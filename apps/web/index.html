@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#090b10" />
+    <title>Wemux Lite</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // 前端脚本加载失败时的兆底提示：避免旧缓存页面“点了没反应”却毫无反馈。
+      setTimeout(function () {
+        var root = document.getElementById('root')
+        if (root && !root.firstElementChild) {
+          var bar = document.createElement('div')
+          bar.textContent = '页面脚本未能加载（可能是缓存了旧版本）：请强制刷新（Ctrl+Shift+R）或清空站点数据后重试。'
+          bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:9999;padding:12px 16px;background:#7f1d1d;color:#fff;font:14px/1.5 system-ui,sans-serif;text-align:center'
+          root.appendChild(bar)
+        }
+      }, 4000)
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,39 @@
+{
+   "name": "@wemux/worker",
+   "version": "0.1.0",
+   "description": "Independently installable Wemux Lite worker",
+   "type": "module",
+   "bin": {
+      "wemux-lite-worker": "./dist/cli.js",
+      "wemux-lite-agent": "./dist/agent-cli.js",
+      "wemux-lite-agent-mcp": "./dist/capabilities/mcp-server.js"
+   },
+   "files": [
+      "dist",
+      "README.md"
+   ],
+   "publishConfig": {
+      "access": "public"
+   },
+   "engines": {
+      "node": ">=22.13.0"
+   },
+   "scripts": {
+      "wemux-lite-agent": "node --enable-source-maps dist/agent-cli.js",
+      "dev": "tsx watch src/cli.ts start",
+      "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+      "build": "tsc -p tsconfig.json",
+      "typecheck": "tsc -p tsconfig.json --noEmit",
+      "prepack": "npm run clean && npm run build",
+      "pack:check": "node scripts/verify-package.mjs",
+      "test": "node --import tsx --test test/*.test.ts"
+   },
+   "dependencies": {
+      "ws": "^8.21.3"
+   },
+   "devDependencies": {
+      "@types/ws": "^8.18.1",
+      "@wemux/domain": "0.1.0",
+      "@wemux/wire-protocol": "0.1.0"
+   }
+}

@@ -1,0 +1,21 @@
+node_modules/
+dist/
+*.log
+.env
+.env.*
+!.env.example
+# Local databases, credentials, and manual environments
+data/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+
+# Generated packages and local investigation evidence
+artifacts/
+.scratch/
+*-current.png
+
+# Machine-local agent configuration
+.claude/
+.agents/

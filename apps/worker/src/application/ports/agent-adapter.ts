@@ -1,0 +1,81 @@
+import type {
+  AgentCapability,
+  CapabilitySnapshot,
+  AgentKey,
+  ModelId,
+  NativeSessionRef,
+  SessionId,
+  ToolCallId,
+  TurnFailure,
+  TurnId,
+  UserMessageInput,
+} from '@wemux/domain'
+
+export interface LocalAgentDetection extends AgentCapability {
+  readonly executablePath: string | null
+  readonly diagnostics: readonly string[]
+}
+
+export interface AgentTurnInput {
+  readonly sessionId: SessionId
+  readonly turnId: TurnId
+  readonly cwd: string
+  readonly modelId: ModelId
+  readonly message: UserMessageInput
+  readonly resume: NativeSessionRef | null
+  readonly launchContext: AgentLaunchContext | null
+}
+
+export interface AgentLaunchContext {
+  readonly assetsRoot: string
+  readonly instructions: string | null
+  readonly skillsRoot: string | null
+  readonly capabilityEndpoint: string | null
+  readonly capabilityToken: string | null
+  readonly capabilitySnapshot: CapabilitySnapshot
+  readonly environment: Readonly<Record<string, string>>
+}
+
+export type AgentTurnEvent =
+  | { readonly kind: 'assistant.text.delta'; readonly text: string }
+  | {
+      readonly kind: 'tool.started'
+      readonly toolCallId: ToolCallId
+      readonly toolName: string
+      readonly input: unknown
+    }
+  | { readonly kind: 'tool.output.delta'; readonly toolCallId: ToolCallId; readonly text: string }
+  | {
+      readonly kind: 'tool.finished'
+      readonly toolCallId: ToolCallId
+      readonly exitCode: number | null
+    }
+
+export type AgentTurnOutcome =
+  | { readonly status: 'completed' }
+  | { readonly status: 'cancelled' }
+  | { readonly status: 'failed'; readonly failure: TurnFailure }
+
+export type AgentSignal =
+  | { readonly kind: 'native-session'; readonly nativeSession: NativeSessionRef }
+  | { readonly kind: 'event'; readonly event: AgentTurnEvent }
+  | { readonly kind: 'finished'; readonly outcome: AgentTurnOutcome }
+
+export interface AgentTurnHandle {
+  readonly signals: AsyncIterable<AgentSignal>
+  /** Idempotently requests that this Turn stop. */
+  stop(): Promise<void>
+}
+
+export type AgentAdapter =
+  | {
+      readonly agentKey: AgentKey
+      readonly mode: 'detect-only'
+      detect(): Promise<LocalAgentDetection>
+    }
+  | {
+      readonly agentKey: AgentKey
+      readonly mode: 'execution'
+      detect(): Promise<LocalAgentDetection>
+      startTurn(input: AgentTurnInput): Promise<AgentTurnHandle>
+    }

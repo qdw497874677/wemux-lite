@@ -1,0 +1,331 @@
+import { sessionIdleReason } from './session-idle.js'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import type { AgentKey, CommandId, EventSeq, Id, MessageId, ModelId, ProjectId, SessionId, TeamId, Timestamp, UserId, WorkerId, WorkspaceId } from '@wemux/domain'
+import type { AuditResource, CommandProjection, Project, Session, Worker, Workspace } from '@wemux/server-domain'
+import type { WorkerCommand } from '@wemux/wire-protocol'
+import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
+import { AppError, requireValue } from './errors.js'
+import { hashSecret } from './auth.js'
+import { sendCapability } from './action-capabilities.js'
+import type { CapabilityService } from './capability-service.js'
+import { Notifications } from './notifications.js'
+import { integer, object, text } from './validation.js'
+
+export const newId = <N extends string>(): Id<N> => randomUUID() as Id<N>
+export const now = (): Timestamp => new Date().toISOString() as Timestamp
+const userId = 'bootstrap-admin' as UserId
+const teamId = 'default-team' as TeamId
+const projectId = 'default-project' as ProjectId
+
+export class ServerService {
+  constructor(private readonly store: ServerStore, readonly notifications: Notifications, private readonly capabilities?: CapabilityService) {}
+  async listWorkers() { return this.store.resources.listWorkers() }
+  async getWorker(id: WorkerId) { return requireValue(await this.store.resources.getWorker(id)) }
+  async getCommand(id: CommandId) { return requireValue(await this.store.commands.get(id)) }
+  async listCommands(input: { workerId?: string; status?: string; limit?: number }) {
+    const statuses: readonly CommandProjection['status'][] = ['pending', 'accepted', 'rejected', 'completed', 'failed', 'cancelled']
+    const status = input.status === undefined ? undefined : statuses.find(value => value === input.status)
+    if (input.status !== undefined && !status) throw new AppError(400, 'Unknown command status')
+    return this.store.commands.list({ workerId: input.workerId as WorkerId | undefined, status, limit: input.limit && input.limit >= 1 && input.limit <= 500 ? Math.floor(input.limit) : 100 })
+  }
+  async cancelCommand(id: CommandId) {
+    const command = await this.getCommand(id)
+    const cancelled = await this.store.transaction(async tx => {
+      const current = requireValue(await tx.commands.get(id))
+      if (await tx.tasks.runByCommand(id)) throw new AppError(409, 'protected_command: Run commands cannot be cancelled; Run cancellation is not implemented')
+      if (['pending', 'accepted'].includes(current.status)) {
+        const protectedWorkspace = (await tx.resources.listWorkspaces()).find(workspace => workspace.provisioning?.commandId === id && ['pending', 'provisioning'].includes(workspace.status))
+        if (protectedWorkspace) throw new AppError(409, 'protected_command: current Workspace provision command cannot be cancelled')
+      }
+      if (!await tx.commands.cancelPending(id, now())) return false
+      await this.audit(tx, 'command.cancel', { kind: 'worker', id: command.workerId })
+      return true
+    })
+    if (!cancelled) throw new AppError(409, 'Only pending commands can be cancelled')
+    this.notifications.commands(command.workerId)
+    return await this.getCommand(id)
+  }
+  async revokeWorker(id: WorkerId, disconnect: (workerId: WorkerId) => void) {
+    const worker = await this.getWorker(id)
+    if (worker.connectionState === 'revoked') return worker
+    await this.store.transaction(async tx => {
+      await tx.resources.saveWorker({ ...worker, connectionState: 'revoked', lastSeenAt: now() })
+      await tx.identity.revokeWorkerCredential(id, now())
+      await this.audit(tx, 'worker.revoke', { kind: 'worker', id })
+    })
+    disconnect(id)
+    for (const session of await this.store.resources.listSessions()) if (session.binding.agent.workerId === id) this.notifications.session(session.id)
+    return await this.getWorker(id)
+  }
+  async reprovisionWorkspace(id: WorkspaceId, requestId: string = randomUUID()) {
+    const result = await this.store.transaction(async tx => {
+      const result = await this.reprovisionWorkspaceInTx(tx, id, requestId)
+      const binding = await tx.tasks.binding(id)
+      if (result.created && binding) {
+        const task = requireValue(await tx.tasks.get(binding.taskId)), at = now()
+        await tx.tasks.save({ ...task, updatedAt: at, lastActivityAt: at })
+        await tx.tasks.append({ taskId: task.id, projectId: task.projectId, type: 'workspace.retried', actor: userId, requestId, occurredAt: at, payload: { workspaceId: id, commandId: result.commandId } })
+      }
+      return { ...result, taskId: binding?.taskId }
+    })
+    if (result.created) {
+      this.notifications.commands(result.workspace.workerId)
+      this.notifications.project({ id: randomUUID(), projectId: result.workspace.projectId, workspaceId: id, ...(result.taskId ? { taskId: result.taskId } : {}), type: 'workspace.provisioning' })
+    }
+    return result
+  }
+  async reprovisionWorkspaceInTx(tx: ServerStoreTx, id: WorkspaceId, requestId: string) {
+    if (typeof requestId !== 'string' || !requestId.trim() || requestId.length > 200) throw new AppError(400, 'Invalid retry requestId')
+    const workspace = await this.getWorkspace(id, tx.resources)
+    const worker = requireValue(await tx.resources.getWorker(workspace.workerId))
+    if (worker.teamId !== (await this.getProject(workspace.projectId, tx.resources)).teamId || worker.connectionState === 'revoked') throw new AppError(403, 'Worker not usable')
+    const previous = workspace.provisioning
+    if (previous && Object.hasOwn(previous.requests, requestId)) {
+      const commandId = previous.requests[requestId]
+      if (typeof commandId === 'string' && commandId.trim()) return { workspace, commandId, created: false }
+    }
+    if (previous && (workspace.status === 'pending' || workspace.status === 'provisioning')) {
+      const next = { ...workspace, provisioning: { ...previous, requests: { ...previous.requests, [requestId]: previous.commandId } } }
+      await tx.resources.saveWorkspace(next)
+      return { workspace: next, commandId: previous.commandId, created: false }
+    }
+    if (workspace.status !== 'failed' && workspace.status !== 'pending') throw new AppError(409, 'Only pending or failed workspaces can be reprovisioned')
+    const repositories = workspace.spec.kind === 'repository'
+      ? [requireValue(await tx.resources.getRepository(workspace.spec.repositoryId))].map(repository => ({ repositoryId: repository.id, gitUrl: repository.gitUrl, revision: repository.defaultBranch })) : []
+    if (workspace.spec.kind === 'composite' && workspace.spec.memberWorkspaceIds.length) throw new AppError(409, 'Composite workspace is not reprovisionable')
+    // Check before inserting: legacy records may have commands but no provisioning metadata.
+    const replacedAttempt = previous !== undefined || await tx.commands.hasProvisionAttempt(id)
+    const commandId = await this.command(tx, worker.id, { kind: 'workspace.provision', workspace: { workspace: { id: workspace.id, projectId: workspace.projectId, workerId: workspace.workerId, name: workspace.name, spec: workspace.spec, status: 'pending', failureReason: null }, repositories } })
+    const next: Workspace = { ...workspace, status: 'pending', failureReason: null, provisioning: { commandId, startedAt: now(), replacedAttempt, requests: { ...previous?.requests, [requestId]: commandId } } }
+    await tx.resources.saveWorkspace(next)
+    await this.audit(tx, 'workspace.reprovision', { kind: 'workspace', id })
+    return { workspace: next, commandId, created: true }
+  }
+  private async audit(tx: ServerStoreTx, action: string, resource: AuditResource): Promise<void> {
+    await tx.audit.append({ id: newId(), actorId: userId, action, resource, result: 'succeeded', occurredAt: now(), metadata: {} })
+  }
+  async bootstrap() {
+    return this.store.transaction(async tx => {
+      const at = now()
+      if (!await tx.identity.getUser(userId)) await tx.identity.saveUser({ id: userId, username: 'admin', email: null, createdAt: at })
+      if (!await tx.identity.getTeam(teamId)) {
+        await tx.identity.saveTeam({ id: teamId, name: 'Default team', createdAt: at })
+        await tx.identity.saveMembership({ teamId, userId, role: 'owner', joinedAt: at })
+      }
+      if (!await tx.resources.getProject(projectId)) await tx.resources.saveProject({ id: projectId, teamId, ownerId: userId, name: 'Default project', shareScope: 'owner-only', deletedAt: null })
+      return { user: await tx.identity.getUser(userId), team: await tx.identity.getTeam(teamId), project: await tx.resources.getProject(projectId) }
+    })
+  }
+  async createEnrollment(input: unknown) {
+    const b = object(input)
+    const ttl = b.ttlSeconds === undefined ? 3600 : integer(b.ttlSeconds, 'ttlSeconds', 1, 86400)
+    requireValue(await this.store.identity.getTeam(teamId), 'Bootstrap required')
+    const token = randomBytes(32).toString('base64url')
+    const expiresAt = new Date(Date.now() + ttl * 1000).toISOString() as Timestamp
+    await this.store.transaction(async tx => {
+      await tx.identity.saveEnrollmentToken({ id: newId(), teamId, createdBy: userId, tokenHash: hashSecret(token), expiresAt, consumedByWorkerId: null, consumedAt: null })
+      await this.audit(tx, 'enrollment-token.create', { kind: 'team', id: teamId })
+    })
+    return { token, expiresAt }
+  }
+  async enroll(input: unknown) {
+    const b = object(input), token = text(b.token, 'token'), name = text(b.name, 'name', 200)
+    const id = newId<'WorkerId'>(), credential = randomBytes(32).toString('base64url'), at = now()
+    const worker = await this.store.transaction(async tx => {
+      const enrollment = await tx.identity.consumeEnrollmentToken({ tokenHash: hashSecret(token), workerId: id, consumedAt: at })
+      const worker: Worker = { id, teamId: enrollment.teamId, ownerId: enrollment.createdBy, name, shareScope: 'owner-only', connectionState: 'offline', version: null, platform: null, capabilities: [], lastSeenAt: null }
+      await tx.resources.saveWorker(worker)
+      await tx.identity.saveWorkerCredential({ id: newId(), workerId: id, credentialHash: hashSecret(credential), createdAt: at, revokedAt: null })
+      await this.audit(tx, 'worker.enroll', { kind: 'worker', id })
+      return worker
+    })
+    return { worker, workerId: id, credential }
+  }
+  async getProject(id: ProjectId, resources = this.store.resources): Promise<Project> {
+    const p = requireValue(await resources.getProject(id))
+    if (p.deletedAt) throw new AppError(404, 'Project deleted')
+    return p
+  }
+  async getWorkspace(id: WorkspaceId, resources = this.store.resources): Promise<Workspace> {
+    const w = requireValue(await resources.getWorkspace(id)); await this.getProject(w.projectId, resources)
+    if (w.status === 'deleted') throw new AppError(404, 'Workspace deleted')
+    return w
+  }
+  sessionView(id: SessionId) {
+    return this.store.transaction(async tx => {
+      const session = await this.getSession(id, tx.resources)
+      return { ...session, sendCapability: await sendCapability(tx, session) }
+    })
+  }
+  async getSession(id: SessionId, resources = this.store.resources): Promise<Session> {
+    const s = requireValue(await resources.getSession(id)); await this.getProject(s.projectId, resources)
+    if (s.deletedAt) throw new AppError(404, 'Session deleted')
+    return s
+  }
+  async createProject(input: unknown) {
+    const b = object(input)
+    requireValue(await this.store.identity.getTeam(teamId), 'Bootstrap required')
+    const project: Project = { id: newId(), teamId, ownerId: userId, name: text(b.name, 'name', 200), shareScope: 'owner-only', deletedAt: null }
+    await this.store.transaction(async tx => { await tx.resources.saveProject(project); await this.audit(tx, 'project.create', { kind: 'project', id: project.id }) })
+    return project
+  }
+  private async command(tx: ServerStoreTx, workerId: WorkerId, command: WorkerCommand, id = newId<'CommandId'>()) {
+    const fingerprint = canonicalFingerprint(command)
+    const existing = await tx.commands.get(id)
+    if (existing) {
+      if (existing.workerId !== workerId || existing.payloadFingerprint !== fingerprint) throw new AppError(409, 'Conflicting commandId')
+      return id
+    }
+    await tx.commands.insertPending({ commandId: id, workerId, command, payloadFingerprint: fingerprint, createdAt: now() })
+    return id
+  }
+  async createWorkspace(input: unknown) {
+    const result = await this.store.transaction(tx => this.createWorkspaceInTx(tx, input))
+    this.notifications.commands(result.workspace.workerId)
+    this.notifications.project({ id: randomUUID(), projectId: result.workspace.projectId, workspaceId: result.workspace.id, type: 'workspace.provisioning' })
+    return result
+  }
+  /** Internal composition seam: caller owns the transaction and post-commit notification. */
+  async createWorkspaceInTx(tx: ServerStoreTx, input: unknown) {
+    const b = object(input), p = await this.getProject(text(b.projectId, 'projectId') as ProjectId, tx.resources)
+    const worker = requireValue(await tx.resources.getWorker(text(b.workerId, 'workerId') as WorkerId))
+    if (worker.teamId !== p.teamId || worker.connectionState === 'revoked') throw new AppError(403, 'Worker not usable')
+    const source = b.source === undefined ? (b.repository === undefined ? 'empty' : 'git') : text(b.source, 'source')
+    if (source !== 'empty' && source !== 'git') throw new AppError(400, 'source must be empty or git')
+    const repository = source === 'git' ? (() => {
+      const repo = object(b.repository)
+      return { id: newId<'RepositoryId'>(), projectId: p.id, name: text(repo.name ?? b.name, 'repository name', 200), gitUrl: text(repo.gitUrl, 'gitUrl'), defaultBranch: text(repo.revision ?? 'main', 'revision') }
+    })() : null
+    if (source === 'empty' && b.repository !== undefined) throw new AppError(400, 'Empty workspace cannot include repository')
+    const workspace: Workspace = { id: newId(), projectId: p.id, workerId: worker.id, name: text(b.name, 'name', 200), spec: repository ? { kind: 'repository', repositoryId: repository.id, ownership: { kind: 'standalone' } } : { kind: 'composite', memberWorkspaceIds: [] }, status: 'pending', failureReason: null, location: null }
+    const repositories = repository ? [{ repositoryId: repository.id, gitUrl: repository.gitUrl, revision: repository.defaultBranch }] : []
+    if (repository) await tx.resources.saveRepository(repository)
+    await tx.resources.saveWorkspace(workspace)
+    const commandId = await this.command(tx, worker.id, { kind: 'workspace.provision', workspace: { workspace: { id: workspace.id, projectId: workspace.projectId, workerId: workspace.workerId, name: workspace.name, spec: workspace.spec, status: workspace.status, failureReason: null }, repositories } })
+    const pending = { ...workspace, provisioning: { commandId, startedAt: now(), replacedAttempt: false, requests: {} } }
+    await tx.resources.saveWorkspace(pending)
+    await this.audit(tx, 'workspace.create', { kind: 'workspace', id: workspace.id })
+    return { workspace: pending, commandId }
+  }
+  async createSession(input: unknown) {
+    const result = await this.store.transaction(tx => this.createSessionInTx(tx, input))
+    this.notifications.commands(result.session.binding.agent.workerId)
+    return result
+  }
+  /** Internal composition seam; never opens a transaction or notifies. */
+  async createSessionInTx(tx: ServerStoreTx, input: unknown, source?: { taskId: string; runId: string | null }) {
+    const b = object(input), workspace = await this.getWorkspace(text(b.workspaceId, 'workspaceId') as WorkspaceId, tx.resources)
+    if (workspace.status !== 'ready') throw new AppError(409, 'Workspace is not ready')
+    const worker = requireValue(await tx.resources.getWorker(workspace.workerId))
+    const agentKey = text(b.agentKey, 'agentKey') as AgentKey, modelId = text(b.modelId, 'modelId') as ModelId
+    const agent = worker.capabilities?.find(c => c?.agentKey === agentKey)
+    if (worker.connectionState === 'revoked' || !agent || agent.mode !== 'execution' || agent.availability?.status !== 'available') throw new AppError(409, 'Agent unavailable')
+    if (!agent.models?.some(model => model?.modelId === modelId)) throw new AppError(409, 'Model unavailable')
+    const session: Session = { id: newId(), projectId: workspace.projectId, ownerId: userId, workspaceId: workspace.id, title: text(b.title, 'title', 200), shareScope: 'owner-only', binding: { workspaceId: workspace.id, agent: { workerId: worker.id, agentKey }, modelId }, runtimeState: 'idle', deletedAt: null, ...source }
+    await tx.resources.saveSession(session)
+    const commandId = await this.command(tx, worker.id, { kind: 'session.create', session: { sessionId: session.id, binding: session.binding } })
+    await this.audit(tx, 'session.create', { kind: 'session', id: session.id })
+    return { session, commandId }
+  }
+  async enqueue(id: SessionId, input: unknown) {
+    const { workerId, ...result } = await this.store.transaction(tx => this.enqueueInTx(tx, id, input))
+    this.notifications.commands(workerId)
+    return { ...result, status: (await this.store.commands.get(result.commandId))!.status }
+  }
+  /** Internal composition seam; capability preparation is local and read-only. */
+  async enqueueInTx(tx: ServerStoreTx, id: SessionId, input: unknown) {
+    const b = object(input), session = await this.getSession(id, tx.resources), workspace = await this.getWorkspace(session.workspaceId, tx.resources)
+    const capability = await sendCapability(tx, session)
+    if (!capability.allowed) throw new AppError(409, capability.reason, capability.reasonCode)
+    const commandId = b.commandId === undefined ? newId<'CommandId'>() : text(b.commandId, 'commandId', 200) as CommandId
+    // Stable default message identity makes commandId retries idempotent.
+    const messageId = (b.messageId === undefined ? commandId : text(b.messageId, 'messageId', 200)) as unknown as MessageId
+    const content = text(b.content, 'content', 100000)
+    if (content.includes('\0')) throw new AppError(400, 'Message contains an unsupported NUL character')
+    if (Buffer.byteLength(JSON.stringify(content)) > 200000) throw new AppError(400, 'Message exceeds the protocol byte limit')
+    const prepared = this.capabilities ? await this.capabilities.prepareTurn({ sessionId: id, turnId: newId<'TurnId'>() }, tx.resources) : null
+    const command: WorkerCommand = { kind: 'session.enqueue', sessionId: id, message: { messageId, content }, ...(prepared ? { capabilities: prepared.runtime } : {}) }
+    if (new TextEncoder().encode(JSON.stringify({ type: 'command', commandId, command })).byteLength > 900 * 1024) throw new AppError(413, 'Message and capability assets exceed the worker transport limit')
+    await this.command(tx, workspace.workerId, command, commandId)
+    await this.audit(tx, 'session.enqueue', { kind: 'session', id })
+    return { commandId, messageId, workerId: workspace.workerId }
+  }
+  async events(id: SessionId, from: number, limit: number) {
+    await this.getSession(id)
+    return { ...await this.store.cache.readEvents(id, integer(from, 'fromSeq', 1) as EventSeq, integer(limit, 'limit', 1, 1000)), freshness: await this.store.cache.getFreshness(id) }
+  }
+  async update(kind: 'projects' | 'workspaces' | 'sessions', id: string, input: unknown) {
+    const b = object(input)
+    return this.store.transaction(async tx => {
+      await this.audit(tx, `${kind}.update`, kind === 'projects' ? { kind: 'project', id: id as ProjectId } : kind === 'workspaces' ? { kind: 'workspace', id: id as WorkspaceId } : { kind: 'session', id: id as SessionId })
+      if (kind === 'projects') { const p = { ...await this.getProject(id as ProjectId, tx.resources), name: text(b.name, 'name', 200) }; await tx.resources.saveProject(p); return p }
+      if (kind === 'workspaces') { const w = { ...await this.getWorkspace(id as WorkspaceId, tx.resources), name: text(b.name, 'name', 200) }; await tx.resources.saveWorkspace(w); return w }
+      const s = { ...await this.getSession(id as SessionId, tx.resources), title: text(b.title, 'title', 200) }; await tx.resources.saveSession(s); return s
+    })
+  }
+  async delete(kind: 'projects' | 'workspaces' | 'sessions', id: string) {
+    if (kind === 'projects') {
+      const project = await this.getProject(id as ProjectId)
+      if ((await this.store.resources.listWorkspaces()).some(workspace => workspace.projectId === project.id && workspace.status !== 'deleted')) throw new AppError(409, 'Delete workspaces first')
+    }
+    await this.store.transaction(async tx => {
+      await this.audit(tx, `${kind}.delete`, kind === 'projects' ? { kind: 'project', id: id as ProjectId } : kind === 'workspaces' ? { kind: 'workspace', id: id as WorkspaceId } : { kind: 'session', id: id as SessionId })
+      if (kind === 'projects') await tx.resources.saveProject({ ...await this.getProject(id as ProjectId, tx.resources), deletedAt: now() })
+      else if (kind === 'sessions') {
+        const session = await this.getSession(id as SessionId, tx.resources)
+        for (const task of await tx.tasks.list(session.projectId)) {
+          if ((await tx.tasks.runs(task.id)).some(run => run.sessionId === session.id && ['pending', 'running', 'cancelling'].includes(run.status))) throw new AppError(409, 'Session has an active Run', 'run_session_protected')
+        }
+        const reason = await sessionIdleReason(tx, session.id)
+        if (reason) throw new AppError(409, reason, 'run_session_protected')
+        const deletedAt = now()
+        await tx.resources.saveSession({ ...session, deletedAt })
+        for (const task of await tx.tasks.list(session.projectId)) {
+          if (session.taskId !== task.id && !(await tx.tasks.runs(task.id)).some(run => run.sessionId === session.id)) continue
+          const detail = requireValue(await tx.tasks.get(task.id))
+          await tx.tasks.save({ ...detail, lastActivityAt: deletedAt })
+          await tx.tasks.append({ taskId: task.id, projectId: session.projectId, type: 'task.updated', actor: session.ownerId, requestId: `session-delete:${session.id}`, occurredAt: deletedAt, payload: { action: 'session.deleted', sessionId: session.id } }, `session-delete:${session.id}`)
+        }
+        await tx.cache.deleteSessionHistory(session.id)
+        await this.command(tx, session.binding.agent.workerId, { kind: 'session.delete', sessionId: session.id }, `session-delete:${session.id}` as CommandId)
+      }
+      else {
+        await this.getWorkspace(id as WorkspaceId, tx.resources)
+        throw new AppError(501, 'Workspace deletion is not supported in this MVP')
+      }
+    })
+    if (kind === 'sessions') {
+      this.notifications.session(id as SessionId)
+      const session = await this.store.resources.getSession(id as SessionId)
+      if (session) this.notifications.commands(session.binding.agent.workerId)
+    }
+  }
+  async listProjects(): Promise<Project[]> {
+    return (await this.store.resources.listProjects()).filter(project => !project.deletedAt)
+  }
+  async listWorkspaces(): Promise<Workspace[]> {
+    const projectIds = new Set((await this.listProjects()).map(project => project.id))
+    return (await this.store.resources.listWorkspaces()).filter(
+      workspace => projectIds.has(workspace.projectId) && workspace.status !== 'deleted',
+    )
+  }
+  async listSessions(): Promise<Session[]> {
+    const projectIds = new Set((await this.listProjects()).map(project => project.id))
+    return (await this.store.resources.listSessions()).filter(
+      session => projectIds.has(session.projectId) && !session.deletedAt,
+    )
+  }
+}
+
+function canonicalFingerprint(command: WorkerCommand): string {
+  const value = command.kind === 'session.enqueue'
+    ? { kind: command.kind, sessionId: command.sessionId, message: { messageId: command.message.messageId, content: command.message.content } }
+    : command
+  return createHash('sha256').update(canonicalCommand(value)).digest('hex')
+}
+
+function canonicalCommand(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalCommand).join(',')}]`
+  return `{${Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)).map(([key, child]) => `${JSON.stringify(key)}:${canonicalCommand(child)}`).join(',')}}`
+}
