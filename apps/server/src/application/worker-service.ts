@@ -92,9 +92,10 @@ export class WorkerService {
           }
           if (message.receipt.status === 'rejected') {
             for (const workspace of await tx.resources.listWorkspaces()) {
-              if (workspace.workerId !== workerId || workspace.provisioning?.commandId !== message.receipt.commandId || !['pending', 'provisioning'].includes(workspace.status)) continue
+              const placement = workspace.placements.find(value => value.workerId === workerId && value.provisioning?.commandId === message.receipt.commandId && ['pending', 'provisioning'].includes(value.status))
+              if (!placement?.provisioning) continue
               const at = now(), reason = message.receipt.error.message
-              await tx.resources.saveWorkspace({ ...workspace, status: 'failed', failureReason: reason, provisioning: { ...workspace.provisioning, reportedAt: at } })
+              await tx.resources.saveWorkspace({ ...workspace, workerId, status: 'failed' as const, failureReason: reason, provisioning: { ...placement.provisioning, reportedAt: at }, location: placement.location, placements: workspace.placements.map(value => value.workerId === workerId ? { ...placement, status: 'failed' as const, failureReason: reason, provisioning: { ...placement.provisioning!, reportedAt: at } } : value) })
               await workspaceActivity(workspace.id, 'failed', reason, at)
             }
           }
@@ -103,18 +104,20 @@ export class WorkerService {
         case 'event':
           if (message.scope === 'workspace') {
             const r = message.report, w = requireValue(await tx.resources.getWorkspace(r.workspaceId))
-            if (w.workerId !== workerId || (r.location && (r.location.workerId !== workerId || r.location.workspaceId !== w.id))) throw new AppError(403, 'Workspace ownership mismatch')
+            const placement = w.placements.find(value => value.workerId === workerId)
+            if (!placement || (r.location && (r.location.workerId !== workerId || r.location.workspaceId !== w.id))) throw new AppError(403, 'Workspace ownership placement mismatch')
             // Attempt identity is authoritative. Legacy reports are accepted only
             // before any explicit retry; their timestamps cannot prove attempt ownership.
-            if (r.commandId ? r.commandId !== w.provisioning?.commandId : w.provisioning?.replacedAttempt === true) break
-            const allowed = w.status === 'deleting' ? ['deleting', 'deleted', 'failed'] : w.status === 'deleted' ? ['deleted'] : ['pending', 'provisioning', 'ready', 'failed']
+            if (r.commandId ? r.commandId !== placement.provisioning?.commandId : placement.provisioning?.replacedAttempt === true) break
+            const allowed = placement.status === 'deleting' ? ['deleting', 'deleted', 'failed'] : ['pending', 'provisioning', 'ready', 'failed']
             if (!allowed.includes(r.status)) throw new AppError(409, 'Invalid workspace transition')
-            if (w.status === 'ready' && r.status !== 'ready') break
-            if (w.provisioning?.reportedAt && r.occurredAt < w.provisioning.reportedAt) break
-            if (w.status === 'failed' && r.status !== 'failed') break
-            if (!r.commandId && w.provisioning && r.occurredAt < w.provisioning.startedAt) break
-            const same = w.status === r.status && w.failureReason === r.reason && JSON.stringify(w.location) === JSON.stringify(r.location)
-            await tx.resources.saveWorkspace({ ...w, status: r.status, failureReason: r.reason, location: r.location, ...(w.provisioning ? { provisioning: { ...w.provisioning, reportedAt: r.occurredAt } } : {}) })
+            if (placement.status === 'ready' && r.status !== 'ready') break
+            if (placement.provisioning?.reportedAt && r.occurredAt < placement.provisioning.reportedAt) break
+            if (placement.status === 'failed' && r.status !== 'failed') break
+            if (!r.commandId && placement.provisioning && r.occurredAt < placement.provisioning.startedAt) break
+            const same = placement.status === r.status && placement.failureReason === r.reason && JSON.stringify(placement.location) === JSON.stringify(r.location)
+            const next: import('@wemux/server-domain').WorkspacePlacement = { ...placement, status: r.status as import('@wemux/domain').WorkspacePlacementStatus, failureReason: r.reason, location: r.location, ...(placement.provisioning ? { provisioning: { ...placement.provisioning, reportedAt: r.occurredAt } } : {}) }
+            await tx.resources.saveWorkspace({ ...w, workerId, status: next.status, failureReason: next.failureReason, provisioning: next.provisioning, location: next.location, placements: w.placements.map(value => value.workerId === workerId ? next : value) })
             if (!same) await workspaceActivity(w.id, r.status, r.reason, r.occurredAt)
           } else {
             if ((await this.ownSession(workerId, message.event.sessionId, tx.resources)).deletedAt) break

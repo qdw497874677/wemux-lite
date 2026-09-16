@@ -31,7 +31,7 @@ test('migration replay preserves legacy rows and task project index', () => {
   const db = new DatabaseSync(':memory:')
   try { migrate(db); db.prepare('INSERT INTO records VALUES(?,?,?)').run('legacy', '1', '{}'); migrate(db)
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM records').get()!.n, 1)
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get()!.n, 13)
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get()!.n, 14)
     assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE name='tasks_project'").get())
   } finally { db.close() }
 })

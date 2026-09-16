@@ -103,8 +103,10 @@ export function evaluateCapability(action: CapabilityAction, f: CapabilityFacts)
     const binding = record(f.binding)
     if (!binding || binding.taskId !== task!.id || binding.projectId !== task!.projectId || binding.workspaceId !== a.workspaceId) return deny('assignment_changed', 'Assignment workspace is not bound to Task')
   }
-  if (!workspace || workspace.id !== a!.workspaceId || workspace.projectId !== (task?.projectId ?? session?.projectId) || workspace.workerId !== a!.workerId) return deny('invalid_metadata', 'Workspace relationship metadata is incomplete')
-  if (workspace.status !== 'ready') return deny('workspace_not_ready', 'Workspace is not ready')
+  const placements = Array.isArray(workspace?.placements) ? workspace.placements.map(record) : undefined
+  const placement = placements?.find(value => value?.workerId === a!.workerId)
+  if (!workspace || workspace.id !== a!.workspaceId || workspace.projectId !== (task?.projectId ?? session?.projectId) || workspace.deletedAt !== null || !placements || !placement) return deny('invalid_metadata', 'Workspace relationship metadata is incomplete')
+  if (placement.status !== 'ready') return deny('workspace_not_ready', 'Workspace is not ready on selected Worker')
   const agents = Array.isArray(worker?.capabilities) ? worker.capabilities.map(record) : []
   const agent = agents.find(value => value?.agentKey === a!.agentKey)
   if (!worker || worker.id !== a!.workerId || (f.teamId !== undefined && worker.teamId !== f.teamId) || !['online', ...(action === 'send' ? ['offline'] : [])].includes(String(worker.connectionState)) || !agent || agent.mode !== 'execution' || record(agent.availability)?.status !== 'available' || !Array.isArray(agent.models) || !agent.models.some(model => record(model)?.modelId === a!.modelId)) return deny('runtime_unavailable', action === 'send' ? 'Worker requires an available execution Agent and reported Model' : 'Worker must be online with an available execution Agent and reported Model')

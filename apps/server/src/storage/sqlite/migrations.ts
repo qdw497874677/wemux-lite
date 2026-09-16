@@ -32,7 +32,13 @@ const migrations = [
        AND json_extract(commands.data,'$.command.workspace.workspace.id')=records.id) > 1
      THEN 'true' ELSE 'false' END))
    WHERE kind='workspace' AND json_type(data,'$.provisioning')='object'
-     AND json_type(data,'$.provisioning.replacedAttempt') IS NULL;`,
+     AND json_type(data,'$.provisioning.replacedAttempt') IS NULL;
+   UPDATE records SET data=json_set(data, '$.placements[0].provisioning.replacedAttempt', json(CASE WHEN
+     (SELECT COUNT(*) FROM commands WHERE json_extract(commands.data,'$.command.kind')='workspace.provision'
+       AND json_extract(commands.data,'$.command.workspace.workspace.id')=records.id) > 1
+     THEN 'true' ELSE 'false' END))
+   WHERE kind='workspace' AND json_type(data,'$.placements[0].provisioning')='object'
+     AND json_type(data,'$.placements[0].provisioning.replacedAttempt') IS NULL;`,
   `CREATE TABLE task_runs (
      id TEXT PRIMARY KEY,
      task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -164,6 +170,15 @@ const migrations = [
      OR json_extract(NEW.data,'$.actor') IS NOT json_extract(OLD.data,'$.actor')
      OR json_extract(NEW.data,'$.requestedAt') IS NOT json_extract(OLD.data,'$.requestedAt')
    BEGIN SELECT RAISE(ABORT, 'Review identity or final decision is immutable'); END;`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS session_create_request ON records(
+     json_extract(data,'$.ownerId'), json_extract(data,'$.projectId'), json_extract(data,'$.creation.requestId'))
+   WHERE kind='session' AND json_type(data,'$.creation.requestId')='text';
+   CREATE TRIGGER IF NOT EXISTS session_creation_identity BEFORE UPDATE ON records
+   WHEN OLD.kind='session' AND json_type(OLD.data,'$.creation')='object'
+     AND (json_extract(NEW.data,'$.creation.requestId') IS NOT json_extract(OLD.data,'$.creation.requestId')
+       OR json_extract(NEW.data,'$.creation.fingerprint') IS NOT json_extract(OLD.data,'$.creation.fingerprint')
+       OR json_extract(NEW.data,'$.creation.commandId') IS NOT json_extract(OLD.data,'$.creation.commandId'))
+   BEGIN SELECT RAISE(ABORT, 'Session creation identity is immutable'); END;`,
 ]
 
 export function migrate(db: DatabaseSync): void {

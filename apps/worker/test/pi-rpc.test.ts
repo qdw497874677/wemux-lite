@@ -199,9 +199,14 @@ test('Pi CLI detects version, executable and RPC authenticated model inventory',
     assert.equal(detection.models[0]?.modelId, 'fixture::model')
   } finally { await f.close() }
 })
-test('Pi no authenticated models is unavailable', async () => {
+test('Pi no authenticated models reports authentication required', async () => {
   const f = await fixture('no-auth')
-  try { assert.equal((await f.agent.detect()).availability.status, 'unavailable'); await assert.rejects(f.agent.startTurn(f.input), /authenticated/) } finally { await f.close() }
+  try {
+    const detection = await f.agent.detect()
+    assert.equal(detection.availability.status, 'authentication-required')
+    assert.equal(detection.authorization?.state, 'unauthorized')
+    await assert.rejects(f.agent.startTurn(f.input), /authenticated/)
+  } finally { await f.close() }
 })
 test('Pi streams text and tools, waits through retries, resumes exact session and selects model', async () => {
   const f = await fixture()

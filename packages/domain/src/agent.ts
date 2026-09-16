@@ -1,4 +1,5 @@
 import type { WorkerId } from './ids.js'
+import type { RuntimeAuthorization } from './runtime-protocol.js'
 import type { AgentKey, ModelId } from './values.js'
 
 export type KnownAgentKey = 'pi' | 'claude-code' | 'codex' | 'opencode'
@@ -25,5 +26,7 @@ export interface AgentCapability {
   readonly version: string | null
   readonly mode: 'detect-only' | 'execution'
   readonly availability: AgentAvailability
+  /** Credential state is independent from executable availability. Optional for v1 Workers. */
+  readonly authorization?: RuntimeAuthorization
   readonly models: readonly AgentModelCapability[]
 }

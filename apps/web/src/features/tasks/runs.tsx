@@ -121,7 +121,7 @@ function RunInspector({ run, api }: { run: Run; api: Api }) {
       await api.cancelRun(run.projectId, run.taskId, { requestId, runId: run.id, sessionId: run.sessionId })
     }}>核对原取消请求</Button>}
     {run.status === 'succeeded' && <p>执行成功；建议人工审查。Task 状态未自动改变。</p>}
-    <p className="text-sm">以下为真实 Session 时间线；初始消息以外的追加消息不属于本 Run、不延长生命周期。</p>
+    <p className="text-sm">以下为本次运行的会话记录；初始消息以外的追加消息不属于本 Run、不延长生命周期。</p>{session.data && <a className="inline-flex items-center rounded-md border border-border px-3 py-2 text-sm underline" href={`/projects/${encodeURIComponent(run.projectId)}/sessions/${encodeURIComponent(run.sessionId)}`}>打开完整对话</a>}
     {session.data && !active(run) && <Button variant="outline" onClick={async () => {
       if (!window.confirm('删除此会话及其对话历史？Run 快照仍保留。')) return
       try { await api.deleteSession(run.sessionId); await session.refetch(); setDeleteError('') }

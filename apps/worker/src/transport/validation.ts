@@ -24,7 +24,7 @@ const capabilityRuntime = object({
 })
 const command = union(
   object({ kind: literal('workspace.provision'), workspace: object({
-    workspace: object({ id: text, workerId: text, projectId: text, name: text, spec, status: literal('pending', 'provisioning', 'ready', 'failed', 'deleting', 'deleted'), failureReason: nullable(text) }),
+    workspace: object({ id: text, projectId: text, name: text, spec }),
     repositories: array(object({ repositoryId: text, gitUrl: text, revision: text })),
   }) }),
   object({ kind: literal('workspace.delete'), workspaceId: text }),

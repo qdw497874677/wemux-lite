@@ -147,6 +147,7 @@ test('SQLite reopen retains attempt requests; reconnect current report converges
   let reopened: SqliteServerStore | undefined
   try {
     const created = await f.create()
+    assert.ok(created.commandId)
     await f.store.transaction(tx => tx.resources.saveWorkspace({ ...created.workspace, status: 'failed', failureReason: 'offline source' }))
     const retry = await f.tasks.retryWorkspace(f.task.projectId, f.task.id, created.workspace.id, { requestId: 'durable' }, context)
     f.store.close()
@@ -190,6 +191,7 @@ test('offline provision cancellation is rejected; retry and reconnect retain del
   const f = await fixture()
   try {
     const created = await f.create()
+    assert.ok(created.commandId)
     for (let i = 0; i < 2; i++) await assert.rejects(f.server.cancelCommand(created.commandId), /protected_command/)
     assert.equal((await f.server.reprovisionWorkspace(created.workspace.id, 'offline-retry')).commandId, created.commandId)
     const worker = new WorkerService(f.store, new Notifications())
@@ -225,9 +227,9 @@ test('migration distinguishes old coalescing from actual replacement using comma
     f.store.close()
     const db = new DatabaseSync(path)
     try {
-      db.exec("UPDATE records SET data=json_remove(data,'$.provisioning.replacedAttempt') WHERE kind='workspace'; DELETE FROM schema_migrations WHERE version=4;")
+      db.exec("UPDATE records SET data=json_remove(json_remove(data,'$.provisioning.replacedAttempt'),'$.placements[0].provisioning.replacedAttempt') WHERE kind='workspace'; DELETE FROM schema_migrations WHERE version=4;")
       migrate(db); migrate(db)
-      const flag = (id: string) => db.prepare("SELECT json_extract(data,'$.provisioning.replacedAttempt') AS flag FROM records WHERE kind='workspace' AND id=?").get(id)!.flag
+      const flag = (id: string) => db.prepare("SELECT COALESCE(json_extract(data,'$.provisioning.replacedAttempt'),json_extract(data,'$.placements[0].provisioning.replacedAttempt')) AS flag FROM records WHERE kind='workspace' AND id=?").get(id)!.flag
       assert.equal(flag(initial.workspace.id), 0)
       assert.equal(flag(replaced.workspace.id), 1)
     } finally { db.close() }

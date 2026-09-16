@@ -1,5 +1,7 @@
 import type {
+  ApprovalId,
   CommandId,
+  RuntimeOperationId,
   SessionExecutionSpec,
   SessionId,
   TurnId,
@@ -41,6 +43,19 @@ export type WorkerCommand =
       readonly kind: 'turn.stop'
       readonly sessionId: SessionId
       readonly turnId: TurnId
+    }
+  | {
+      readonly kind: 'runtime.command'
+      readonly sessionId: SessionId
+      readonly operationId: RuntimeOperationId
+      readonly name: 'compact' | 'set_model' | 'set_thinking_level'
+      readonly arguments: Readonly<Record<string, unknown>>
+    }
+  | {
+      readonly kind: 'runtime.approval.resolve'
+      readonly sessionId: SessionId
+      readonly approvalId: ApprovalId
+      readonly decision: 'approve' | 'deny'
     }
 
 export interface CommandError {

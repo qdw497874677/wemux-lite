@@ -12,6 +12,7 @@ import type {
   WorkspaceDefinition,
   WorkspaceId,
   WorkspaceLocationObservation,
+  WorkspacePlacementStatus,
 } from '@wemux/domain'
 import type { ResourceShareScope, SessionShareScope } from './access.js'
 
@@ -47,24 +48,50 @@ export interface Repository {
   readonly defaultBranch: string
 }
 
-export interface Workspace extends WorkspaceDefinition {
-  /** Durable Server-side provisioning attempt, independent of Session execution. */
-  readonly provisioning?: {
-    readonly commandId: string
-    readonly startedAt: string
-    readonly reportedAt?: string
-    /** True only after issuing a replacement command, never for request coalescing. */
-    readonly replacedAttempt?: boolean
-    readonly requests: Readonly<Record<string, string>>
-  }
-  /** Read-only observation reported by the owning Worker after provisioning. */
+export interface WorkspaceProvisioningAttempt {
+  readonly commandId: string
+  readonly startedAt: string
+  readonly reportedAt?: string
+  /** True only after issuing a replacement command, never for request coalescing. */
+  readonly replacedAttempt?: boolean
+  readonly requests: Readonly<Record<string, string>>
+}
+
+export interface WorkspacePlacement {
+  readonly workerId: WorkerId
+  readonly status: WorkspacePlacementStatus
+  readonly failureReason: string | null
+  readonly provisioning?: WorkspaceProvisioningAttempt
+  /** Read-only observation reported by this Worker after provisioning. */
   readonly location: WorkspaceLocationObservation | null
+}
+
+export interface Workspace extends WorkspaceDefinition {
+  /** A logical Workspace may be materialized independently on several Workers. */
+  readonly placements: readonly WorkspacePlacement[]
+  readonly deletedAt: Timestamp | null
+  /** @deprecated Single-placement compatibility view. New code must use placements. */
+  readonly workerId?: WorkerId
+  /** @deprecated Single-placement compatibility view. New code must use placements. */
+  readonly status?: import('@wemux/domain').WorkspaceStatus
+  /** @deprecated Single-placement compatibility view. New code must use placements. */
+  readonly failureReason?: string | null
+  /** @deprecated Single-placement compatibility view. New code must use placements. */
+  readonly provisioning?: WorkspaceProvisioningAttempt
+  /** @deprecated Single-placement compatibility view. New code must use placements. */
+  readonly location?: WorkspaceLocationObservation | null
 }
 
 export interface Session {
   /** Immutable creation provenance; absent only on legacy standalone Sessions. */
   readonly taskId?: string | null
   readonly runId?: string | null
+  /** Durable idempotency identity for standalone Session creation. */
+  readonly creation?: {
+    readonly requestId: string
+    readonly fingerprint: string
+    readonly commandId: string
+  }
   readonly id: SessionId
   readonly projectId: ProjectId
   readonly ownerId: UserId

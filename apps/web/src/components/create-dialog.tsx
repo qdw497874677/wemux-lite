@@ -1,13 +1,16 @@
 import { isExecutable, capabilityLabel } from '../lib/capability'
+import { randomId } from '../lib/random.ts'
 import { useState } from 'react'
 import type { Api } from '@/api/client'
 import type { SessionDTO, WorkerDTO, WorkspaceDTO } from '@/api/dto'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from './ui/dialog'
+import { DialogFooter } from './ui/dialog'
 import { workerStateLabel, workspaceStateLabel } from '@/lib/display'
 
 export const selectClass = 'h-10 w-full rounded-md border border-input bg-background px-3 text-xs'
+import { CreationDialog } from './creation-dialog'
+
 export type CreateKind = 'project' | 'workspace' | 'session'
 const titles: Record<CreateKind, string> = { project: '新建项目', workspace: '新建工作区', session: '新建会话' }
 
@@ -27,6 +30,8 @@ export function CreateDialog({ kind, api, teamId, projectId, defaultWorkspaceId 
   const [branch, setBranch] = useState('main')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const dirty = name !== '' || (kind !== 'project' && (workerId !== (defaultWorkspace?.workerId ?? '') || workspaceSource !== 'empty' || gitUrl !== '' || branch !== 'main' || workspaceId !== (defaultWorkspace?.id ?? '') || agentKey !== '' || modelId !== ''))
+  const requestClose = () => { if (!busy && (!dirty || window.confirm('放弃未保存的内容？'))) onClose() }
   const selectedWorkerId = workerId || workers[0]?.id || ''
   const worker = workers.find(item => item.id === selectedWorkerId)
   const workspace = workspaces.find(item => item.id === workspaceId && item.workerId === selectedWorkerId)
@@ -54,7 +59,7 @@ export function CreateDialog({ kind, api, teamId, projectId, defaultWorkspaceId 
           onCreated(kind, result.id); break
         }
         case 'session': {
-          const result = await api.createSession({ title: name.trim(), workspaceId, agentKey, modelId: modelId.trim(), shareScope: 'owner-only' })
+          const result = await api.createSession({ requestId: randomId(), title: name.trim(), workspaceId, agentKey, modelId: modelId.trim(), shareScope: 'owner-only' })
           onCreated(kind, result.id, result); break
         }
       }
@@ -65,7 +70,7 @@ export function CreateDialog({ kind, api, teamId, projectId, defaultWorkspaceId 
     finally { setBusy(false) }
   }
 
-  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }}><DialogContent className="max-h-[90dvh] overflow-y-auto"><DialogHeader><DialogTitle>{titles[kind]}</DialogTitle><DialogDescription>{kind === 'project' ? '项目用来组织相关的工作区和会话。' : kind === 'workspace' ? '工作区会固定到所选工作节点，可创建空白目录或克隆 Git 仓库。' : '选择工作区、智能体和模型，创建后即可开始对话。'}</DialogDescription></DialogHeader>
+  return <CreationDialog title={titles[kind]} busy={busy} onClose={requestClose} description={kind === 'project' ? '项目用来组织相关的工作区和会话。' : kind === 'workspace' ? '工作区会固定到所选工作节点，可创建空白目录或克隆 Git 仓库。' : '选择工作区、智能体和模型，创建后即可开始对话。'}>
     <form onSubmit={submit} className="space-y-4">
       <label className="grid gap-2 text-xs">名称<Input autoFocus required value={name} onChange={event => setName(event.target.value)} /></label>
       {kind === 'project' && <p className="rounded-lg bg-muted/30 p-3 text-xs text-muted-foreground">项目将创建在当前默认团队中。</p>}
@@ -74,7 +79,7 @@ export function CreateDialog({ kind, api, teamId, projectId, defaultWorkspaceId 
       {kind === 'workspace' && <p className="text-xs text-muted-foreground">创建后，工作节点会异步准备独立目录{workspaceSource === 'git' ? '并拉取仓库' : ''}。显示“已就绪”后才可以创建会话；节点离线时会等待处理。</p>}
       {kind === 'session' && <><label className="grid gap-2 text-xs">工作区<select required className={selectClass} value={workspaceId} onChange={event => setWorkspaceId(event.target.value)}><option value="">选择已就绪的工作区</option>{workspaces.filter(item => item.workerId === selectedWorkerId).map(item => <option key={item.id} value={item.id} disabled={item.status !== 'ready'}>{item.name} · {workspaceStateLabel[item.status]}</option>)}</select></label><label className="grid gap-2 text-xs">智能体<select required className={selectClass} value={agentKey} onChange={event => { setAgentKey(event.target.value); setModelId('') }}><option value="">选择可执行的智能体</option>{agents.map(item => <option key={item.agentKey} value={item.agentKey} disabled={!isExecutable(item)}>{item.displayName} {item.version} · {capabilityLabel(item)}</option>)}</select></label><label className="grid gap-2 text-xs">模型<select required className={selectClass} value={modelId} onChange={event => setModelId(event.target.value)} disabled={!agent}><option value="">选择工作节点已报告的模型</option>{agent?.models.map(item => <option key={item.modelId} value={item.modelId}>{item.displayName}</option>)}</select></label><p className="text-xs text-muted-foreground">{worker && !agents.length ? '该工作节点尚未报告可执行且已认证的智能体。' : '会话创建后会固定到当前工作节点、工作区、智能体和模型。会话内容可能包含敏感信息。'}</p></>}
       {error && <p role="alert" className="rounded-lg border border-red-500/25 bg-red-500/10 p-3 text-sm text-red-200">{error}</p>}
-      <DialogFooter><Button type="button" variant="outline" disabled={busy} onClick={onClose}>取消</Button><Button type="submit" disabled={!valid || busy}>{busy ? '正在创建…' : '创建'}</Button></DialogFooter>
+      <DialogFooter className="sticky bottom-0 border-t border-border bg-card py-3"><Button type="button" variant="outline" disabled={busy} onClick={requestClose}>取消</Button><Button type="submit" disabled={!valid || busy}>{busy ? '正在创建…' : '创建'}</Button></DialogFooter>
     </form>
-  </DialogContent></Dialog>
+  </CreationDialog>
 }

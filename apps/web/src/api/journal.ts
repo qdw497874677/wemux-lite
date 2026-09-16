@@ -1,4 +1,4 @@
-import type { JournalEventDTO, RuntimeState } from './dto'
+import type { JournalEventDTO, RuntimeState, RuntimeUsageDTO } from './dto'
 
 export interface ChatMessage {
   id: string
@@ -31,7 +31,14 @@ export interface TimelineNotice {
   tone: 'info' | 'error'
 }
 
-export type ChatTimelineItem = TimelineMessage | TimelineTool | TimelineNotice
+export interface TimelineUsage {
+  kind: 'usage'
+  id: string
+  turnId: string
+  usage: RuntimeUsageDTO
+}
+
+export type ChatTimelineItem = TimelineMessage | TimelineTool | TimelineNotice | TimelineUsage
 
 // Rebuild from the ordered, durable journal. The timeline keeps assistant text
 // segments on either side of tool calls instead of flattening the whole turn.
@@ -140,6 +147,21 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
         tool.status = payload.exitCode === null || payload.exitCode === 0 ? 'completed' : 'failed'
         break
       }
+      case 'usage.updated': {
+        const previous = timeline.find(item => item.kind === 'usage' && item.turnId === payload.turnId)
+        if (previous?.kind === 'usage') previous.usage = payload.usage
+        else timeline.push({ kind: 'usage', id: `usage:${payload.turnId}`, turnId: payload.turnId, usage: payload.usage })
+        break
+      }
+      case 'approval.requested':
+        timeline.push({ kind: 'notice', id: `approval:${payload.approvalId}`, text: payload.reason ? `：${payload.reason}` : '', tone: 'info' })
+        break
+      case 'compaction.started':
+        timeline.push({ kind: 'notice', id: `compaction:${payload.turnId}:${event.seq}`, text: payload.reason ? `：${payload.reason}` : '', tone: 'info' })
+        break
+      case 'compaction.finished':
+        timeline.push({ kind: 'notice', id: `compaction:${payload.turnId}:${event.seq}`, text: payload.summary ? `：${payload.summary}` : '', tone: 'info' })
+        break
     }
   }
   return { messages, timeline, notices, runtimeState }

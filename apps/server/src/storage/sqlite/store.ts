@@ -2,7 +2,7 @@ import { validReviewMetadata } from '@wemux/web-contract/task-platform'
 import { DatabaseSync } from 'node:sqlite'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { AgentInboxMessage, CapabilityAsset, EventSeq, JournalEvent, ProjectId, SessionId, Timestamp, WorkerId } from '@wemux/domain'
-import type { CommandProjection, EnrollmentTokenRecord, PersonalAccessTokenRecord, SessionCacheState, Worker, WorkerCredentialRecord } from '@wemux/server-domain'
+import type { CommandProjection, EnrollmentTokenRecord, PersonalAccessTokenRecord, SessionCacheState, Worker, WorkerCredentialRecord, Workspace } from '@wemux/server-domain'
 import type { ServerStore, ServerStoreTx } from '../../application/ports/server-store.js'
 import type { PendingCommand } from '../../application/ports/server-store-types.js'
 import { AppError } from '../../application/errors.js'
@@ -62,9 +62,64 @@ export class SqliteServerStore implements ServerStore {
     return this.db.prepare('SELECT data FROM records WHERE kind=? ORDER BY rowid').all(kind).map(row => JSON.parse(String(row.data)) as T)
   }
   private put(kind: string, id: string, data: unknown): void {
-    this.db.prepare('INSERT INTO records VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data').run(kind, id, JSON.stringify(data))
+    const normalized = kind === 'workspace' ? this.normalizeWorkspaceWrite(data as Workspace & { workerId?: WorkerId; status?: import('@wemux/domain').WorkspaceStatus }) : data
+    this.db.prepare('INSERT INTO records VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data').run(kind, id, JSON.stringify(normalized))
+  }
+  private normalizeWorkspaceWrite(workspace: Workspace & { workerId?: WorkerId; status?: import('@wemux/domain').WorkspaceStatus }): Workspace {
+    const compatibility = workspace as Workspace & { workerId?: WorkerId; status?: import('@wemux/domain').WorkspaceStatus; failureReason?: string | null; provisioning?: Workspace['placements'][number]['provisioning']; location?: Workspace['placements'][number]['location'] }
+    const inferredWorkerId = compatibility.workerId ?? (workspace.placements.length === 1 ? workspace.placements[0].workerId : undefined)
+    if (!inferredWorkerId || !compatibility.status || compatibility.status === 'unplaced' || compatibility.status === 'deleted') {
+      const { workerId: _workerId, status: _status, failureReason: _failureReason, provisioning: _provisioning, location: _location, ...logical } = compatibility
+      return logical
+    }
+    const placement = workspace.placements.find(value => value.workerId === inferredWorkerId) ?? {
+      workerId: inferredWorkerId,
+      status: compatibility.status as import('@wemux/domain').WorkspacePlacementStatus,
+      failureReason: null,
+      location: null,
+    }
+    const next = {
+      ...placement,
+      status: compatibility.status,
+      failureReason: compatibility.failureReason ?? placement.failureReason,
+      ...(compatibility.provisioning ? { provisioning: compatibility.provisioning } : {}),
+      location: compatibility.location ?? placement.location,
+    }
+    const { workerId: _workerId, status: _status, failureReason: _failureReason, provisioning: _provisioning, location: _location, ...logical } = compatibility
+    return {
+      ...logical,
+      ...(compatibility.workerId ? {
+        workerId: inferredWorkerId,
+        status: next.status,
+        failureReason: next.failureReason,
+        provisioning: next.provisioning,
+        location: next.location,
+      } : {}),
+      placements: [...workspace.placements.filter(value => value.workerId !== inferredWorkerId), next],
+    }
   }
   private remove(kind: string, id: string): void { this.db.prepare('DELETE FROM records WHERE kind=? AND id=?').run(kind, id) }
+  private workspace(id: string): Workspace | null {
+    const stored = this.get<Workspace & Record<string, unknown>>('workspace', id)
+    if (!stored) return null
+    const logical = Array.isArray(stored.placements) ? stored : (() => {
+      const legacy = stored as Workspace & { workerId?: WorkerId; status?: import('@wemux/domain').WorkspaceStatus; failureReason?: string | null; provisioning?: Workspace['placements'][number]['provisioning']; location?: Workspace['placements'][number]['location'] }
+      const { workerId, status, failureReason, provisioning, location } = legacy
+      return {
+        id: legacy.id,
+        projectId: legacy.projectId,
+        name: legacy.name,
+        spec: legacy.spec,
+        deletedAt: status === 'deleted' ? (new Date(0).toISOString() as Timestamp) : null,
+        placements: workerId && status && status !== 'unplaced' && status !== 'deleted'
+          ? [{ workerId, status, failureReason: failureReason ?? null, ...(provisioning ? { provisioning } : {}), location: location ?? null }]
+          : [],
+      } satisfies Workspace
+    })()
+    const placement = logical.placements.length === 1 ? logical.placements[0] : undefined
+    return { ...logical, ...(placement ? { workerId: placement.workerId, status: placement.status, failureReason: placement.failureReason, provisioning: placement.provisioning, location: placement.location } : { status: logical.deletedAt ? 'deleted' as const : 'unplaced' as const, failureReason: null, location: null }) }
+  }
+  private workspaces(): Workspace[] { return this.list<{ id: string }>('workspace').map(value => this.workspace(value.id)).filter((value): value is Workspace => value !== null) }
   private readonly identityReader: ServerStore['identity'] = {
     getUser: async id => this.get('user', id),
     getUserByLogin: async login => this.list<import('@wemux/server-domain').User>('user').find(u => u.username === login || u.email === login) ?? null,
@@ -77,9 +132,10 @@ export class SqliteServerStore implements ServerStore {
   readonly identity = this.committed(this.identityReader)
   private readonly resourceReader: ServerStore['resources'] = {
     getWorker: async id => this.get('worker', id), getProject: async id => this.get('project', id),
-    getRepository: async id => this.get('repository', id), getWorkspace: async id => this.get('workspace', id), getSession: async id => this.get('session', id),
+    getRepository: async id => this.get('repository', id), getWorkspace: async id => this.workspace(id), getSession: async id => this.get('session', id),
+    getSessionByCreateRequest: async (ownerId, projectId, requestId) => this.list<import('@wemux/server-domain').Session>('session').find(session => session.ownerId === ownerId && session.projectId === projectId && session.creation?.requestId === requestId) ?? null,
     listWorkers: async () => this.list('worker'), listProjects: async () => this.list('project'),
-    listWorkspaces: async () => this.list('workspace'), listSessions: async () => this.list('session'),
+    listWorkspaces: async () => this.workspaces(), listSessions: async () => this.list('session'),
     listCapabilityAssets: async projectId => this.get<CapabilityAsset[]>('capability-assets', projectId) ?? [],
     listAgentInboxMessages: async (sessionId, unreadOnly) => this.list<AgentInboxMessage>('agent-inbox').filter(message => message.toSessionId === sessionId && (!unreadOnly || message.status !== 'read')),
     getAgentInboxMessage: async messageId => this.get('agent-inbox', messageId),

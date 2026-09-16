@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { TaskError, type TaskService } from '../application/task-service.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { CapabilityToolName } from '@wemux/domain'
-import type { CommandId, ProjectId, SessionId, WorkerId, WorkspaceId } from '@wemux/domain'
+import type { ApprovalId, CommandId, ProjectId, SessionId, WorkerId, WorkspaceId } from '@wemux/domain'
 import { AuthenticationService } from '../application/auth.js'
 import { CapabilityError, CapabilityService } from '../application/capability-service.js'
 import { CapabilityTokenError } from '../application/capability-token-service.js'
@@ -158,10 +158,15 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
       if (method === 'POST' && revoke) { json(response, 200, await service.revokeWorker(revoke[1] as WorkerId, id => control?.disconnectWorker(id))); return }
       const reprovision = path.match(/^\/workspaces\/([^/]+)\/reprovision$/)
       if (method === 'POST' && reprovision) {
-        const input = await body(request) as { requestId?: unknown }
+        const input = await body(request) as { requestId?: unknown; workerId?: unknown }
         if (input.requestId !== undefined && typeof input.requestId !== 'string') throw new AppError(400, 'Invalid retry requestId')
-        json(response, 200, await service.reprovisionWorkspace(reprovision[1] as WorkspaceId, input.requestId)); return
+        if (input.workerId !== undefined && typeof input.workerId !== 'string') throw new AppError(400, 'Invalid workerId')
+        json(response, 200, await service.reprovisionWorkspace(reprovision[1] as WorkspaceId, input.requestId, input.workerId as WorkerId | undefined)); return
       }
+      const runtimeCommand = path.match(/^\/sessions\/([^/]+)\/runtime\/commands$/)
+      if (method === 'POST' && runtimeCommand) { json(response, 202, await service.invokeRuntimeCommand(runtimeCommand[1] as SessionId, await body(request))); return }
+      const runtimeApproval = path.match(/^\/sessions\/([^/]+)\/runtime\/approvals\/([^/]+)$/)
+      if (method === 'POST' && runtimeApproval) { json(response, 202, await service.resolveRuntimeApproval(runtimeApproval[1] as SessionId, runtimeApproval[2] as ApprovalId, await body(request))); return }
       const sessions = path.match(/^\/sessions\/([^/]+)\/(messages|events|stream)$/)
       if (sessions) {
         const id = sessions[1] as SessionId

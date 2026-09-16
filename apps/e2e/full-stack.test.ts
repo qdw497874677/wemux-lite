@@ -90,7 +90,8 @@ test('real Server and Worker CLI complete the project-to-agent conversation loop
   console.error('[e2e] wait workspace ready')
   await eventually(
     () => api(`/workspaces/${provision.workspace.id}`),
-    workspace => workspace.status === 'ready',
+    workspace => workspace.status === 'ready'
+      || workspace.placements?.some((placement: { status?: string }) => placement.status === 'ready'),
   )
   const capabilities = await eventually(
     () => api(`/workers/${JSON.parse(registration.stdout).workerId}/capabilities`),
@@ -100,6 +101,7 @@ test('real Server and Worker CLI complete the project-to-agent conversation loop
 
   console.error('[e2e] create session and send')
   const created = await api('/sessions', 'POST', {
+    requestId: 'e2e-session-create',
     workspaceId: provision.workspace.id,
     title: 'E2E Session',
     agentKey: 'test',

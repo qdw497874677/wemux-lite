@@ -142,7 +142,7 @@ export class TaskService {
       if (Object.keys(b).some(key => key !== 'title') || typeof b.title !== 'string' || !b.title.trim() || b.title.length > 200) invalid('Session title required; unknown fields are not allowed')
       if (!task.assignee) throw new TaskError('assignment_changed', 'Task assignment required')
       const workspace = await this.workspace(tx, task, task.assignee.workspaceId)
-      if ((await tx.tasks.binding(workspace.id))?.taskId !== id || workspace.workerId !== task.assignee.workerId) throw new TaskError('assignment_changed', 'Assignment workspace binding changed')
+      if ((await tx.tasks.binding(workspace.id))?.taskId !== id || !workspace.placements.some(placement => placement.workerId === task.assignee!.workerId && placement.status === 'ready')) throw new TaskError('assignment_changed', 'Assignment workspace placement changed')
       const created = await server.createSessionInTx(tx, { ...task.assignee, title: b.title }, { taskId: id, runId: null })
       const session = created.session
       const at = new Date().toISOString()
@@ -236,7 +236,7 @@ export class TaskService {
   private async workspace(tx: ServerStoreTx, task: TaskDetail, workspaceId: unknown) {
     if (typeof workspaceId !== 'string' || !workspaceId) invalid('Workspace required')
     const workspace = await tx.resources.getWorkspace(workspaceId as WorkspaceId)
-    if (!workspace || workspace.status === 'deleted' || workspace.status === 'deleting') throw new TaskError('not_found', 'Workspace not found')
+    if (!workspace || workspace.deletedAt) throw new TaskError('not_found', 'Workspace not found')
     if (workspace.projectId !== task.projectId) throw new TaskError('forbidden', 'Workspace belongs to another project')
     const owner = await tx.tasks.binding(workspace.id)
     if (owner && owner.taskId !== task.id) throw new TaskError('workspace_bound', 'Workspace already bound to another Task')
@@ -257,7 +257,7 @@ export class TaskService {
       const a = object(input)
       if (Object.keys(a).some(key => !['workspaceId', 'workerId', 'agentKey', 'modelId'].includes(key)) || ['workspaceId', 'workerId', 'agentKey', 'modelId'].some(key => typeof a[key] !== 'string' || !a[key])) invalid('Complete assignment required')
       const workspace = await this.workspace(tx, task, a.workspaceId)
-      if (workspace.workerId !== a.workerId) throw new TaskError('runtime_unavailable', 'Workspace Worker mismatch')
+      if (!workspace.placements.some(placement => placement.workerId === a.workerId)) throw new TaskError('runtime_unavailable', 'Workspace is unavailable on selected Worker')
       const worker = await tx.resources.getWorker(a.workerId as WorkerId)
       const project = await tx.resources.getProject(task.projectId as ProjectId)
       const agent = worker?.capabilities.find(value => value.agentKey === a.agentKey)
@@ -316,14 +316,15 @@ export class TaskService {
   }
   async retryWorkspace(projectId: string, id: string, workspaceId: string, input: unknown, context: TaskContext) {
     const b = object(input)
-    if (Object.keys(b).some(key => key !== 'requestId') || typeof b.requestId !== 'string' || !b.requestId.trim() || b.requestId.length > 200) invalid('Retry requestId required')
+    if (Object.keys(b).some(key => !['requestId', 'workerId'].includes(key)) || typeof b.requestId !== 'string' || !b.requestId.trim() || b.requestId.length > 200) invalid('Retry requestId required')
     const server = this.server
     if (!server) throw new Error('Workspace composition unavailable')
     const result = await this.store.transaction(async tx => {
       let task = await this.task(tx, projectId, id, context)
       await this.workspace(tx, task, workspaceId)
       if ((await tx.tasks.binding(workspaceId))?.taskId !== id) throw new TaskError('not_found', 'Workspace not bound to Task')
-      const result = await server.reprovisionWorkspaceInTx(tx, workspaceId as WorkspaceId, b.requestId as string)
+      const requestedWorkerId = b.workerId === undefined ? undefined : typeof b.workerId === 'string' ? b.workerId as WorkerId : invalid('Invalid workerId')
+      const result = await server.reprovisionWorkspaceInTx(tx, workspaceId as WorkspaceId, b.requestId as string, requestedWorkerId)
       if (result.created) {
         const at = new Date().toISOString(); task = { ...task, updatedAt: at, lastActivityAt: at }
         await this.record(tx, task, 'workspace.retried', { workspaceId, commandId: result.commandId }, context)
@@ -331,7 +332,7 @@ export class TaskService {
       return { ...result, task }
     })
     if (result.created) {
-      server.notifications.commands(result.workspace.workerId)
+      server.notifications.commands(result.workerId)
       this.publish({ id: randomUUID(), projectId, taskId: id, workspaceId, type: 'workspace.provisioning' })
     }
     return result
@@ -346,11 +347,14 @@ export class TaskService {
       if ('assignment' in b) this.cas(task, b.version)
       const created = await server.createWorkspaceInTx(tx, { ...b, projectId })
       task = await this.bindInTx(tx, task, created.workspace.id, context)
-      if ('assignment' in b) task = await this.assignInTx(tx, task, { ...object(b.assignment), workspaceId: created.workspace.id, workerId: created.workspace.workerId }, context)
+      if ('assignment' in b) {
+        if (!created.workerId) throw new TaskError('runtime_unavailable', 'Creating an assigned Workspace requires a Worker placement')
+        task = await this.assignInTx(tx, task, { ...object(b.assignment), workspaceId: created.workspace.id, workerId: created.workerId }, context)
+      }
       await this.record(tx, task, 'workspace.created', { workspaceId: created.workspace.id, commandId: created.commandId }, context)
       return { ...created, task }
     })
-    server.notifications.commands(result.workspace.workerId)
+    if (result.workerId) server.notifications.commands(result.workerId)
     this.publish({ id: randomUUID(), projectId, taskId: id, workspaceId: result.workspace.id, type: 'binding.changed' })
     if ('assignment' in b) this.notify(result.task, 'assignment.changed')
     this.publish({ id: randomUUID(), projectId, taskId: id, workspaceId: result.workspace.id, type: 'workspace.provisioning' }); return result

@@ -50,7 +50,7 @@ test('creation primitives compose in one transaction; every failure rolls back w
     const { workspace } = await service.createWorkspaceInTx(tx, workspaceInput)
     // Provisioning is not bypassed in production; simulate its ready report in this fixture.
     await tx.resources.saveWorkspace({ ...workspace, status: 'ready' })
-    const { session } = await service.createSessionInTx(tx, { workspaceId: workspace.id, title: 'test', agentKey: 'pi', modelId: 'test' })
+    const { session } = await service.createSessionInTx(tx, { requestId: 'composed-session', workspaceId: workspace.id, title: 'test', agentKey: 'pi', modelId: 'test' })
     const message = await service.enqueueInTx(tx, session.id, { content: 'hello', commandId: 'stable' })
     const retry = await service.enqueueInTx(tx, session.id, { content: 'hello', commandId: 'stable' })
     assert.deepEqual(message, retry)
@@ -67,7 +67,7 @@ test('creation primitives compose in one transaction; every failure rolls back w
   assert.equal(committedAuditCount, initialAuditCount + 4)
   for (const operation of [
     () => service.createWorkspace(workspaceInput),
-    () => service.createSession({ workspaceId: result.workspace.id, title: 'failure', agentKey: 'pi', modelId: 'test' }),
+    () => service.createSession({ requestId: 'failure-create', workspaceId: result.workspace.id, title: 'failure', agentKey: 'pi', modelId: 'test' }),
     () => service.enqueue(result.session.id, { content: 'failure', commandId: 'failed' }),
   ]) {
     const workspaces = await db.resources.listWorkspaces(), sessions = await db.resources.listSessions(), commands = await db.commands.list({ limit: 100 })
@@ -85,7 +85,7 @@ test('creation primitives compose in one transaction; every failure rolls back w
     const { workspace } = await service.createWorkspaceInTx(tx, workspaceInput)
     rolledBackWorkspace = workspace
     await tx.resources.saveWorkspace({ ...workspace, status: 'ready' })
-    const { session } = await service.createSessionInTx(tx, { workspaceId: workspace.id, title: 'rollback', agentKey: 'pi', modelId: 'test' })
+    const { session } = await service.createSessionInTx(tx, { requestId: 'rollback-session', workspaceId: workspace.id, title: 'rollback', agentKey: 'pi', modelId: 'test' })
     await service.enqueueInTx(tx, session.id, { content: 'rollback' })
     throw new Error('outer failure')
   }), /outer failure/)

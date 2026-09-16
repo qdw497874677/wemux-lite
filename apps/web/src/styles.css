@@ -81,6 +81,48 @@ h1 { font-size: 1.25rem; font-weight: 650; }
 @media (max-width: 1279px) { .workbench-layout { grid-template-columns: 64px minmax(0, 1fr); } .project-column { display: none; } }
 @media (max-width: 1023px) { .inspector-sheet { inset: 0 !important; width: 100vw !important; height: 100dvh !important; max-width: 100vw !important; margin: 0 !important; } }
 @media (max-width: 767px) { .workbench-layout { grid-template-columns: minmax(0, 1fr); } .workbench-layout > .global-rail { display: none; } .inspector-sheet, .navigation-sheet { width: 100vw !important; max-width: 100vw !important; } }
+@media (min-width: 1280px) {
+  .workbench-layout.conversation-focus { grid-template-columns: 64px minmax(0, 1fr) auto; }
+  .conversation-focus > .project-column { display: none; }
+}
+.conversation-content { width: 100%; max-width: 1080px; margin-inline: auto; }
+.conversation-composer { padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+
+/* Scoped message typography: Tailwind resets must not erase Markdown structure. */
+.message-markdown { min-width: 0; max-width: 100%; overflow-wrap: anywhere; line-height: 1.75; }
+.message-markdown > :first-child { margin-top: 0; }
+.message-markdown > :last-child { margin-bottom: 0; }
+.message-markdown p { margin-block: .65em; white-space: pre-wrap; }
+.message-markdown h1, .message-markdown h2, .message-markdown h3,
+.message-markdown h4, .message-markdown h5, .message-markdown h6 { margin: 1.1em 0 .45em; font-weight: 650; line-height: 1.4; }
+.message-markdown h1 { font-size: 1.4em; }
+.message-markdown h2 { font-size: 1.25em; }
+.message-markdown h3 { font-size: 1.1em; }
+.message-markdown ul, .message-markdown ol { padding-left: 1.6em; margin-block: .65em; }
+.message-markdown ul { list-style-type: disc; }
+.message-markdown ol { list-style-type: decimal; }
+.message-markdown li { margin-block: .2em; }
+.message-markdown li > p { margin-block: .2em; }
+.message-markdown .task-list-item { list-style: none; }
+.message-markdown input[type=checkbox] { margin-right: .5em; }
+.message-markdown blockquote { margin-block: .8em; padding-left: 1em; border-left: 3px solid var(--color-border); color: var(--color-muted-foreground); }
+.message-markdown a { color: var(--color-primary); text-decoration: underline; text-underline-offset: 3px; }
+.message-markdown code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .9em; }
+.message-markdown :not(pre) > code { border-radius: 4px; padding: .12em .3em; background: var(--color-accent); }
+.message-markdown pre { max-width: 100%; overflow-x: auto; margin-block: .8em; padding: 12px 14px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-background); white-space: pre; overflow-wrap: normal; line-height: 1.6; }
+.message-markdown pre code { padding: 0; background: none; }
+.message-markdown .message-table-scroll { max-width: 100%; overflow-x: auto; margin-block: .8em; }
+.message-markdown table { border-collapse: collapse; min-width: 100%; font-size: .95em; }
+.message-markdown th, .message-markdown td { border: 1px solid var(--color-border); padding: .45em .7em; min-width: 5em; }
+.message-markdown th { background: var(--color-accent); font-weight: 600; }
+.message-markdown hr { margin-block: 1em; border-top: 1px solid var(--color-border); }
+.message-markdown :focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+.creation-dialog { width: calc(100% - 2rem); }
+.creation-dialog input, .creation-dialog textarea, .creation-dialog select { min-width: 0; max-width: 100%; }
+@media (max-width: 767px) {
+  .creation-dialog input, .creation-dialog textarea, .creation-dialog select { font-size: 16px; }
+  .conversation-timeline article.ml-11, .conversation-timeline div.ml-11 { margin-left: 0; }
+}
 .navigation-sheet .global-rail { flex-direction: row; justify-content: space-around; }
 
 input::placeholder, textarea::placeholder { color: var(--color-muted-foreground); opacity: 1; }

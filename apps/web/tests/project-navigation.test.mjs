@@ -1,0 +1,36 @@
+import { readFileSync } from 'node:fs'
+import assert from 'node:assert/strict'
+import test from 'node:test'
+const source = path => readFileSync(new URL(path, import.meta.url), 'utf8')
+test('mobile project pages prioritize conversation and keep workspace access directly visible', () => {
+  const nav = source('../src/components/project-quick-nav.tsx')
+  assert.match(nav, /aria-label="项目快捷导航"/)
+  assert.match(nav, /\['workspaces', '工作区'\]/)
+  assert.ok(nav.indexOf("['workspaces', '工作区']") < nav.indexOf('<DropdownMenu>'))
+  assert.match(nav, /\['sessions', '对话'\]/)
+  assert.match(nav, /\['board', '任务'\]/)
+  assert.match(nav, /aria-current=/)
+  const app = source('../src/App.tsx')
+  assert.match(app, /<MainCanvas>.*<ProjectQuickNav/)
+  assert.doesNotMatch(app, /setContextOpen\(matchMedia/)
+})
+test('project conversation route is a single draft canvas; sessions remain in the workspace tree', () => {
+  const app = source('../src/App.tsx')
+  assert.match(app, /section === 'sessions' \? <div className="m-auto w-full">\{quickEntry\}/)
+  assert.doesNotMatch(app, /ProjectSessionList/)
+  assert.match(app, /workspaceId && sessions.filter/)
+  const navigation = source('../src/features/sessions/navigation.tsx')
+  assert.match(navigation, /aria-label=""/)
+  assert.match(navigation, /workspaceSessions.map\(session/)
+  assert.match(navigation, /onCreate\('session'\)/)
+})
+test('overview exposes readable recent sessions and existing workspaces', () => {
+  const resources = source('../src/components/project-resources.tsx')
+  assert.match(resources, /aria-label="工作区快捷入口"/)
+  assert.match(resources, /aria-label="最近会话"/)
+  assert.match(resources, /filter\(item => item.canRead\)/)
+  assert.match(resources, /sort\(\(a, b\) => b.updatedAt.localeCompare\(a.updatedAt\)\)/)
+  assert.match(resources, /workspaces\/\$\{encodeURIComponent\(ws.id\)\}/)
+  assert.match(resources, /sessions\/\$\{encodeURIComponent\(session.id\)\}/)
+  assert.match(source('../src/App.tsx'), /<ProjectResources.*<ProjectOverview/)
+})

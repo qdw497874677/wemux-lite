@@ -11,6 +11,8 @@ import { LocalProvisioner } from './workspaces/local-provisioner.js'
 import { FilesystemAgentLaunchContextProvider } from './application/agent-launch-context-provider.js'
 import { CapabilityGateway } from './capabilities/gateway.js'
 import { WorkerRuntime } from './application/runtime.js'
+import { PiRuntimeSessionAdapter } from './agents/pi-runtime-session-adapter.js'
+import { ClaudeRuntimeSessionAdapter } from './agents/claude-runtime-session-adapter.js'
 import { WebSocketTransport } from './transport/websocket.js'
 import { enroll, toSocketUrl } from './transport/enrollment.js'
 import { defaultProbe, preflightServer, probeCli, reportTailscale } from './transport/tailscale.js'
@@ -162,7 +164,13 @@ export async function main(args = process.argv.slice(2)) {
       const gateway = new CapabilityGateway(finalOrder[0])
       const capabilityEndpoint = await gateway.listen()
       const transport = new WebSocketTransport({ url: finalOrder[0], urls: finalOrder, credential }, message => runtime.receive(message), () => runtime.connected(), console.error, (url, reason) => console.error(`[connect] 切换到候选地址 ${originalOrder[finalOrder.indexOf(url)] ?? url}（${reason === 'connect-failed' ? '连接失败' : '连续重连失败'}）`))
-      runtime = new WorkerRuntime(store, new LocalProvisioner(join(options.home, 'workspaces')), agents, transport, identity.workerId, identity.name ?? options.name, new FilesystemAgentLaunchContextProvider(options.home, capabilityEndpoint))
+      const runtimeAdapters = new Map()
+      const selected = await readAgentSettings(options.home)
+      for (const agent of agents) {
+        if (agent.agentKey === 'pi') runtimeAdapters.set(agent.agentKey, new PiRuntimeSessionAdapter(selected.pi?.executable ?? 'pi'))
+        if (agent.agentKey === 'claude') runtimeAdapters.set(agent.agentKey, new ClaudeRuntimeSessionAdapter(selected['claude-code']?.executable ?? 'claude'))
+      }
+      runtime = new WorkerRuntime(store, new LocalProvisioner(join(options.home, 'workspaces')), agents, transport, identity.workerId, identity.name ?? options.name, new FilesystemAgentLaunchContextProvider(options.home, capabilityEndpoint), undefined, runtimeAdapters)
       await runtime.initialize()
       transport.start()
       await new Promise<void>(resolve => {

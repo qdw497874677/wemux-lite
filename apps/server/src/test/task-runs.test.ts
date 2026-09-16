@@ -1102,7 +1102,7 @@ test('real server listen recovers contiguous disk cache with cursor behind exact
     }
     const check = new DatabaseSync(path)
     try {
-      assert.deepEqual(check.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(r => r.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+      assert.deepEqual(check.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(r => r.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
       assert.deepEqual(check.prepare('PRAGMA foreign_key_check').all(), [])
     } finally { check.close() }
   } finally { await rm(dir, { recursive: true, force: true }) }

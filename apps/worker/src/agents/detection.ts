@@ -34,7 +34,8 @@ class DetectedAgent implements Extract<AgentAdapter, { mode: 'detect-only' }> {
       catch { diagnostics.push('Version probe failed.') }
     }
     return { agentKey: this.agentKey, displayName: this.executable, version, mode: this.mode, executablePath, diagnostics,
-      availability: executablePath ? { status: 'available' } : { status: 'unavailable', reason: 'Executable not found in PATH' }, models: [] }
+      availability: executablePath ? { status: 'available' } : { status: 'unavailable', reason: 'Executable not found in PATH' },
+      authorization: { state: 'unknown', instructions: 'This Agent is detection-only; verify credentials in its local CLI.' }, models: [] }
   }
 }
 export function defaultAgents(settings: AgentSettings = {}): readonly AgentAdapter[] {

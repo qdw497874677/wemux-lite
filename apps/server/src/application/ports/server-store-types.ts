@@ -135,6 +135,7 @@ export interface ServerResourceReader {
   getRepository(repositoryId: import('@wemux/domain').RepositoryId): Promise<Repository | null>
   getWorkspace(workspaceId: import('@wemux/domain').WorkspaceId): Promise<Workspace | null>
   getSession(sessionId: SessionId): Promise<Session | null>
+  getSessionByCreateRequest(ownerId: UserId, projectId: ProjectId, requestId: string): Promise<Session | null>
   listCapabilityAssets(projectId: ProjectId): Promise<readonly CapabilityAsset[]>
   listAgentInboxMessages(sessionId: SessionId, unreadOnly?: boolean): Promise<readonly AgentInboxMessage[]>
   getAgentInboxMessage(messageId: string): Promise<AgentInboxMessage | null>

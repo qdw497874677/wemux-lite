@@ -9,6 +9,8 @@ import type {
   TurnFailure,
   TurnId,
   UserMessageInput,
+  ApprovalId,
+  RuntimeUsage,
 } from '@wemux/domain'
 
 export interface LocalAgentDetection extends AgentCapability {
@@ -50,6 +52,10 @@ export type AgentTurnEvent =
       readonly toolCallId: ToolCallId
       readonly exitCode: number | null
     }
+  | { readonly kind: 'approval.requested'; readonly approvalId: ApprovalId; readonly action: unknown; readonly reason: string | undefined }
+  | { readonly kind: 'usage.updated'; readonly usage: RuntimeUsage }
+  | { readonly kind: 'compaction.started'; readonly reason: string | undefined }
+  | { readonly kind: 'compaction.finished'; readonly summary: string | undefined }
 
 export type AgentTurnOutcome =
   | { readonly status: 'completed' }

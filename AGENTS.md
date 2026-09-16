@@ -4,7 +4,7 @@
 
 ## 项目是什么
 
-Wemux Lite 是一个最小化的团队智能体协作控制台：**Server**（HTTP + WebSocket 控制面）集中管理注册上来的 **Worker**（执行节点），Worker 发现并上报本机 **Agent** 与模型清单；用户通过 **Web** 控制台按 **Project → Task → Workspace → Run → Session** 的层级指派工作、与任意 Worker 上的 Agent 对话、审查产出。设计参照 `~/profiles/scribe/workspace/wemux-slim`（调研见 `docs/research/`）。当前形态已按任务看板型 Agent 协作平台规格演进，规格见 `docs/specs/0001-task-board-agent-platform.md`。
+Wemux Lite 是一个最小化的团队智能体协作控制台：**Server**（HTTP + WebSocket 控制面）集中管理注册上来的 **Worker**（执行节点），Worker 发现并上报本机 **Agent** 与模型清单；用户通过 **Web** 控制台从 **Project → Workspace → Session** 快速开始与任意 Worker 上的 Agent 对话；任务看板是可选的计划、指派与审查入口，使用 **Task → Run → Session** 执行追踪，不是自由对话的前置步骤。设计参照 `~/profiles/scribe/workspace/wemux-slim`（调研见 `docs/research/`）。当前形态已按任务看板型 Agent 协作平台规格演进，规格见 `docs/specs/0001-task-board-agent-platform.md`。
 
 ## 仓库布局
 

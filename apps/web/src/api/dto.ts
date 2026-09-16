@@ -19,12 +19,21 @@ export interface WorkerDTO {
 export interface CreateEnrollmentTokenDTO { ttlSeconds: number }
 export interface EnrollmentTokenDTO { token: string; expiresAt: string }
 export interface ProjectDTO { id: string; name: string }
+export interface WorkspacePlacementDTO {
+  workerId: string
+  status: 'pending' | 'provisioning' | 'ready' | 'failed' | 'deleting' | 'deleted'
+  failureReason: string | null
+  location: { rootPath: string } | null
+}
 export interface WorkspaceDTO {
   id: string
   projectId: string
-  workerId: string
   name: string
-  status: 'pending' | 'provisioning' | 'ready' | 'failed' | 'deleting' | 'deleted'
+  repository?: { kind: 'blank' } | { kind: 'git'; url: string; revision?: string }
+  placements: WorkspacePlacementDTO[]
+  /** Compatibility projection of the primary placement for existing views. */
+  workerId: string
+  status: WorkspacePlacementDTO['status']
   failureReason: string | null
   location: { rootPath: string } | null
 }
@@ -62,6 +71,21 @@ export interface SessionDTO {
   canSend: boolean
   canManage: boolean
 }
+export interface RuntimeUsageDTO {
+  scope?: 'message' | 'operation' | 'native-session'
+  subjectId?: string
+  source?: 'runtime'
+  revision?: number
+  completeness?: 'complete' | 'partial'
+  modelId?: string
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadTokens?: number
+  cacheWriteTokens?: number
+  totalTokens?: number
+  costUsd?: number
+  currency?: 'USD'
+}
 export type EventPayloadDTO =
   | { kind: 'message.queued'; commandId: string; messageId: string; content: string; position: number }
   | { kind: 'message.cancelled'; commandId: string; messageId: string }
@@ -73,6 +97,10 @@ export type EventPayloadDTO =
   | { kind: 'tool.started'; turnId: string; toolCallId: string; toolName: string; input: unknown }
   | { kind: 'tool.output.delta'; turnId: string; toolCallId: string; text: string }
   | { kind: 'tool.finished'; turnId: string; toolCallId: string; exitCode: number | null }
+  | { kind: 'approval.requested'; turnId: string; approvalId: string; action: unknown; reason?: string }
+  | { kind: 'usage.updated'; turnId: string; usage: RuntimeUsageDTO }
+  | { kind: 'compaction.started'; turnId: string; reason?: string }
+  | { kind: 'compaction.finished'; turnId: string; summary?: string }
 export interface JournalEventDTO { sessionId: string; seq: number; occurredAt: string; payload: EventPayloadDTO }
 export interface EventsPageDTO { events: JournalEventDTO[]; throughSeq: number; hasMore: boolean }
 export interface BootstrapResultDTO { user: { id: string }; team: { id: string; name: string }; project: ProjectDTO }
@@ -86,7 +114,7 @@ export interface CreateProjectDTO { teamId: string; name: string; shareScope: 'o
 export type CreateWorkspaceDTO =
   | { workerId: string; name: string; source: 'empty' }
   | { workerId: string; name: string; source: 'git'; repository: { name: string; gitUrl: string; revision: string } }
-export interface CreateSessionDTO { workspaceId: string; title: string; agentKey: string; modelId: string; shareScope: 'owner-only' }
+export interface CreateSessionDTO { requestId: string; workspaceId: string; title: string; agentKey: string; modelId: string; shareScope: 'owner-only' }
 export interface SendMessageDTO { commandId: string; messageId: string; content: string }
 export interface SendResultDTO { commandId: string; messageId: string; status: 'pending' | 'accepted' | 'queued' | 'rejected' | 'completed' | 'failed' }
 export interface TailnetInfoDTO { available: boolean; state: string; dnsName: string | null; selfIps: string[]; lanIps: string[]; error?: string }

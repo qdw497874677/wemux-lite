@@ -35,11 +35,14 @@ export class PiAgent implements Extract<AgentAdapter, { mode: 'execution' }> {
       if (!Array.isArray(models)) throw new Error('Pi RPC returned no model inventory')
       return { agentKey: this.agentKey, displayName: 'Pi', version, mode: this.mode, executablePath,
         diagnostics: models.length ? [] : ['Pi CLI has no authenticated model available.'],
-        availability: models.length ? { status: 'available' } : { status: 'unavailable', reason: 'No authenticated Pi model is available' },
+        availability: models.length ? { status: 'available' } : { status: 'authentication-required', reason: 'No authenticated Pi model is available' },
+        authorization: models.length
+          ? { state: 'authorized', accountLabel: `${models.length} configured model${models.length === 1 ? '' : 's'}` }
+          : { state: 'unauthorized', instructions: 'Authenticate a provider in the local Pi CLI, then restart or refresh the Worker.' },
         models: models.map(model => ({ modelId: modelId(model.provider, model.id), displayName: `${model.name ?? model.id} (${model.provider})`, source: 'configured' })) }
     } catch (cause) {
       const reason = errorText(cause)
-      return { agentKey: this.agentKey, displayName: 'Pi', version, mode: this.mode, executablePath, diagnostics: [reason], availability: { status: 'unavailable', reason }, models: [] }
+      return { agentKey: this.agentKey, displayName: 'Pi', version, mode: this.mode, executablePath, diagnostics: [reason], availability: { status: 'unavailable', reason }, authorization: { state: 'unknown', instructions: 'Install or repair the local Pi CLI before checking credentials.' }, models: [] }
     } finally { await rpc?.close() }
   }
 

@@ -53,6 +53,13 @@ function capability(value: unknown): AgentCapability {
   text(c.agentKey, 'agentKey'); text(c.displayName, 'displayName'); nullableText(c.version); oneOf(c.mode, ['detect-only', 'execution'])
   const a = object(c.availability); oneOf(a.status, ['available', 'unavailable', 'authentication-required'])
   if (a.status !== 'available') text(a.reason, 'reason')
+  if (c.authorization !== undefined) {
+    const authorization = object(c.authorization)
+    oneOf(authorization.state, ['unknown', 'authorized', 'unauthorized', 'expired'])
+    if (authorization.accountLabel !== undefined) text(authorization.accountLabel, 'accountLabel')
+    if (authorization.expiresAt !== undefined) timestamp(authorization.expiresAt)
+    if (authorization.instructions !== undefined) text(authorization.instructions, 'instructions')
+  }
   for (const model of array(c.models)) { const m = object(model); text(m.modelId, 'modelId'); text(m.displayName, 'displayName'); oneOf(m.source, ['detected', 'configured']) }
   return value as AgentCapability
 }

@@ -24,7 +24,9 @@ test('transaction rollback, expired enrollment, revocation and worker ownership'
   assert.equal((await store.resources.listWorkers()).length, 0)
   const first = await service.enroll({ token: (await service.createEnrollment({})).token, name: 'First' })
   const second = await service.enroll({ token: (await service.createEnrollment({})).token, name: 'Second' })
-  const { workspace, commandId } = await service.createWorkspace({ projectId: bootstrap.project!.id, workerId: first.workerId, name: 'Repo', repository: { gitUrl: 'https://example.com/repo.git' } })
+  const created = await service.createWorkspace({ projectId: bootstrap.project!.id, workerId: first.workerId, name: 'Repo', repository: { gitUrl: 'https://example.com/repo.git' } })
+  assert.ok(created.commandId)
+  const { workspace, commandId } = created
   await assert.rejects(workers.receive(second.workerId, { ...envelope(), type: 'ack', receipt: { commandId, status: 'accepted' } }), /another worker/)
   assert.equal((await store.commands.get(commandId))!.status, 'pending')
   await assert.rejects(workers.receive(second.workerId, { ...envelope(), type: 'event', scope: 'workspace', report: { workspaceId: workspace.id, status: 'ready', reason: null, location: null, occurredAt: now() } }), /ownership/)
@@ -33,7 +35,7 @@ test('transaction rollback, expired enrollment, revocation and worker ownership'
     await tx.resources.saveWorkspace({ ...workspace, status: 'ready' })
     await tx.resources.saveWorker({ ...first.worker, capabilities: [{ agentKey: 'pi' as import('@wemux/domain').AgentKey, displayName: 'Pi', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'custom' as import('@wemux/domain').ModelId, displayName: 'Custom', source: 'detected' }] }] })
   })
-  const { session } = await service.createSession({ workspaceId: workspace.id, title: 'Chat', agentKey: 'pi', modelId: 'custom' })
+  const { session } = await service.createSession({ requestId: 'storage-create', workspaceId: workspace.id, title: 'Chat', agentKey: 'pi', modelId: 'custom' })
   const event = { sessionId: session.id, seq: 1 as EventSeq, occurredAt: now(), payload: { kind: 'session.runtime.changed' as const, state: 'running' as const, reason: null } }
   await assert.rejects(workers.receive(second.workerId, { ...envelope(), type: 'event', scope: 'session', event }), /another worker/)
   assert.deepEqual((await service.events(session.id, 1, 100)).events, [])

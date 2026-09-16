@@ -37,7 +37,8 @@ export async function runCapabilities(tx: ServerStoreTx, task: TaskDetail, run: 
 }
 export async function sendCapability(tx: ServerStoreTx, session: import('@wemux/server-domain').Session): Promise<ActionCapability> {
   const workspace = typeof session.workspaceId === 'string' ? await tx.resources.getWorkspace(session.workspaceId) : null
-  const worker = workspace ? await tx.resources.getWorker(workspace.workerId) : null
+  const workerId = session.binding?.agent?.workerId
+  const worker = typeof workerId === 'string' ? await tx.resources.getWorker(workerId) : null
   const project = await tx.resources.getProject(session.projectId)
   return evaluateCapability('send', { session, workspace, worker, teamId: project?.teamId })
 }

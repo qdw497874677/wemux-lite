@@ -1,4 +1,5 @@
 import type { CommandId, MessageId, SessionId, ToolCallId, TurnId } from './ids.js'
+import type { ApprovalId, RuntimeUsage } from './runtime-protocol.js'
 import type { SessionRuntimeState, TurnFailure } from './session.js'
 import type { EventSeq, Timestamp } from './values.js'
 
@@ -43,6 +44,28 @@ export type SessionEventPayload =
       readonly turnId: TurnId
       readonly toolCallId: ToolCallId
       readonly exitCode: number | null
+    }
+  | {
+      readonly kind: 'approval.requested'
+      readonly turnId: TurnId
+      readonly approvalId: ApprovalId
+      readonly action: unknown
+      readonly reason?: string
+    }
+  | {
+      readonly kind: 'usage.updated'
+      readonly turnId: TurnId
+      readonly usage: RuntimeUsage
+    }
+  | {
+      readonly kind: 'compaction.started'
+      readonly turnId: TurnId
+      readonly reason?: string
+    }
+  | {
+      readonly kind: 'compaction.finished'
+      readonly turnId: TurnId
+      readonly summary?: string
     }
   | {
       readonly kind: 'turn.finished'

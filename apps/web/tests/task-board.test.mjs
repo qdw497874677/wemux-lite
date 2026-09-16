@@ -10,10 +10,10 @@ test('task deep route preserves URL query and defers task authorization to detai
  assert.deepEqual(resolveSelection('/projects/p/tasks/t', '?view=list&filter=cancelled&tab=activity&q=title', [{ id: 'p' }], [], []), {})
  assert.ok(resolveSelection('/projects/missing/tasks/t', '', [{ id: 'p' }], [], []).error)
 })
-test('board uses frozen six-column seven-state contract and explicit Ready alias', () => {
+test('board uses frozen six-column seven-state contract and Chinese stage labels', () => {
  assert.deepEqual(boardStatuses, ['backlog', 'todo', 'in_progress', 'in_review', 'done', 'blocked'])
  assert.equal(taskStatuses.length, 7)
- assert.match(board, /todo: 'Ready'/)
+ for (const label of ['待规划', '待开始', '进行中', '待审查', '已完成', '已阻塞', '已取消']) assert.ok(board.includes(`'${label}'`))
  assert.match(board, /boardStatuses.map/)
  assert.match(board, /filter === 'cancelled'/)
 })
