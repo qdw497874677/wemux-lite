@@ -4,6 +4,13 @@ import type { AgentRuntimeSession, RuntimeCommand, RuntimeOperationInput, Runtim
 import type { AgentSignal, AgentTurnHandle } from '../application/ports/agent-adapter.js'
 import { parseJsonLines } from './json-lines.js'
 import { mapRuntimeRecord } from './runtime-event-mapper.js'
+import { splitModelId } from '../domain/model-id.js'
+
+/** Pi CLI expects `provider/model`, while the platform modelId convention is `provider::model`. */
+function piModelArgument(modelId: string): string {
+  const parsed = splitModelId(modelId as import('@wemux/domain').ModelId)
+  return parsed ? `${parsed.provider}/${parsed.id}` : modelId
+}
 
 /** Bounded stderr tail kept for diagnostics when the child dies unexpectedly. */
 const MAX_STDERR_BYTES = 8192
@@ -82,7 +89,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
     this.exitInfo = null
 
     const args = ['--mode', 'rpc']
-    if (this.input.modelId) args.push('--model', this.input.modelId)
+    if (this.input.modelId) args.push('--model', piModelArgument(this.input.modelId))
     if (this.input.resume) args.push('--session', this.input.resume)
     const child = spawn(this.executable, args, { cwd: this.input.cwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] })
     if (!child.stdin || !child.stdout || !child.stderr) throw new Error('Pi runtime streams unavailable')
