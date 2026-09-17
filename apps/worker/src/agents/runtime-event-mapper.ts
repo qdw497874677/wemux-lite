@@ -39,7 +39,7 @@ export function mapRuntimeRecord(provider: 'pi' | 'claude', operationId: Runtime
   }
   if (type === 'usage' || type === 'usage_update' || (type === 'result' && record.usage !== undefined)) {
     const raw = Object.keys(object(record.usage)).length > 0 ? object(record.usage) : record
-    const usage = { inputTokens: number(raw.inputTokens ?? raw.input_tokens), outputTokens: number(raw.outputTokens ?? raw.output_tokens), cacheReadTokens: number(raw.cacheReadTokens ?? raw.cache_read_input_tokens), cacheWriteTokens: number(raw.cacheWriteTokens ?? raw.cache_creation_input_tokens), totalTokens: number(raw.totalTokens ?? raw.total_tokens), costUsd: number(record.costUsd ?? record.cost_usd) }
+    const usage = { inputTokens: number(raw.inputTokens ?? raw.input_tokens ?? raw.input), outputTokens: number(raw.outputTokens ?? raw.output_tokens ?? raw.output), cacheReadTokens: number(raw.cacheReadTokens ?? raw.cache_read_input_tokens ?? raw.cacheRead), cacheWriteTokens: number(raw.cacheWriteTokens ?? raw.cache_creation_input_tokens ?? raw.cacheWrite), totalTokens: number(raw.totalTokens ?? raw.total_tokens), costUsd: number(record.costUsd ?? record.cost_usd) }
     if (usage.totalTokens === undefined && usage.inputTokens !== undefined && usage.outputTokens !== undefined) usage.totalTokens = usage.inputTokens + usage.outputTokens
     const normalized = {
       scope: 'operation' as const,
@@ -60,7 +60,7 @@ export function mapRuntimeRecord(provider: 'pi' | 'claude', operationId: Runtime
   }
   if (type === 'auto_compaction_start' || type === 'compaction_started') return [{ kind: 'event', event: { kind: 'compaction.started', reason: text(record.reason) ?? undefined } as AgentTurnEvent }]
   if (type === 'auto_compaction_end' || type === 'compaction_finished') return [{ kind: 'event', event: { kind: 'compaction.finished', summary: text(record.summary) ?? undefined } as AgentTurnEvent }]
-  if (type === 'done' || type === 'result' || type === 'completed') return [{ kind: 'finished', outcome: record.is_error === true || record.status === 'failed' ? { status: 'failed', failure: { code: 'agent-error', message: text(record.error) ?? text(record.message) ?? `${provider} runtime failed` } } : { status: 'completed' } }]
+  if (type === 'done' || type === 'result' || type === 'completed' || type === 'turn_end' || type === 'agent_end' || type === 'agent_settled') return [{ kind: 'finished', outcome: record.is_error === true || record.status === 'failed' || record.success === false ? { status: 'failed', failure: { code: 'agent-error', message: text(record.error) ?? text(record.message) ?? `${provider} runtime failed` } } : { status: 'completed' } }]
   if (type === 'error') return [{ kind: 'finished', outcome: { status: 'failed', failure: { code: 'agent-error', message: text(record.message) ?? `${provider} runtime failed` } } }]
   return []
 }
