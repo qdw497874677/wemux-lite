@@ -6,14 +6,16 @@ const shellQuote = (value: string) => `'${value.replaceAll("'", `'"'"'`)}'`
 const DIRECT_HOST = /^(localhost(\.domain)?$|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/
 
 function curlLine(url: string, indent: string, terminator: string): string {
-  const host = new URL(url).hostname
-  const noproxy = DIRECT_HOST.test(host) ? ` --noproxy ${shellQuote(host)}` : ''
+  let host = ''
+  try { host = new URL(url).hostname } catch { /* 非法候选（如未加方括号的 IPv6）：渲染期绝不抛出 */ }
+  const noproxy = host && DIRECT_HOST.test(host) ? ` --noproxy ${shellQuote(host)}` : ''
   const scriptUrl = `${url.replace(/\/+$/, '')}/downloads/install-worker.sh`
   return `${indent}curl -fsSL --connect-timeout 5 ${shellQuote(scriptUrl)}${noproxy} ${terminator}`
 }
 
 function ncLine(url: string, indent: string, terminator: string): string {
-  const { hostname, port } = new URL(url)
+  let hostname = '', port = ''
+  try { ({ hostname, port } = new URL(url)) } catch { /* 同上：宁出废行不出崩溃 */ }
   const hostPort = port || '80'
   return `${indent}node -e ${shellQuote(ncDownloadScript)} ${shellQuote(hostname)} ${shellQuote(hostPort)} ${shellQuote('/downloads/install-worker.sh')} "$d/install.sh" ${terminator}`
 }
@@ -33,7 +35,10 @@ function ncLine(url: string, indent: string, terminator: string): string {
  * All deployment-specific values travel as environment variables.
  */
 export function buildWorkerInstallCommand(input: { token: string; serverUrl: string; workerName: string; serverUrls?: string[]; prefer?: 'tailnet' | 'direct' | 'any'; transport?: 'direct' | 'nc' }): string {
-  const all = input.serverUrls ?? [input.serverUrl]
+  // 候选必须能被 URL 解析；渲染期抛异常会卸载整棵 React 树（表现为「链接无效」），
+  // 宁可剔除坏候选（如未加方括号的 IPv6）也不能 throw。
+  const parseable = (url: string) => { try { new URL(url); return true } catch { return false } }
+  const all = (input.serverUrls ?? [input.serverUrl]).filter(parseable)
   const httpOnly = all.filter(url => url.startsWith('http://'))
   // nc 隧道只支持明文 http：无 http 候选时回退直连，避免生成必败命令
   const transport = input.transport === 'nc' && httpOnly.length > 0 ? 'nc' : 'direct'

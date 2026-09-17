@@ -43,7 +43,7 @@ export function WorkerEnrollmentDialog({ api, workers, onRefreshWorkers, onClose
     const primary = serverUrl.trim()
     let port = ''
     try { port = new URL(primary).port || window.location.port } catch { /* 输入未完成时忽略 */ }
-    const suffix = (host: string) => `http://${host}${port ? `:${port}` : ''}`
+    const suffix = (host: string) => `http://${host.includes(':') ? `[${host}]` : host}${port ? `:${port}` : ''}`
     const extras = [...(tailnet?.selfIps ?? []), ...(tailnet?.lanIps ?? [])].filter(Boolean).map(suffix)
     if (tailnetHost) extras.push(suffix(tailnetHost))
     const seen = new Set<string>()
