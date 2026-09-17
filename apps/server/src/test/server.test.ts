@@ -296,10 +296,10 @@ test('HTTP + SQLite + Worker WS + SSE durable end-to-end loop', { timeout: 20000
   const session = created.data.session
   await peer.wait(m => m.type === 'command' && m.commandId === created.data.commandId)
   peer.send({ type: 'ack', receipt: { commandId: created.data.commandId, status: 'accepted' } })
-  // Regression: omitted modelId must resolve to the Agent default on the wire (worker protocol requires text)
+  // Regression: omitted modelId must resolve to the Agent default on the Session binding
   const defaultModelCreate = await request('/sessions', 'POST', { requestId: 'default-model-create', workspaceId: workspace.id, title: 'Default model', agentKey: 'pi' })
   assert.equal(defaultModelCreate.status, 201)
-  assert.equal(defaultModelCreate.data.session.binding.modelId, null)
+  assert.equal(defaultModelCreate.data.session.binding.modelId, 'test-model')
   const defaultModelCommand = await peer.wait(m => m.type === 'command' && m.commandId === defaultModelCreate.data.commandId)
   if (defaultModelCommand.type === 'command' && defaultModelCommand.command.kind === 'session.create') assert.equal(defaultModelCommand.command.session.binding.modelId, 'test-model')
   else assert.fail('expected session.create command')

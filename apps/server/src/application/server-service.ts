@@ -277,14 +277,20 @@ export class ServerService {
     if (!selected) throw new AppError(409, requestedWorkerId ? 'Workspace is not ready on selected Worker' : readyPlacements.length ? 'workerId is required when Workspace is ready on multiple Workers' : 'Workspace has no ready placement')
     const worker = requireValue(await tx.resources.getWorker(selected.workerId))
     const agentKey = text(b.agentKey, 'agentKey') as AgentKey
-    // modelId is optional: a Session binds the Agent runtime, not a specific model.
-    // When omitted the Agent CLI uses its own default; users may switch models mid-conversation.
-    const modelId = b.modelId === undefined || b.modelId === null ? null : text(b.modelId, 'modelId') as ModelId
+    // modelId is optional at the HTTP boundary: when omitted we resolve the Agent's
+    // first advertised model, because the send capability and the worker protocol
+    // both require a concrete modelId on the Session binding.
+    const requestedModelId = b.modelId === undefined || b.modelId === null ? null : text(b.modelId, 'modelId') as ModelId
     const title = text(b.title, 'title', 200)
     if (!source && Object.keys(b).some(key => !['requestId', 'workspaceId', 'workerId', 'title', 'agentKey', 'modelId', 'shareScope'].includes(key))) throw new AppError(400, 'Invalid Session creation request')
     if (!source && b.shareScope !== undefined && b.shareScope !== 'owner-only') throw new AppError(400, 'Invalid Session shareScope')
     const requestId = source || b.requestId === undefined ? undefined : text(b.requestId, 'requestId', 200)
     if (!source && !requestId) throw new AppError(400, 'Invalid requestId')
+    const agent = worker.capabilities?.find(c => c?.agentKey === agentKey)
+    if (worker.connectionState === 'revoked' || !agent || agent.mode !== 'execution' || agent.availability?.status !== 'available') throw new AppError(409, 'Agent unavailable')
+    if (requestedModelId !== null && !agent.models?.some(model => model?.modelId === requestedModelId)) throw new AppError(409, 'Model unavailable')
+    const modelId = requestedModelId ?? agent.models?.map(model => model?.modelId).find(id => !!id) ?? null
+    if (modelId === null) throw new AppError(409, 'Agent exposes no models')
     const fingerprint = createHash('sha256').update(canonicalCommand({ workspaceId: workspace.id, workerId: worker.id, agentKey, modelId, title, shareScope: 'owner-only' })).digest('hex')
     if (requestId) {
       const previous = await tx.resources.getSessionByCreateRequest(userId, workspace.projectId, requestId)
@@ -293,17 +299,10 @@ export class ServerService {
         return { session: previous, commandId: previous.creation.commandId as CommandId, created: false }
       }
     }
-    const agent = worker.capabilities?.find(c => c?.agentKey === agentKey)
-    if (worker.connectionState === 'revoked' || !agent || agent.mode !== 'execution' || agent.availability?.status !== 'available') throw new AppError(409, 'Agent unavailable')
-    if (modelId !== null && !agent.models?.some(model => model?.modelId === modelId)) throw new AppError(409, 'Model unavailable')
-    // The worker transport protocol requires a non-empty modelId on session.create;
-    // when the Session omits it, resolve the Agent's first advertised model.
-    const commandModelId = modelId ?? agent.models?.map(model => model?.modelId).find(id => !!id) ?? null
-    if (commandModelId === null) throw new AppError(409, 'Agent exposes no models')
     const sessionId = newId<'SessionId'>(), commandId = newId<'CommandId'>()
     const session: Session = { id: sessionId, projectId: workspace.projectId, ownerId: userId, workspaceId: workspace.id, title, shareScope: 'owner-only', binding: { workspaceId: workspace.id, agent: { workerId: worker.id, agentKey }, modelId }, runtimeState: 'idle', archivedAt: null, deletedAt: null, ...(requestId ? { creation: { requestId, fingerprint, commandId } } : {}), ...source }
     await tx.resources.saveSession(session)
-    await this.command(tx, worker.id, { kind: 'session.create', session: { sessionId: session.id, binding: { ...session.binding, modelId: commandModelId } } }, commandId)
+    await this.command(tx, worker.id, { kind: 'session.create', session: { sessionId: session.id, binding: session.binding } }, commandId)
     await this.audit(tx, 'session.create', { kind: 'session', id: session.id })
     return { session, commandId, created: true }
   }
