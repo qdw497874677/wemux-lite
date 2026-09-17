@@ -137,12 +137,24 @@ class PiRuntimeSession implements AgentRuntimeSession {
 
   private async *signals(operationId: RuntimeOperationInput['operationId'], child: ReturnType<typeof spawn>): AsyncIterable<AgentSignal> {
     if (!child.stdout) throw new Error('Pi runtime output unavailable')
+    let emittedText = ''
+    const dedupeText = (signal: AgentSignal): AgentSignal | null => {
+      if (signal.kind !== 'event' || signal.event.kind !== 'assistant.text.delta') return signal
+      const text = signal.event.text
+      // message_end carries the full message; earlier message_update deltas may
+      // already have streamed it (or a cumulative prefix). Emit only the unseen suffix.
+      const suffix = text.startsWith(emittedText) ? text.slice(emittedText.length) : null
+      emittedText += suffix ?? ''
+      return suffix ? { ...signal, event: { ...signal.event, text: suffix } } : null
+    }
     try {
       for await (const record of parseJsonLines(child.stdout)) {
         if (typeof record.sessionId === 'string') yield { kind: 'native-session', nativeSession: record.sessionId as never }
         const mapped = mapRuntimeRecord('pi', operationId, record)
         for (const signal of mapped) {
-          yield signal
+          const deduped = dedupeText(signal)
+          if (!deduped) continue
+          yield deduped
           if (signal.kind === 'finished') return
         }
       }

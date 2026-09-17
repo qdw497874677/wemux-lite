@@ -17,7 +17,7 @@ const assistantText = (record: Record<string, unknown>) => {
 
 export function mapRuntimeRecord(provider: 'pi' | 'claude', operationId: RuntimeOperationInput['operationId'], record: Record<string, unknown>): AgentSignal[] {
   const type = text(record.type)
-  if (type === 'assistant' || type === 'assistant_message' || type === 'text_delta' || (type === 'message_end' && object(record.message).role === 'assistant')) {
+  if (type === 'assistant' || type === 'assistant_message' || type === 'text_delta' || type === 'message_update' || (type === 'message_end' && object(record.message).role === 'assistant')) {
     const value = assistantText(record)
     return value ? [{ kind: 'event', event: { kind: 'assistant.text.delta', text: value } }] : []
   }
@@ -37,7 +37,7 @@ export function mapRuntimeRecord(provider: 'pi' | 'claude', operationId: Runtime
     const event = { kind: 'approval.requested', approvalId: (text(record.approvalId) ?? text(record.id) ?? `${provider}-${operationId}-approval`) as ApprovalId, action: record.action ?? record.input ?? null, reason: text(record.reason) ?? undefined } as AgentTurnEvent
     return [{ kind: 'event', event }]
   }
-  if (type === 'usage' || type === 'usage_update' || (type === 'result' && record.usage !== undefined)) {
+  if (type === 'usage' || type === 'usage_update' || type === 'message_update' || (type === 'result' && record.usage !== undefined)) {
     const raw = Object.keys(object(record.usage)).length > 0 ? object(record.usage) : record
     const usage = { inputTokens: number(raw.inputTokens ?? raw.input_tokens ?? raw.input), outputTokens: number(raw.outputTokens ?? raw.output_tokens ?? raw.output), cacheReadTokens: number(raw.cacheReadTokens ?? raw.cache_read_input_tokens ?? raw.cacheRead), cacheWriteTokens: number(raw.cacheWriteTokens ?? raw.cache_creation_input_tokens ?? raw.cacheWrite), totalTokens: number(raw.totalTokens ?? raw.total_tokens), costUsd: number(record.costUsd ?? record.cost_usd) }
     if (usage.totalTokens === undefined && usage.inputTokens !== undefined && usage.outputTokens !== undefined) usage.totalTokens = usage.inputTokens + usage.outputTokens
@@ -61,6 +61,6 @@ export function mapRuntimeRecord(provider: 'pi' | 'claude', operationId: Runtime
   if (type === 'auto_compaction_start' || type === 'compaction_started') return [{ kind: 'event', event: { kind: 'compaction.started', reason: text(record.reason) ?? undefined } as AgentTurnEvent }]
   if (type === 'auto_compaction_end' || type === 'compaction_finished') return [{ kind: 'event', event: { kind: 'compaction.finished', summary: text(record.summary) ?? undefined } as AgentTurnEvent }]
   if (type === 'done' || type === 'result' || type === 'completed' || type === 'turn_end' || type === 'agent_end' || type === 'agent_settled') return [{ kind: 'finished', outcome: record.is_error === true || record.status === 'failed' || record.success === false ? { status: 'failed', failure: { code: 'agent-error', message: text(record.error) ?? text(record.message) ?? `${provider} runtime failed` } } : { status: 'completed' } }]
-  if (type === 'error') return [{ kind: 'finished', outcome: { status: 'failed', failure: { code: 'agent-error', message: text(record.message) ?? `${provider} runtime failed` } } }]
+  if (type === 'error' || (type === 'response' && record.success === false)) return [{ kind: 'finished', outcome: { status: 'failed', failure: { code: 'agent-error', message: text(record.error) ?? text(record.message) ?? `${provider} runtime failed` } } }]
   return []
 }

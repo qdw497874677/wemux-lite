@@ -38,6 +38,22 @@ test('pi runtime session maps native json events', async () => {
   assert.deepEqual(signals.at(-1), { kind: 'finished', outcome: { status: 'completed' } })
 })
 
+test('pi runtime session maps new pi RPC protocol without duplicating assistant text', async () => {
+  // Regression: pi ≥0.85 RPC emits streaming `message_update` records plus a final
+  // `message_end` carrying the full message, then `turn_end`/`agent_end`/`agent_settled`.
+  // Full-text replays must be deduped and turn_end must finish the turn (used to hang).
+  const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"session\",\"sessionId\":\"pi-new\"}' '{\"type\":\"message_start\"}' '{\"type\":\"message_update\",\"usage\":{\"input\":9,\"output\":1}}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"收到\"}]}}' '{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\"}}' '{\"type\":\"agent_end\"}' '{\"type\":\"agent_settled\"}'")
+  const adapter = new PiRuntimeSessionAdapter(cli)
+  const session = await adapter.openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  const handle = await session.execute({ operationId: 'turn-new' as TurnId, message: { content: '你好' } })
+  const signals = await collect(handle.signals)
+  const texts = signals.flatMap(s => s.kind === 'event' && s.event.kind === 'assistant.text.delta' ? [s.event.text] : [])
+  assert.deepEqual(texts, ['收到'])
+  const last = signals.at(-1)
+  assert.equal(last?.kind, 'finished')
+  if (last?.kind === 'finished') assert.deepEqual(last.outcome, { status: 'completed' })
+})
+
 test('pi runtime session reports failure when child exits without completing stdout', async () => {
   // Regression: Worker used to crash with an unhandled 'error' event (EPIPE) when the
   // Pi child process died mid-session, leaving the UI stuck on "正在处理" with 0/1 nodes online.
