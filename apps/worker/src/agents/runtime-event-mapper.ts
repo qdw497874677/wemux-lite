@@ -17,7 +17,7 @@ const assistantText = (record: Record<string, unknown>) => {
 
 export function mapRuntimeRecord(provider: 'pi' | 'claude', operationId: RuntimeOperationInput['operationId'], record: Record<string, unknown>): AgentSignal[] {
   const type = text(record.type)
-  if (type === 'assistant' || type === 'assistant_message' || type === 'text_delta' || type === 'message_update' || (type === 'message_end' && object(record.message).role === 'assistant')) {
+  if (type === 'assistant' || type === 'assistant_message' || type === 'text_delta' || (type === 'message_end' && object(record.message).role === 'assistant')) {
     const value = assistantText(record)
     return value ? [{ kind: 'event', event: { kind: 'assistant.text.delta', text: value } }] : []
   }
