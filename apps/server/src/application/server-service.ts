@@ -296,10 +296,14 @@ export class ServerService {
     const agent = worker.capabilities?.find(c => c?.agentKey === agentKey)
     if (worker.connectionState === 'revoked' || !agent || agent.mode !== 'execution' || agent.availability?.status !== 'available') throw new AppError(409, 'Agent unavailable')
     if (modelId !== null && !agent.models?.some(model => model?.modelId === modelId)) throw new AppError(409, 'Model unavailable')
+    // The worker transport protocol requires a non-empty modelId on session.create;
+    // when the Session omits it, resolve the Agent's first advertised model.
+    const commandModelId = modelId ?? agent.models?.map(model => model?.modelId).find(id => !!id) ?? null
+    if (commandModelId === null) throw new AppError(409, 'Agent exposes no models')
     const sessionId = newId<'SessionId'>(), commandId = newId<'CommandId'>()
     const session: Session = { id: sessionId, projectId: workspace.projectId, ownerId: userId, workspaceId: workspace.id, title, shareScope: 'owner-only', binding: { workspaceId: workspace.id, agent: { workerId: worker.id, agentKey }, modelId }, runtimeState: 'idle', archivedAt: null, deletedAt: null, ...(requestId ? { creation: { requestId, fingerprint, commandId } } : {}), ...source }
     await tx.resources.saveSession(session)
-    await this.command(tx, worker.id, { kind: 'session.create', session: { sessionId: session.id, binding: session.binding } }, commandId)
+    await this.command(tx, worker.id, { kind: 'session.create', session: { sessionId: session.id, binding: { ...session.binding, modelId: commandModelId } } }, commandId)
     await this.audit(tx, 'session.create', { kind: 'session', id: session.id })
     return { session, commandId, created: true }
   }

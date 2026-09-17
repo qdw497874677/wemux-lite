@@ -296,6 +296,14 @@ test('HTTP + SQLite + Worker WS + SSE durable end-to-end loop', { timeout: 20000
   const session = created.data.session
   await peer.wait(m => m.type === 'command' && m.commandId === created.data.commandId)
   peer.send({ type: 'ack', receipt: { commandId: created.data.commandId, status: 'accepted' } })
+  // Regression: omitted modelId must resolve to the Agent default on the wire (worker protocol requires text)
+  const defaultModelCreate = await request('/sessions', 'POST', { requestId: 'default-model-create', workspaceId: workspace.id, title: 'Default model', agentKey: 'pi' })
+  assert.equal(defaultModelCreate.status, 201)
+  assert.equal(defaultModelCreate.data.session.binding.modelId, null)
+  const defaultModelCommand = await peer.wait(m => m.type === 'command' && m.commandId === defaultModelCreate.data.commandId)
+  if (defaultModelCommand.type === 'command' && defaultModelCommand.command.kind === 'session.create') assert.equal(defaultModelCommand.command.session.binding.modelId, 'test-model')
+  else assert.fail('expected session.create command')
+  peer.send({ type: 'ack', receipt: { commandId: defaultModelCreate.data.commandId, status: 'accepted' } })
   const assets = await request(`/projects/${project.id}/capability-assets`, 'PUT', { items: [
     { kind: 'instruction', name: 'team-rules', content: 'Always report test results.' },
     { kind: 'prompt', name: 'review', content: 'Review this change.' },
@@ -367,7 +375,7 @@ test('HTTP + SQLite + Worker WS + SSE durable end-to-end loop', { timeout: 20000
   assert.equal((await request(`/sessions/${session.id}/events`)).status, 200)
   assert.equal((await request(`/workspaces/${workspace.id}`, 'DELETE')).status, 501)
   assert.equal((await request(`/projects/${project.id}`, 'DELETE')).status, 409)
-  assert.equal((await request('/sessions')).data.items.length, 1)
+  assert.equal((await request('/sessions')).data.items.length, 2)
   const db = new DatabaseSync(databasePath)
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()!.count, 14)
   const records = db.prepare('SELECT data FROM records').all().map(r => String(r.data)).join('\n')
