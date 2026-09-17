@@ -45,8 +45,7 @@ test('local workbench authorizes a canonical directory and runs a durable sessio
     const receipt = await workbench.enqueue(session.sessionId, '你好 local', identity)
     assert.deepEqual(await workbench.enqueue(session.sessionId, '你好 local', identity), receipt)
     await assert.rejects(workbench.enqueue(session.sessionId, 'changed', identity), /different payload/)
-    assert.deepEqual(await workbench.supportedCommands(session.sessionId), [])
-    await assert.rejects(workbench.command(session.sessionId, 'compact'), /不支持/)
+    assert.deepEqual(await workbench.supportedCommands(session.sessionId), ['compact'])
     await assert.rejects(workbench.resolveApproval(session.sessionId, 'missing', 'approve'), /待批准请求不存在/)
     assert.equal(receipt.status, 'accepted')
     await waitFor(async () => (await workbench.journal(session.sessionId, 1, 200) as { events: readonly { payload: { kind: string } }[] }).events.some(event => event.payload.kind === 'turn.finished'))
@@ -103,7 +102,7 @@ test('dual-host runtime rejects cross-scope commands and never publishes local s
     const localAgainstCluster = await runtime.executeLocal('local-cross-scope' as CommandId, { kind: 'session.enqueue', sessionId: clusterSessionId, message: { messageId: 'local-cross-message' as import('@wemux/domain').MessageId, content: 'blocked' } })
     assert.equal(localAgainstCluster.status, 'rejected')
 
-    await runtime.receive({ protocolVersion: 1, messageId: 'server-message' as import('@wemux/domain').MessageId, sentAt: new Date().toISOString() as import('@wemux/domain').Timestamp, type: 'command', commandId: 'cluster-cross-scope' as CommandId, command: { kind: 'session.enqueue', sessionId: localSession.sessionId, message: { messageId: 'cluster-cross-message' as import('@wemux/domain').MessageId, content: 'blocked' } } })
+    await runtime.receive({ messageId: 'server-message' as import('@wemux/domain').MessageId, sentAt: new Date().toISOString() as import('@wemux/domain').Timestamp, type: 'command', commandId: 'cluster-cross-scope' as CommandId, command: { kind: 'session.enqueue', sessionId: localSession.sessionId, message: { messageId: 'cluster-cross-message' as import('@wemux/domain').MessageId, content: 'blocked' } } })
     await runtime.connected()
     const serialized = JSON.stringify(sent)
     assert.equal(serialized.includes(localSession.sessionId), false)

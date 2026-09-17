@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { once } from 'node:events'
 import { WebSocket } from 'ws'
 import { createWemuxServer } from '../server.js'
+import { TransportV2Peer } from './transport-v2-peer.js'
 
 test('HTTP retry requestIds matching Object prototype names create and reuse string commandIds', async () => {
  const token = 'prototype-http-test', app = createWemuxServer({ databasePath: ':memory:', bootstrapToken: token }), base = await app.listen(0)
@@ -24,10 +25,10 @@ test('HTTP retry requestIds matching Object prototype names create and reuse str
    assert.equal((await call(path, 'POST', { requestId })).data.commandId, created.commandId)
    assert.equal((await call(`/commands/${created.commandId}`, 'DELETE')).status, 409)
    const socket = new WebSocket(`${base.replace('http', 'ws')}/worker/ws`, { headers: { Authorization: `Bearer ${worker.credential}` } })
+   const peer = new TransportV2Peer(socket, worker.workerId)
    try {
-    await once(socket, 'open')
-    socket.send(JSON.stringify({ protocolVersion: 1, messageId: `hello-${requestId}`, type: 'hello', side: 'worker', workerId: worker.workerId, name: 'HTTP worker', workerVersion: 'test', platform: 'linux', architecture: 'x64' }))
-    socket.send(JSON.stringify({ protocolVersion: 1, messageId: `failed-${requestId}`, type: 'event', scope: 'workspace', report: { workspaceId: created.workspace.id, commandId: created.commandId, status: 'failed', reason: 'retry test', location: null, occurredAt: new Date(Date.now() + 1000).toISOString() } }))
+    await peer.connect({ name: 'HTTP worker' })
+    peer.send({ type: 'event', scope: 'workspace', report: { workspaceId: created.workspace.id, commandId: created.commandId, status: 'failed', reason: 'retry test', location: null, occurredAt: new Date(Date.now() + 1000).toISOString() } })
     for (let i = 0; i < 100; i++) { if ((await call(`/workspaces/${created.workspace.id}`, 'GET')).data.status === 'failed') break; await new Promise(r => setTimeout(r, 10)) }
     // Use another prototype name not yet recorded on this Workspace.
     const freshId = requestId === 'toString' ? 'constructor' : requestId === 'constructor' ? '__proto__' : 'toString'
@@ -53,12 +54,12 @@ test('HTTP assignment rejects auth, scope, ownership and capability bypass with 
   const enroll = async () => { const e = await call('/enrollment-tokens', 'POST', {}); return (await call('/workers/enroll', 'POST', { token: e.data.token, name: 'HTTP worker' })).data }
   const worker = await enroll(), other = await enroll()
   ws = new WebSocket(`${base.replace('http', 'ws')}/worker/ws`, { headers: { Authorization: `Bearer ${worker.credential}` } })
-  await once(ws, 'open')
-  ws.send(JSON.stringify({ protocolVersion: 1, messageId: 'hello', type: 'hello', side: 'worker', workerId: worker.workerId, name: 'HTTP worker', workerVersion: 'test', platform: 'linux', architecture: 'x64' }))
-  ws.send(JSON.stringify({ protocolVersion: 1, messageId: 'cap', type: 'capability', detectedAt: new Date().toISOString(), workerId: worker.workerId, capabilities: [
+  const peer = new TransportV2Peer(ws, worker.workerId)
+  await peer.connect({ name: 'HTTP worker' })
+  peer.send({ type: 'capability', detectedAt: new Date().toISOString(), workerId: worker.workerId, capabilities: [
    { agentKey: 'test', displayName: 'Test', version: '1', mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'test', displayName: 'Test', source: 'configured' }] },
    { agentKey: 'detect', displayName: 'Detect', version: '1', mode: 'detect-only', availability: { status: 'available' }, models: [] },
-  ] }))
+  ] })
   for (let i = 0; i < 100; i++) { if ((await call(`/workers/${worker.workerId}`)).data.capabilities.length) break; await new Promise(r => setTimeout(r, 10)) }
   const task = (await call('/projects/default-project/tasks', 'POST', { title: 'HTTP assignment' })).data
   const path = `/projects/default-project/tasks/${task.id}`

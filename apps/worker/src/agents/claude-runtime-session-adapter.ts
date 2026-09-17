@@ -38,7 +38,16 @@ class ClaudeRuntimeSession implements AgentRuntimeSession {
     throw new Error('Claude runtime approvals are not supported by this adapter')
   }
 
-  async close(): Promise<void> { if (this.active && !this.active.child.killed) this.active.child.kill('SIGTERM') }
+  async close(): Promise<void> {
+    const child = this.active?.child
+    if (child && child.exitCode === null && child.signalCode === null) child.kill('SIGTERM')
+  }
+  kill(): void {
+    const child = this.active?.child
+    if (child && child.exitCode === null && child.signalCode === null) {
+      try { child.kill('SIGKILL') } catch { /* exited */ }
+    }
+  }
 
   private args(message: string) {
     const args = ['-p', '--output-format', 'stream-json', '--verbose']

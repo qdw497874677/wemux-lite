@@ -13,6 +13,7 @@ import { SessionStreams } from './http/sse.js'
 import { ProjectStreams } from './http/project-sse.js'
 import type { StaticSite } from './http/static.js'
 import { WorkerGateway } from './worker-ws/gateway.js'
+import { ServerTransportStore } from './worker-ws/transport-store.js'
 
 export function createWemuxServer(options: { databasePath: string; bootstrapToken: string; capabilitySecret?: string; workerPackagePath?: string; webStaticPath?: string; adminSessionTtlMs?: number }) {
   const store = new SqliteServerStore(options.databasePath)
@@ -26,7 +27,7 @@ export function createWemuxServer(options: { databasePath: string; bootstrapToke
   let gateway: WorkerGateway | undefined
   const server = createServer(httpHandler(service, auth, streams, capabilities, options.workerPackagePath ? { tarballPath: options.workerPackagePath } : undefined, { disconnectWorker: id => gateway?.disconnect(id) }, options.webStaticPath ? { root: options.webStaticPath } : undefined, options.adminSessionTtlMs, new TaskService(store, event => notifications.project(event), service), projectStreams))
   const workers = new WorkerService(store, notifications)
-  gateway = new WorkerGateway(server, auth, workers, notifications)
+  gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))
   let closed = false
   return {
     server,

@@ -230,7 +230,7 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
     })().catch(error => {
       if (response.headersSent) { response.destroy(); return }
       const status = error instanceof AppError ? error.status : error instanceof CapabilityTokenError ? 401 : error instanceof CapabilityError ? error.code === 'forbidden' ? 403 : error.code === 'not-found' ? 404 : 400 : 500
-      json(response, status, { error: error instanceof AppError && error.code ? { code: error.code, message: error.message } : error instanceof Error ? error.message : 'Internal server error' })
+      json(response, status, { error: error instanceof AppError ? { code: error.code ?? 'error', message: error.message } : error instanceof Error ? { code: 'internal_error', message: error.message } : { code: 'internal_error', message: 'Internal server error' } })
     })
   }
 }

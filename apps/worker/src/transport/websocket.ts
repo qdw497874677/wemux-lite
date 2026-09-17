@@ -1,93 +1,241 @@
 import WebSocket from 'ws'
-import type { ServerToWorker, WorkerToServer } from '@wemux/wire-protocol'
-import type { Timestamp } from '@wemux/domain'
-import { envelope } from '../domain/envelope.js'
-import { parseServerMessage } from './validation.js'
+import {
+  WEMUX_ADK_PROFILE_V1,
+  parseServerTransportFrame,
+  type ServerPayload,
+  type ServerToWorkerFrame,
+  type WorkerPayload,
+  type WorkerToServerFrame,
+} from '@wemux/wire-protocol'
+import type { ConnectionState, StateChange, WorkerTransport } from './types.js'
+import type { WorkerTransportStore } from './transport-store.js'
 
-export interface ConnectionOptions {
-  url: string
-  /** 多候选地址（含 url）：连接失败时自动轮换，恢复后自动切回优先地址。 */
-  urls?: readonly string[]
-  credential: string
-  heartbeatMs?: number
-  reconnectMs?: number
+export interface WebSocketTransportOptions {
+  readonly url: string
+  readonly authToken: string
+  readonly workerId: import('@wemux/domain').WorkerId
+  readonly workerVersion: string
+  readonly name: string
+  readonly platform: string
+  readonly architecture: string
+  readonly store: WorkerTransportStore
+  readonly onMessage: (payload: ServerPayload) => void
+  readonly onConnected: () => void
+  readonly onDisconnected?: () => void
+  readonly onStateChange?: (change: StateChange) => void
+  readonly random?: () => number
+  /** Test/embedding override; production defaults preserve bounded exponential backoff. */
+  readonly retry?: {
+    readonly baseDelayMs?: number
+    readonly maxDelayMs?: number
+    readonly jitterRatio?: number
+    readonly stableConnectionMs?: number
+  }
 }
-export class WebSocketTransport {
-  private socket?: WebSocket
-  private timer?: ReturnType<typeof setTimeout>
-  private heartbeat?: ReturnType<typeof setInterval>
+
+const defaultBaseDelayMs = 1_000
+const defaultMaxDelayMs = 30_000
+const defaultJitterRatio = 0.2
+const defaultStableConnectionMs = 30_000
+const connectTimeoutMs = 10_000
+const idleTimeoutMs = 45_000
+
+export class WebSocketTransport implements WorkerTransport {
+  private socket: WebSocket | undefined
+  private reconnectTimer: NodeJS.Timeout | undefined
+  private connectTimer: NodeJS.Timeout | undefined
+  private idleTimer: NodeJS.Timeout | undefined
+  private stableTimer: NodeJS.Timeout | undefined
+  private flushing = false
   private stopped = true
-  private attempt = 0
-  private urlIndex = 0
-  private urlNeverOpened = 0
-  private readonly urls: readonly string[]
-  constructor(private readonly options: ConnectionOptions, private readonly onMessage: (message: ServerToWorker) => Promise<void>, private readonly onOpen: () => Promise<void>, private readonly onError: (error: unknown) => void = console.error, private readonly onRotate: (url: string, reason: 'connect-failed' | 'repeated-failures') => void = () => {}) {
-    this.urls = options.urls && options.urls.length > 0 ? options.urls : [options.url]
+  private attempts = 0
+  private generation = 0
+  private lastConnectedAt = 0
+  private state: ConnectionState = 'stopped'
+
+  constructor(private readonly options: WebSocketTransportOptions) {}
+
+  start(): void {
+    if (!this.stopped) return
+    this.stopped = false
+    this.transition('connecting', 'start')
+    this.connect()
   }
-  start() { if (!this.stopped) return; this.stopped = false; this.connect() }
-  send(message: WorkerToServer) {
-    if (this.socket?.readyState !== WebSocket.OPEN) return
-    // The journal is the offline outbox; slow sockets reconnect and request replay.
-    if (this.socket.bufferedAmount > 4 * 1024 * 1024) { this.socket.terminate(); return }
-    this.socket.send(JSON.stringify(message), error => { if (error) this.onError(error) })
+
+  stop(): void {
+    this.stopped = true
+    this.generation += 1
+    this.clearTimers()
+    this.socket?.close()
+    this.socket = undefined
+    this.transition('stopped', 'stop')
   }
-  private connect() {
+
+  async send(payload: WorkerPayload): Promise<void> {
+    await this.options.store.enqueue(payload)
+    this.flush().catch(() => undefined)
+  }
+
+  private connect(): void {
     if (this.stopped) return
-    const url = this.urls[this.urlIndex] ?? this.options.url
-    const socket = new WebSocket(url, { headers: { Authorization: `Bearer ${this.options.credential}` }, maxPayload: 1024 * 1024, handshakeTimeout: 10000 })
+    const generation = ++this.generation
+    const socket = new WebSocket(this.options.url, {
+      headers: { authorization: `Bearer ${this.options.authToken}` },
+      handshakeTimeout: connectTimeoutMs,
+      perMessageDeflate: false,
+      maxPayload: 4 * 1024 * 1024,
+    })
     this.socket = socket
-    let alive = true
-    let opened = false
-    socket.on('pong', () => { alive = true })
-    socket.on('open', () => {
-      opened = true
-      this.attempt = 0
-      this.urlNeverOpened = 0
-      this.urlIndex = 0
-      void this.onOpen().catch(this.onError)
-      this.heartbeat = setInterval(() => {
-        if (!alive) { socket.terminate(); return }
-        alive = false
-        socket.ping()
-        this.send({ ...envelope(), type: 'heartbeat', nonce: crypto.randomUUID(), sentAt: new Date().toISOString() as Timestamp })
-      }, this.options.heartbeatMs ?? 15000)
+    this.connectTimer = setTimeout(() => socket.terminate(), connectTimeoutMs)
+    socket.on('open', () => this.handleOpen(socket, generation))
+    socket.on('message', (data) => this.handleMessage(socket, generation, data.toString()))
+    socket.on('pong', () => this.armIdleTimer(socket, generation))
+    socket.on('error', () => undefined)
+    socket.on('close', () => this.handleClose(socket, generation))
+  }
+
+  private handleOpen(socket: WebSocket, generation: number): void {
+    if (!this.isCurrent(socket, generation)) return socket.close()
+    this.clearTimer('connect')
+    this.lastConnectedAt = Date.now()
+    const hello = this.options.store.workerHello({
+      workerId: this.options.workerId,
+      workerVersion: this.options.workerVersion,
+      name: this.options.name,
+      platform: this.options.platform,
+      architecture: this.options.architecture,
+      adkProfiles: [WEMUX_ADK_PROFILE_V1],
     })
-    socket.on('message', (data, binary) => {
-      try {
-        if (binary) throw new Error('Binary protocol frames are not supported')
-        const message = parseServerMessage(data.toString())
-        if (message.type === 'error' && !message.error.retryable) { this.stop(); return }
-        void this.onMessage(message).catch(this.onError)
-      } catch (error) {
-        this.onError(error)
-        this.send({ ...envelope(), type: 'error', error: { code: 'invalid-message', message: 'Invalid protocol v1 message', retryable: false, relatedMessageId: null } })
-        socket.close(1002, 'Invalid protocol')
+    socket.send(JSON.stringify(hello))
+    this.armIdleTimer(socket, generation)
+    // The transport hello is authoritative. The first connected callback waits
+    // for Server negotiation; raw WS acceptance alone never means online.
+  }
+
+  private async handleMessage(socket: WebSocket, generation: number, raw: string): Promise<void> {
+    if (!this.isCurrent(socket, generation)) return
+    this.armIdleTimer(socket, generation)
+    let frame: ServerToWorkerFrame
+    try { frame = parseServerTransportFrame(JSON.parse(raw)) }
+    catch { return socket.close(1002, 'invalid transport v2 frame') }
+
+    if (frame.frameType === 'transport.hello') {
+      if (frame.selectedTransport.major !== 2 || frame.selectedAdkProfile !== WEMUX_ADK_PROFILE_V1) {
+        this.transition('needs-attention', 'incompatible transport or ADK profile')
+        this.stopped = true
+        return socket.close(1002, 'incompatible transport or ADK profile')
       }
-    })
-    socket.on('error', this.onError)
-    socket.on('close', () => {
-      clearInterval(this.heartbeat)
+      await this.options.store.acceptServerHello(frame)
+      this.transition('open', 'handshake accepted')
+      this.options.onConnected()
+      this.stableTimer = setTimeout(() => { this.attempts = 0 }, this.options.retry?.stableConnectionMs ?? defaultStableConnectionMs)
+      return this.flush()
+    }
+    if (frame.frameType === 'transport.ack') {
+      await this.options.store.acknowledgeOutbound(frame)
+      return this.flush()
+    }
+    if (frame.frameType === 'transport.error') {
+      if (!frame.retryable) {
+        this.transition('needs-attention', frame.message)
+        this.stopped = true
+      }
+      return socket.close(frame.code === 'revoked' ? 1008 : 1002, frame.code)
+    }
+    if (frame.frameType === 'transport.ping') {
+      return void socket.send(JSON.stringify({ frameType: 'transport.pong', nonce: frame.nonce, sentAt: frame.sentAt } satisfies WorkerToServerFrame))
+    }
+    if (frame.frameType === 'transport.pong') return
+    if (frame.frameType === 'data') {
+      if (frame.durability === 'volatile') {
+        this.options.onMessage(frame.payload)
+        return
+      }
+      const accepted = await this.options.store.acceptInbound(frame)
+      socket.send(JSON.stringify(accepted.ack))
+      if (accepted.isNew) this.options.onMessage(frame.payload)
+    }
+  }
+
+  private handleClose(socket: WebSocket, generation: number): void {
+    if (this.socket !== socket || this.generation !== generation) return
+    this.socket = undefined
+    this.clearTimers()
+    this.options.onDisconnected?.()
+    if (this.stopped) return this.transition(this.state === 'needs-attention' ? 'needs-attention' : 'stopped', 'closed')
+    const uptimeMs = this.lastConnectedAt === 0 ? 0 : Date.now() - this.lastConnectedAt
+    if (uptimeMs < (this.options.retry?.stableConnectionMs ?? defaultStableConnectionMs)) this.attempts += 1
+    else this.attempts = 0
+    const delayMs = this.retryDelay(this.attempts)
+    this.transition('backoff', 'closed', delayMs)
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined
       if (this.stopped) return
-      const delay = Math.min(30000, (this.options.reconnectMs ?? 500) * 2 ** Math.min(this.attempt++, 8))
-      if (this.urls.length > 1) {
-        if (!opened) {
-          // 连接从未建立成功：立刻轮换到下一个候选
-          this.urlIndex = (this.urlIndex + 1) % this.urls.length
-          this.onRotate(this.urls[this.urlIndex], 'connect-failed')
-        } else if (++this.urlNeverOpened >= 3) {
-          // 曾连上但连续 3 轮重连失败：切换候选，成功后 open 会归位回优先地址
-          this.urlNeverOpened = 0
-          this.urlIndex = (this.urlIndex + 1) % this.urls.length
-          this.onRotate(this.urls[this.urlIndex], 'repeated-failures')
+      this.transition('connecting', 'retry')
+      this.connect()
+    }, delayMs)
+  }
+
+  private async flush(): Promise<void> {
+    if (this.flushing) return
+    this.flushing = true
+    try {
+      while (true) {
+        const socket = this.socket
+        if (!socket || socket.readyState !== WebSocket.OPEN || this.state !== 'open') return
+        const pending = await this.options.store.pendingOutbound(64)
+        if (!pending.length) return
+        for (const frame of pending) {
+          if (socket.readyState !== WebSocket.OPEN || socket !== this.socket) return
+          await this.options.store.markOutboundSent(frame)
+          socket.send(JSON.stringify(frame))
         }
       }
-      this.timer = setTimeout(() => this.connect(), delay)
-    })
+    } finally {
+      this.flushing = false
+      if (this.socket?.readyState === WebSocket.OPEN && this.state === 'open' && (await this.options.store.pendingOutbound(1)).length) this.flush().catch(() => undefined)
+    }
   }
-  stop() {
-    this.stopped = true
-    clearTimeout(this.timer)
-    clearInterval(this.heartbeat)
-    this.socket?.terminate()
+
+  private armIdleTimer(socket: WebSocket, generation: number): void {
+    this.clearTimer('idle')
+    this.idleTimer = setTimeout(() => {
+      if (this.isCurrent(socket, generation)) socket.terminate()
+    }, idleTimeoutMs)
+  }
+
+  private isCurrent(socket: WebSocket, generation: number): boolean {
+    return !this.stopped && this.socket === socket && this.generation === generation
+  }
+
+  private retryDelay(attempt: number): number {
+    const baseDelayMs = this.options.retry?.baseDelayMs ?? defaultBaseDelayMs
+    const maxDelayMs = this.options.retry?.maxDelayMs ?? defaultMaxDelayMs
+    const jitterRatio = this.options.retry?.jitterRatio ?? defaultJitterRatio
+    const exponential = Math.min(baseDelayMs * 2 ** Math.max(0, attempt - 1), maxDelayMs)
+    const random = this.options.random ?? Math.random
+    return Math.round(exponential * (1 + ((random() * 2) - 1) * jitterRatio))
+  }
+
+  private transition(current: ConnectionState, reason: string, retryInMs?: number): void {
+    const previous = this.state
+    if (previous === current && retryInMs === undefined) return
+    this.state = current
+    this.options.onStateChange?.({ previous, current, reason, attempt: this.attempts, retryInMs })
+  }
+
+  private clearTimer(kind: 'connect' | 'idle'): void {
+    const timer = kind === 'connect' ? this.connectTimer : this.idleTimer
+    if (timer) clearTimeout(timer)
+    if (kind === 'connect') this.connectTimer = undefined
+    else this.idleTimer = undefined
+  }
+
+  private clearTimers(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    if (this.connectTimer) clearTimeout(this.connectTimer)
+    if (this.idleTimer) clearTimeout(this.idleTimer)
+    if (this.stableTimer) clearTimeout(this.stableTimer)
+    this.reconnectTimer = this.connectTimer = this.idleTimer = this.stableTimer = undefined
   }
 }

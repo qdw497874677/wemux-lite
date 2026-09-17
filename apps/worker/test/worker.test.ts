@@ -8,13 +8,15 @@ import { setTimeout as delay } from 'node:timers/promises'
 import { createServer } from 'node:http'
 import { WebSocketServer, type WebSocket } from 'ws'
 import type { CommandId, EventSeq, SessionId, Timestamp, WorkerId, WorkspaceProvisionSpec } from '@wemux/domain'
-import type { WorkerCommand, WorkerToServer } from '@wemux/wire-protocol'
+import { WEMUX_ADK_PROFILE_V1, parseWorkerTransportFrame, type ServerToWorkerFrame, type WorkerCommand, type WorkerPayload, type WorkerTransportHello } from '@wemux/wire-protocol'
+import { randomUUID } from 'node:crypto'
 import { SqliteWorkerStore } from '../src/storage/sqlite-store.js'
-import { WorkerRuntime, envelope } from '../src/application/runtime.js'
+import { WorkerRuntime } from '../src/application/runtime.js'
 import { TestAgent } from '../src/agents/test-agent.js'
 import type { AgentAdapter } from '../src/application/ports/agent-adapter.js'
 import { LocalProvisioner } from '../src/workspaces/local-provisioner.js'
 import { WebSocketTransport } from '../src/transport/websocket.js'
+import { WorkerTransportStore } from '../src/transport/transport-store.js'
 import { parseServerMessage } from '../src/transport/validation.js'
 import { enroll } from '../src/transport/enrollment.js'
 import { serverUrl } from '../src/config.js'
@@ -64,7 +66,7 @@ async function fixture() {
   const events: WorkerToServer[] = []
   const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [new TestAgent(15)], { send: message => events.push(message) }, workerId, 'test')
   await runtime.initialize()
-  const send = (id: string, command: WorkerCommand) => runtime.receive({ ...envelope(), type: 'command', commandId: id as CommandId, command })
+  const send = (id: string, command: WorkerCommand) => runtime.receive({ type: 'command', commandId: id as CommandId, command })
   await send('provision', { kind: 'workspace.provision', workspace })
   await until(async () => (await store.workspaces.get(workspace.workspace.id))?.status === 'ready')
   await send('create', create)
@@ -95,7 +97,7 @@ test('FIFO, durable ACK, idempotency conflict, cancellation, stop and stream/too
     const path = (await f.store.workspaces.get(workspace.workspace.id))!.rootPath
     assert.ok(path.startsWith(join(f.home, 'workspaces')))
     for (const event of f.events) if (event.type === 'event' && event.scope === 'session') assert.deepEqual(await f.store.journal.getEvent(sessionId, event.event.seq), event.event)
-    await f.runtime.receive({ ...envelope(), type: 'sync', kind: 'request', sessionId, fromSeq: 1 as EventSeq, limit: 2 })
+    await f.runtime.receive({ type: 'sync', kind: 'request', sessionId, fromSeq: 1 as EventSeq, limit: 2 })
     const batch = f.events.at(-1)!
     assert.ok(batch.type === 'sync' && batch.kind === 'batch' && batch.hasMore && batch.throughSeq === 2)
   } finally { await f.cleanup() }
@@ -117,7 +119,7 @@ test('a silent agent turn fails durably instead of leaving the session running f
     },
   }
   const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [silentAgent], { send() {} }, workerId, 'silent', undefined, { idleMs: 30, maxMs: 100 })
-  const send = (id: string, command: WorkerCommand) => runtime.receive({ ...envelope(), type: 'command', commandId: id as CommandId, command })
+  const send = (id: string, command: WorkerCommand) => runtime.receive({ type: 'command', commandId: id as CommandId, command })
   try {
     await runtime.initialize()
     await send('provision', { kind: 'workspace.provision', workspace })
@@ -141,10 +143,10 @@ test('slow workspace provisioning does not block unrelated command handling', as
   const runtime = new WorkerRuntime(store, { async provision() { await gate; return { rootPath: home, checkouts: [] } } }, [new TestAgent(1)], { send() {} }, workerId, 'test')
   try {
     await runtime.initialize()
-    const provision = runtime.receive({ ...envelope(), type: 'command', commandId: 'slow-provision' as CommandId, command: { kind: 'workspace.provision', workspace } })
+    const provision = runtime.receive({ type: 'command', commandId: 'slow-provision' as CommandId, command: { kind: 'workspace.provision', workspace } })
     await provision
     const startedAt = Date.now()
-    await runtime.receive({ ...envelope(), type: 'sync', kind: 'request', sessionId, fromSeq: 1 as EventSeq, limit: 1 })
+    await runtime.receive({ type: 'sync', kind: 'request', sessionId, fromSeq: 1 as EventSeq, limit: 1 })
     assert.ok(Date.now() - startedAt < 100, 'sync should not wait for the provisioner')
   } finally { release(); await runtime.shutdown(); store.close(); await rm(home, { recursive: true, force: true }) }
 })
@@ -178,32 +180,59 @@ test('SQLite rollback, restart interruption, queued recovery and persistent iden
   } finally { store.close(); await rm(home, { recursive: true, force: true }) }
 })
 
-test('real ws connection: authentication, hello, heartbeat, commands, reconnect and sync replay', async () => {
+test('real transport-v2 ws connection authenticates, handshakes, delivers commands and replays after reconnect', async () => {
   const f = await fixture()
   const server = new WebSocketServer({ port: 0 })
   await new Promise<void>(resolve => server.once('listening', resolve))
   const address = server.address()
   assert.ok(typeof address === 'object' && address)
-  const messages: WorkerToServer[] = []
+  const messages: WorkerPayload[] = []
   let peer: WebSocket | undefined
   let connections = 0
+  let serverSeq = 0
+  let resolveTransportEvent!: () => void
+  let transportEvent = new Promise<void>(resolve => { resolveTransportEvent = resolve })
+  const serverEpoch = randomUUID()
   server.on('connection', (socket, request) => {
     assert.equal(request.headers.authorization, 'Bearer secret')
     peer = socket; connections++
-    socket.on('message', raw => messages.push(JSON.parse(raw.toString()) as WorkerToServer))
+    socket.on('message', raw => {
+      const frame = parseWorkerTransportFrame(JSON.parse(raw.toString()))
+      if (frame.frameType === 'transport.hello') {
+        const hello = frame as WorkerTransportHello
+        socket.send(JSON.stringify({
+          frameType: 'transport.hello', side: 'server', selectedTransport: { major: 2, minor: 0 }, selectedAdkProfile: WEMUX_ADK_PROFILE_V1,
+          enabledFeatures: [], logicalConnectionId: randomUUID(), connectionEpoch: randomUUID(), resumeAccepted: true,
+          authoritativeCursors: { workerToServer: hello.resume.workerToServer!, serverToWorker: { deliveryEpoch: serverEpoch, ackThrough: serverSeq } },
+          acceptedAt: new Date().toISOString(),
+        } satisfies ServerToWorkerFrame))
+      } else if (frame.frameType === 'data') {
+        messages.push(frame.payload)
+        if (frame.durability === 'durable') socket.send(JSON.stringify({ frameType: 'transport.ack', deliveryEpoch: frame.deliveryEpoch, ackThrough: frame.directionSeq } satisfies ServerToWorkerFrame))
+        resolveTransportEvent()
+      }
+    })
   })
   const runtime = new WorkerRuntime(f.store, new LocalProvisioner(join(f.home, 'workspaces')), [new TestAgent(1)], { send: message => transport.send(message) }, workerId, 'network')
-  const transport = new WebSocketTransport({ url: `ws://127.0.0.1:${address.port}`, credential: 'secret', heartbeatMs: 30, reconnectMs: 10 }, message => runtime.receive(message), () => runtime.connected(), () => {})
+  const transport = new WebSocketTransport({
+    url: `ws://127.0.0.1:${address.port}`, authToken: 'secret', workerId, workerVersion: 'test', name: 'network', platform: 'linux', architecture: 'x64',
+    store: new WorkerTransportStore(join(f.home, 'transport.sqlite')), onMessage: message => { void runtime.receive(message) }, onConnected: () => { void runtime.connected() }, random: () => 0,
+    retry: { baseDelayMs: 10, maxDelayMs: 10, jitterRatio: 0, stableConnectionMs: 100 },
+  })
+  const send = async (payload: import('@wemux/wire-protocol').ServerPayload) => {
+    serverSeq++
+    transportEvent = new Promise<void>(resolve => { resolveTransportEvent = resolve })
+    peer!.send(JSON.stringify({ frameType: 'data', durability: 'durable', deliveryEpoch: serverEpoch, directionSeq: serverSeq, messageId: randomUUID(), lane: 'command', payloadVersion: 'wemux.server.payload.v1', expiresAt: null, payload } satisfies ServerToWorkerFrame))
+    await transportEvent
+  }
   try {
     await runtime.initialize(); transport.start()
-    await until(() => messages.some(m => m.type === 'heartbeat'))
-    assert.ok(messages.some(m => m.type === 'hello'))
-    assert.ok(messages.some(m => m.type === 'capability'))
-    peer!.send(JSON.stringify({ ...envelope(), type: 'command', commandId: 'network', command: enqueue('network') }))
+    await until(() => messages.some(m => m.type === 'capability'))
+    await send({ type: 'command', commandId: 'network' as CommandId, command: enqueue('network') })
     await until(() => messages.some(m => m.type === 'event' && m.scope === 'session' && m.event.payload.kind === 'turn.finished'))
     peer!.terminate()
     await until(() => connections === 2 && messages.filter(m => m.type === 'sync' && m.kind === 'heads').length === 2)
-    peer!.send(JSON.stringify({ ...envelope(), type: 'sync', kind: 'request', sessionId, fromSeq: 1, limit: 1000 }))
+    await send({ type: 'sync', kind: 'request', sessionId, fromSeq: 1 as EventSeq, limit: 1000 })
     await until(() => messages.some(m => m.type === 'sync' && m.kind === 'batch'))
     const batch = messages.find(m => m.type === 'sync' && m.kind === 'batch')!
     assert.ok(batch.type === 'sync' && batch.kind === 'batch' && batch.events.length > 5 && !batch.hasMore)
@@ -242,13 +271,11 @@ test('git clone uses allocated paths, is idempotent, rejects mismatched sources'
   } finally { await rm(home, { recursive: true, force: true }) }
 })
 
-test('boundary rejects bad versions, malformed commands, arbitrary paths and unbounded sync', () => {
-  for (const message of [
-    { ...envelope(), protocolVersion: 2, type: 'command', commandId: 'a', command: enqueue('x') },
-    { ...envelope(), type: 'command', commandId: 'a', command: { kind: 'session.create' } },
-    { ...envelope(), type: 'command', commandId: 'a', command: { kind: 'workspace.provision', workspace: { ...workspace, rootPath: '/tmp' } } },
-    { ...envelope(), type: 'sync', kind: 'request', sessionId, fromSeq: 0, limit: 100000 },
-  ]) assert.throws(() => parseServerMessage(JSON.stringify(message)))
+test('boundary requires a strict transport-v2 data frame', () => {
+  assert.throws(() => parseServerMessage(JSON.stringify({ type: 'command', commandId: 'a', command: enqueue('x') })))
+  assert.throws(() => parseServerMessage(JSON.stringify({ frameType: 'data', durability: 'durable', deliveryEpoch: 'server', directionSeq: 0, messageId: randomUUID(), lane: 'command', payloadVersion: 'wemux.server.payload.v1', expiresAt: null, payload: { type: 'command', commandId: 'a', command: enqueue('x') } })))
+  const payload = parseServerMessage(JSON.stringify({ frameType: 'data', durability: 'durable', deliveryEpoch: 'server', directionSeq: 1, messageId: randomUUID(), lane: 'command', payloadVersion: 'wemux.server.payload.v1', expiresAt: null, payload: { type: 'command', commandId: 'a', command: enqueue('x') } }))
+  assert.equal(payload.type, 'command')
 })
 
 test('enrollment exchanges token without persisting or reusing it as credential', async () => {

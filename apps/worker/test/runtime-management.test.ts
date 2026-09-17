@@ -27,10 +27,12 @@ function installer(calls: ProcessRequest[], fail?: 'npm' | 'version' | 'manifest
       return '1.0.0'
     }
     if (fail === 'npm') throw new Error('npm timed out')
-    const spec = request.args.at(-1) === '@earendil-works/pi-coding-agent@0.85.1' ? installCatalog.pi : installCatalog['claude-code']
+    const requested = request.args.at(-1)
+    const spec = requested === '@earendil-works/pi-coding-agent@0.85.1' ? installCatalog.pi : requested === 'opencode-ai@1.18.31' ? installCatalog.opencode : installCatalog['claude-code']
     const root = join(request.args[request.args.indexOf('--prefix') + 1], 'node_modules', spec.name)
     await executable(join(root, spec.bin))
-    await writeFile(join(root, 'package.json'), JSON.stringify({ name: spec.name, version: fail === 'manifest' ? '0.0.0' : spec.version, bin: { [spec === installCatalog.pi ? 'pi' : 'claude']: spec.bin } }))
+    const binName = spec === installCatalog.pi ? 'pi' : spec === installCatalog.opencode ? 'opencode' : 'claude'
+    await writeFile(join(root, 'package.json'), JSON.stringify({ name: spec.name, version: fail === 'manifest' ? '0.0.0' : spec.version, bin: { [binName]: spec.bin } }))
     return ''
   }
 }
@@ -46,6 +48,14 @@ test('CLI opt-in is explicit; aliases work; arbitrary packages and unsupported i
   await assert.rejects(installAgent(home, 'codex', true, run), /暂不支持/)
   assert.equal(count, 0)
   assert.deepEqual(await readdir(home), [])
+})
+
+test('environment overrides cover Pi, OpenCode and Claude runtime paths', () => {
+  const environment = { WEMUX_PI_COMMAND: '/env/pi', WEMUX_OPENCODE_COMMAND: '/env/opencode', WEMUX_CLAUDE_COMMAND: '/env/claude' }
+  assert.equal(agentCommand('pi', {}, environment), '/env/pi')
+  assert.equal(agentCommand('opencode', {}, environment), '/env/opencode')
+  assert.equal(agentCommand('claude-code', {}, environment), '/env/claude')
+  assert.equal(agentSelections({}, environment).find(item => item.key === 'opencode')?.source, 'environment')
 })
 
 test('absolute path reuse probes only the executable, persists across reload, never installs', async t => {
@@ -64,12 +74,12 @@ test('absolute path reuse probes only the executable, persists across reload, ne
   assert.equal((await readAgentSettings(home))['claude-code']?.executable, path)
 })
 
-for (const key of ['pi', 'claude'] as const) test(`managed ${key} install uses exact non-global npm args, validates and persists provenance`, async t => {
+for (const key of ['pi', 'opencode', 'claude'] as const) test(`managed ${key} install uses exact non-global npm args, validates and persists provenance`, async t => {
   const home = await fixture(t)
   const calls: ProcessRequest[] = []
   const result = await installAgent(home, key, true, installer(calls))
   const prefix = calls[0].cwd!
-  const spec = key === 'pi' ? '@earendil-works/pi-coding-agent@0.85.1' : '@anthropic-ai/claude-code@2.1.34'
+  const spec = key === 'pi' ? '@earendil-works/pi-coding-agent@0.85.1' : key === 'opencode' ? 'opencode-ai@1.18.31' : '@anthropic-ai/claude-code@2.1.34'
   assert.deepEqual(calls[0], { command: 'npm', args: ['install', '--global=false', '--prefix', prefix, '--no-save', '--package-lock=false', '--no-audit', '--no-fund', '--registry=https://registry.npmjs.org', '--', spec], cwd: prefix, env: calls[0].env, timeout: 300_000 })
   assert.ok(prefix.startsWith(join(home, 'agents', result.key)))
   assert.deepEqual(calls[1], { command: result.executable, args: ['--version'], timeout: 10_000 })

@@ -56,7 +56,7 @@ for (const workspaceStatus of ['pending', 'failed'] as const) {
         const current = await store.resources.getWorkspace(workspaceId)
         const worker = new WorkerService(store, new Notifications())
         const report = async (commandId: string | undefined, status: 'provisioning' | 'failed' | 'ready') => worker.receive(workerId, {
-          protocolVersion: 1, messageId: newId<'MessageId'>(), type: 'event', scope: 'workspace',
+          type: 'event', scope: 'workspace',
           report: { workspaceId, ...(commandId ? { commandId: commandId as CommandId } : {}), status, reason: null, location: null,
             // Newer than startedAt: rejection must be based on identity, not time.
             occurredAt: '2099-01-01T00:00:00.000Z' as Timestamp },

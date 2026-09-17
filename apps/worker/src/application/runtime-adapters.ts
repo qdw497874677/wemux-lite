@@ -3,10 +3,12 @@ import type { AgentAdapter } from './ports/agent-adapter.js'
 import type { RuntimeSessionAdapter } from './ports/runtime-session.js'
 import { ClaudeRuntimeSessionAdapter } from '../agents/claude-runtime-session-adapter.js'
 import { PiRuntimeSessionAdapter } from '../agents/pi-runtime-session-adapter.js'
+import { OpenCodeRuntimeSessionAdapter } from '../agents/opencode-runtime-session-adapter.js'
 import { TestRuntimeSessionAdapter } from '../agents/test-runtime-session-adapter.js'
 
 export interface RuntimeAdapterExecutables {
   readonly pi?: string
+  readonly opencode?: string
   readonly claude?: string
 }
 
@@ -17,6 +19,7 @@ export function runtimeAdaptersFor(agents: readonly AgentAdapter[], executables:
     if (agent.mode !== 'execution') continue
     if (agent.agentKey === 'test') adapters.set(agent.agentKey, new TestRuntimeSessionAdapter())
     else if (agent.agentKey === 'pi') adapters.set(agent.agentKey, new PiRuntimeSessionAdapter(executables.pi ?? 'pi'))
+    else if (agent.agentKey === 'opencode') adapters.set(agent.agentKey, new OpenCodeRuntimeSessionAdapter(executables.opencode ?? 'opencode'))
     else if (agent.agentKey === 'claude-code') adapters.set(agent.agentKey, new ClaudeRuntimeSessionAdapter(executables.claude ?? 'claude'))
   }
   return adapters

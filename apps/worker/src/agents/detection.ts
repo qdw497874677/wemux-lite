@@ -8,6 +8,7 @@ import type { AgentAdapter, LocalAgentDetection } from '../application/ports/age
 import { TestAgent } from './test-agent.js'
 import { PiAgent } from './pi-agent.js'
 import { ClaudeAgent } from './claude-agent.js'
+import { OpenCodeAgent } from './opencode-agent.js'
 import { agentCommand, readAgentSettings, type AgentSettings } from '../config/agent-settings.js'
 
 const exec = promisify(execFile)
@@ -39,7 +40,7 @@ class DetectedAgent implements Extract<AgentAdapter, { mode: 'detect-only' }> {
   }
 }
 export function defaultAgents(settings: AgentSettings = {}): readonly AgentAdapter[] {
-  return [new TestAgent(), new PiAgent(agentCommand('pi', settings)), new ClaudeAgent(agentCommand('claude-code', settings)), new DetectedAgent('codex', agentCommand('codex', settings)), new DetectedAgent('opencode', agentCommand('opencode', settings))]
+  return [new TestAgent(), new PiAgent(agentCommand('pi', settings)), new OpenCodeAgent(agentCommand('opencode', settings)), new ClaudeAgent(agentCommand('claude-code', settings)), new DetectedAgent('codex', agentCommand('codex', settings))]
 }
 
 export async function agentsForHome(home: string): Promise<readonly AgentAdapter[]> {

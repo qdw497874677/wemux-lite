@@ -7,6 +7,7 @@ import type { ModelId, SessionId, TurnId } from '@wemux/domain'
 import type { RuntimeSignal } from '../src/agents/agent-types.js'
 import { ClaudeRuntimeSessionAdapter } from '../src/agents/claude-runtime-session-adapter.js'
 import { PiRuntimeSessionAdapter } from '../src/agents/pi-runtime-session-adapter.js'
+import { OpenCodeRuntimeSessionAdapter } from '../src/agents/opencode-runtime-session-adapter.js'
 
 async function collect(signals: AsyncIterable<RuntimeSignal>) {
   const result: RuntimeSignal[] = []
@@ -49,6 +50,24 @@ test('pi runtime session maps new pi RPC protocol without duplicating assistant 
   const signals = await collect(handle.signals)
   const texts = signals.flatMap(s => s.kind === 'event' && s.event.kind === 'assistant.text.delta' ? [s.event.text] : [])
   assert.deepEqual(texts, ['收到'])
+  const last = signals.at(-1)
+  assert.equal(last?.kind, 'finished')
+  if (last?.kind === 'finished') assert.deepEqual(last.outcome, { status: 'completed' })
+})
+
+test('pi runtime session keeps every assistant message in a multi-message turn', async () => {
+  // Regression: a turn can contain several assistant messages (e.g. text, tool
+  // call, more text). Each message streams cumulative text and message_end may
+  // replay it in full. The dedupe baseline must reset at every message_start,
+  // otherwise the second message is diffed against the first message's text and
+  // dropped entirely.
+  const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"session\",\"sessionId\":\"pi-multi\"}' '{\"type\":\"message_start\"}' '{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"你好\"}}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"你好\"}]}}' '{\"type\":\"message_start\"}' '{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"世界\"}}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"世界\"}]}}' '{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\"}}' '{\"type\":\"agent_end\"}' '{\"type\":\"agent_settled\"}'")
+  const adapter = new PiRuntimeSessionAdapter(cli)
+  const session = await adapter.openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  const handle = await session.execute({ operationId: 'turn-multi' as TurnId, message: { content: '你好' } })
+  const signals = await collect(handle.signals)
+  const texts = signals.flatMap(s => s.kind === 'event' && s.event.kind === 'assistant.text.delta' ? [s.event.text] : [])
+  assert.deepEqual(texts, ['你好', '世界'])
   const last = signals.at(-1)
   assert.equal(last?.kind, 'finished')
   if (last?.kind === 'finished') assert.deepEqual(last.outcome, { status: 'completed' })
@@ -99,6 +118,62 @@ test('pi runtime session does not crash on EPIPE when child closes stdin immedia
   const last = signals.at(-1)
   assert.equal(last?.kind, 'finished')
   if (last?.kind === 'finished') assert.equal(last.outcome.status, 'failed')
+})
+
+test('pi runtime session escalates SIGTERM to SIGKILL when the child ignores graceful shutdown', async () => {
+  const cli = await executable('pi-stuck', "trap '' TERM; read _; while :; do sleep 1; done")
+  const adapter = new PiRuntimeSessionAdapter(cli)
+  const session = await adapter.openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  const handle = await session.execute({ operationId: 'turn-stuck' as TurnId, message: { content: 'hang' } })
+  const completion = collect(handle.signals)
+  await new Promise(resolve => setTimeout(resolve, 50))
+  const closing = session.close()
+  await new Promise(resolve => setTimeout(resolve, 50))
+  session.kill?.()
+  await closing
+  const signals = await Promise.race([
+    completion,
+    new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('SIGKILL did not terminate Pi child')), 2_000)
+      timer.unref()
+    }),
+  ])
+  const last = signals.at(-1)
+  assert.equal(last?.kind, 'finished')
+  if (last?.kind === 'finished') assert.equal(last.outcome.status, 'failed')
+})
+
+test('opencode runtime session maps resume, text, tools and aggregate usage', async () => {
+  const cli = await executable('opencode', `
+args="$*"
+printf '%s\\n' \
+'{"type":"step_start","sessionID":"native-opencode","part":{"type":"step-start"}}' \
+'{"type":"tool_use","sessionID":"native-opencode","part":{"id":"part-tool","tool":"bash","callID":"call-1","state":{"status":"completed","input":{"command":"echo hello"},"output":"hello\\n","metadata":{"exit":0}}}}' \
+'{"type":"step_finish","sessionID":"native-opencode","part":{"reason":"tool-calls","tokens":{"input":10,"output":2,"reasoning":1,"cache":{"read":3,"write":4}},"cost":0.01}}' \
+'{"type":"text","sessionID":"native-opencode","part":{"text":"done"}}' \
+'{"type":"step_finish","sessionID":"native-opencode","part":{"reason":"stop","tokens":{"input":5,"output":6,"reasoning":0,"cache":{"read":7,"write":0}},"cost":0.02}}'
+`)
+  const adapter = new OpenCodeRuntimeSessionAdapter(cli)
+  const session = await adapter.openSession({ sessionId, cwd: process.cwd(), modelId: 'opencode::big-pickle' as ModelId, resume: 'old-session' as never })
+  const handle = await session.execute({ operationId: 'turn-opencode' as TurnId, message: { content: 'hello' }, launchContext: null })
+  const signals = await collect(handle.signals)
+  assert(signals.some(signal => signal.kind === 'native-session' && signal.nativeSession === 'native-opencode'))
+  assert(signals.some(signal => signal.kind === 'event' && signal.event.kind === 'assistant.text.delta' && signal.event.text === 'done'))
+  assert(signals.some(signal => signal.kind === 'event' && signal.event.kind === 'tool.started' && signal.event.toolName === 'bash'))
+  assert(signals.some(signal => signal.kind === 'event' && signal.event.kind === 'tool.output.delta' && signal.event.text.trim() === 'hello'))
+  assert(signals.some(signal => signal.kind === 'event' && signal.event.kind === 'tool.finished' && signal.event.exitCode === 0))
+  const usage = signals.find(signal => signal.kind === 'event' && signal.event.kind === 'usage.updated')
+  assert.equal(usage?.kind, 'event')
+  if (usage?.kind === 'event' && usage.event.kind === 'usage.updated') assert.deepEqual(usage.event.usage, { scope: 'operation', subjectId: 'turn-opencode', source: 'runtime', revision: 1, completeness: 'complete', inputTokens: 15, outputTokens: 9, cacheReadTokens: 10, cacheWriteTokens: 4, costUsd: 0.03, totalTokens: 38, currency: 'USD' })
+  assert.deepEqual(signals.at(-1), { kind: 'finished', outcome: { status: 'completed' } })
+})
+
+test('opencode runtime session fails closed when no terminal stop step is emitted', async () => {
+  const cli = await executable('opencode-truncated', `printf '%s\\n' '{"type":"text","sessionID":"native-opencode","part":{"text":"partial"}}'`)
+  const session = await new OpenCodeRuntimeSessionAdapter(cli).openSession({ sessionId, cwd: process.cwd(), modelId: null, resume: null })
+  const signals = await collect((await session.execute({ operationId: 'turn-opencode-truncated' as TurnId, message: { content: 'hello' }, launchContext: null })).signals)
+  assert.equal(signals.at(-1)?.kind, 'finished')
+  if (signals.at(-1)?.kind === 'finished') assert.equal(signals.at(-1)!.outcome.status, 'failed')
 })
 
 test('claude runtime session maps native json events', async () => {

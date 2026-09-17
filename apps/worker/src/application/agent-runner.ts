@@ -129,6 +129,12 @@ export class WorkerAgentRunner implements AgentRunner {
     await Promise.all([...this.managers.values()].map(manager => manager.shutdown()))
   }
 
+  /** 同步强制终止所有 provider 子进程；不等待 in-flight promise，永不挂起。 */
+  abort(): void {
+    for (const invocation of this.active.values()) invocation.stopRequested = true
+    for (const manager of this.managers.values()) manager.abort()
+  }
+
   private async persist(sessionKey: { appName: string; userId: string; sessionId: SessionId }, event: AgentEvent) {
     if (!this.options.sessionStore || event.partial) return
     const session = await this.options.sessionStore.get(sessionKey)

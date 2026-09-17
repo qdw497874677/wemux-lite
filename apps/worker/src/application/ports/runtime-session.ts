@@ -27,6 +27,12 @@ export interface AgentRuntimeSession {
   command(command: RuntimeCommand): Promise<void>
   resolveApproval(approvalId: ApprovalId, decision: 'approve' | 'deny'): Promise<void>
   close(): Promise<void>
+  /**
+   * 可选的同步强制终止：立即杀掉 provider 子进程，不等待任何 promise。
+   * 用于 close() 本身可能挂死（子进程僵死/管道卡住）时的兜底，
+   * 让挂起的 execute 迭代器因进程退出而结束。必须是同步的。
+   */
+  kill?(): void
 }
 
 export interface RuntimeSessionAdapter {

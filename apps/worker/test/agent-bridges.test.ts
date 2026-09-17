@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import type { ModelId } from '@wemux/domain'
 import { ClaudeAgent } from '../src/agents/claude-agent.js'
 import { PiAgent } from '../src/agents/pi-agent.js'
+import { OpenCodeAgent } from '../src/agents/opencode-agent.js'
 import { modelId } from '@wemux/domain'
 
 async function fixtureScript(body: string) {
@@ -72,6 +73,39 @@ process.stdin.resume(); setInterval(() => {}, 1000)
     await handle.stop()
     assert.deepEqual((await collect(handle)).at(-1), { kind: 'finished', outcome: { status: 'cancelled' } })
   } finally { await fixture.close() }
+})
+
+test('OpenCode bridge detects provider-qualified models as an execution Agent', async () => {
+  const fixture = await fixtureScript(`
+if (process.argv.includes('--version')) console.log('1.18.31')
+else if (process.argv.includes('models')) console.log('opencode/big-pickle\\nmy-provider/my-model')
+else if (process.argv.includes('auth')) console.log('0 credentials')
+`)
+  try {
+    const detected = await new OpenCodeAgent(fixture.path).detect()
+    assert.equal(detected.mode, 'execution')
+    assert.equal(detected.agentKey, 'opencode')
+    assert.equal(detected.availability.status, 'available')
+    assert.deepEqual(detected.runtime, { resume: true, tools: true, approvals: false, usage: true, cancel: true, structuredOutput: false, commands: [] })
+    assert.deepEqual(detected.models.map(model => model.modelId), ['opencode::big-pickle', 'my-provider::my-model'])
+  } finally { await fixture.close() }
+})
+
+test('OpenCode bridge completes a real prompt with an available model when enabled', { timeout: 90_000 }, async t => {
+  if (process.env.WEMUX_REAL_AGENT_SMOKE !== '1') { t.skip('set WEMUX_REAL_AGENT_SMOKE=1 to run network smoke'); return }
+  const detected = await new OpenCodeAgent().detect()
+  if (detected.availability.status !== 'available' || !detected.models.length) { t.skip('no OpenCode model available'); return }
+  const cwd = await mkdtemp(join(tmpdir(), 'wemux-lite-opencode-smoke-'))
+  try {
+    const adapter = new (await import('../src/agents/opencode-runtime-session-adapter.js')).OpenCodeRuntimeSessionAdapter()
+    const session = await adapter.openSession({ sessionId: 'opencode-smoke' as any, cwd, modelId: detected.models[0]!.modelId, resume: null })
+    const handle = await session.execute({ operationId: 'opencode-turn' as any, message: { content: 'Reply with exactly OK' }, launchContext: null })
+    const signals = []
+    for await (const signal of handle.signals) signals.push(signal)
+    assert(signals.some(signal => signal.kind === 'native-session'))
+    assert(signals.some(signal => signal.kind === 'event' && signal.event.kind === 'assistant.text.delta'))
+    assert.deepEqual(signals.at(-1), { kind: 'finished', outcome: { status: 'completed' } })
+  } finally { await rm(cwd, { recursive: true, force: true }) }
 })
 
 test('Pi bridge completes a real prompt with an authenticated configured model when available', { timeout: 60_000 }, async t => {

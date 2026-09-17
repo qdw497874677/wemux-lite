@@ -5,13 +5,14 @@ const source = path => readFileSync(new URL(path, import.meta.url), 'utf8')
 
 test('resource and task creation share a guarded, scrollable dialog', () => {
   const dialog = source('../src/components/creation-dialog.tsx')
-  assert.match(dialog, /max-h-\[90dvh\] overflow-y-auto/)
+  assert.match(dialog, /max-h-\[90dvh\]/)
+  assert.match(dialog, /overflow-y-auto/)
   assert.match(dialog, /onInteractOutside=.*preventDefault/)
   assert.match(dialog, /!open && !busy/)
   for (const path of ['../src/components/create-dialog.tsx', '../src/features/tasks/board.tsx', '../src/features/tasks/workspaces.tsx']) {
     const form = source(path)
     assert.match(form, /<CreationDialog/)
-    assert.match(form, /<DialogFooter/)
+    assert.match(form, /footer=/)
     assert.match(form, /window.confirm/)
   }
   assert.doesNotMatch(source('../src/components/create-dialog.tsx'), /dirty.current = true/)

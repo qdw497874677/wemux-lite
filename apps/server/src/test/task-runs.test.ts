@@ -9,8 +9,8 @@ import { AuthenticationService } from '../application/auth.js'
 import { httpHandler } from '../http/handler.js'
 import { SessionStreams } from '../http/sse.js'
 import { WebSocket } from 'ws'
-import type { ServerToWorker } from '@wemux/wire-protocol'
 import { createWemuxServer } from '../server.js'
+import { TransportV2Peer } from './transport-v2-peer.js'
 import type { ServerStore, ServerStoreTx } from '../application/ports/server-store.js'
 import assert from 'node:assert/strict'
 import { projectRuns } from '../application/run-projection.js'
@@ -51,7 +51,7 @@ test('Worker project Run invalidations see committed state and duplicate receipt
       reads.push(f.store.tasks.run(run.id).then(value => assert.equal(value?.status, 'failed')))
     })
     const workers = new WorkerService(f.store, notifications)
-    const receipt = { protocolVersion: 1 as const, messageId: 'project-rejection' as MessageId, type: 'ack' as const, receipt: { commandId: run.createCommandId as CommandId, status: 'rejected' as const, error: { code: 'invalid-input' as const, message: 'create failed', retryable: false } } }
+    const receipt = { type: 'ack' as const, receipt: { commandId: run.createCommandId as CommandId, status: 'rejected' as const, error: { code: 'invalid-input' as const, message: 'create failed', retryable: false } } }
     await workers.receive(f.worker.id, receipt)
     await Promise.all(reads)
     assert.equal(reads.length, 1)
@@ -71,7 +71,7 @@ test('Worker rolled back receipt publishes no project invalidation', async () =>
     const store: ServerStore = { tasks: f.store.tasks, resources: f.store.resources, identity: f.store.identity, commands: f.store.commands, cache: f.store.cache,
       transaction: work => f.store.transaction(async tx => { await work(tx); throw Error('forced rollback') }) }
     const workers = new WorkerService(store, notifications)
-    await assert.rejects(workers.receive(f.worker.id, { protocolVersion: 1, messageId: 'rollback-project' as MessageId, type: 'ack', receipt: { commandId: run.createCommandId as CommandId, status: 'rejected', error: { code: 'invalid-input', message: 'create failed', retryable: false } } }), /forced rollback/)
+    await assert.rejects(workers.receive(f.worker.id, { type: 'ack', receipt: { commandId: run.createCommandId as CommandId, status: 'rejected', error: { code: 'invalid-input', message: 'create failed', retryable: false } } }), /forced rollback/)
     assert.equal(count, 0)
     assert.equal((await f.store.tasks.run(run.id))?.status, 'pending')
   } finally { f.store.close() }
@@ -593,7 +593,7 @@ for (const cancelFirst of [false, true]) test(`natural completion and cancel ser
     assert.equal(before.filter(a => a.type === 'run.finished').length, 1)
     if (cancelFirst) {
       const workers = new WorkerService(f.store, new Notifications())
-      await workers.receive(f.worker.id, { protocolVersion: 1, messageId: 'late-rejection' as MessageId, type: 'ack', receipt: { commandId: done.cancelCommandIds[0] as CommandId, status: 'rejected', error: { code: 'invalid-input', message: 'Already finished', retryable: false } } })
+      await workers.receive(f.worker.id, { type: 'ack', receipt: { commandId: done.cancelCommandIds[0] as CommandId, status: 'rejected', error: { code: 'invalid-input', message: 'Already finished', retryable: false } } })
       assert.deepEqual(await f.store.tasks.run(run.id), done)
       assert.deepEqual(await f.store.tasks.activity(run.taskId, 0), before)
     }
@@ -608,14 +608,14 @@ test('cancel rejection requires explicit new request and concurrent recovery emi
     const cancel = (request = input) => f.tasks.cancelRun(run.projectId, run.taskId, run.id, request, context)
     const first = (await cancel()).run
     const workers = new WorkerService(f.store, new Notifications())
-    await workers.receive(f.worker.id, { protocolVersion: 1, messageId: 'reject-cancel' as MessageId, type: 'ack', receipt: { commandId: first.cancelCommandIds[0] as CommandId, status: 'rejected', error: { code: 'invalid-input', message: 'Target unavailable', retryable: false } } })
+    await workers.receive(f.worker.id, { type: 'ack', receipt: { commandId: first.cancelCommandIds[0] as CommandId, status: 'rejected', error: { code: 'invalid-input', message: 'Target unavailable', retryable: false } } })
     const replay = (await cancel()).run
     assert.equal(replay.failure?.code, 'cancel_rejected')
     assert.equal(replay.cancelCommandIds.length, 1)
     const retry = { ...input, requestId: 'cancel-recovery' }
     const [a, b] = await Promise.all([cancel(retry), cancel(retry)])
     assert.deepEqual(a, b); assert.equal(a.run.cancelCommandIds.length, 2); assert.equal(a.run.failure, null)
-    await workers.receive(f.worker.id, { protocolVersion: 1, messageId: 'accept-cancel' as MessageId, type: 'ack', receipt: { commandId: a.run.cancelCommandIds[1] as CommandId, status: 'accepted' } })
+    await workers.receive(f.worker.id, { type: 'ack', receipt: { commandId: a.run.cancelCommandIds[1] as CommandId, status: 'accepted' } })
     assert.equal((await cancel(retry)).run.status, 'cancelling')
     const sessionId = run.sessionId as SessionId
     await f.store.transaction(async tx => {
@@ -757,11 +757,11 @@ test('Run enqueue is not deliverable before create accepted; generic command del
     await workers.disconnected(f.worker.id)
     workers = new WorkerService(f.store, new Notifications())
     assert.ok((await ids()).includes(run.createCommandId as CommandId))
-    await workers.receive(f.worker.id, { protocolVersion: 1, messageId: 'ack' as MessageId, type: 'ack', receipt: { commandId: run.createCommandId as CommandId, status: 'accepted' } })
+    await workers.receive(f.worker.id, { type: 'ack', receipt: { commandId: run.createCommandId as CommandId, status: 'accepted' } })
     assert.ok((await ids()).includes(run.enqueueCommandId as CommandId))
     assert.ok((await ids()).includes(run.enqueueCommandId as CommandId))
     assert.equal((await f.store.tasks.run(run.id))!.status, 'pending')
-    const rejected = { protocolVersion: 1 as const, messageId: 'reject' as MessageId, type: 'ack' as const, receipt: { commandId: run.enqueueCommandId as CommandId, status: 'rejected' as const, error: { code: 'invalid-input' as const, message: 'failed', retryable: false } } }
+    const rejected = { type: 'ack' as const, receipt: { commandId: run.enqueueCommandId as CommandId, status: 'rejected' as const, error: { code: 'invalid-input' as const, message: 'failed', retryable: false } } }
     await workers.receive(f.worker.id, rejected)
     const activity = await f.store.tasks.activity(f.task.id, 0)
     await workers.receive(f.worker.id, rejected)
@@ -915,16 +915,14 @@ test('real WS contradictory terminal Journal cannot regress an undeleted cancell
     const counts = () => ({ activity: db.prepare('SELECT * FROM task_activity ORDER BY task_id,seq').all(), audit: db.prepare("SELECT * FROM records WHERE kind='audit' ORDER BY id").all() })
     const before = counts()
     ws = new WebSocket(base.replace('http', 'ws') + '/worker/ws', { headers: { Authorization: `Bearer ${f.credential}` } })
-    const received: Array<Record<string, unknown>> = []
-    ws.on('message', data => { const frame = JSON.parse(data.toString()); received.push(frame); transcript.push({ direction: 'server', frame }) })
-    await once(ws, 'open')
-    const send = (frame: object) => { const message = { protocolVersion: 1, messageId: String(transcript.length), ...frame }; transcript.push({ direction: 'worker', frame: message }); ws!.send(JSON.stringify(message)) }
-    send({ type: 'hello', side: 'worker', workerId: f.worker.id, name: 'late-terminal-probe', workerVersion: 'test', platform: 'linux', architecture: 'x64' })
+    const peer = new TransportV2Peer(ws, f.worker.id)
+    ws.on('message', data => transcript.push({ direction: 'server', frame: JSON.parse(data.toString()) }))
+    await peer.connect({ name: 'late-terminal-probe' })
+    const send = (payload: Record<string, unknown>) => { transcript.push({ direction: 'worker', payload }); peer.send(payload) }
     for (const seq of [5, 4]) send({ type: 'event', scope: 'session', event: { sessionId, seq, occurredAt: run.createdAt, payload: { kind: 'turn.finished', turnId: 'ws-turn', outcome: seq % 2 ? 'failed' : 'completed', failure: null } } })
     send({ type: 'sync', kind: 'heads', complete: false, heads: [{ sessionId, lastSeq: 5 }] })
     send({ type: 'heartbeat', nonce: 'probe-complete', sentAt: new Date().toISOString() })
-    for (let i = 0; i < 200 && !received.some(frame => frame.nonce === 'probe-complete'); i++) await new Promise(resolve => setTimeout(resolve, 10))
-    assert.ok(received.some(frame => frame.nonce === 'probe-complete'))
+    await peer.wait(message => message.type === 'heartbeat' && message.nonce === 'probe-complete')
     const after = JSON.parse(String(db.prepare('SELECT data FROM task_runs WHERE id=?').get(run.id)!.data))
     assert.deepEqual({ ...after, lastProjectedSeq: terminal.lastProjectedSeq }, terminal)
     assert.equal(after.lastProjectedSeq, 5)
@@ -939,7 +937,7 @@ test('real WS contradictory terminal Journal cannot regress an undeleted cancell
     send({ type: 'event', scope: 'session', event: { ...events[2], payload: { kind: 'turn.finished', turnId: 'ws-turn', outcome: 'failed', failure: null } } })
     const [closeCode] = await closedByIntegrity
     assert.equal(closeCode, 1008)
-    assert.ok(received.some(frame => frame.type === 'error'))
+    assert.ok(peer.frames.some(frame => frame.frameType === 'transport.error'))
     assert.deepEqual(counts(), before)
     await writeFile(evidence + '/cancelled-session-ws.json', JSON.stringify({ transcript, terminal, after, freshness, activityAuditUnchanged: true, conflictingSeqCloseCode: closeCode }, null, 2))
     db.close()
@@ -972,8 +970,8 @@ test('deleted Session after disk restart ignores late and out-of-order Worker in
     const snapshot = () => db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => ({ name: row.name, rows: db.prepare(`SELECT * FROM "${row.name}" ORDER BY rowid`).all().map(record => { if (record.kind === 'worker') { const worker = JSON.parse(String(record.data)); delete worker.lastSeenAt; return { ...record, data: JSON.stringify(worker) } } return record }) }))
     const before = snapshot()
     for (const seq of [10, 1, 2]) {
-      await worker.receive(f.worker.id, { protocolVersion: 1, messageId: `late-${seq}` as MessageId, type: 'event', scope: 'session', event: { ...event, seq: seq as EventSeq, payload: { kind: 'turn.finished', turnId: 'old-turn' as TurnId, outcome: 'failed', failure: null } } })
-      await worker.receive(f.worker.id, { protocolVersion: 1, messageId: `head-${seq}` as MessageId, type: 'sync', kind: 'heads', complete: true, heads: [{ sessionId, lastSeq: seq as EventSeq }] })
+      await worker.receive(f.worker.id, { type: 'event', scope: 'session', event: { ...event, seq: seq as EventSeq, payload: { kind: 'turn.finished', turnId: 'old-turn' as TurnId, outcome: 'failed', failure: null } } })
+      await worker.receive(f.worker.id, { type: 'sync', kind: 'heads', complete: true, heads: [{ sessionId, lastSeq: seq as EventSeq }] })
     }
     assert.deepEqual(snapshot(), before); assert.equal(notifications, 0)
     assert.equal((await reopened.tasks.run(run.id))!.status, 'cancelled')
@@ -1118,10 +1116,9 @@ test('real server listen recovers contiguous disk cache with cursor behind exact
   const connect = async () => {
     const ws = new WebSocket(`${base.replace('http', 'ws')}/worker/ws`, { headers: { Authorization: `Bearer ${f.credential}` } })
     socket = ws
-    const received: ServerToWorker[] = []
-    ws.on('message', data => received.push(JSON.parse(data.toString())))
-    await once(ws, 'open')
-    ws.send(JSON.stringify({ protocolVersion: 1, messageId: 'hello', type: 'hello', side: 'worker', workerId: f.worker.id, name: 'Reconnect worker', workerVersion: 'test', platform: 'linux', architecture: 'x64' }))
+    const peer = new TransportV2Peer(ws, f.worker.id)
+    await peer.connect({ name: 'Reconnect worker' })
+    const received = peer.messages
     const waitCommand = async (id: string) => {
       for (let i = 0; i < 200; i++) {
         const command = received.find(m => m.type === 'command' && m.commandId === id)
@@ -1130,7 +1127,7 @@ test('real server listen recovers contiguous disk cache with cursor behind exact
       }
       assert.fail(`No command ${id}: ${JSON.stringify(received)}`)
     }
-    return { ws, received, waitCommand }
+    return { ws, peer, received, waitCommand }
   }
   const disconnect = async (ws: WebSocket) => {
     const closed = once(ws, 'close'); ws.close(); await closed
@@ -1146,7 +1143,7 @@ test('real server listen recovers contiguous disk cache with cursor behind exact
     assert.ok(!first.received.some(m => m.type === 'command' && m.commandId === run.enqueueCommandId))
     await disconnect(first.ws) // received create, no receipt: ACK lost
     const second = await connect(); await second.waitCommand(run.createCommandId!)
-    second.ws.send(JSON.stringify({ protocolVersion: 1, messageId: 'ack', type: 'ack', receipt: { commandId: run.createCommandId, status: 'accepted' } }))
+    second.peer.send({ type: 'ack', receipt: { commandId: run.createCommandId, status: 'accepted' } })
     await second.waitCommand(run.enqueueCommandId)
     await disconnect(second.ws) // received enqueue, no receipt: ACK lost
     await app.close()

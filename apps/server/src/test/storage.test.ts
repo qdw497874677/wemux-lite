@@ -50,5 +50,5 @@ test('transaction rollback, expired enrollment, revocation and worker ownership'
   await store.transaction(tx => tx.identity.revokeWorkerCredential(first.workerId, now()))
   await assert.rejects(new AuthenticationService(store, 'test-bootstrap-token').authenticateWorker(first.credential), /Unauthorized/)
   assert.throws(() => workerMessage({ ...envelope(), type: 'capability', workerId: first.workerId, detectedAt: now(), capabilities: [{}] }), /Invalid/)
-  assert.throws(() => workerMessage({ ...envelope(), protocolVersion: 2, type: 'hello' }), /Unsupported/)
+  assert.throws(() => workerMessage({ ...envelope(), protocolVersion: 2, type: 'hello' }), /Unknown message type/)
 })

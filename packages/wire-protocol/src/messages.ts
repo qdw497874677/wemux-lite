@@ -2,7 +2,6 @@ import type {
   AgentCapability,
   EventSeq,
   JournalEvent,
-  MessageId,
   SessionId,
   SessionJournalHead,
   Timestamp,
@@ -12,51 +11,36 @@ import type {
   WorkspaceStatus,
 } from '@wemux/domain'
 import type { CommandReceipt, WorkerCommand } from './commands.js'
-import type { Envelope, ProtocolErrorPayload } from './envelope.js'
 
-export interface WorkerHello extends Envelope {
-  readonly type: 'hello'
-  readonly side: 'worker'
-  readonly workerId: WorkerId
-  readonly workerVersion: string
-  readonly name: string
-  readonly platform: string
-  readonly architecture: string
-}
-
-export interface ServerHello extends Envelope {
-  readonly type: 'hello'
-  readonly side: 'server'
-  readonly connectionId: string
-  readonly acceptedAt: Timestamp
-}
-
-export interface Heartbeat extends Envelope {
+/**
+ * Application payloads carried by transport v2 data frames.
+ * Delivery identity, ordering, ACK and replay belong exclusively to transport-v2.
+ */
+export interface HeartbeatPayload {
   readonly type: 'heartbeat'
-  readonly nonce: string
+  readonly nonce?: string
   readonly sentAt: Timestamp
 }
 
-export interface CapabilityMessage extends Envelope {
+export interface CapabilityPayload {
   readonly type: 'capability'
   readonly workerId: WorkerId
   readonly capabilities: readonly AgentCapability[]
   readonly detectedAt: Timestamp
 }
 
-export interface CommandMessage extends Envelope {
+export interface CommandPayload {
   readonly type: 'command'
   readonly commandId: import('@wemux/domain').CommandId
   readonly command: WorkerCommand
 }
 
-export interface AckMessage extends Envelope {
+export interface CommandReceiptPayload {
   readonly type: 'ack'
   readonly receipt: CommandReceipt
 }
 
 export interface WorkspaceOperationReport {
-  /** Provision attempt identity; absent on legacy Workers. Not a Run identity. */
   readonly commandId?: import('@wemux/domain').CommandId
   readonly workspaceId: WorkspaceId
   readonly status: WorkspaceStatus
@@ -65,70 +49,31 @@ export interface WorkspaceOperationReport {
   readonly occurredAt: Timestamp
 }
 
-export type EventMessage =
-  | (Envelope & {
-      readonly type: 'event'
-      readonly scope: 'session'
-      readonly event: JournalEvent
-    })
-  | (Envelope & {
-      readonly type: 'event'
-      readonly scope: 'workspace'
-      readonly report: WorkspaceOperationReport
-    })
+export type EventPayload =
+  | { readonly type: 'event'; readonly scope: 'session'; readonly event: JournalEvent }
+  | { readonly type: 'event'; readonly scope: 'workspace'; readonly report: WorkspaceOperationReport }
 
-export type SyncMessage =
-  | (Envelope & {
-      readonly type: 'sync'
-      readonly kind: 'heads'
-      readonly complete: boolean
-      readonly heads: readonly SessionJournalHead[]
-    })
-  | (Envelope & {
-      readonly type: 'sync'
-      readonly kind: 'request'
-      readonly sessionId: SessionId
-      /** Inclusive first sequence requested. */
-      readonly fromSeq: EventSeq
-      readonly limit: number
-    })
-  | (Envelope & {
-      readonly type: 'sync'
-      readonly kind: 'batch'
-      readonly sessionId: SessionId
-      readonly throughSeq: EventSeq
-      readonly hasMore: boolean
-      readonly events: readonly JournalEvent[]
-    })
-  | (Envelope & {
-      readonly type: 'sync'
-      readonly kind: 'gap'
-      readonly sessionId: SessionId
-      readonly fromSeq: EventSeq
-      readonly reason: string
-    })
+export type SyncPayload =
+  | { readonly type: 'sync'; readonly kind: 'heads'; readonly complete: boolean; readonly heads: readonly SessionJournalHead[] }
+  | { readonly type: 'sync'; readonly kind: 'request'; readonly sessionId: SessionId; readonly fromSeq: EventSeq; readonly limit: number }
+  | { readonly type: 'sync'; readonly kind: 'batch'; readonly sessionId: SessionId; readonly throughSeq: EventSeq; readonly hasMore: boolean; readonly events: readonly JournalEvent[] }
+  | { readonly type: 'sync'; readonly kind: 'gap'; readonly sessionId: SessionId; readonly fromSeq: EventSeq; readonly reason: string }
 
-export interface ProtocolErrorMessage extends Envelope {
-  readonly type: 'error'
-  readonly error: ProtocolErrorPayload
-}
+export type ServerPayload =
+  | HeartbeatPayload
+  | CommandPayload
+  | Extract<SyncPayload, { readonly kind: 'request' }>
 
-export type ServerToWorker =
-  | ServerHello
-  | Heartbeat
-  | CommandMessage
-  | Extract<SyncMessage, { readonly kind: 'request' }>
-  | ProtocolErrorMessage
+export type WorkerPayload =
+  | HeartbeatPayload
+  | CapabilityPayload
+  | CommandReceiptPayload
+  | EventPayload
+  | Exclude<SyncPayload, { readonly kind: 'request' }>
 
-export type WorkerToServer =
-  | WorkerHello
-  | Heartbeat
-  | CapabilityMessage
-  | AckMessage
-  | EventMessage
-  | Exclude<SyncMessage, { readonly kind: 'request' }>
-  | ProtocolErrorMessage
+export type ProtocolPayload = ServerPayload | WorkerPayload
 
-export type ProtocolMessage = ServerToWorker | WorkerToServer
-
-export type { MessageId }
+// Application-level idempotency keys remain in payloads; transport ordering,
+// delivery identity, ACK and replay identity live only in transport-v2 frames.
+export type ServerToWorker = ServerPayload
+export type WorkerToServer = WorkerPayload

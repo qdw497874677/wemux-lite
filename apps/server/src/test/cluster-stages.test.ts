@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
 import { WebSocket } from 'ws'
-import type { ServerToWorker } from '@wemux/wire-protocol'
 import { createWemuxServer } from '../server.js'
+import { TransportV2Peer } from './transport-v2-peer.js'
 
 const token = 'cluster-bootstrap-token-12345678'
 const capability = { agentKey: 'pi', displayName: 'Pi', version: '1', mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'test-model', displayName: 'Test', source: 'configured' }] }
@@ -15,14 +15,6 @@ async function eventually(check: () => Promise<boolean>) {
   for (let i = 0; i < 150; i++) { if (await check()) return; await delay(20) }
   assert.fail('Timed out waiting for condition')
 }
-class Peer {
-  readonly messages: ServerToWorker[] = []
-  private counter = 0
-  constructor(readonly ws: WebSocket) { ws.on('message', data => this.messages.push(JSON.parse(data.toString()) as ServerToWorker)) }
-  send(message: Record<string, unknown>) { this.ws.send(JSON.stringify({ protocolVersion: 1, messageId: `worker-message-${++this.counter}`, ...message })) }
-  async close() { if (this.ws.readyState === WebSocket.CLOSED) return; const done = once(this.ws, 'close'); this.ws.close(); await done }
-}
-
 async function setup() {
   const dir = await mkdtemp(join(tmpdir(), 'wemux-cluster-'))
   const app = createWemuxServer({ databasePath: join(dir, 'server.sqlite'), bootstrapToken: token })
@@ -64,13 +56,10 @@ test('command stage list and protected provision cancellation: pending remains d
   assert.equal(retry.data.commandId, commandId)
   // Reconnect delivers the original protected attempt.
   const ws = new WebSocket(base.replace('http:', 'ws:') + '/worker/ws', { headers: { Authorization: `Bearer ${credential}` } })
-  const messages: ServerToWorker[] = []
-  let counter = 0
-  ws.on('message', data => messages.push(JSON.parse(data.toString()) as ServerToWorker))
-  const send = (message: Record<string, unknown>) => ws.send(JSON.stringify({ protocolVersion: 1, messageId: `m-${++counter}`, ...message }))
-  await once(ws, 'open')
-  send({ type: 'hello', side: 'worker', workerId, workerVersion: 'test', name: 'Cluster worker', platform: 'linux', architecture: 'x64' })
-  await eventually(async () => messages.some(m => m.type === 'hello'))
+  const peer = new TransportV2Peer(ws, workerId)
+  await peer.connect({ name: 'Cluster worker' })
+  const messages = peer.messages
+  const send = peer.send.bind(peer)
   await delay(300)
   assert.equal(messages.some(m => m.type === 'command' && m.commandId === commandId), true)
   // Normal receipt handling remains unchanged.
@@ -83,13 +72,10 @@ test('workspace reprovision: only pending/failed, re-issues provision command de
   const { app, base, request, workerId, credential, projectId } = await setup()
   t.after(() => app.close())
   const ws = new WebSocket(base.replace('http:', 'ws:') + '/worker/ws', { headers: { Authorization: `Bearer ${credential}` } })
-  const messages: ServerToWorker[] = []
-  let counter = 0
-  ws.on('message', data => messages.push(JSON.parse(data.toString()) as ServerToWorker))
-  const send = (message: Record<string, unknown>) => ws.send(JSON.stringify({ protocolVersion: 1, messageId: `m-${++counter}`, ...message }))
-  await once(ws, 'open')
-  send({ type: 'hello', side: 'worker', workerId, workerVersion: 'test', name: 'Cluster worker', platform: 'linux', architecture: 'x64' })
-  await eventually(async () => messages.some(m => m.type === 'hello'))
+  const peer = new TransportV2Peer(ws, workerId)
+  await peer.connect({ name: 'Cluster worker' })
+  const messages = peer.messages
+  const send = peer.send.bind(peer)
   send({ type: 'capability', workerId, detectedAt: new Date().toISOString(), capabilities: [capability] })
   const provision = await request('/workspaces', 'POST', { projectId, workerId, name: 'Repo', repository: { gitUrl: 'https://example.com/repo.git', revision: 'main' } })
   const workspace = provision.data.workspace
@@ -120,13 +106,8 @@ test('worker revoke: blocks reconnect, disconnects live socket, blocks new comma
   const { app, base, request, workerId, credential, projectId } = await setup()
   t.after(() => app.close())
   const ws = new WebSocket(base.replace('http:', 'ws:') + '/worker/ws', { headers: { Authorization: `Bearer ${credential}` } })
-  const messages: ServerToWorker[] = []
-  let counter = 0
-  ws.on('message', data => messages.push(JSON.parse(data.toString()) as ServerToWorker))
-  const send = (message: Record<string, unknown>) => ws.send(JSON.stringify({ protocolVersion: 1, messageId: `m-${++counter}`, ...message }))
-  await once(ws, 'open')
-  send({ type: 'hello', side: 'worker', workerId, workerVersion: 'test', name: 'Cluster worker', platform: 'linux', architecture: 'x64' })
-  await eventually(async () => messages.some(m => m.type === 'hello'))
+  const peer = new TransportV2Peer(ws, workerId)
+  await peer.connect({ name: 'Cluster worker' })
   await eventually(async () => (await request(`/workers/${workerId}`)).data.connectionState === 'online')
   // Revoking while connected terminates the socket and the credential stops authenticating.
   const revoked = await request(`/workers/${workerId}/revoke`, 'POST')

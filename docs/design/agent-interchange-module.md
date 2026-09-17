@@ -1,6 +1,6 @@
 # Agent 互操作模块设计
 
-状态：M2 设计基线。目标是为 Pi、Claude Code 及后续 Coding Agent 提供一个职责单一、ADK 兼容的执行 Module。该 Module 输出的 Wemux ADK Profile 是 Worker 面向本地 Web 与 Server 的同一套对话契约；二者只允许使用不同传输封装，不得各自定义对话模型。Project、Workspace、Worker、Task 与权限治理使用独立的非对话 Management API。
+状态：P0 协议基线。目标是为 Pi、OpenCode、Claude Code 及后续 Coding Agent 提供一个职责单一、ADK 兼容的执行 Module。该 Module 输出的 `@wemux/agent-interchange` `AgentEvent` 是 Worker 面向本地 Web 与 Server 的唯一公共 Wemux ADK Profile；二者只允许使用不同传输封装，不得各自定义对话模型。`AgentTurnEvent`/`AgentSignal` 只属于 Worker 内部 Provider seam，`SessionEventPayload`/`JournalEvent` 只属于持久化与 UI 投影，transport v2 只增加可靠交付字段。Project、Workspace、Worker、Task 与权限治理使用独立的非对话 Management API。
 
 ## 1. 决策
 
@@ -22,7 +22,7 @@ WorkerRuntime
 │ internal:                                     │
 │ - SessionPool：复用、互斥、generation、回收  │
 │ - SessionStore：ADK Session/Event 持久化端口  │
-│ - ProviderAgent：Pi/Claude 原生协议适配       │
+│ - ProviderAgent：Pi/OpenCode 原生协议适配     │
 └───────────────────────────────────────────────┘
 ```
 
@@ -49,7 +49,7 @@ WorkerRuntime
 - HTTP、WebSocket、Worker 注册和 Server 重连。
 - Team、Project、Workspace、Task、Run、Review 权限和状态机。
 - UI DTO、Journal 页面投影和文案。
-- 安装或认证 Pi、Claude Code。
+- 安装或认证 Pi、OpenCode、Claude Code。
 - 任意 shell 执行或远程下发 executable/argv。
 
 删除此 Module 后，Session 互斥、Provider 生命周期、事件标准化和终态保证会重新散落到多个调用方，因此它是深 Module，不是转发层。
@@ -102,7 +102,19 @@ Wemux 状态放在 `customMetadata.wemux` 中；Provider 私有数据放在 `cus
 
 ## 4. ADK 兼容级别
 
-公共契约命名为版本化的 **Wemux ADK Profile**。其 wire schema 由 Wemux 独立维护，不直接采用某个 `@google/adk` 版本的内部序列化格式；但核心字段必须保持可无损映射。
+公共契约命名为版本化的 **Wemux ADK Profile**，当前标识为 `wemux.adk.v1`，常量定义在 `@wemux/domain`，由 transport 握手引用而不是重新定义。其 wire schema 由 Wemux 独立维护，不直接采用某个 `@google/adk` 版本的内部序列化格式；但核心字段必须保持可无损映射。
+
+事件转换链固定为单向链路：
+
+```text
+Provider 原生事件
+  → Worker 内部 AgentSignal / AgentTurnEvent
+  → @wemux/agent-interchange AgentEvent（唯一公共执行契约）
+  → SessionEventPayload / JournalEvent（持久化与 UI 读模型）
+  → transport v2 data frame（可靠交付封装）
+```
+
+禁止从 Journal 反推另一套 Agent Event，也禁止把 `deliveryEpoch`、`directionSeq`、ACK 或连接状态写入 Agent 语义。
 
 “兼容”分三层，避免宣称不真实的 SDK 互换：
 
@@ -128,7 +140,7 @@ interface ProviderAgent {
 
 `ProviderSession` 只表达 Provider 原生会话能力：执行、命令、批准、关闭。它不持久化 ADK Session，不知道 Project/Workspace/Task，也不发送 Server 协议消息。
 
-真实 Adapter 至少两个：Pi 与 Claude，因此该 Seam 是真实的。测试使用协议桩，不再增加一个只会透传的“通用 CLI Adapter”。
+P1 首批真实 Adapter 基线为 Pi 与 OpenCode，因此该 Seam 必须以两者的能力差异完成验证。Claude Code 保留现有兼容能力，但不作为 P1 主验收目标。测试使用协议桩，不再增加一个只会透传的“通用 CLI Adapter”。
 
 ### 5.2 SessionPool
 
@@ -159,7 +171,7 @@ interface SessionStore {
 
 ## 6. Provider Adapter 规则
 
-Pi 与 Claude Adapter 必须满足同一合同：
+Pi 与 OpenCode Adapter 必须满足同一合同；Claude Code 兼容 Adapter 也遵守同一基础约束：
 
 - `execute` 只能在空闲 Session 上调用。
 - Event 必须携带当前 invocationId。
@@ -169,7 +181,21 @@ Pi 与 Claude Adapter 必须满足同一合同：
 - Adapter 不直接写 SQLite、不调用 Server transport、不创建产品 Session。
 - 原始 JSONL/RPC 解析和事件映射留在 Adapter 内部。
 
-Pi 可复用常驻 RPC 进程；Claude 若 CLI 不支持可靠 stdin 多轮，则可按 invocation 启动并用 `--resume` 恢复。外部 Interface 不暴露这一区别。
+Pi 可复用常驻 RPC 进程；OpenCode 当前按 invocation 执行 `opencode run --format json` 并用 `--session` 恢复。外部 Interface 不暴露这一区别。
+
+P1 能力必须由 `AgentCapability.runtime` 显式报告，而不是由 UI 按 Agent 名称猜测。当前验证矩阵：
+
+| 能力 | Pi | OpenCode |
+| --- | --- | --- |
+| resume | 支持，原生 session file | 支持，`sessionID` / `--session` |
+| tool lifecycle | 支持 | 支持 |
+| approval | 支持 RPC approval response | CLI JSON 模式不支持，必须报告 false |
+| usage | 当前未标准化报告 | 支持，聚合 step token/cache/cost |
+| cancel | 支持，abort + 有界进程回收 | 支持，SIGTERM 后 1 秒升级 SIGKILL |
+| structured output | 当前公共 Profile 未开放 | 当前公共 Profile 未开放 |
+| runtime commands | `compact`、`set_model`、`set_thinking_level` | 无；停止通过 invocation cancel |
+
+不支持的能力必须 fail closed；例如 OpenCode 不得伪造 approval 响应或向 UI 暴露不可执行命令。
 
 ## 7. 与现有代码的迁移
 
@@ -177,7 +203,7 @@ Pi 可复用常驻 RPC 进程；Claude 若 CLI 不支持可靠 stdin 多轮，�
 
 1. 在 `packages/agent-interchange` 定义零运行时依赖的兼容类型与 `AgentRunner` Interface。
 2. 将 `RuntimeSessionManager` 收入 Runner implementation，调用方不再获取/释放 lease。
-3. 将现有 Pi/Claude runtime-session adapter 改为 `ProviderAgent` Adapter。
+3. 将现有 Pi/OpenCode runtime-session adapter 保持在 `ProviderAgent` 内部 Seam；Claude Code 作为兼容 Adapter。
 4. 增加 Worker SQLite `SessionStore` Adapter；非 partial Event 在 Runner 内先持久化再 yield。
 5. `WorkerRuntime` 只调用 `runner.run()` 并将 `AgentEvent` 映射到现有 Journal；过渡期保留一个单向 mapper。
 6. 删除 `LegacyRuntimeSessionAdapter` 和旧 `startTurn` 双状态机。
@@ -191,7 +217,7 @@ Pi 可复用常驻 RPC 进程；Claude 若 CLI 不支持可靠 stdin 多轮，�
 必须覆盖：
 
 - 连续两次 invocation 复用同一 Pi 进程且 Session 历史连续。
-- Claude 按轮进程恢复时对调用方保持同一语义。
+- OpenCode 按轮进程恢复时对调用方保持同一语义。
 - 同 Session 并发被拒绝或排队，不出现两个活动 invocation。
 - 不同 Session 不串 Event、native session、批准或错误。
 - partial Event 被流式返回但不持久化；背压时允许合并、限速或丢弃；非 partial Event 按 `sessionSequence` 顺序持久化并可重放。
@@ -208,7 +234,7 @@ Pi 可复用常驻 RPC 进程；Claude 若 CLI 不支持可靠 stdin 多轮，�
 - 不把 SQLite、WebSocket、HTTP client 塞进 Provider Adapter。
 - 不为了“插件化”暴露 spawn、argv、env 或原始 JSON parser。
 - 不创建 Agent、Runner、SessionManager、EventBus 四个同样浅的公开 Interface。
-- 不宣称 Pi/Claude 本身实现了 Google ADK；它们是可映射到 ADK 执行语义的 Provider Adapter。
+- 不宣称 Pi/OpenCode/Claude Code 本身实现了 Google ADK；它们是可映射到 ADK 执行语义的 Provider Adapter。
 
 ## 10. 参考基线
 

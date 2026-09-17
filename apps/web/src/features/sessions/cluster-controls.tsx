@@ -62,19 +62,19 @@ export function ClusterControls({ api, session, activeTurnId, queuedItems, pendi
     const action: ActionState = {
       commandId: previous?.status === 'error' ? previous.commandId : randomId(),
       operationId: previous?.status === 'error' ? previous.operationId : randomId(),
-      status: 'sending', message: '…',
+      status: 'sending', message: '正在提交…',
     }
     update('compact', action)
     void api.invokeRuntimeCommand(session.id, { commandId: action.commandId, operationId: action.operationId, name: 'compact' }).then(result => {
-      if (result.commandId !== action.commandId) throw new Error('，。')
-      update('compact', { ...action, status: 'pending', message: '， Worker 。' })
-    }).catch(error => update('compact', { ...action, status: 'error', message: error instanceof Error ? error.message : '，。' }))
+      if (result.commandId !== action.commandId) throw new Error('响应身份不匹配，请核对后重试。')
+      update('compact', { ...action, status: 'pending', message: '压缩请求已提交，等待 Worker 执行。' })
+    }).catch(error => update('compact', { ...action, status: 'error', message: error instanceof Error ? error.message : '请求失败，重试将复用原请求身份。' }))
   }
   const feedback = (key: string) => actions[key] && <p role={['error', 'rejected'].includes(actions[key].status) ? 'alert' : 'status'} className="break-words text-xs text-muted-foreground">{actions[key].message}</p>
   return <section aria-label="会话运行控制" className="max-h-[35dvh] shrink-0 space-y-2 overflow-auto border-t border-border px-3 py-2 sm:px-6">
     <div className="flex flex-wrap gap-2">
       <Button size="sm" variant="outline" disabled={!activeTurnId || blocked(`stop:${activeTurnId}`)} onClick={() => { if (activeTurnId) void run(`stop:${activeTurnId}`, commandId => api.stopTurn(session.id, activeTurnId, commandId)) }}>停止当前回合</Button>
-      <Button size="sm" variant="outline" disabled={compactBlocked || Boolean(activeTurnId) || queuedItems.length > 0} onClick={compact}>{actions.compact?.status === 'accepted' ? '' : actions.compact?.status === 'error' ? '' : ''}</Button>
+      <Button size="sm" variant="outline" disabled={compactBlocked || Boolean(activeTurnId) || queuedItems.length > 0} onClick={compact}>{actions.compact && ['sending', 'pending'].includes(actions.compact.status) ? '正在压缩上下文…' : actions.compact?.status === 'error' ? '重试压缩上下文' : '压缩上下文'}</Button>
     </div>
     {activeTurnId && feedback(`stop:${activeTurnId}`)}{feedback('compact')}
     {queuedItems.length > 0 && <div><h2 className="text-xs font-medium">排队消息（{queuedItems.length}）</h2><ol className="space-y-2">{queuedItems.map(item => <li key={item.messageId} className="text-sm"><div className="flex items-start gap-2"><p className="min-w-0 flex-1 whitespace-pre-wrap break-words">{item.content}</p><Button size="sm" variant="ghost" disabled={blocked(`cancel:${item.commandId}`)} onClick={() => { void run(`cancel:${item.commandId}`, commandId => api.cancelQueued(session.id, item.commandId, commandId)) }}>取消排队</Button></div>{feedback(`cancel:${item.commandId}`)}</li>)}</ol></div>}

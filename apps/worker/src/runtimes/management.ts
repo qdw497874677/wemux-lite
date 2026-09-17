@@ -59,6 +59,7 @@ export const runRuntimeProcess: RuntimeProcess = request => new Promise((resolve
 // Exact official registry releases, not user-controlled package specs or shell commands.
 export const installCatalog = {
   pi: { name: '@earendil-works/pi-coding-agent', version: '0.85.1', bin: 'dist/bundle/cli.js' },
+  opencode: { name: 'opencode-ai', version: '1.18.31', bin: 'bin/opencode.exe' },
   'claude-code': { name: '@anthropic-ai/claude-code', version: '2.1.34', bin: 'cli.js' },
 } as const
 export const installWarning = '警告：此操作将从 https://registry.npmjs.org 下载固定版本的官方 npm 包及依赖，可能执行包的安装脚本；需要网络并信任上游代码。仅安装到 Worker home，不使用全局安装、不覆盖已有 Agent。请明确提供 --yes。'
@@ -83,7 +84,7 @@ export async function useAgent(home: string, value: string | undefined, executab
 
 export async function installAgent(home: string, value: string | undefined, yes: boolean, run: RuntimeProcess = runRuntimeProcess) {
   const key: RuntimeKey = runtimeKey(value)
-  if (key !== 'pi' && key !== 'claude-code') throw new Error(`${key} 暂不支持托管安装；请自行安装后使用 agent use ${key} --path 绝对路径（目前仅检测，不支持执行）`)
+  if (key !== 'pi' && key !== 'opencode' && key !== 'claude-code') throw new Error(`${key} 暂不支持托管安装；请自行安装后使用 agent use ${key} --path 绝对路径（目前仅检测，不支持执行）`)
   if (!yes) throw new Error(installWarning)
   if (process.platform === 'win32') throw new Error('托管 npm 安装暂不支持 Windows；请在 WSL 使用，或通过 agent use 选择可直接执行的本地文件')
   const spec = installCatalog[key]
@@ -109,7 +110,7 @@ export async function installAgent(home: string, value: string | undefined, yes:
     await run({ command: 'npm', args: ['install', '--global=false', '--prefix', directory, '--no-save', '--package-lock=false', '--no-audit', '--no-fund', '--registry=https://registry.npmjs.org', '--', packageSpec], cwd: directory, env, timeout: 300_000 })
     const root = join(directory, 'node_modules', spec.name)
     const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
-    const binName = key === 'pi' ? 'pi' : 'claude'
+    const binName = key === 'pi' ? 'pi' : key === 'opencode' ? 'opencode' : 'claude'
     if (manifest.name !== spec.name || manifest.version !== spec.version || manifest.bin?.[binName] !== spec.bin) throw new Error('安装包名称、版本或入口与固定目录不匹配；保留原有选择')
     const executable = join(root, spec.bin)
     const version = await validateExecutable(executable, run)

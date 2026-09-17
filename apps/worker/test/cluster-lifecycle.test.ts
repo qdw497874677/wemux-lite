@@ -1,18 +1,40 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
-import { WebSocketServer } from 'ws'
+import { WebSocketServer, type WebSocket } from 'ws'
 import type { Timestamp, WorkerId } from '@wemux/domain'
 import { SqliteWorkerStore } from '../src/storage/sqlite-store.js'
 import { ensureLocalInstallation } from '../src/application/local-installation.js'
 import { createLocalWorkbenchService } from '../src/application/local-workbench.js'
 import { ClusterLifecycle } from '../src/application/cluster-lifecycle.js'
 import { TestAgent } from '../src/agents/test-agent.js'
+import { TestRuntimeSessionAdapter } from '../src/agents/test-runtime-session-adapter.js'
 import { WorkerRuntime } from '../src/application/runtime.js'
 import { main } from '../src/cli.js'
+import { WEMUX_ADK_PROFILE_V1, parseWorkerTransportFrame, type TransportWorkerHello } from '@wemux/wire-protocol'
+
+function acceptTransportV2(socket: WebSocket) {
+  socket.once('message', raw => {
+    const hello = parseWorkerTransportFrame(JSON.parse(raw.toString()))
+    assert.equal(hello.frameType, 'transport.hello')
+    assert.equal(hello.side, 'worker')
+    const workerHello = hello as TransportWorkerHello
+    socket.send(JSON.stringify({
+      frameType: 'transport.hello', side: 'server', selectedTransport: { major: 2, minor: 0 },
+      selectedAdkProfile: WEMUX_ADK_PROFILE_V1, enabledFeatures: [],
+      logicalConnectionId: randomUUID(), connectionEpoch: randomUUID(), resumeAccepted: true,
+      authoritativeCursors: {
+        workerToServer: workerHello.resume.workerToServer,
+        serverToWorker: { deliveryEpoch: randomUUID(), ackThrough: 0 },
+      },
+      acceptedAt: new Date().toISOString(),
+    }))
+  })
+}
 
 async function fixture() {
   const home = await mkdtemp(join(tmpdir(), 'wemux-lifecycle-'))
@@ -185,5 +207,60 @@ test('CLI persisted identity startup uses ClusterLifecycle as its single owner',
     if (process.listenerCount('SIGTERM')) process.emit('SIGTERM')
     await settled
     await f.close()
+  }
+})
+
+test('connect proceeds when previous runtime shutdown hangs on a stuck agent turn', async t => {
+  // 回归：local runtime 上有一个永不结束的 turn（provider 子进程挂死、stop/close 均无响应）时，
+  // connect() 不得被 previous.shutdown() 永久阻塞：先同步强杀，再限时等待旧 runtime 收尾。
+  const f = await fixture()
+  const server = createServer()
+  const sockets = new WebSocketServer({ server })
+  let connections = 0
+  sockets.on('connection', socket => { connections++; acceptTransportV2(socket) })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const closeAttempts: string[] = []
+  let executeStarted = false
+  let releaseProcess!: () => void
+  const processExited = new Promise<void>(resolve => { releaseProcess = resolve })
+  const stuckSession = {
+    execute: async () => {
+      executeStarted = true
+      return {
+        signals: (async function* () { await processExited })(),
+        stop: async () => { await processExited },
+      }
+    },
+    command: async () => {},
+    resolveApproval: async () => {},
+    close: async () => { closeAttempts.push('close'); await new Promise(() => {}) },
+    kill: () => { closeAttempts.push('kill'); releaseProcess() },
+  }
+  t.mock.method(TestRuntimeSessionAdapter.prototype, 'openSession', async () => stuckSession)
+  try {
+    await f.lifecycle.initializeLocalRuntime()
+    const workbench = createLocalWorkbenchService(f.store, f.lifecycle)
+    const directory = await workbench.addDirectory(f.home)
+    const session = await workbench.createSession({ workspaceId: directory.workspaceId, agentKey: 'test', modelId: 'test' })
+    // 直接驱动 runtime 执行 turn（不经过 initialize 的重放），确保 execute() 被调用并卡死，
+    // 从而占住 session serial 锁——这正是 connect() 必须绕过的挂起状态。
+    const runtime = (f.lifecycle as unknown as { runtime: { executeLocal(commandId: string, command: unknown): Promise<unknown> } }).runtime
+    await runtime.executeLocal('cmd-stuck', { kind: 'session.enqueue', sessionId: session.sessionId, message: { messageId: 'msg-stuck', content: 'hang forever' } })
+    await waitFor(() => executeStarted)
+    // turn 已进入卡死的 execute；现在 identity 就绪并 connect
+    f.identity(`ws://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/ws/worker`)
+    await writeFile(join(f.home, 'credential'), 'secret')
+    const raced = await Promise.race([
+      f.lifecycle.connect().then(() => 'connected', () => 'rejected'),
+      new Promise(resolve => setTimeout(() => resolve('timeout'), 4000).unref()),
+    ])
+    assert.equal(raced, 'connected', 'connect() must not block on a hung previous runtime shutdown')
+    await waitFor(() => connections > 0 && f.lifecycle.connection().phase === 'online')
+    assert.deepEqual(closeAttempts.slice(0, 1), ['kill'], 'runtime replacement must synchronously kill the stuck provider')
+  } finally {
+    for (const socket of sockets.clients) socket.terminate()
+    await new Promise<void>(resolve => sockets.close(() => resolve()))
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    await f.close().catch(() => {})
   }
 })

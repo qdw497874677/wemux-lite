@@ -108,6 +108,22 @@ export class RuntimeSessionManager {
     await Promise.all([...this.entries.keys()].map(id => this.closeSession(id)))
   }
 
+  /**
+   * 同步强制终止：调用每个 session 的同步 kill()（立即 SIGKILL 子进程），
+   * 让挂起的 execute 迭代器因进程退出而结束、释放 serial 锁，
+   * 随后异步走正常 closeSession 清理。永不挂起。
+   */
+  abort(): void {
+    this.stopped = true
+    const ids = [...this.entries.keys()]
+    for (const [, entry] of this.entries) {
+      if (entry.timer) clearTimeout(entry.timer)
+      entry.timer = null
+      try { entry.session.kill?.() } catch { /* best effort */ }
+    }
+    void Promise.all(ids.map(id => this.closeSession(id))).catch(() => {})
+  }
+
   snapshot() {
     return [...this.entries].map(([sessionId, entry]) => ({ sessionId, generation: entry.generation, leases: entry.leases, fingerprint: entry.fingerprint }))
   }

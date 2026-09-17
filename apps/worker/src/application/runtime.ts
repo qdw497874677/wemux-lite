@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import type { AgentEvent } from '@wemux/agent-interchange'
-import type { ApprovalId, CommandId, EventSeq, SessionId, Timestamp, ToolCallId, Turn, TurnId, WorkerId } from '@wemux/domain'
+import { projectAgentEventToSessionPayload, type AgentEvent } from '@wemux/agent-interchange'
+import type { CommandId, EventSeq, SessionId, Timestamp, Turn, TurnId, WorkerId } from '@wemux/domain'
 import type { CommandReceipt, ServerToWorker, WorkerCommand, WorkerToServer } from '@wemux/wire-protocol'
 import type { AgentAdapter, AgentTurnEvent, AgentTurnOutcome } from './ports/agent-adapter.js'
 import type { AgentLaunchContextProvider } from './ports/agent-launch-context.js'
@@ -14,8 +14,6 @@ const now = () => new Date().toISOString() as Timestamp
 const DEFAULT_AGENT_IDLE_TIMEOUT_MS = 30_000
 const DEFAULT_AGENT_MAX_TIMEOUT_MS = 10 * 60_000
 class AgentTimeoutError extends Error {}
-import { envelope } from '../domain/envelope.js'
-export { envelope } from '../domain/envelope.js'
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
   if (value && typeof value === 'object') return `{${Object.entries(value).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(',')}}`
@@ -31,6 +29,8 @@ export class WorkerRuntime {
   private commands: Promise<unknown> = Promise.resolve()
   private publishing: Promise<unknown> = Promise.resolve()
   private closing = false
+  /** shutdown 可能因 agent 子进程或 in-flight turn 挂起；abort 同步强制终止，供接管方超时后调用。 */
+  private aborted = false
   constructor(private readonly store: WorkerStore & LocalState & import('@wemux/agent-interchange').SessionStore, private readonly provisioner: WorkspaceProvisioner,
     private readonly agents: readonly AgentAdapter[], private readonly transport: RuntimeTransport,
     private readonly workerId: WorkerId, private readonly name: string,
@@ -57,8 +57,7 @@ export class WorkerRuntime {
   }
   async connected() {
     this.sent.clear()
-    this.send({ ...envelope(), type: 'hello', side: 'worker', workerId: this.workerId, workerVersion: '0.1.0', name: this.name, platform: process.platform, architecture: process.arch })
-    this.send({ ...envelope(), type: 'capability', workerId: this.workerId, capabilities: this.store.capabilities(), detectedAt: now() })
+    this.send({ type: 'capability', workerId: this.workerId, capabilities: this.store.capabilities(), detectedAt: now() })
     await this.sendHeads()
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = setInterval(() => { void this.sendHeads() }, 1_000)
@@ -71,7 +70,7 @@ export class WorkerRuntime {
       if (message.type === 'command') await this.command(message.commandId, message.command, true, 'cluster')
       if (message.type === 'sync') {
         if (await this.isLocalSession(message.sessionId)) {
-          this.send({ ...envelope(), type: 'sync', kind: 'gap', sessionId: message.sessionId, fromSeq: message.fromSeq, reason: 'Requested journal range is unavailable' })
+          this.send({ type: 'sync', kind: 'gap', sessionId: message.sessionId, fromSeq: message.fromSeq, reason: 'Requested journal range is unavailable' })
           return
         }
         const original = await this.store.journal.read(message)
@@ -83,8 +82,8 @@ export class WorkerRuntime {
         const page = { events, throughSeq: (events.at(-1)?.seq ?? message.fromSeq - 1) as EventSeq, hasMore: original.hasMore || events.length < original.events.length }
         const head = (await this.store.journal.listHeads()).find(h => h.sessionId === message.sessionId)
         if (!head || message.fromSeq > head.lastSeq + 1 || page.events.some((event,i) => event.seq !== message.fromSeq + i) || (!page.events.length && message.fromSeq <= head.lastSeq)) {
-          this.send({ ...envelope(), type: 'sync', kind: 'gap', sessionId: message.sessionId, fromSeq: message.fromSeq, reason: 'Requested journal range is unavailable' })
-        } else this.send({ ...envelope(), type: 'sync', kind: 'batch', sessionId: message.sessionId, ...page })
+          this.send({ type: 'sync', kind: 'gap', sessionId: message.sessionId, fromSeq: message.fromSeq, reason: 'Requested journal range is unavailable' })
+        } else this.send({ type: 'sync', kind: 'batch', sessionId: message.sessionId, ...page })
       }
     })
     this.commands = next.catch(() => {})
@@ -96,12 +95,12 @@ export class WorkerRuntime {
     this.commands = next.catch(() => {})
     return next
   }
-  private send(message: WorkerToServer) { this.transport.send(message) }
+  private send(message: WorkerToServer) { return this.transport.send(message) }
   private async sendHeads() {
     if (this.closing) return
     const heads = []
     for (const head of await this.store.journal.listHeads()) if (!(await this.isLocalSession(head.sessionId))) heads.push(head)
-    this.send({ ...envelope(), type: 'sync', kind: 'heads', complete: true, heads })
+    this.send({ type: 'sync', kind: 'heads', complete: true, heads })
   }
   private async isLocalSession(sessionId: SessionId) {
     const installationId = this.store.localInstallation()?.installationId
@@ -119,7 +118,7 @@ export class WorkerRuntime {
     if (previous) {
       if (previous.payloadFingerprint !== payloadFingerprint) receipt = { commandId, status: 'rejected', error: { code: 'conflicting-command', message: 'Command ID reused with a different payload', retryable: false } }
       else if (previous.state === 'rejected') receipt = previous.result as CommandReceipt
-      if (acknowledge) this.send({ ...envelope(), type: 'ack', receipt })
+      if (acknowledge) this.send({ type: 'ack', receipt })
       return receipt
     }
     try {
@@ -144,7 +143,7 @@ export class WorkerRuntime {
       receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: error instanceof Error ? error.message : 'Invalid command', retryable: false } }
       await this.store.transaction(tx => tx.commands.record({ commandId, command, payloadFingerprint }, receipt))
     }
-    if (acknowledge) this.send({ ...envelope(), type: 'ack', receipt })
+    if (acknowledge) this.send({ type: 'ack', receipt })
     if (receipt.status === 'rejected') return receipt
     if (command.kind === 'workspace.provision') {
       this.startProvision(commandId, command)
@@ -246,7 +245,7 @@ export class WorkerRuntime {
   private async report(id: import('@wemux/domain').WorkspaceId) {
     const workspace = await this.store.workspaces.get(id)
     if (!workspace) return
-    this.send({ ...envelope(), type: 'event', scope: 'workspace', report: { ...(workspace.provisionCommandId ? { commandId: workspace.provisionCommandId } : {}), workspaceId: id, status: workspace.status, reason: workspace.failureReason, occurredAt: workspace.updatedAt,
+    this.send({ type: 'event', scope: 'workspace', report: { ...(workspace.provisionCommandId ? { commandId: workspace.provisionCommandId } : {}), workspaceId: id, status: workspace.status, reason: workspace.failureReason, occurredAt: workspace.updatedAt,
       location: workspace.status === 'ready' ? { workspaceId: id, workerId: this.workerId, rootPath: workspace.rootPath, checkouts: await this.store.workspaces.listRepositoryCheckouts(id) } : null } })
   }
   private schedule(id: SessionId) {
@@ -311,10 +310,10 @@ export class WorkerRuntime {
             break
           }
           const nativeSession = event.customMetadata?.wemux?.nativeSession
-          const journalEvent = this.toJournalEvent(event)
+          const journalEvent = projectAgentEventToSessionPayload(event, turn.id)
           await this.store.transaction(async tx => {
             if (nativeSession) await tx.sessions.bindNativeSession({ sessionId: turn.sessionId, nativeSession })
-            if (journalEvent) await tx.appendJournal(turn.sessionId, [{ occurredAt: event.timestamp, payload: { ...journalEvent, turnId: turn.id } }])
+            if (journalEvent) await tx.appendJournal(turn.sessionId, [{ occurredAt: event.timestamp, payload: journalEvent }])
           })
           await this.publish()
         }
@@ -331,22 +330,6 @@ export class WorkerRuntime {
       : { turnId: turn.id, outcome: outcome.status, finishedAt: now() }))
     await this.publish()
   }
-  private toJournalEvent(event: AgentEvent): AgentTurnEvent | null {
-    const text = event.content?.parts.map(part => 'text' in part ? part.text : '').join('')
-    if (text) return { kind: 'assistant.text.delta', text }
-    if (event.customMetadata?.wemux?.usage) return { kind: 'usage.updated', usage: event.customMetadata.wemux.usage }
-    const provider = event.customMetadata?.provider
-    if (!provider || typeof provider.kind !== 'string') return null
-    switch (provider.kind) {
-      case 'tool.started': return { kind: 'tool.started', toolCallId: provider.toolCallId as ToolCallId, toolName: String(provider.toolName), input: provider.input }
-      case 'tool.output.delta': return { kind: 'tool.output.delta', toolCallId: provider.toolCallId as ToolCallId, text: String(provider.text ?? '') }
-      case 'tool.finished': return { kind: 'tool.finished', toolCallId: provider.toolCallId as ToolCallId, exitCode: typeof provider.exitCode === 'number' ? provider.exitCode : null }
-      case 'approval.requested': return { kind: 'approval.requested', approvalId: provider.approvalId as ApprovalId, action: provider.action, reason: typeof provider.reason === 'string' ? provider.reason : undefined }
-      case 'compaction.started': return { kind: 'compaction.started', reason: typeof provider.reason === 'string' ? provider.reason : undefined }
-      case 'compaction.finished': return { kind: 'compaction.finished', summary: typeof provider.summary === 'string' ? provider.summary : undefined }
-      default: return null
-    }
-  }
   private publish(): Promise<void> {
     const work = this.publishing.then(async () => {
       for (const head of await this.store.journal.listHeads()) {
@@ -355,7 +338,7 @@ export class WorkerRuntime {
         while (from <= head.lastSeq) {
           const page = await this.store.journal.read({ sessionId: head.sessionId, fromSeq: from as EventSeq, limit: 256 })
           if (!page.events.length) break
-          for (const event of page.events) this.send({ ...envelope(), type: 'event', scope: 'session', event })
+          for (const event of page.events) await this.send({ type: 'event', scope: 'session', event })
           from = page.throughSeq + 1
           this.sent.set(head.sessionId, page.throughSeq)
         }
@@ -374,5 +357,14 @@ export class WorkerRuntime {
     await Promise.all(this.provisions.values())
     await Promise.all(this.tasks.values())
     await this.publishing
+  }
+  /** 同步强制终止：不等待任何 in-flight promise，只杀 agent 子进程。永不挂起。 */
+  abort() {
+    if (this.aborted) return
+    this.aborted = true
+    this.closing = true
+    if (this.headRefresh) clearInterval(this.headRefresh)
+    this.headRefresh = null
+    try { this.agentRunner.abort() } catch {}
   }
 }

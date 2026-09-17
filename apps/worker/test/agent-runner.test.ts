@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { join } from 'node:path'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { MemorySessionStore, textContent } from '@wemux/agent-interchange'
+import { MemorySessionStore, projectAgentEventToSessionPayload, textContent } from '@wemux/agent-interchange'
 import type { AgentKey, MessageId, ModelId, SessionId, TurnId } from '@wemux/domain'
 import { WorkerAgentRunner } from '../src/application/agent-runner.js'
 import type { AgentRuntimeSession, RuntimeSessionAdapter } from '../src/application/ports/runtime-session.js'
@@ -35,6 +35,41 @@ async function collect<T>(iterable: AsyncIterable<T>) {
 
 const detection = { agentKey, displayName: 'Test', available: true, version: null, executablePath: '/test', models: [], commands: [], authorization: { state: 'authorized' as const }, diagnostics: [] }
 const executionAgent = { agentKey, mode: 'execution' as const, async detect() { return detection } }
+
+test('Pi-like and OpenCode-like providers satisfy the same public AgentRunner contract', async () => {
+  for (const provider of ['pi', 'opencode'] as const) {
+    const key = provider as AgentKey
+    const runtime: AgentRuntimeSession = {
+      async execute(input) {
+        return {
+          signals: (async function* () {
+            yield { kind: 'native-session', nativeSession: `${provider}:native` as never } as const
+            yield { kind: 'event', event: { kind: 'assistant.text.delta', text: `${provider}:reply` } } as const
+            yield { kind: 'event', event: { kind: 'usage.updated', usage: { scope: 'operation', subjectId: input.operationId, inputTokens: 2, outputTokens: 3, totalTokens: 5 } } } as const
+            yield { kind: 'finished', outcome: { status: 'completed' } } as const
+          })(),
+          async stop() {},
+        }
+      },
+      async close() {},
+    }
+    const runner = new WorkerAgentRunner({
+      agents: [{ agentKey: key, mode: 'execution' as const, async detect() { return { ...detection, agentKey: key, displayName: provider } } }],
+      runtimeAdapters: new Map([[key, { async openSession() { return runtime } }]]),
+    })
+    const events = await collect(runner.run(request({ agentKey: key, invocationId: `${provider}-turn` as TurnId })))
+    assert.equal(events.some(event => event.partial && event.content?.parts.some(part => 'text' in part && part.text === `${provider}:reply`)), true)
+    assert.equal(events.some(event => event.customMetadata?.wemux?.usage?.totalTokens === 5), true)
+    assert.equal(events.at(-1)?.customMetadata?.wemux?.terminal, 'completed')
+    assert.equal(events.filter(event => event.customMetadata?.wemux?.terminal !== undefined).length, 1)
+    const projected = events.flatMap(event => {
+      const payload = projectAgentEventToSessionPayload(event, `${provider}-turn` as TurnId)
+      return payload ? [payload] : []
+    })
+    assert.deepEqual(projected.map(event => event.kind), ['assistant.text.delta', 'usage.updated'])
+    await runner.close()
+  }
+})
 
 test('runner owns the lease, maps signals, persists non-partial events, and reuses provider session', async () => {
   let opens = 0

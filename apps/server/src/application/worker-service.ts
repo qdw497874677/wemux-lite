@@ -7,9 +7,9 @@ import { AppError, requireValue } from './errors.js'
 import { Notifications } from './notifications.js'
 import { newId, now } from './server-service.js'
 
-export const envelope = () => ({ protocolVersion: 1 as const, messageId: newId<'MessageId'>() })
-
 /** Worker ownership and journal consistency belong here, not in the WS adapter. */
+export const envelope = (): { readonly messageId: import('@wemux/domain').MessageId } => ({ messageId: newId<'MessageId'>() })
+
 export class WorkerService {
   constructor(private readonly store: ServerStore, private readonly notifications: Notifications) {}
   async recoverRuns() {
@@ -36,6 +36,13 @@ export class WorkerService {
     if (session.binding.agent.workerId !== workerId) throw new AppError(403, 'Session belongs to another worker')
     return session
   }
+  async connected(workerId: WorkerId, details: { readonly workerVersion: string; readonly platform: string; readonly name?: string }): Promise<void> {
+    await this.store.transaction(async tx => {
+      const worker = requireValue(await tx.resources.getWorker(workerId))
+      if (worker.connectionState === 'revoked') throw new AppError(403, 'Worker revoked')
+      await tx.resources.saveWorker({ ...worker, name: details.name ?? worker.name, connectionState: 'online', version: details.workerVersion, platform: details.platform, lastSeenAt: now() })
+    })
+  }
   async disconnected(workerId: WorkerId): Promise<void> {
     await this.store.transaction(async tx => {
       const worker = requireValue(await tx.resources.getWorker(workerId))
@@ -45,10 +52,10 @@ export class WorkerService {
     for (const session of await this.store.resources.listSessions()) if (session.binding.agent.workerId === workerId) this.notifications.session(session.id)
   }
   async deliverable(workerId: WorkerId): Promise<readonly ServerToWorker[]> {
-    return (await this.store.commands.listDeliverable(workerId, 100)).map(p => ({ ...envelope(), type: 'command', commandId: p.commandId, command: p.command }))
+    return (await this.store.commands.listDeliverable(workerId, 100)).map(p => ({ type: 'command', commandId: p.commandId, command: p.command }))
   }
   private request(sessionId: SessionId, seq: number): ServerToWorker {
-    return { ...envelope(), type: 'sync', kind: 'request', sessionId, fromSeq: (seq + 1) as EventSeq, limit: 500 }
+    return { type: 'sync', kind: 'request', sessionId, fromSeq: (seq + 1) as EventSeq, limit: 500 }
   }
   async receive(workerId: WorkerId, message: WorkerToServer): Promise<readonly ServerToWorker[]> {
     const replies: ServerToWorker[] = [], changed = new Set<SessionId>()
@@ -62,12 +69,7 @@ export class WorkerService {
       if (worker.connectionState === 'revoked') throw new AppError(403, 'Worker revoked')
       await tx.resources.saveWorker({ ...worker, lastSeenAt: now() })
       switch (message.type) {
-        case 'hello':
-          if (message.workerId !== workerId) throw new AppError(403, 'Worker identity mismatch')
-          await tx.resources.saveWorker({ ...worker, name: message.name, version: message.workerVersion, platform: `${message.platform}/${message.architecture}`, connectionState: 'online', lastSeenAt: now() })
-          replies.push({ ...envelope(), type: 'hello', side: 'server', connectionId: newId(), acceptedAt: now() })
-          break
-        case 'heartbeat': replies.push({ ...envelope(), type: 'heartbeat', nonce: message.nonce, sentAt: now() }); break
+        case 'heartbeat': replies.push({ type: 'heartbeat', nonce: message.nonce, sentAt: now() }); break
         case 'capability':
           if (message.workerId !== workerId) throw new AppError(403, 'Worker identity mismatch')
           await tx.resources.saveWorker({ ...worker, capabilities: message.capabilities, lastSeenAt: now() })
@@ -165,7 +167,6 @@ export class WorkerService {
             if (inserted || JSON.stringify(previous) !== JSON.stringify(await tx.cache.getFreshness(message.sessionId))) changed.add(message.sessionId)
           }
           break
-        case 'error': break
       }
       async function workspaceActivity(workspaceId: string, status: string, reason: string | null, occurredAt: string) {
         const workspace = requireValue(await tx.resources.getWorkspace(workspaceId as import('@wemux/domain').WorkspaceId))
@@ -174,7 +175,7 @@ export class WorkerService {
         if (!binding) return
         const task = requireValue(await tx.tasks.get(binding.taskId))
         await tx.tasks.save({ ...task, lastActivityAt: now() })
-        await tx.tasks.append({ taskId: task.id, projectId: task.projectId, type: 'workspace.provisioning', actor: workerId, requestId: message.messageId, occurredAt, payload: { workspaceId, status, reason } })
+        await tx.tasks.append({ taskId: task.id, projectId: task.projectId, type: 'workspace.provisioning', actor: workerId, requestId: newId(), occurredAt, payload: { workspaceId, status, reason } })
       }
       // Only contiguous journal entries influence the display projection.
       async function projectRuntime(sessionId: SessionId, start: number, through: EventSeq) {

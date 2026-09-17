@@ -313,9 +313,9 @@ test('Ticket06 exact notification recipient/type/count matrix with durable resta
   }
   const input = { runId: f.run.id, sessionId, requestId: 'cancel' }
   const cancel = (requestId = input.requestId) => tasks.cancelRun(f.task.projectId, f.task.id, f.run.id, { ...input, requestId }, context)
-  const ack = (id: string, rejected: boolean) => workers.receive(workerId, { protocolVersion: 1, messageId: 'ack' as MessageId, type: 'ack', receipt: rejected ? { commandId: id as CommandId, status: 'rejected', error: { code: 'invalid-input', message: 'Controlled rejection', retryable: false } } : { commandId: id as CommandId, status: 'accepted' } })
+  const ack = (id: string, rejected: boolean) => workers.receive(workerId, { type: 'ack', receipt: rejected ? { commandId: id as CommandId, status: 'rejected', error: { code: 'invalid-input', message: 'Controlled rejection', retryable: false } } : { commandId: id as CommandId, status: 'accepted' } })
   const event = (seq: number, payload: JournalEvent['payload']): JournalEvent => ({ sessionId, seq: seq as EventSeq, occurredAt: f.run.createdAt as Timestamp, payload })
-  const receive = (e: JournalEvent) => workers.receive(workerId, { protocolVersion: 1, messageId: 'event' as MessageId, type: 'event', scope: 'session', event: e })
+  const receive = (e: JournalEvent) => workers.receive(workerId, { type: 'event', scope: 'session', event: e })
   let http: ReturnType<typeof createServer> | undefined
   try {
     subscribe()
@@ -336,7 +336,7 @@ test('Ticket06 exact notification recipient/type/count matrix with durable resta
     await check('terminal idempotent HTTP-equivalent service replay', () => cancel('retry'), [])
     const finished = await store.tasks.activity(f.task.id, 0)
     await check('duplicate terminal Journal', () => receive(terminal), [])
-    await check('duplicate terminal Journal batch', () => workers.receive(workerId, { protocolVersion: 1, messageId: 'batch' as MessageId, type: 'sync', kind: 'batch', sessionId, events: [terminal], throughSeq: terminal.seq, hasMore: false }), [])
+    await check('duplicate terminal Journal batch', () => workers.receive(workerId, { type: 'sync', kind: 'batch', sessionId, events: [terminal], throughSeq: terminal.seq, hasMore: false }), [])
     await check('late conflicting rejected receipt after terminal rolls back', () => assert.rejects(ack(retryTarget, true), /Conflicting receipt/), [])
     const third = event(4, { kind: 'session.runtime.changed', state: 'idle', reason: null })
     const second = event(3, { kind: 'session.runtime.changed', state: 'idle', reason: null })
@@ -377,10 +377,10 @@ test('Ticket06 exact notification recipient/type/count matrix with durable resta
         assert.deepEqual(snapshot(observer), before)
       }
     } finally { observer.close() }
-    await check('wrong Worker Session scope', () => assert.rejects(workers.receive('missing-worker' as WorkerId, { protocolVersion: 1, messageId: 'wrong' as MessageId, type: 'event', scope: 'session', event: terminal })), [])
+    await check('wrong Worker Session scope', () => assert.rejects(workers.receive('missing-worker' as WorkerId, { type: 'event', scope: 'session', event: terminal })), [])
     await check('settle initial enqueue', () => ack(f.run.enqueueCommandId, false), [command])
-    await check('Worker hello after restart', () => workers.receive(workerId, { protocolVersion: 1, messageId: 'hello' as MessageId, type: 'hello', side: 'worker', workerId, name: 'Evidence worker', workerVersion: 'test', platform: 'linux', architecture: 'x64' }), [])
-    await check('fresh live head after restart', () => workers.receive(workerId, { protocolVersion: 1, messageId: 'head' as MessageId, type: 'sync', kind: 'heads', complete: true, heads: [{ sessionId, lastSeq: 4 as EventSeq }] }), [session, command])
+    await check('Worker hello after restart', () => workers.connected(workerId, { name: 'Evidence worker', workerVersion: 'test', platform: 'linux' }), [])
+    await check('fresh live head after restart', () => workers.receive(workerId, { type: 'sync', kind: 'heads', complete: true, heads: [{ sessionId, lastSeq: 4 as EventSeq }] }), [session, command])
     await check('delete Session', () => server.delete('sessions', sessionId), [session, command])
     await check('delete replay rejected', () => assert.rejects(server.delete('sessions', sessionId)), [])
     const deletedRun = await store.tasks.run(f.run.id), deletedActivities = await store.tasks.activity(f.task.id, 0)
@@ -388,7 +388,7 @@ test('Ticket06 exact notification recipient/type/count matrix with durable resta
     signals = new Notifications(); server = new ServerService(store, signals); workers = new WorkerService(store, signals); subscribe()
     await check('deleted restart reconciliation', () => workers.recoverRuns(), [])
     await check('deleted late/out-of-order events', async () => { await receive(third); await receive(terminal); await receive(second) }, [])
-    await check('deleted late head', () => workers.receive(workerId, { protocolVersion: 1, messageId: 'head' as MessageId, type: 'sync', kind: 'heads', complete: true, heads: [{ sessionId, lastSeq: 10 as EventSeq }] }), [])
+    await check('deleted late head', () => workers.receive(workerId, { type: 'sync', kind: 'heads', complete: true, heads: [{ sessionId, lastSeq: 10 as EventSeq }] }), [])
     assert.deepEqual(await store.tasks.run(f.run.id), deletedRun)
     assert.deepEqual(await store.tasks.activity(f.task.id, 0), deletedActivities)
     assert.deepEqual((await store.cache.readEvents(sessionId, 1 as EventSeq, 100)).events, [])

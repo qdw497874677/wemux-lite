@@ -20,7 +20,10 @@
   --color-border: hsl(221 18% 20%);
   --color-input: hsl(221 18% 22%);
   --color-ring: hsl(244 78% 70%);
-  --radius: .625rem;
+  --radius: 1rem;
+  --radius-lg: 1.5rem;
+  --radius-xl: 2rem;
+  --radius-pill: 9999px;
 
   /* Motion tokens — single source of truth for all transitions. */
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
@@ -30,17 +33,19 @@
   --duration-slow: 380ms;
 
   /* Elevation tokens — hue-matched shadows, never pure black. */
-  --shadow-sm: 0 1px 2px hsl(224 32% 3% / .4);
-  --shadow-md: 0 2px 8px hsl(224 32% 3% / .35), 0 8px 24px hsl(224 32% 3% / .2);
-  --shadow-lg: 0 4px 12px hsl(224 32% 3% / .4), 0 16px 48px hsl(224 32% 3% / .25);
-  --shadow-glow: 0 0 20px hsl(244 75% 64% / .15);
+  --shadow-sm: 0 2px 4px hsl(224 32% 3% / .3);
+  --shadow-md: 0 4px 12px hsl(224 32% 3% / .25), 0 12px 32px hsl(224 32% 3% / .15);
+  --shadow-lg: 0 8px 24px hsl(224 32% 3% / .3), 0 24px 64px hsl(224 32% 3% / .2);
+  --shadow-glow: 0 0 32px hsl(244 75% 64% / .2);
+  --shadow-float: 0 8px 32px hsl(224 32% 3% / .4), 0 2px 8px hsl(224 32% 3% / .2);
 }
 
 * { box-sizing: border-box; border-color: var(--color-border); }
 html { color-scheme: dark; background: var(--color-background); overflow-x: clip; }
 #root { width: 100%; min-width: 0; max-width: 100vw; overflow-x: clip; }
 body { margin: 0; min-width: 0; min-height: 100vh; overflow: hidden; background: var(--color-background); color: var(--color-foreground); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; }
-button, input, textarea, select { font: inherit; }
+button, input, textarea, select { font: inherit; color: var(--color-foreground); }
+select { color-scheme: dark; }
 button, [role="button"], a, summary, select { touch-action: manipulation; }
 ::selection { background: hsl(244 75% 64% / .35); }
 :focus-visible { outline: 2px solid var(--color-ring); outline-offset: 2px; }
@@ -60,11 +65,35 @@ code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospac
 
 /* Glassmorphism surface — use sparingly for overlays/panels only. */
 .surface-glass {
-  background: hsl(223 26% 10% / .72);
-  backdrop-filter: blur(16px) saturate(1.4);
-  -webkit-backdrop-filter: blur(16px) saturate(1.4);
-  border: 1px solid hsl(216 24% 96% / .07);
-  box-shadow: inset 0 1px 0 hsl(216 24% 96% / .05), var(--shadow-md);
+  background: hsl(223 26% 10% / .68);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  border: 1px solid hsl(216 24% 96% / .08);
+  box-shadow: inset 0 1px 0 hsl(216 24% 96% / .06), var(--shadow-float);
+}
+
+/* Gradient accent utilities */
+.gradient-primary {
+  background: linear-gradient(135deg, hsl(244 75% 64%) 0%, hsl(280 70% 60%) 50%, hsl(320 75% 65%) 100%);
+}
+.gradient-subtle {
+  background: linear-gradient(135deg, hsl(244 75% 64% / .15) 0%, hsl(280 70% 60% / .1) 100%);
+}
+.gradient-border {
+  position: relative;
+  background: var(--color-card);
+}
+.gradient-border::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, hsl(244 75% 64% / .4), hsl(280 70% 60% / .2), hsl(320 75% 65% / .3));
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
 }
 @media (prefers-reduced-transparency: reduce) {
   .surface-glass { background: var(--color-card); backdrop-filter: none; -webkit-backdrop-filter: none; }

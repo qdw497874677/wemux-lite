@@ -69,7 +69,27 @@ class PiRuntimeSession implements AgentRuntimeSession {
     await writeLine(child, { type: 'approval_response', id: approvalId, approved: decision === 'approve' })
   }
 
-  async close(): Promise<void> { if (this.child && !this.child.killed) this.child.kill('SIGTERM'); this.child = null }
+  async close(): Promise<void> {
+    const child = this.child
+    if (!child || child.exitCode !== null || child.signalCode !== null) return
+    child.kill('SIGTERM')
+    const forceTimer = setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) {
+        try { child.kill('SIGKILL') } catch { /* already exited */ }
+      }
+    }, 3000)
+    forceTimer.unref()
+    try { await this.childClosed }
+    finally { clearTimeout(forceTimer) }
+  }
+
+  /** 同步强杀：即使已经发送过 SIGTERM，也必须能升级为 SIGKILL。 */
+  kill(): void {
+    const child = this.child
+    if (child && child.exitCode === null && child.signalCode === null) {
+      try { child.kill('SIGKILL') } catch { /* already exited */ }
+    }
+  }
 
   /**
    * Returns a live child process, spawning a fresh one when the previous child has
@@ -109,6 +129,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
     // that childFailure/exitInfo are populated before any awaiting code proceeds.
     this.childClosed = new Promise<void>(resolve => {
       child.once('close', (code, signal) => {
+        if (this.child === child) this.child = null
         this.exitInfo = { code, signal }
         if (!this.childFailure) {
           const detail = [
@@ -150,6 +171,11 @@ class PiRuntimeSession implements AgentRuntimeSession {
     try {
       for await (const record of parseJsonLines(child.stdout)) {
         if (typeof record.sessionId === 'string') yield { kind: 'native-session', nativeSession: record.sessionId as never }
+        // Each assistant message streams its own cumulative text and message_end
+        // may replay it in full. A new message_start opens a fresh dedupe
+        // baseline; otherwise a multi-message turn would mis-diff the second
+        // message against the first message's text and drop it entirely.
+        if (record.type === 'message_start') emittedText = ''
         const mapped = mapRuntimeRecord('pi', operationId, record)
         for (const signal of mapped) {
           const deduped = dedupeText(signal)

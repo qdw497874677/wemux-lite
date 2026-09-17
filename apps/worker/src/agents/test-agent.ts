@@ -7,7 +7,7 @@ export class TestAgent implements Extract<AgentAdapter, { mode: 'execution' }> {
   readonly mode = 'execution' as const
   async detect() {
     return { agentKey: this.agentKey, displayName: 'Deterministic Test Agent', version: '1', mode: this.mode,
-      availability: { status: 'available' as const }, models: [{ modelId: 'test' as ModelId, displayName: 'Test', source: 'configured' as const }],
+      availability: { status: 'available' as const }, runtime: { resume: false, tools: true, approvals: true, usage: true, cancel: true, structuredOutput: false, commands: ['compact'] }, models: [{ modelId: 'test' as ModelId, displayName: 'Test', source: 'configured' as const }],
       executablePath: null, diagnostics: [] }
   }
 }

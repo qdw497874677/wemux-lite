@@ -29,6 +29,12 @@
 
 默认投入顺序为 M1 → M2 → M3 → M4 → M5 → M6 → M7，M7 是完整产品发布线。M8 不作为无限推迟发布的理由。
 
+Agent Network 近期采用独立的纵向优先级，不改变上述产品阶段编号：
+
+- **P0 公共执行协议收敛（已完成）**：`@wemux/domain` 拥有 `wemux.adk.v1` 与公共值对象；`@wemux/agent-interchange` 的 `AgentEvent` 是唯一公共执行 Event；Provider signal → AgentEvent → Session Journal → transport 是单向转换链；Transport v2 仅引用 Profile；已删除未接入生产的第二套 RuntimeEvent / compatibility / wire parser。
+- **P1 真正支持多 Agent（当前优先，Pi + OpenCode）**：实现 OpenCode 检测、配置、运行时 Adapter 与安装生命周期；用真实 Pi/OpenCode 验证同一 AgentRunner/AgentEvent 合同；形成 resume、tool、approval、usage、cancel、structured output 能力矩阵，并补双 Agent 真实验收证据。
+- **P2 团队协作与 Agent Network 编排**：在稳定的单 Agent 语义上增加委派、handoff、父子 invocation、跨 Worker 路由、审批、预算、取消传播和审计；保持直接对话无需任务看板。
+
 这不是要求所有阶段全量串行完成：M1 的会话设计确认后即可实施 M2，其余页面继续细化；M3/M4 的共享执行目标选择先定契约。M5 先在受信管理员范围交付任务功能，多成员评论、提及与通知待 M6 权限门槛通过后开放。不互信用户共享必须等待 M6。
 
 ### 与上一版的变化
@@ -42,6 +48,8 @@
 ## 3. M0：定位与文档
 
 已编写产品方向、术语表、使用指南和历史规格适用范围。继续维持两条一等路径：直接对话 `Project → Workspace → Session`，任务协作 `Task → Run → Session → Review`。
+
+公共执行协议已完成 P0 收敛；下一步多 Agent 验收明确优先 Pi 与 OpenCode。Claude Code 保留现有兼容能力，但不替代 P1 的 Pi + OpenCode 基线。
 
 文档变更不代表功能交付；旧幂等、取消、权限和历史新鲜度规则不因重新排期而失效。
 
@@ -118,10 +126,11 @@ M2 范围因此扩大，W2 独立工作台和 W3 集群接入分别验收，不�
 3. Agent 能力与模型目录；明确未安装、未认证、仅检测、可执行，以及刷新时间和操作支持。
 4. 重检、重命名、诊断、撤销、身份恢复和凭据轮换；维护模式不接新执行，并说明已有执行处理方式。
 5. 本地 Agent 路径/显式安装的管理指引；远程安装如开放，须限定固定允许包、授权与进度，不开放任意 shell。
+6. 按 [Worker 可靠长连接模块设计](design/worker-reliable-connection.md) 分切片完善单连接状态机、transport/ADK 独立协商、持久 outbox/inbox、ACK、背压、重连诊断与 Journal cursor 恢复；近期继续使用原生 WebSocket 和 SQLite，不引入独立 Broker。
 
-交付：集群管理页面、节点生命周期和能力矩阵、诊断与管理 API。
+交付：集群管理页面、节点生命周期和能力矩阵、诊断与管理 API，以及不会改变 Wemux ADK Profile 对话契约的可靠连接基础能力。
 
-验收：至少两个 Worker 的身份、能力和会话不串用；模型消失不静默替换；仅检测 Agent 不允许启动。Pi/Claude 作为执行基线，Codex/OpenCode 的执行适配另定规格和测试，不能因可检测而宣称可执行。
+验收：至少两个 Worker 的身份、能力和会话不串用；模型消失不静默替换；仅检测 Agent 不允许启动。Pi/Claude 作为执行基线，Codex/OpenCode 的执行适配另定规格和测试，不能因可检测而宣称可执行。新连接替换旧连接时，旧 socket 的迟到关闭不得把 Worker 标记离线；网络重试不得改变 `messageId`、`invocationId`、Event `id` 或管理 `commandId`。系统性断网、重启、磁盘与大规模重连演练仍在 M7 汇总验收。
 
 ## 8. M5：任务、审查与成果追踪
 

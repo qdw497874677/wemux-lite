@@ -61,9 +61,9 @@ export async function removeAgentSelection(home: string, key: RuntimeKey): Promi
 }
 
 export function agentCommand(key: RuntimeKey, settings: AgentSettings, env: NodeJS.ProcessEnv = process.env): string {
-  return settings[key]?.executable ?? (key === 'pi' ? env.WEMUX_PI_COMMAND : key === 'claude-code' ? env.WEMUX_CLAUDE_COMMAND : undefined) ?? (key === 'claude-code' ? 'claude' : key)
+  return settings[key]?.executable ?? (key === 'pi' ? env.WEMUX_PI_COMMAND : key === 'opencode' ? env.WEMUX_OPENCODE_COMMAND : key === 'claude-code' ? env.WEMUX_CLAUDE_COMMAND : undefined) ?? (key === 'claude-code' ? 'claude' : key)
 }
 
 export function agentSelections(settings: AgentSettings, env: NodeJS.ProcessEnv = process.env) {
-  return runtimeKeys.map(key => ({ key, executable: agentCommand(key, settings, env), source: settings[key]?.source ?? ((key === 'pi' && env.WEMUX_PI_COMMAND != null) || (key === 'claude-code' && env.WEMUX_CLAUDE_COMMAND != null) ? 'environment' : 'PATH'), package: settings[key]?.package ?? null, selectedAt: settings[key]?.selectedAt ?? null }))
+  return runtimeKeys.map(key => ({ key, executable: agentCommand(key, settings, env), source: settings[key]?.source ?? ((key === 'pi' && env.WEMUX_PI_COMMAND != null) || (key === 'opencode' && env.WEMUX_OPENCODE_COMMAND != null) || (key === 'claude-code' && env.WEMUX_CLAUDE_COMMAND != null) ? 'environment' : 'PATH'), package: settings[key]?.package ?? null, selectedAt: settings[key]?.selectedAt ?? null }))
 }

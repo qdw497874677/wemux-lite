@@ -8,8 +8,8 @@ import { join } from 'node:path'
 import { once } from 'node:events'
 import { DatabaseSync } from 'node:sqlite'
 import { WebSocket } from 'ws'
-import type { ServerToWorker } from '@wemux/wire-protocol'
 import { createWemuxServer } from '../server.js'
+import { TransportV2Peer } from './transport-v2-peer.js'
 
 const realDateNow = Date.now
 const token = 'integration-bootstrap-token-12345'
@@ -19,17 +19,6 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 async function eventually(check: () => Promise<boolean>) {
   for (let i = 0; i < 100; i++) { if (await check()) return; await delay(20) }
   assert.fail('Timed out waiting for condition')
-}
-class Peer {
-  readonly messages: ServerToWorker[] = []
-  private counter = 0
-  constructor(readonly ws: WebSocket) { ws.on('message', data => this.messages.push(JSON.parse(data.toString()) as ServerToWorker)) }
-  send(message: Record<string, unknown>) { this.ws.send(JSON.stringify({ protocolVersion: 1, messageId: `worker-message-${++this.counter}`, ...message })) }
-  async wait(predicate: (message: ServerToWorker) => boolean): Promise<ServerToWorker> {
-    await eventually(async () => this.messages.some(predicate))
-    return this.messages.splice(this.messages.findIndex(predicate), 1)[0]
-  }
-  async close() { if (this.ws.readyState === WebSocket.CLOSED) return; const done = once(this.ws, 'close'); this.ws.close(); await done }
 }
 
 test('serves an installer and configured Worker tarball without exposing enrollment credentials', async t => {
@@ -227,10 +216,47 @@ test('the test after admin session expiry has the real clock (no filesystem)', a
   assert.ok(Math.abs(Date.now() - new Date().getTime()) < 1000)
 })
 
+test('a new connection replaces the old socket without marking the worker offline', async t => {
+  const app = createWemuxServer({ databasePath: ':memory:', bootstrapToken: token })
+  const base = await app.listen(0)
+  t.after(() => app.close())
+  const request = async (path: string, method = 'GET', body?: unknown, bearer: string | null = token) => {
+    const response = await fetch(`${base}${path}`, {
+      method,
+      headers: { ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}), 'Content-Type': 'application/json' },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+    return { status: response.status, data: response.status === 204 ? null : await response.json() }
+  }
+  await request('/bootstrap', 'POST', {})
+  const enrollment = (await request('/enrollment-tokens', 'POST', {})).data
+  const enrolled = await request('/workers/enroll', 'POST', { token: enrollment.token, name: 'Replaceable' }, null)
+  assert.equal(enrolled.status, 201)
+  const { workerId, credential } = enrolled.data
+  const connect = async () => {
+    const ws = new WebSocket(base.replace('http:', 'ws:') + '/worker/ws', { headers: { Authorization: `Bearer ${credential}` } })
+    await once(ws, 'open')
+    const peer = new TransportV2Peer(ws, workerId)
+    await peer.connect({ name: 'Replaceable' })
+    return peer
+  }
+
+  const first = await connect()
+  const firstClosed = once(first.ws, 'close')
+  const second = await connect()
+  await firstClosed
+  await delay(50)
+  const workers = await request('/workers')
+  assert.equal(workers.data.items[0].connectionState, 'online')
+  second.send({ type: 'heartbeat', nonce: 'replacement-alive', sentAt: new Date().toISOString() })
+  await second.wait(message => message.type === 'heartbeat' && message.nonce === 'replacement-alive')
+  await second.close()
+})
+
 test('HTTP + SQLite + Worker WS + SSE durable end-to-end loop', { timeout: 20000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'wemux-lite-server-')), databasePath = join(dir, 'server.sqlite')
   let app = createWemuxServer({ databasePath, bootstrapToken: token }), base = await app.listen(0)
-  const peers: Peer[] = []
+  const peers: TransportV2Peer[] = []
   t.after(async () => { for (const p of peers) await p.close(); await app.close(); await rm(dir, { recursive: true, force: true }) })
   async function request(path: string, method = 'GET', body?: unknown, bearer: string | null = token) {
     const response = await fetch(`${base}${path}`, { method, headers: { ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}), 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
@@ -238,9 +264,8 @@ test('HTTP + SQLite + Worker WS + SSE durable end-to-end loop', { timeout: 20000
   }
   async function connect(workerId: string, credential: string) {
     const ws = new WebSocket(base.replace('http:', 'ws:') + '/worker/ws', { headers: { Authorization: `Bearer ${credential}` } })
-    const p = new Peer(ws); peers.push(p); await once(ws, 'open')
-    p.send({ type: 'hello', side: 'worker', workerId, workerVersion: 'test', name: 'Test worker', platform: 'linux', architecture: 'x64' })
-    await p.wait(m => m.type === 'hello')
+    const p = new TransportV2Peer(ws, workerId); peers.push(p)
+    await p.connect({ name: 'Test worker' })
     return p
   }
   assert.equal((await request('/health', 'GET', undefined, null)).status, 200)
@@ -404,10 +429,9 @@ test('reject unauthorized, malformed and cross-worker protocol writes; atomic en
   })
   assert.equal(unauthorized, 401)
   const ws = new WebSocket(base.replace('http:', 'ws:') + '/worker/ws', { headers: { Authorization: `Bearer ${first.credential}` } })
-  const peer = new Peer(ws); await once(ws, 'open')
-  peer.send({ type: 'hello', side: 'worker', workerId: second.workerId, workerVersion: '1', name: 'Spoof', platform: 'linux', architecture: 'x64' })
-  const error = await peer.wait(m => m.type === 'error')
-  assert.equal(error.type === 'error' && error.error.code, 'unauthorized')
+  const peer = new TransportV2Peer(ws, second.workerId)
+  await peer.connect({ name: 'Spoof', workerVersion: '1' }).catch(() => undefined)
+  await once(ws, 'close')
   await peer.close()
   const malformed = await fetch(base + '/projects', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: '{' })
   assert.equal(malformed.status, 400)

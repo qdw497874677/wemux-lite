@@ -1,10 +1,13 @@
 import type { SessionId, TurnId } from './ids.js'
 import type { ModelId, Timestamp } from './values.js'
 
-export type RuntimeProtocolVersion = 2
+/** The only public conversation profile exposed by a Worker. */
+export const WEMUX_ADK_PROFILE_V1 = 'wemux.adk.v1' as const
+export type WemuxAdkProfile = typeof WEMUX_ADK_PROFILE_V1
+export const WEMUX_ADK_PROFILES = [WEMUX_ADK_PROFILE_V1] as const
+
 export type RuntimeSessionId = SessionId
 export type RuntimeOperationId = TurnId
-export type RuntimeEventSequence = number & { readonly __brand: 'RuntimeEventSequence' }
 export type ApprovalId = string & { readonly __brand: 'ApprovalId' }
 
 export interface RuntimeUsage {
@@ -53,30 +56,4 @@ export interface ApprovalRequest {
   readonly status: 'pending' | 'approved' | 'denied' | 'expired'
   readonly expiresAt?: Timestamp
   readonly metadata?: Readonly<Record<string, unknown>>
-}
-
-interface RuntimeEventBase {
-  readonly version: RuntimeProtocolVersion
-  readonly operationId: RuntimeOperationId
-  readonly sessionId: RuntimeSessionId
-  readonly sequence: RuntimeEventSequence
-  readonly occurredAt: Timestamp
-}
-
-export type RuntimeEvent =
-  | (RuntimeEventBase & { readonly type: 'text_delta'; readonly text: string })
-  | (RuntimeEventBase & { readonly type: 'reasoning_delta'; readonly text: string })
-  | (RuntimeEventBase & { readonly type: 'operation_status'; readonly status: 'queued' | 'running' | 'stopping' | 'completed' | 'failed' | 'cancelled'; readonly message?: string })
-  | (RuntimeEventBase & { readonly type: 'command_catalog'; readonly commands: readonly CommandDescriptor[] })
-  | (RuntimeEventBase & { readonly type: 'approval_required'; readonly approval: ApprovalRequest })
-  | (RuntimeEventBase & { readonly type: 'usage'; readonly usage: RuntimeUsage })
-  | (RuntimeEventBase & { readonly type: 'authorization'; readonly authorization: RuntimeAuthorization })
-  | (RuntimeEventBase & { readonly type: 'error'; readonly error: RuntimeErrorInfo })
-  | (RuntimeEventBase & { readonly type: 'completed'; readonly status: 'succeeded' | 'failed' | 'cancelled'; readonly usage?: RuntimeUsage; readonly error?: RuntimeErrorInfo })
-
-export interface RuntimeSessionDescriptor {
-  readonly sessionId: RuntimeSessionId
-  readonly modelId: ModelId
-  readonly authorization: RuntimeAuthorization
-  readonly commands: readonly CommandDescriptor[]
 }

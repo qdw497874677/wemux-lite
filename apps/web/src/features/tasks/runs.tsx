@@ -128,7 +128,7 @@ function RunInspector({ run, api }: { run: Run; api: Api }) {
       catch (error) { setDeleteError(error instanceof Error ? error.message : '删除失败') }
     }}>删除 Session 历史</Button>}
     {deleteError && <p role="alert">{deleteError}</p>}
-    {session.data === null && <p role="status">Session 已删除；Journal N/A。以下 Run 历史快照仍保留。</p>}
+    {session.data === null && <p role="status">会话已删除，无法加载运行日志。以下运行历史快照仍保留。</p>}
     {journal.error && <p role="alert">{journal.error}</p>}
     {journal.timeline.map((entry, i) => <TimelineEntry key={i} entry={entry} />)}
     {session.data && <><h4>追加独立消息（不属于本 Run）</h4><Composer controller={controller} session={session.data} canSend={online && session.data.sendCapability?.allowed === true} blockedReason={!online ? '浏览器当前离线' : (session.data.sendCapability ?? unavailableCapability).reason} confirmedIds={confirmedIds} /></>}

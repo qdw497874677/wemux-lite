@@ -137,8 +137,8 @@ export function createLocalWorkbenchService(store: WorkerStore & LocalState, run
     },
     async supportedCommands(sessionId) {
       const session = await requireLocalSession(sessionId)
-      // Current discovery has no command descriptors. Only the Pi adapter supports compact.
-      return store.capabilities().some(item => item.agentKey === session.binding.agent.agentKey && item.agentKey === 'pi' && item.mode === 'execution' && item.availability.status === 'available') ? ['compact'] : []
+      const capability = store.capabilities().find(item => item.agentKey === session.binding.agent.agentKey && item.mode === 'execution' && item.availability.status === 'available')
+      return capability?.runtime?.commands ?? (capability?.agentKey === 'pi' ? ['compact'] : [])
     },
     async command(sessionId, name, requestId) {
       if (!(await this.supportedCommands(sessionId)).includes(name)) throw new LocalWorkbenchError('不支持的运行时命令')

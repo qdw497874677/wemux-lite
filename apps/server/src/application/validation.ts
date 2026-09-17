@@ -65,11 +65,7 @@ function capability(value: unknown): AgentCapability {
 }
 export function workerMessage(value: unknown): WorkerToServer {
   const m = object(value)
-  if (m.protocolVersion !== 1) throw new AppError(426, 'Unsupported protocol version')
-  text(m.messageId, 'messageId')
   switch (m.type) {
-    case 'hello':
-      oneOf(m.side, ['worker']); for (const key of ['workerId', 'workerVersion', 'name', 'platform', 'architecture']) text(m[key], key); break
     case 'heartbeat': text(m.nonce, 'nonce'); timestamp(m.sentAt); break
     case 'capability': text(m.workerId, 'workerId'); timestamp(m.detectedAt); array(m.capabilities).forEach(capability); break
     case 'ack': {
@@ -97,7 +93,6 @@ export function workerMessage(value: unknown): WorkerToServer {
         else { integer(m.throughSeq, 'throughSeq'); boolean(m.hasMore); array(m.events).forEach(validateEvent) }
       }
       break
-    case 'error': { const e = object(m.error); oneOf(e.code, ['unsupported-version', 'unauthorized', 'invalid-message', 'integrity-error', 'internal-error']); text(e.message, 'message'); boolean(e.retryable); nullableText(e.relatedMessageId); break }
     default: throw new AppError(400, 'Unknown message type')
   }
   return value as WorkerToServer

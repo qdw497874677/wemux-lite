@@ -5,6 +5,7 @@ import type { LocalState } from './ports/local-state.js'
 import type { WorkerStore } from './ports/worker-store.js'
 import type { SessionStore } from '@wemux/agent-interchange'
 import type { CommandId } from '@wemux/domain'
+import { WorkerTransportStore } from '../transport/transport-store.js'
 import type { CommandReceipt, WorkerCommand } from '@wemux/wire-protocol'
 import type { WorkerIdentity } from '../domain/worker-identity.js'
 import { enroll, toSocketUrl } from '../transport/enrollment.js'
@@ -134,7 +135,7 @@ export class ClusterLifecycle {
     const installation = this.store.localInstallation()
     if (!installation) throw new Error('Worker local installation is not initialized')
     const selected = await readAgentSettings(this.options.home)
-    const runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, { send: () => {} }, `local-${installation.installationId}` as import('@wemux/domain').WorkerId, installation.name, undefined, undefined, runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, claude: selected['claude-code']?.executable }))
+    const runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, { send: () => {} }, `local-${installation.installationId}` as import('@wemux/domain').WorkerId, installation.name, undefined, undefined, runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }))
     try {
       await runtime.initialize()
       this.runtime = runtime
@@ -174,22 +175,47 @@ export class ClusterLifecycle {
       this.gateway = gateway
       const capabilityEndpoint = await gateway.listen()
       let runtime!: WorkerRuntime
-      const transport = new WebSocketTransport({ url: urls[0], urls, credential }, message => runtime.receive(message), async () => {
-        if (this.transport !== transport) return
-        this.state = { phase: 'online', retryAt: null, failure: null }
-        await runtime.connected()
-      }, error => {
-        if (this.transport === transport) this.state = { phase: 'degraded', retryAt: null, failure: error instanceof Error ? error.message : String(error) }
+      const transportStore = new WorkerTransportStore(join(this.options.home, 'transport.sqlite'))
+      const transport = new WebSocketTransport({
+        url: urls[0],
+        authToken: credential,
+        workerId: identity.workerId,
+        workerVersion: '0.1.0',
+        name: identity.name ?? this.options.name,
+        platform: process.platform,
+        architecture: process.arch,
+        store: transportStore,
+        onMessage: message => { void runtime.receive(message) },
+        onConnected: () => {
+          if (this.transport !== transport) return
+          this.state = { phase: 'online', retryAt: null, failure: null }
+          void runtime.connected()
+        },
+        onStateChange: change => {
+          if (this.transport !== transport) return
+          if (change.current === 'connecting') this.state = { phase: 'connecting', retryAt: null, failure: null }
+          if (change.current === 'backoff') this.state = { phase: 'degraded', retryAt: change.retryInMs == null ? null : new Date(Date.now() + change.retryInMs).toISOString(), failure: change.reason }
+          if (change.current === 'needs-attention') this.state = { phase: 'degraded', retryAt: null, failure: change.reason }
+        },
       })
       // Only replace the runtime once connection resources are ready. The failure
       // path restores a local runtime before allowing subsequent local commands.
+      // connect 会以新 runtime 接管同一个持久化 store。先同步强杀旧 provider，
+      // 再给旧 runtime 一个有上限的收尾窗口，尽量避免两个 runtime 并发写状态；
+      // 即使旧 close() 本身挂死，也不能永久阻塞新连接建立。
       const previous = this.runtime
       this.runtime = null
-      if (previous) await previous.shutdown()
-      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint), undefined, runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, claude: selected['claude-code']?.executable }))
+      if (previous) {
+        previous.abort()
+        await Promise.race([
+          previous.shutdown().catch(() => undefined),
+          new Promise<void>(resolve => setTimeout(resolve, 1000).unref()),
+        ])
+      }
+      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint), undefined, runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }))
       this.runtime = runtime
-      this.transport = transport
       await runtime.initialize()
+      this.transport = transport
       transport.start()
     } catch (error) {
       this.state = { phase: 'degraded', retryAt: null, failure: error instanceof Error ? error.message : String(error) }
@@ -260,8 +286,17 @@ export class ClusterLifecycle {
     this.gateway = null
     const pool = this.tunnelPool
     this.tunnelPool = null
-    try { if (runtime) await runtime.shutdown() }
-    finally {
+    try {
+      if (runtime) {
+        // shutdown 可能因挂死的 agent turn 永不 resolve；3s 后同步 abort 强杀子进程兜底，
+        // 再给 1s 让 shutdown 收尾，仍不结束则放弃等待（资源已强制释放）。
+        const abortTimer = setTimeout(() => { try { runtime.abort() } catch {} }, 3000)
+        abortTimer.unref()
+        try {
+          await Promise.race([runtime.shutdown(), new Promise(resolve => setTimeout(resolve, 4000).unref())])
+        } finally { clearTimeout(abortTimer) }
+      }
+    } finally {
       try { if (gateway) await gateway.close() }
       finally { if (pool) await pool.close() }
     }

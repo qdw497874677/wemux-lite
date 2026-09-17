@@ -50,7 +50,7 @@ async function lock(home: string) {
 export async function main(args = process.argv.slice(2)) {
   const options = config(args)
   if (options.command === 'version') { console.log('wemux-lite-worker 0.1.0'); return }
-  if (options.command === 'help') { console.log('wemux-lite-worker admin init [--username NAME] [--password-file FILE] | register --server URL [--servers URL1,URL2] [--prefer tailnet|direct|any] [--transport direct|nc] --token TOKEN | start [--host 127.0.0.1] [--port 3002] [--secure-cookies] [--prefer ...] [--transport ...] | status [--prefer ...] | detect | agent list | agent status | agent use <key> --path /absolute/executable | agent install <pi|claude> --yes | tailscale [--server URL]；所有命令支持 --home DIR；admin init 也可读取 WEMUX_LOCAL_ADMIN_PASSWORD；HTTPS 终止于受信反向代理时启用 --secure-cookies 或 WEMUX_WORKER_SECURE_COOKIES=1；Agent 选择变更需要重启 Worker；--prefer 缺省时自动：检测到 tailscale CLI 且候选含 tailnet 地址则优先 tailnet；--transport nc 让注册与 WebSocket 全部经由 tailscale nc 隧道（不改系统路由，仅支持明文 http 端点）'); return }
+  if (options.command === 'help') { console.log('wemux-lite-worker admin init [--username NAME] [--password-file FILE] | register --server URL [--servers URL1,URL2] [--prefer tailnet|direct|any] [--transport direct|nc] --token TOKEN | start [--host 127.0.0.1] [--port 3002] [--secure-cookies] [--prefer ...] [--transport ...] | status [--prefer ...] | detect | agent list | agent status | agent use <key> --path /absolute/executable | agent install <pi|opencode|claude> --yes | tailscale [--server URL]；所有命令支持 --home DIR；admin init 也可读取 WEMUX_LOCAL_ADMIN_PASSWORD；HTTPS 终止于受信反向代理时启用 --secure-cookies 或 WEMUX_WORKER_SECURE_COOKIES=1；Agent 选择变更需要重启 Worker；--prefer 缺省时自动：检测到 tailscale CLI 且候选含 tailnet 地址则优先 tailnet；--transport nc 让注册与 WebSocket 全部经由 tailscale nc 隧道（不改系统路由，仅支持明文 http 端点）'); return }
   if (!['register', 'start', 'status', 'detect', 'tailscale', 'agent', 'admin'].includes(options.command)) throw new Error('Unknown command')
   await mkdir(options.home, { recursive: true, mode: 0o700 })
   await chmod(options.home, 0o700)
@@ -68,7 +68,7 @@ export async function main(args = process.argv.slice(2)) {
       const settings = await readAgentSettings(options.home)
       const capabilities = await Promise.all(defaultAgents(settings).map(agent => agent.detect()))
       console.log(JSON.stringify({ selections: agentSelections(settings), capabilities, installCatalog, message: '以上为当前选择及检测结果；变更后需重启 Worker，登录和模型配置需单独完成。' }, null, 2))
-    } else throw new Error('使用 agent list | status | use <key> --path 绝对路径 | install <pi|claude> --yes')
+    } else throw new Error('使用 agent list | status | use <key> --path 绝对路径 | install <pi|opencode|claude> --yes')
     return
   }
   const release = ['start', 'register', 'admin'].includes(options.command) ? await lock(options.home) : async () => {}

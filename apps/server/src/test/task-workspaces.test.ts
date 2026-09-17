@@ -88,7 +88,7 @@ test('provision attempts: retry identities, coalescing, rejected, stale, duplica
     const worker = new WorkerService(f.store, new Notifications())
     let tick = Date.now() + 1000
     const report = async (commandId: string | undefined, status: 'provisioning' | 'failed' | 'ready', reason: string | null = null) => {
-      const message = { protocolVersion: 1 as const, messageId: newId<'MessageId'>(), type: 'event' as const, scope: 'workspace' as const, report: { workspaceId: id, ...(commandId ? { commandId: commandId as CommandId } : {}), status, reason, location: null, occurredAt: new Date(tick++).toISOString() as Timestamp } }
+      const message = { type: 'event' as const, scope: 'workspace' as const, report: { workspaceId: id, ...(commandId ? { commandId: commandId as CommandId } : {}), status, reason, location: null, occurredAt: new Date(tick++).toISOString() as Timestamp } }
       await worker.receive(f.worker.id, message)
       return message
     }
@@ -101,7 +101,7 @@ test('provision attempts: retry identities, coalescing, rejected, stale, duplica
     for (const state of ['provisioning', 'failed', 'ready'] as const) await report(created.commandId, state)
     await report(undefined, 'ready')
     assert.equal((await f.store.resources.getWorkspace(id))!.status, 'pending')
-    await worker.receive(f.worker.id, { protocolVersion: 1, messageId: newId<'MessageId'>(), type: 'ack', receipt: { commandId: next.commandId as CommandId, status: 'rejected', error: { code: 'invalid-input', message: 'rejected without report', retryable: false } } })
+    await worker.receive(f.worker.id, { type: 'ack', receipt: { commandId: next.commandId as CommandId, status: 'rejected', error: { code: 'invalid-input', message: 'rejected without report', retryable: false } } })
     assert.equal((await f.store.resources.getWorkspace(id))!.failureReason, 'rejected without report')
     const third = await retry('retry-2')
     await report(next.commandId, 'ready')
@@ -155,7 +155,7 @@ test('SQLite reopen retains attempt requests; reconnect current report converges
     const service = new ServerService(reopened, new Notifications()), tasks = new TaskService(reopened, () => {}, service)
     assert.equal((await tasks.retryWorkspace(f.task.projectId, f.task.id, created.workspace.id, { requestId: 'durable' }, context)).commandId, retry.commandId)
     const worker = new WorkerService(reopened, new Notifications())
-    const report = (commandId: string) => ({ protocolVersion: 1 as const, messageId: newId<'MessageId'>(), type: 'event' as const, scope: 'workspace' as const, report: { workspaceId: created.workspace.id, commandId: commandId as CommandId, status: 'ready' as const, reason: null, location: null, occurredAt: new Date().toISOString() as Timestamp } })
+    const report = (commandId: string) => ({ type: 'event' as const, scope: 'workspace' as const, report: { workspaceId: created.workspace.id, commandId: commandId as CommandId, status: 'ready' as const, reason: null, location: null, occurredAt: new Date().toISOString() as Timestamp } })
     const legacy = report(created.commandId)
     const { commandId: _commandId, ...uncorrelated } = legacy.report
     await worker.receive(f.worker.id, { ...legacy, report: uncorrelated })
@@ -163,7 +163,7 @@ test('SQLite reopen retains attempt requests; reconnect current report converges
     await worker.receive(f.worker.id, report(created.commandId))
     assert.equal((await reopened.resources.getWorkspace(created.workspace.id))!.status, 'pending')
     await worker.disconnected(f.worker.id)
-    await worker.receive(f.worker.id, { protocolVersion: 1, messageId: newId<'MessageId'>(), type: 'hello', side: 'worker', workerId: f.worker.id, name: 'reconnected', workerVersion: 'test', platform: 'linux', architecture: 'x64' })
+    await worker.connected(f.worker.id, { name: 'reconnected', workerVersion: 'test', platform: 'linux' })
     const current = report(retry.commandId)
     await worker.receive(f.worker.id, current)
     const count = (await reopened.tasks.activity(f.task.id, 0)).length
@@ -182,7 +182,7 @@ test('ordinary pending command cancellation and late receipt semantics remain un
     assert.equal((await f.server.cancelCommand(commandId)).status, 'cancelled')
     await assert.rejects(f.server.cancelCommand(commandId), /Only pending/)
     assert.equal((await f.store.commands.listDeliverable(f.worker.id, 100)).length, 0)
-    await new WorkerService(f.store, new Notifications()).receive(f.worker.id, { protocolVersion: 1, messageId: newId<'MessageId'>(), type: 'ack', receipt: { commandId, status: 'accepted' } })
+    await new WorkerService(f.store, new Notifications()).receive(f.worker.id, { type: 'ack', receipt: { commandId, status: 'accepted' } })
     assert.equal((await f.server.getCommand(commandId)).status, 'accepted')
   } finally { f.store.close() }
 })
@@ -195,9 +195,9 @@ test('offline provision cancellation is rejected; retry and reconnect retain del
     for (let i = 0; i < 2; i++) await assert.rejects(f.server.cancelCommand(created.commandId), /protected_command/)
     assert.equal((await f.server.reprovisionWorkspace(created.workspace.id, 'offline-retry')).commandId, created.commandId)
     const worker = new WorkerService(f.store, new Notifications())
-    await worker.receive(f.worker.id, { protocolVersion: 1, messageId: newId<'MessageId'>(), type: 'hello', side: 'worker', workerId: f.worker.id, name: 'reconnected', workerVersion: 'test', platform: 'linux', architecture: 'x64' })
+    await worker.connected(f.worker.id, { name: 'reconnected', workerVersion: 'test', platform: 'linux' })
     assert.ok((await f.store.commands.listDeliverable(f.worker.id, 100)).some(c => c.commandId === created.commandId))
-    await worker.receive(f.worker.id, { protocolVersion: 1, messageId: newId<'MessageId'>(), type: 'event', scope: 'workspace', report: { workspaceId: created.workspace.id, status: 'ready', reason: null, location: null, occurredAt: new Date(Date.now() + 1000).toISOString() as Timestamp } })
+    await worker.receive(f.worker.id, { type: 'event', scope: 'workspace', report: { workspaceId: created.workspace.id, status: 'ready', reason: null, location: null, occurredAt: new Date(Date.now() + 1000).toISOString() as Timestamp } })
     assert.equal((await f.store.resources.getWorkspace(created.workspace.id))!.status, 'ready')
   } finally { f.store.close() }
 })
@@ -211,7 +211,7 @@ for (const status of ['pending', 'provisioning'] as const) test(`initial ${statu
     await f.store.transaction(tx => tx.resources.saveWorkspace({ ...created.workspace, status }))
     assert.equal((await f.server.reprovisionWorkspace(created.workspace.id, 'merged')).commandId, created.commandId)
     f.store.close(); reopened = new SqliteServerStore(`${directory}/server.sqlite`)
-    await new WorkerService(reopened, new Notifications()).receive(f.worker.id, { protocolVersion: 1, messageId: newId<'MessageId'>(), type: 'event', scope: 'workspace', report: { workspaceId: created.workspace.id, status: 'ready', reason: null, location: null, occurredAt: new Date(Date.now() + 1000).toISOString() as Timestamp } })
+    await new WorkerService(reopened, new Notifications()).receive(f.worker.id, { type: 'event', scope: 'workspace', report: { workspaceId: created.workspace.id, status: 'ready', reason: null, location: null, occurredAt: new Date(Date.now() + 1000).toISOString() as Timestamp } })
     assert.equal((await reopened.resources.getWorkspace(created.workspace.id))!.status, 'ready')
   } finally { if (reopened) reopened.close(); else f.store.close(); await rm(directory, { recursive: true, force: true }) }
 })

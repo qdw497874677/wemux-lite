@@ -52,6 +52,10 @@ Worker 可独立安装，不注册 Server 也可通过自身鉴权的 Web/API �
 
 独立与集群两种宿主复用运行时内核、会话协议和会话 Web 模块，身份与资源授权各自负责。加入集群不自动上传本地会话或发布目录，断线或退出不破坏独立使用。具体交互、安全边界和实施切片见 [Worker 独立 Web 工作台](design/worker-web-workbench.md)；这是待实施目标，不是现有能力声明。
 
+集群连接与 Agent 对话协议保持分层：Worker 到 Server 的一条主动出站连接负责认证、版本协商、多路复用、可靠投递、重连和补传；Wemux ADK Profile 继续独立定义 Session、Invocation、Event、Content、Action、Approval、Cancel 与终态。`@wemux/agent-interchange` 的 `AgentEvent` 是唯一公共执行 Event；Worker 内部 Provider signal、Session Journal 投影与 transport frame 都不是第二套 Agent 协议。升级 transport 不得改写对话身份。具体技术基线见 [Agent 互操作模块设计](design/agent-interchange-module.md) 与 [Worker 可靠长连接模块设计](design/worker-reliable-connection.md)。
+
+当前 Agent Network 的实施顺序是：P0 先完成公共执行协议收敛；P1 用 Pi 与 OpenCode 两个真实 Adapter 验证多 Agent seam 和能力差异；P2 再在稳定的单 Agent 语义上增加团队委派、handoff、父子 invocation、审批、预算和取消传播。Claude Code 保留兼容与后续扩展，但不替代 P1 的 Pi + OpenCode 验收基线。
+
 ## 4. 必须完整建设的能力
 
 | 能力域 | 目标 |
@@ -80,6 +84,7 @@ Worker 可独立安装，不注册 Server 也可通过自身鉴权的 Web/API �
 8. Project、Worker、Session 权限独立约束执行；管理资源不自动授予私人内容读取权。安全能力未完整验收前，不得宣称可供不互信用户共享使用。
 9. 默认保留单 Server、Server/Worker 本地持久化和直接通信的轻量部署形态。现有 Node HTTP、SQLite、WebSocket 是合理正式产品选择，不因去掉 MVP 标签而更换技术栈。
 10. 不为假设规模预引入 Redis、消息队列、外部数据库或 Kubernetes。新增依赖须说明已测量的问题、替代方案、部署与维护成本；轻量也不能成为省略测试和恢复机制的理由。
+11. Worker 长连接的 transport envelope、ACK、cursor 和重放状态不进入 Wemux ADK Profile。网络重试必须保留原 `messageId`、`invocationId`、Event `id` 与管理 `commandId`，不能通过生成新领域身份掩盖重复投递。
 
 ## 6. 当前基础与目标严格分开
 
@@ -87,7 +92,7 @@ Worker 可独立安装，不注册 Server 也可通过自身鉴权的 Web/API �
 
 - 仓库已有 Server、Worker、Web、共享协议与领域包。
 - `packages/domain/src/workspace.ts` 与 `packages/server-domain/src/resources.ts` 已包含逻辑 Workspace 与 placements；旧单 Placement 投影仍存在，端到端契约尚需逐项核验。
-- `apps/worker/src/agents/` 有 Pi 与 Claude 执行适配相关代码；其他 Agent 的可执行程度以运行时上报和真实验收为准，不从目录名或检测结果推断。
+- `apps/worker/src/agents/` 已有 Pi 与 Claude Code 执行适配相关代码；P1 将优先补 OpenCode，并以 Pi + OpenCode 的同一合同测试和真实运行作为多 Agent 基线。其他 Agent 的可执行程度以运行时上报和真实验收为准，不从目录名或检测结果推断。
 - 已有任务、会话、命令、日志投影与部分管理入口；入口存在不代表所有异常路径已闭环。
 - `apps/server/src/http/handler.ts` 有 bootstrap 管理员及 `/auth/session` 管理会话入口；不能因此宣称多用户、完整资源授权或 PAT 管理已完成。
 

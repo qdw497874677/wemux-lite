@@ -1,5 +1,5 @@
 import type { CommandId, MessageId, SessionId, ToolCallId, TurnId } from './ids.js'
-import type { ApprovalId, RuntimeUsage } from './runtime-protocol.js'
+import type { ApprovalId, RuntimeUsage } from './agent-profile.js'
 import type { SessionRuntimeState, TurnFailure } from './session.js'
 import type { EventSeq, Timestamp } from './values.js'
 
