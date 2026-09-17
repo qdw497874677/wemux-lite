@@ -47,8 +47,9 @@ export class PiAgent implements Extract<AgentAdapter, { mode: 'execution' }> {
   }
 
   async startTurn(input: AgentTurnInput) {
-    const selected = splitModelId(input.modelId)
-    if (!selected) throw new Error(`Pi model ${input.modelId} is ambiguous; refresh Agent capabilities and select provider-qualified model`)
+    // modelId is optional: when null, Pi uses its own default model.
+    const selected = input.modelId ? splitModelId(input.modelId) : null
+    if (input.modelId && !selected) throw new Error(`Pi model ${input.modelId} is ambiguous; refresh Agent capabilities and select provider-qualified model`)
     if (input.resume) await validateResume(input.resume)
     const executable = await findPi(this.command)
     await supportedVersion(executable, this.requestTimeout)
@@ -75,8 +76,11 @@ export class PiAgent implements Extract<AgentAdapter, { mode: 'execution' }> {
       rpc.onFailure = error => { startupError = error }
       rpc.onEvent = event => { if (event.type === 'extension_error') startupError = new Error(`Pi extension failed: ${event.error ?? event.message}`) }
       const { models } = await rpc.request('get_available_models')
-      if (!models?.some((model: any) => model.provider === selected.provider && model.id === selected.id)) throw new Error(`Pi model ${selected.provider}/${selected.id} is not configured or authenticated`)
-      await rpc.request('set_model', { provider: selected.provider, modelId: selected.id })
+      // When modelId is null the Agent uses its own default; skip validation and set_model.
+      if (selected) {
+        if (!models?.some((model: any) => model.provider === selected.provider && model.id === selected.id)) throw new Error(`Pi model ${selected.provider}/${selected.id} is not configured or authenticated`)
+        await rpc.request('set_model', { provider: selected.provider, modelId: selected.id })
+      }
       const state = await rpc.request('get_state')
       if (startupError) throw startupError
       if (readyPath) {

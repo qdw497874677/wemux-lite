@@ -12,11 +12,17 @@ export function parseTransport(value: string | undefined): WorkerTransport {
 export function config(args: string[], env: NodeJS.ProcessEnv = process.env) {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
     home: { type: 'string' }, server: { type: 'string' }, servers: { type: 'string' }, token: { type: 'string' }, name: { type: 'string' }, prefer: { type: 'string' }, transport: { type: 'string' },
+    host: { type: 'string' }, port: { type: 'string' }, username: { type: 'string' }, 'password-file': { type: 'string' },
     'enrollment-path': { type: 'string' }, 'socket-path': { type: 'string' }, version: { type: 'boolean' },
-    path: { type: 'string' }, yes: { type: 'boolean' },
+    path: { type: 'string' }, yes: { type: 'boolean' }, 'secure-cookies': { type: 'boolean' },
   } })
+  const port = Number(values.port ?? env.WEMUX_WORKER_PORT ?? '3002')
+  if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new Error('Worker Web port must be an integer between 0 and 65535')
   return { command: values.version ? 'version' : positionals[0] ?? 'help',
     agentAction: positionals[1], agentKey: positionals[2], extraPositionals: positionals.slice(3), agentPath: values.path, yes: values.yes ?? false,
+    adminAction: positionals[1], username: values.username ?? env.WEMUX_LOCAL_ADMIN_USERNAME ?? 'admin', passwordFile: values['password-file'], localAdminPassword: env.WEMUX_LOCAL_ADMIN_PASSWORD,
+    host: values.host ?? env.WEMUX_WORKER_HOST ?? '127.0.0.1', port,
+    secureCookies: values['secure-cookies'] ?? env.WEMUX_WORKER_SECURE_COOKIES === '1',
     home: resolve(values.home ?? env.WEMUX_WORKER_HOME ?? resolve(homedir(), '.wemux-lite')),
     server: values.server ?? env.WEMUX_SERVER_URL, servers: values.servers ?? env.WEMUX_SERVER_URLS,
     token: values.token ?? env.WEMUX_ENROLLMENT_TOKEN, prefer: values.prefer ?? env.WEMUX_PREFER,

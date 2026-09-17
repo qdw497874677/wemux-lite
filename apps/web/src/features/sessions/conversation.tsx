@@ -31,18 +31,18 @@ const formatToolValue = (value: unknown) => {
   try { return JSON.stringify(value, null, 2) } catch { return String(value) }
 }
 
-export function TimelineEntry({ entry }: { entry: ChatTimelineItem }) {
+export function TimelineEntry({ entry, onOpenContext }: { entry: ChatTimelineItem; onOpenContext?: () => void }) {
   if (entry.kind === 'usage') {
     const parts = [
-      entry.usage.completeness === 'partial' ? '' : null,
-      formatUsageNumber(entry.usage.inputTokens) && ` ${formatUsageNumber(entry.usage.inputTokens)}`,
-      formatUsageNumber(entry.usage.outputTokens) && ` ${formatUsageNumber(entry.usage.outputTokens)}`,
-      formatUsageNumber(entry.usage.cacheReadTokens) && ` ${formatUsageNumber(entry.usage.cacheReadTokens)}`,
-      formatUsageNumber(entry.usage.cacheWriteTokens) && ` ${formatUsageNumber(entry.usage.cacheWriteTokens)}`,
-      formatUsageNumber(entry.usage.totalTokens) && ` ${formatUsageNumber(entry.usage.totalTokens)}`,
-      entry.usage.costUsd === undefined ? null : ` ${entry.usage.currency ?? 'USD'} $${entry.usage.costUsd.toFixed(4)}`,
+      entry.usage.completeness === 'partial' ? '部分统计' : null,
+      formatUsageNumber(entry.usage.inputTokens) && `输入 ${formatUsageNumber(entry.usage.inputTokens)}`,
+      formatUsageNumber(entry.usage.outputTokens) && `输出 ${formatUsageNumber(entry.usage.outputTokens)}`,
+      formatUsageNumber(entry.usage.cacheReadTokens) && `缓存读取 ${formatUsageNumber(entry.usage.cacheReadTokens)}`,
+      formatUsageNumber(entry.usage.cacheWriteTokens) && `缓存写入 ${formatUsageNumber(entry.usage.cacheWriteTokens)}`,
+      formatUsageNumber(entry.usage.totalTokens) && `总计 ${formatUsageNumber(entry.usage.totalTokens)}`,
+      entry.usage.costUsd === undefined ? null : `费用 ${entry.usage.currency ?? 'USD'} $${entry.usage.costUsd.toFixed(4)}`,
     ].filter(Boolean)
-    return <div className="ml-11 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground" aria-label="">{parts.length > 0 ? parts.map(part => <span key={part}>{part}</span>) : <span></span>}</div>
+    return <div className="ml-11 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-muted-foreground" aria-label="运行用量">{parts.length > 0 ? parts.map(part => <span key={part}>{part}</span>) : <span>暂无用量数据</span>}</div>
   }
   if (entry.kind === 'notice') return <div role={entry.tone === 'error' ? 'alert' : 'status'} className={cn('ml-11 rounded-lg border px-3 py-2 text-sm', entry.tone === 'error' ? 'border-red-500/25 bg-red-500/10 text-red-200' : 'border-border bg-card text-muted-foreground')}><p className="whitespace-pre-wrap break-words">{entry.text}</p></div>
   if (entry.kind === 'tool') {
@@ -50,14 +50,12 @@ export function TimelineEntry({ entry }: { entry: ChatTimelineItem }) {
     const statusIcon = entry.status === 'running' ? <LoaderCircle className="size-3.5 animate-spin" /> : entry.status === 'completed' ? <CircleCheck className="size-3.5" /> : <CircleX className="size-3.5" />
     return <article className="ml-11 overflow-hidden rounded-xl border border-border bg-card/70 text-xs"><header className="flex min-h-10 items-center gap-2 border-b border-border px-3"><Wrench className="size-3.5 text-violet-300" /><strong className="min-w-0 flex-1 truncate font-mono text-foreground">{entry.toolName}</strong><span className={cn('flex items-center gap-1', entry.status === 'failed' ? 'text-red-300' : entry.status === 'running' ? 'text-amber-300' : 'text-emerald-300')}>{statusIcon}{toolStatusLabels[entry.status]}{entry.exitCode != null ? ` · ${entry.exitCode}` : ''}</span></header>{input && <details className="border-b border-border" open={entry.status === 'running'}><summary className="cursor-pointer px-3 py-2 text-muted-foreground">调用参数</summary><pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words border-t border-border bg-background/60 px-3 py-2 font-mono leading-5 text-foreground">{input}</pre></details>}{entry.output && <details open><summary className="cursor-pointer px-3 py-2 text-muted-foreground">工具输出</summary><pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words border-t border-border bg-background/60 px-3 py-2 font-mono leading-5 text-foreground">{entry.output}</pre></details>}{!input && !entry.output && <p className="px-3 py-2 text-muted-foreground">等待工具输出…</p>}</article>
   }
-  return <article className={cn('flex gap-3', entry.role === 'user' && 'justify-end')}>{entry.role === 'assistant' && <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-violet-500/10 text-violet-300"><Bot className="size-4" /></span>}<div className={cn('max-w-[90%] min-w-0 text-sm leading-6', entry.role === 'user' && 'rounded-2xl rounded-br-sm bg-indigo-500/20 px-4 py-3 ring-1 ring-indigo-400/15')}>{entry.text ? <MarkdownMessage text={entry.text} /> : <p className="text-muted-foreground">等待输出…</p>}{entry.role === 'user' ? <div className="mt-1 flex justify-end"><MessageStatus status={entry.status} /></div> : entry.status === 'running' || entry.status === 'started' ? <TypingDots /> : (entry.status === 'failed' || entry.status === 'rejected') && <small className="mt-1 block text-xs text-red-300">回复失败</small>}</div></article>
+  return <article className={cn('flex gap-3', entry.role === 'user' && 'justify-end')}>{entry.role === 'assistant' && <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-violet-500/10 text-violet-300"><Bot className="size-4" /></span>}<div className={cn('max-w-[90%] min-w-0 text-sm leading-6', entry.role === 'user' && 'rounded-2xl rounded-br-sm bg-indigo-500/20 px-4 py-3 ring-1 ring-indigo-400/15')}>{entry.text ? <MarkdownMessage text={entry.text} /> : <p className="text-muted-foreground">等待输出…</p>}{entry.role === 'user' ? <div className="mt-1 flex items-center justify-end gap-1.5"><MessageStatus status={entry.status} />{onOpenContext && <button type="button" onClick={onOpenContext} className="rounded p-0.5 text-muted-foreground/40 transition-colors hover:bg-muted/60 hover:text-foreground" aria-label="查看会话信息"><ChevronRight className="size-3" /></button>}</div> : entry.status === 'running' || entry.status === 'started' ? <TypingDots /> : <MessageStatus status={entry.status} />}</div></article>
 }
 
-// 业界通行的极简消息状态：发送中 spinner、送达一枚淡勾、失败红字；不再用文字步骤条
+const messageStatusLabels: Record<string, string> = { queued: '排队中', started: '正在处理', running: '正在回复', completed: '已完成', cancelled: '已取消', rejected: '已拒绝', failed: '执行失败' }
 function MessageStatus({ status }: { status: string }) {
-  if (status === 'failed' || status === 'cancelled' || status === 'rejected') return <small className="flex items-center gap-1 text-[10px] text-red-300"><CircleX className="size-3" />发送失败</small>
-  if (status === 'completed') return <span title="已送达"><Check className="size-3 text-muted-foreground/60" /></span>
-  return <LoaderCircle aria-label="发送中" className="size-3 animate-spin text-indigo-300/70" />
+  return <small role="status" className={cn('text-[10px]', status === 'failed' || status === 'rejected' ? 'text-red-300' : 'text-muted-foreground')}>{messageStatusLabels[status] ?? '等待确认'}</small>
 }
 
 function TypingDots() {

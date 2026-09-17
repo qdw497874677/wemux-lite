@@ -34,7 +34,8 @@ export interface Assignment {
   readonly workspaceId: string
   readonly workerId: string
   readonly agentKey: string
-  readonly modelId: string
+  /** Optional: null means the Agent runtime uses its default model. */
+  readonly modelId: string | null
 }
 export interface TaskSummary {
   readonly capabilities?: import('./action-capability.js').TaskCapabilities
@@ -137,7 +138,7 @@ export type LaunchRequest = {
  * Preserve prompt verbatim, including whitespace. Identity is (taskId, requestId).
  */
 export function launchFingerprintInput(request: LaunchRequest): readonly [
-  LaunchRequest['mode'], string, string | null, readonly [string, string, string, string],
+  LaunchRequest['mode'], string, string | null, readonly [string, string, string, string | null],
 ] {
   const a = request.assignment
   return [request.mode, request.prompt, request.mode === 'new' ? null : request.reuseSessionId,

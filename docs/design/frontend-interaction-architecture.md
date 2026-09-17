@@ -1,6 +1,8 @@
 # Wemux Lite 前端交互架构设计：Agent 协作平台
 
-> 状态：v1.1 修订设计，已结合子代理审查，尚未实施；开工受 M1 契约冻结门约束。
+> 状态：任务能力扩展阶段的历史交互设计，不作为当前完成状态。产品定位与新阶段安排见 [产品方向](../product-direction.md) 和 [路线图](../roadmap.md)；旧 M/P/V 编号仅在本文历史计划内有效。Workspace 的就绪与路径按目标 Placement 解释，发布必须真实浏览器验收，旧“可选”要求不再适用。
+
+当前功能补全的源码依据见 [M1 调研](../research/wemux-m1-feature-interaction.md)，导航、会话和首批开发切片见 [功能与交互设计计划](feature-interaction-plan.md)（待确认提案）。本文历史页面布局不优先于新方案，执行归属与幂等等约束继续保留。
 
 ## 修订记录
 
@@ -18,14 +20,14 @@
 9. Repository v1 为内嵌 git URL，无 API 拉取。
 10. SSE：P6 加 /api/projects/:id/events 项目级频道。
 
-> 产品定位：Agent 协作平台——Project 提供管理流程，Task 是主工作流（看板形态、保留扩展口），Task 可关联 Git issue 等外部跟踪对象，可在 Task 中创建 Workspace 并分配 Agent 运行时执行任务。
+> 产品定位：AI Agent 集群管理与协作平台。Project 是组织中心，直接 Session 对话和 Task 协作均为一等路径；本文主要描述后者，不要求所有用户先建任务。
 > 参考：`/opt/data/profiles/scribe/workspace/wemux-slim` 看板（`apps/web/src/components/kanban/`）、任务工作区创建（`apps/web/src/components/kanban/task-workspace-create-panel.tsx`）、planner 架构报告（`/tmp/acp-delegate/del_mu10hnlu_vh13.out`）。
 > 领域术语以 `CONTEXT.md` 为准：Task / Task Workflow / Task Link / Agent Assignment / Agent Run / Task Workspace 已定义。
 
 ## 0. 核心结论
 
 1. **OS 隐喻的正确用法**：体现在稳定的应用框架（全局导航）、资源管理器（Project/Task/Workspace/Session）、进程监视器（Agent Run 实时视图）、通知中心（活动流）；不做桌面窗口管理器、不做浏览器端调度器、不做插件系统。
-2. **Task 是主工作流，Session 是执行现场**。看板是 Task Workflow 的一种视图（第一种，不是唯一一种），扩展口从第一天就设计好。
+2. **Task 是可选协作流程，Session 同时也是独立对话入口**。看板是 Task Workflow 的一种视图（第一种，不是唯一一种），扩展口从第一天就设计好。
 3. **Task → Workspace 创建参考 wemux**：单屏表单（名称 + 节点 + 仓库 + Agent + 模型），创建后异步 provisioning，ready 后可启动 Run。
 4. **外部关联第一版只读**：Task Link 只存类型 + 外部 ID + URL，展示与跳转；同步是按类型扩展的适配器接口，不预先承诺。
 5. **任务完成是管理决策**：Agent Run 完成最多建议进入 in_review，由人确认 done。这是交互层必须表达的领域不变量。
@@ -45,7 +47,7 @@
 
 项目内导航（进入某个 Project 后）
 ├── 概览 Overview        ← 需要关注的事，不是指标堆砌
-├── 任务 Tasks           ← 主工作流：看板 + 任务详情
+├── 任务 Tasks           ← 可选协作：看板 + 任务详情
 ├── 会话 Sessions        ← 现有 Project → Workspace → Session 树（保留）
 ├── 工作区 Workspaces    ← 项目下 Workspace 列表与 provisioning 状态
 └── 设置                 ← 仓库、成员（未来）
@@ -98,7 +100,7 @@
 - 连接状态条沿用现有分层：浏览器离线 / Server 连接 / 令牌无效 / Worker 在线数（`App.tsx` 现有 connectionState 迁入 shell）。
 - 右侧检查器（Inspector）是可选栏：运行详情、会话上下文宽屏常驻、窄屏可用 Sheet；**任务详情例外：窄屏必须整页**，遵循唯一详情路径。
 
-## 3. 任务看板（主工作流，含扩展口）
+## 3. 任务看板（可选协作流程，含扩展口）
 
 ### 3.1 布局
 

@@ -4,7 +4,8 @@ import { readFileSync } from 'node:fs'
 import { QuickStartController, fillQuickChoices, initialQuickConfig, quickConfigReason, quickKey, readPreference } from '../src/features/sessions/quick-start.ts'
 
 const config = { workspaceId: 'w', workerId: 'worker', agentKey: 'pi', modelId: 'model' }
-const workspace = { id: 'w', projectId: 'p', workerId: 'worker', status: 'ready' }
+const readyPlacement = { workerId: 'worker', status: 'ready', failureReason: null, location: { rootPath: '/repo' } }
+const workspace = { id: 'w', projectId: 'p', placements: [readyPlacement], workerId: 'worker', status: 'ready' }
 const worker = { id: 'worker', connectionState: 'online', capabilities: [{ agentKey: 'pi', mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' }] }] }
 const session = { id: 's', projectId: 'p', ...config, sendCapability: { allowed: true } }
 const memory = () => { const data = new Map(); return { getItem: k => data.get(k) ?? null, setItem: (k, v) => data.set(k, v), removeItem: k => data.delete(k) } }
@@ -42,7 +43,7 @@ test('double submit creates and sends once, remembers only acknowledged configur
   assert.equal(f.controller.state.draft, '')
   assert.deepEqual(readPreference(f.preferences, 'key'), config)
   assert.equal(await f.controller.start(), null)
-  assert.equal('workerId' in f.calls.creates[0], false)
+  assert.equal(f.calls.creates[0].workerId, 'worker')
 })
 test('lost create response retries one durable requestId and resumes the same Session after reload', async () => {
   const requests = []
@@ -170,7 +171,7 @@ test('pending acknowledgement alone completes and persists preference, not enque
 test('quick UI keeps mobile workspaces visible, exact select names and stale navigation guards', () => {
   const src = path => readFileSync(new URL(path, import.meta.url), 'utf8')
   const ui = src('../src/components/quick-conversation.tsx')
-  for (const label of ['工作区', '智能体', '模型']) assert.ok(ui.includes(`<select aria-label="${label}"`))
+  for (const label of ['工作区', '工作节点', '智能体', '模型']) assert.ok(ui.includes(`<select aria-label="${label}"`))
   assert.match(ui, /return \(\) => \{ viewGeneration.current\+\+ \}/)
   assert.match(ui, /id && generation === viewGeneration.current/)
   assert.match(src('../src/App.tsx'), /key=\{`\$\{projectId\}:\$\{section\}`\}/)

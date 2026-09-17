@@ -1,6 +1,20 @@
 # Wemux Lite
 
-Wemux Lite 是面向开发团队的最小 Agent 执行控制面：Server 管理 Project、Worker、Workspace 和 Session；独立安装的 Worker 在本机执行 Agent，并把标准化 Journal 同步回 Server；Web 通过 HTTP + SSE 操作和观察会话。
+Wemux Lite 是面向个人与团队、自托管的 AI Agent 集群管理与协作平台。Server 统一管理分布式 Worker、Agent 能力、Project、Workspace 和持续 Session；Worker 执行本机 Agent 并同步标准化 Journal；Web 和其他客户端共享控制与授权入口。
+
+目标是完善可长期使用的产品，而不是 MVP。“Lite”表示轻量部署与必要依赖，不表示缩减可靠性或管理能力。直接对话 `Project → Workspace → Session` 与任务协作 `Task → Run → Session → Review` 均是一等路径，任务看板不是对话前置条件。
+
+## 产品与建设方向
+
+- [产品定位与边界](docs/product-direction.md)
+- [里程碑、依赖与验收安排](docs/roadmap.md)
+- [领域术语](CONTEXT.md)
+
+Workspace 是项目级逻辑环境，可以在多个 Worker 上拥有独立 Placement；Session 固定绑定执行位置。跨节点管理不等于自动同步文件或迁移会话。文档描述的目标能力与当前代码、已验收能力严格分开。
+
+### 已确认的 Worker 独立工作台方向（待实施）
+
+Worker 将支持独立安装、自身 Web/API 鉴权与显式公网 HTTPS 访问，不要求先加入集群。用户可从 Worker Web 主动加入 Server；加入不自动上传本地会话或发布目录。集群与独立工作台复用运行时和会话 Web 模块，详见 [设计与交付切片](docs/design/worker-web-workbench.md)。下方命令仍是当前集群使用方式，不代表已提供独立 Web 启动入口。
 
 ## 从旧名称迁移
 
@@ -23,7 +37,7 @@ packages/wire-protocol   版本化 Server–Worker 协议
 packages/web-contract    Web 展示契约
 ```
 
-应用层只依赖 ports；SQLite、HTTP、WebSocket、Git 和 Agent 均位于外层 adapter。MVP 使用 Node 内置 `node:sqlite`，网络只额外依赖 `ws`。
+应用层只依赖 ports；SQLite、HTTP、WebSocket、Git 和 Agent 均位于外层 adapter。默认使用 Node 内置 `node:sqlite`，Worker 通信依赖 `ws`；不要求外部数据库或消息中间件。
 
 ## 要求
 
@@ -51,8 +65,8 @@ npm run dev:web
 
 ```bash
 npm run build:web
-WEMUX_BOOTSTRAP_TOKEN='replace-with-a-long-random-secret' PORT=8004 HOST=0.0.0.0 npm run start:server
-# 打开 http://<主机>:8004/ 即控制台；Worker 的 Server URL 也是 http://<主机>:8004
+WEMUX_BOOTSTRAP_TOKEN='replace-with-a-long-random-secret' PORT=8010 HOST=0.0.0.0 npm run start:server
+# 打开 http://<主机>:8010/ 即控制台；Worker 的 Server URL 也是 http://<主机>:8010
 ```
 
 静态目录默认取 `apps/web/dist`，可用 `WEMUX_WEB_DIST` 覆盖；未配置或目录不存在时仅提供 API。SPA 回退只对带 `text/html` 的浏览器导航生效，API 客户端未命中路由仍返回 JSON 404；控制台的同源 `/api/*` 调用由 Server 直接兼容。
@@ -108,7 +122,7 @@ WEMUX_E2E_GIT_REVISION='master' \
 npm test
 ```
 
-Worker 默认把 Workspace 分配到 `~/.wemux-lite/workspaces/<sha256(workspaceId)>`，Agent Session 以该 Workspace 根目录为 `cwd`；同一 Workspace 的多个 Session 共享目录。
+Worker 默认把 Workspace 分配到 `~/.wemux-lite/workspaces/<sha256(workspaceId)>`，Agent Session 以该 Workspace 根目录为 `cwd`；同一 Workspace 在同一 Worker 上的 Placement 内，多个 Session 共享目录；不同 Worker 上的副本不自动同步。
 
 ## 集群阶段管理
 
@@ -116,15 +130,15 @@ Web 侧边栏新增「集群阶段」页，集中管理集群中所有阶段性�
 
 - **Worker 阶段**：在线 / 离线 / 已撤销，支持撤销（断开连接并作废凭据，幂等）；
 - **命令阶段**：`pending → accepted → succeeded/failed`，可取消尚未交付的 `pending` 命令（Worker 迟到的回执优先，已取消命令不重复交付）；
-- **Workspace 阶段**：`pending/provisioning → ready/failed`，可对 `pending/failed` 的重新下发；
+- **Workspace 物化阶段**：各 Placement 独立记录 `pending/provisioning → ready/failed`，重试需明确目标 Worker，不能以一个副本就绪代表全部就绪；
 - **Session 阶段**：可删除异常会话。
 
 对应 Server 接口：`GET /commands`（支持 `status`/`workerId` 筛选）、`DELETE /commands/:id`（取消）、`POST /workspaces/:id/reprovision`（重发）、`POST /workers/:id/revoke`（撤销）。
 
-## MVP 边界
+## 当前基础与验证边界
 
-- 单 bootstrap 管理员；完整用户、团队授权 UI 尚未实现。
-- Repository Workspace；Composite Workspace 尚未实现。
-- `test` Agent 提供可重复的执行闭环。
-- Pi 使用本机 CLI RPC，Claude Code 使用本机 CLI stream-json bridge；均支持原生会话续接、流式事件和停止。Codex、OpenCode 仍为检测模式。
+- 当前以 bootstrap 管理员接入为主；不能宣称已完成多用户、团队资源授权与客户端凭证的完整闭环。
+- 已有逻辑 Workspace 与 Placement 类型和相关实现；多节点生命周期与客户端一致性纳入里程碑核验，非空 Composite Workspace 不作为已交付能力。
+- `test` Agent 提供确定性执行验证；Pi 与 Claude Code 有本机 CLI 执行适配，需对版本、认证与真实运行分别验收。Codex、OpenCode 不因可检测就被宣称可执行。
 - Server 是缓存与控制面，Worker Journal 是会话历史权威。
+- 当前缺口不是永久产品边界。准确交付状态以路线图能力台账与可复查证据为准；构建通过不等于浏览器或真实 Agent 验收通过。

@@ -1,6 +1,8 @@
 # Task Platform 权威契约裁定（Ticket 01）
 
-状态：Ticket 01 的后续实现依据；本文件是 spec、交互架构、实施方案、视觉设计与 CONTEXT 残留冲突的唯一裁定入口。父 spec `docs/specs/0001-task-board-agent-platform.md` 保留原文，不删除、不改写。冲突处以本文件为准，未冲突部分继续遵循父 spec。这里冻结的是实现契约与 M1 共享 DTO 代码，不代表 Task API 或业务已交付；Ticket 01 不实现 Ticket 02+。
+适用范围：本文继续裁定任务域的 requestId 幂等、取消收敛、CAS 和 Run 归属细节，不裁定整个产品定位或路线图。当前产品主线见 [产品方向](../product-direction.md)，Workspace 的身份与 Placement 见 [CONTEXT](../../CONTEXT.md)；文中 Workspace ready 均指目标 Worker 的 Placement ready。后续里程碑若修改本契约，必须有明确规格和迁移测试。
+
+历史状态：Ticket 01 的后续实现依据；本文件是 spec、交互架构、实施方案、视觉设计与 CONTEXT 残留冲突的唯一裁定入口。父 spec `docs/specs/0001-task-board-agent-platform.md` 保留原文，不删除、不改写。冲突处以本文件为准，未冲突部分继续遵循父 spec。这里冻结的是实现契约与 M1 共享 DTO 代码，不代表 Task API 或业务已交付；Ticket 01 不实现 Ticket 02+。
 
 ## 1. 身份、尝试与启动
 

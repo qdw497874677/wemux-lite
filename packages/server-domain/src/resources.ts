@@ -100,5 +100,7 @@ export interface Session {
   readonly shareScope: SessionShareScope
   readonly binding: SessionBinding
   readonly runtimeState: SessionRuntimeState
+  /** Absent on legacy records; archiving never deletes execution history. */
+  readonly archivedAt?: Timestamp | null
   readonly deletedAt: Timestamp | null
 }

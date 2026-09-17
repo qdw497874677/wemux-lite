@@ -43,6 +43,15 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
       if (method === 'GET' && path === '/health') { json(response, 200, { status: 'ok' }); return }
       if (method === 'GET' && await serveWorkerDownload(response, path, downloads)) return
       if (method === 'POST' && path === '/workers/enroll') { json(response, 201, await service.enroll(await body(request))); return }
+      const workerLeave = path.match(/^\/workers\/([^/]+)\/enrollment$/)
+      if (method === 'DELETE' && workerLeave) {
+        const header = request.headers.authorization
+        const token = header?.startsWith('Bearer ') ? header.slice(7) : undefined
+        const workerId = await auth.authenticateWorker(token)
+        if (workerId !== workerLeave[1]) throw new AppError(403, 'Forbidden')
+        await service.leaveWorker(workerId, id => control?.disconnectWorker(id))
+        response.writeHead(204).end(); return
+      }
       if (staticSite && method === 'GET' && await serveStaticSite(response, path, request.headers.accept, staticSite)) return
       if (method === 'POST' && path.startsWith('/agent-capabilities/')) {
         if (!capabilities) throw new AppError(503, 'Agent capabilities are disabled')
@@ -163,6 +172,10 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
         if (input.workerId !== undefined && typeof input.workerId !== 'string') throw new AppError(400, 'Invalid workerId')
         json(response, 200, await service.reprovisionWorkspace(reprovision[1] as WorkspaceId, input.requestId, input.workerId as WorkerId | undefined)); return
       }
+      const cancelQueued = path.match(/^\/sessions\/([^/]+)\/messages\/([^/]+)\/cancel$/)
+      if (method === 'POST' && cancelQueued) { json(response, 202, await service.cancelQueued(cancelQueued[1] as SessionId, cancelQueued[2] as CommandId, await body(request))); return }
+      const stopTurn = path.match(/^\/sessions\/([^/]+)\/turn\/stop$/)
+      if (method === 'POST' && stopTurn) { json(response, 202, await service.stopTurn(stopTurn[1] as SessionId, await body(request))); return }
       const runtimeCommand = path.match(/^\/sessions\/([^/]+)\/runtime\/commands$/)
       if (method === 'POST' && runtimeCommand) { json(response, 202, await service.invokeRuntimeCommand(runtimeCommand[1] as SessionId, await body(request))); return }
       const runtimeApproval = path.match(/^\/sessions\/([^/]+)\/runtime\/approvals\/([^/]+)$/)
@@ -192,7 +205,9 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
             const items = await service.listWorkspaces()
             json(response, 200, { items: projectId ? items.filter(item => item.projectId === projectId) : items })
           } else {
-            const items = await Promise.all((await service.listSessions()).map(session => service.sessionView(session.id)))
+            const archived = url.searchParams.get('archived')
+            if (archived !== null && archived !== 'true' && archived !== 'false') throw new AppError(400, 'archived must be true or false')
+            const items = await Promise.all((await service.listSessions({ archived: archived === null ? undefined : archived === 'true' })).map(session => service.sessionView(session.id)))
             json(response, 200, {
               items: workspaceId
                 ? items.filter(item => item.workspaceId === workspaceId)

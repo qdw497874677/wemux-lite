@@ -10,40 +10,46 @@ const isConfig = (value: unknown): value is QuickConfig => Boolean(value && type
 export function readPreference(storage: Pick<Storage, 'getItem'>, key: string): QuickConfig | null {
   try { const value: unknown = JSON.parse(storage.getItem(`${key}:preference`) ?? 'null'); return isConfig(value) ? value : null } catch { return null }
 }
-/** Defaults are unique choices only. A saved selection is never repaired implicitly. */
+/** Defaults are unique choices only. A saved selection is never repaired implicitly.
+ * Prefers a workspace that already has a ready placement on an online worker so the
+ * user can start immediately without manual selection when the environment is usable. */
 export function initialQuickConfig(projectId: string, workspaces: WorkspaceDTO[], workers: WorkerDTO[], preference: QuickConfig | null): QuickConfig {
   if (preference) return preference
   const candidates = workspaces.filter(ws => ws.projectId === projectId)
-  if (candidates.length !== 1 || candidates[0].status !== 'ready' || !workers.some(w => w.id === candidates[0].workerId && w.connectionState === 'online' && w.capabilities.some(a => isExecutable(a) && a.models.length))) return emptyQuickConfig()
-  const ws = candidates[0], worker = workers.find(w => w.id === ws.workerId)!
-  const agents = worker.capabilities.filter(a => isExecutable(a) && a.models.length)
-  const agent = agents.length === 1 ? agents[0] : undefined
-  return { workspaceId: ws.id, workerId: ws.workerId, agentKey: agent?.agentKey ?? '', modelId: agent?.models.length === 1 ? agent.models[0].modelId : '' }
+  if (!candidates.length) return emptyQuickConfig()
+  const onlineIds = new Set(workers.filter(w => w.connectionState === 'online').map(w => w.id))
+  const ready = candidates.filter(ws => ws.placements.some(p => p.status === 'ready' && onlineIds.has(p.workerId)))
+  const pick = ready.length === 1 ? ready[0] : candidates.length === 1 ? candidates[0] : null
+  if (!pick) return emptyQuickConfig()
+  return fillQuickChoices({ ...emptyQuickConfig(), workspaceId: pick.id }, projectId, workspaces, workers)
 }
 export function quickConfigReason(config: QuickConfig, projectId: string, workspaces: WorkspaceDTO[], workers: WorkerDTO[]): string {
   if (!config.workspaceId) return '请选择工作区；多个可用工作区不会自动代选。'
   const ws = workspaces.find(w => w.id === config.workspaceId && w.projectId === projectId)
   if (!ws) return '原工作区已不可访问，请明确选择其他工作区。'
-  if (ws.workerId !== config.workerId) return '工作区绑定的节点已变化，请重新选择工作区。'
-  if (ws.status !== 'ready') return ws.failureReason || '工作区尚未就绪，请等待准备完成或检查工作区。'
+  if (!config.workerId) return '请选择工作节点。'
+  const placement = ws.placements?.find(p => p.workerId === config.workerId)
+  if (!placement) return '所选工作节点已不在该工作区中，请重新选择。'
+  if (placement.status !== 'ready') return placement.failureReason || '所选工作节点上的工作区尚未初始化完成，请等待或检查状态。'
   const worker = workers.find(w => w.id === config.workerId)
-  if (!worker || worker.connectionState !== 'online') return '所选工作节点不在线，请恢复连接或明确更换工作区。'
+  if (!worker || worker.connectionState !== 'online') return '所选工作节点不在线，请恢复连接或明确更换工作节点。'
   if (!config.agentKey) return '请选择智能体。'
   const agent = worker.capabilities.find(a => a.agentKey === config.agentKey)
   if (!agent || !isExecutable(agent)) return agent?.availability.reason || '所选智能体不可执行或尚未认证。'
-  if (!config.modelId) return '请选择模型。'
-  if (!agent.models.some(m => m.modelId === config.modelId)) return '原模型已不在节点报告清单中，请明确选择其他模型。'
+  if (config.modelId && !agent.models.some(m => m.modelId === config.modelId)) return '原模型已不在节点报告清单中，请明确选择其他模型。'
   return ''
 }
 
 /** Only explicit upstream selection calls this; refresh never repairs stale choices. */
 export function fillQuickChoices(config: QuickConfig, projectId: string, workspaces: WorkspaceDTO[], workers: WorkerDTO[]): QuickConfig {
-  const ws = workspaces.find(w => w.id === config.workspaceId && w.projectId === projectId && w.workerId === config.workerId && w.status === 'ready')
-  const worker = workers.find(w => w.id === ws?.workerId && w.connectionState === 'online')
+  const ws = workspaces.find(w => w.id === config.workspaceId && w.projectId === projectId)
+  const workerId = config.workerId || (ws?.placements?.length === 1 ? ws.placements[0].workerId : '')
+  const placement = ws?.placements?.find(p => p.workerId === workerId)
+  const worker = placement?.status === 'ready' ? workers.find(w => w.id === workerId && w.connectionState === 'online') : undefined
   const agents = worker?.capabilities.filter(a => isExecutable(a) && a.models.length) ?? []
   const agentKey = config.agentKey || (agents.length === 1 ? agents[0].agentKey : '')
   const agent = agents.find(a => a.agentKey === agentKey)
-  return { ...config, agentKey, modelId: config.modelId || (agent?.models.length === 1 ? agent.models[0].modelId : '') }
+  return { ...config, workerId, agentKey, modelId: config.modelId || (agent?.models.length === 1 ? agent.models[0].modelId : '') }
 }
 
 interface Attempt { requestId: string; config: QuickConfig; title: string; message: SendMessageDTO; sessionId: string | null; sent?: boolean; rejected?: boolean }
@@ -86,7 +92,7 @@ export class QuickStartController {
   configure(config: QuickConfig) { if (this.state.pending || this.state.attempt || this.state.completed) return; this.update({ config, error: '' }); try { this.persist() } catch { /* Checked before create. */ } }
   dispose() { this.disposed = true; clearTimeout(this.receiptTimer); this.listeners.clear() }
   private bound(session: SessionDTO, attempt: Attempt) {
-    return session.projectId === this.projectId && session.workspaceId === attempt.config.workspaceId && session.workerId === attempt.config.workerId && session.agentKey === attempt.config.agentKey && session.modelId === attempt.config.modelId
+    return session.projectId === this.projectId && session.workspaceId === attempt.config.workspaceId && session.workerId === attempt.config.workerId && session.agentKey === attempt.config.agentKey && (session.modelId ?? '') === attempt.config.modelId
   }
   private acknowledge() {
     const attempt = this.state.attempt!
@@ -126,7 +132,7 @@ export class QuickStartController {
       if (reason) throw new Error(reason)
       if (!this.state.attempt) {
         const content = this.state.draft.trim()
-        if (content.includes('\0') || content.length > 100000 || new TextEncoder().encode(JSON.stringify(content)).length > 200000) throw new Error('。')
+        if (content.includes('\0') || content.length > 100000 || new TextEncoder().encode(JSON.stringify(content)).length > 200000) throw new Error('消息包含不支持的字符或超过长度限制，请缩短后重试。')
         const attempt: Attempt = { requestId: randomId(), config: { ...this.state.config }, title: content.slice(0, 80), message: { commandId: randomId(), messageId: randomId(), content }, sessionId: null }
         // Failure to persist must not issue a create request.
         this.storage.setItem(this.key, JSON.stringify({ ...this.state, attempt, pending: false }))
@@ -135,7 +141,7 @@ export class QuickStartController {
       let attempt = this.state.attempt!
       if (!attempt.sessionId) {
         creating = true
-        const created = await this.api.createSession({ requestId: attempt.requestId, workspaceId: attempt.config.workspaceId, agentKey: attempt.config.agentKey, modelId: attempt.config.modelId, title: attempt.title, shareScope: 'owner-only' })
+        const created = await this.api.createSession({ requestId: attempt.requestId, workspaceId: attempt.config.workspaceId, workerId: attempt.config.workerId, agentKey: attempt.config.agentKey, modelId: attempt.config.modelId || null, title: attempt.title, shareScope: 'owner-only' })
         attempt = { ...attempt, sessionId: created.id }; creating = false
         this.update({ attempt }); this.persist()
       }
@@ -160,7 +166,7 @@ export class QuickStartController {
       const status = typeof cause === 'object' && cause && 'status' in cause ? Number(cause.status) : 0
       if (sending && status >= 400 && status < 500 && ![408, 429].includes(status)) { this.reject('服务端明确拒绝请求'); return null }
       if (creating && status >= 400 && status < 500 && ![408, 429].includes(status)) { this.update({ attempt: null }); try { this.persist() } catch { /* Keep durable retry identity if persistence fails. */ } }
-      this.update({ error: creating ? '，； requestId 。' : cause instanceof Error ? cause.message : '，。' })
+      this.update({ error: creating ? '创建会话尚未确认，草稿已保留；重试将复用原 requestId，避免重复创建。' : cause instanceof Error ? cause.message : '启动失败，草稿已保留，请稍后重试。' })
       return this.disposed ? null : this.state.attempt?.sessionId ?? null
     } finally { this.update({ pending: false }); void this.checkReceipt() }
   }

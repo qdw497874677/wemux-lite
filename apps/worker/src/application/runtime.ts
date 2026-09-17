@@ -1,12 +1,13 @@
 import { createHash } from 'node:crypto'
-import type { CommandId, EventSeq, SessionId, Timestamp, Turn, TurnId, WorkerId } from '@wemux/domain'
+import type { AgentEvent } from '@wemux/agent-interchange'
+import type { ApprovalId, CommandId, EventSeq, SessionId, Timestamp, ToolCallId, Turn, TurnId, WorkerId } from '@wemux/domain'
 import type { CommandReceipt, ServerToWorker, WorkerCommand, WorkerToServer } from '@wemux/wire-protocol'
-import type { AgentAdapter, AgentTurnHandle, AgentTurnOutcome } from './ports/agent-adapter.js'
+import type { AgentAdapter, AgentTurnEvent, AgentTurnOutcome } from './ports/agent-adapter.js'
 import type { AgentLaunchContextProvider } from './ports/agent-launch-context.js'
 import type { LocalState, RuntimeTransport, WorkspaceProvisioner } from './ports/local-state.js'
 import type { WorkerStore } from './ports/worker-store.js'
-import { LegacyRuntimeSessionAdapter } from './legacy-runtime-session-adapter.js'
-import { RuntimeSessionManager, type RuntimeSessionLease } from './runtime-session-manager.js'
+import { WorkerAgentRunner } from './agent-runner.js'
+import { runtimeAdaptersFor } from './runtime-adapters.js'
 import type { RuntimeSessionAdapter } from './ports/runtime-session.js'
 
 const now = () => new Date().toISOString() as Timestamp
@@ -23,20 +24,21 @@ function canonical(value: unknown): string {
 
 export class WorkerRuntime {
   private readonly tasks = new Map<SessionId, Promise<void>>()
-  private readonly handles = new Map<SessionId, AgentTurnHandle & { turnId: TurnId }>()
   private readonly sent = new Map<SessionId, number>()
   private readonly provisions = new Map<import('@wemux/domain').WorkspaceId, Promise<void>>()
-  private readonly runtimeSessions = new Map<import('@wemux/domain').AgentKey, RuntimeSessionManager>()
+  private readonly agentRunner: WorkerAgentRunner
   private headRefresh: NodeJS.Timeout | null = null
   private commands: Promise<unknown> = Promise.resolve()
   private publishing: Promise<unknown> = Promise.resolve()
   private closing = false
-  constructor(private readonly store: WorkerStore & LocalState, private readonly provisioner: WorkspaceProvisioner,
+  constructor(private readonly store: WorkerStore & LocalState & import('@wemux/agent-interchange').SessionStore, private readonly provisioner: WorkspaceProvisioner,
     private readonly agents: readonly AgentAdapter[], private readonly transport: RuntimeTransport,
     private readonly workerId: WorkerId, private readonly name: string,
     private readonly launchContexts: AgentLaunchContextProvider = { prepare: async () => ({ context: null, cleanup: async () => undefined }) },
     private readonly agentTimeouts = { idleMs: DEFAULT_AGENT_IDLE_TIMEOUT_MS, maxMs: DEFAULT_AGENT_MAX_TIMEOUT_MS },
-    private readonly runtimeAdapters: ReadonlyMap<import('@wemux/domain').AgentKey, RuntimeSessionAdapter> = new Map()) {}
+    runtimeAdapters: ReadonlyMap<import('@wemux/domain').AgentKey, RuntimeSessionAdapter> = runtimeAdaptersFor(agents)) {
+    this.agentRunner = new WorkerAgentRunner({ agents, runtimeAdapters, sessionStore: store })
+  }
 
   async initialize() {
     this.store.saveCapabilities(await Promise.all(this.agents.map(agent => agent.detect())))
@@ -61,13 +63,17 @@ export class WorkerRuntime {
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = setInterval(() => { void this.sendHeads() }, 1_000)
     this.headRefresh.unref()
-    for (const workspace of await this.store.listWorkspaces()) await this.report(workspace.id)
+    for (const workspace of await this.store.listWorkspaces()) if (!this.isLocalWorkspace(workspace)) await this.report(workspace.id)
   }
   receive(message: ServerToWorker): Promise<void> {
     const next = this.commands.then(async () => {
       if (this.closing) return
-      if (message.type === 'command') await this.command(message.commandId, message.command)
+      if (message.type === 'command') await this.command(message.commandId, message.command, true, 'cluster')
       if (message.type === 'sync') {
+        if (await this.isLocalSession(message.sessionId)) {
+          this.send({ ...envelope(), type: 'sync', kind: 'gap', sessionId: message.sessionId, fromSeq: message.fromSeq, reason: 'Requested journal range is unavailable' })
+          return
+        }
         const original = await this.store.journal.read(message)
         let bytes = 1024
         const events = original.events.filter(event => {
@@ -84,23 +90,41 @@ export class WorkerRuntime {
     this.commands = next.catch(() => {})
     return next
   }
+  async executeLocal(commandId: CommandId, command: WorkerCommand): Promise<CommandReceipt> {
+    if (this.closing) throw new Error('Worker runtime is shutting down')
+    const next = this.commands.then(() => this.command(commandId, command, false, 'local'))
+    this.commands = next.catch(() => {})
+    return next
+  }
   private send(message: WorkerToServer) { this.transport.send(message) }
   private async sendHeads() {
     if (this.closing) return
-    this.send({ ...envelope(), type: 'sync', kind: 'heads', complete: true, heads: await this.store.journal.listHeads() })
+    const heads = []
+    for (const head of await this.store.journal.listHeads()) if (!(await this.isLocalSession(head.sessionId))) heads.push(head)
+    this.send({ ...envelope(), type: 'sync', kind: 'heads', complete: true, heads })
   }
-  private async command(commandId: CommandId, command: WorkerCommand) {
+  private async isLocalSession(sessionId: SessionId) {
+    const installationId = this.store.localInstallation()?.installationId
+    if (!installationId) return false
+    return (await this.store.sessions.get(sessionId))?.binding.agent.workerId === `local-${installationId}`
+  }
+  private isLocalWorkspace(workspace: import('../domain/local-workspace.js').LocalWorkspace) {
+    const installationId = this.store.localInstallation()?.installationId
+    return Boolean(installationId) && workspace.projectId === ('local' as import('@wemux/domain').ProjectId) && workspace.workerId === `local-${installationId}`
+  }
+  private async command(commandId: CommandId, command: WorkerCommand, acknowledge = true, source: 'cluster' | 'local' = 'cluster'): Promise<CommandReceipt> {
     const payloadFingerprint = createHash('sha256').update(canonical(command.kind === 'session.enqueue' ? { kind: command.kind, sessionId: command.sessionId, message: { messageId: command.message.messageId, content: command.message.content } } : command)).digest('hex')
     const previous = await this.store.commands.get(commandId)
     let receipt: CommandReceipt = { commandId, status: 'accepted' }
     if (previous) {
       if (previous.payloadFingerprint !== payloadFingerprint) receipt = { commandId, status: 'rejected', error: { code: 'conflicting-command', message: 'Command ID reused with a different payload', retryable: false } }
       else if (previous.state === 'rejected') receipt = previous.result as CommandReceipt
-      this.send({ ...envelope(), type: 'ack', receipt })
-      return
+      if (acknowledge) this.send({ ...envelope(), type: 'ack', receipt })
+      return receipt
     }
     try {
-      await this.validate(command)
+      const approvalTurnId = command.kind === 'runtime.approval.resolve' ? (await this.store.sessions.get(command.sessionId))?.activeTurnId ?? null : null
+      await this.validate(command, source)
       await this.store.transaction(async tx => {
         await tx.commands.record({ commandId, command, payloadFingerprint }, receipt)
         switch (command.kind) {
@@ -109,6 +133,10 @@ export class WorkerRuntime {
           case 'session.delete': await tx.sessions.deleteSession(command.sessionId); break
           case 'session.cancel-queued': await tx.sessions.cancelQueued(command.sessionId, command.submissionCommandId); break
           case 'turn.stop': await tx.sessions.requestStop(command.sessionId, command.turnId); break
+          case 'runtime.approval.resolve':
+            if (!approvalTurnId) throw new Error('Agent invocation is not active')
+            await tx.appendJournal(command.sessionId, [{ occurredAt: now(), payload: { kind: 'approval.resolved', turnId: approvalTurnId, approvalId: command.approvalId, decision: command.decision } }])
+            break
         }
         if (command.kind !== 'workspace.provision') await tx.commands.setExecutionState({ commandId, state: 'completed', result: null, updatedAt: now() })
       })
@@ -116,30 +144,33 @@ export class WorkerRuntime {
       receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: error instanceof Error ? error.message : 'Invalid command', retryable: false } }
       await this.store.transaction(tx => tx.commands.record({ commandId, command, payloadFingerprint }, receipt))
     }
-    this.send({ ...envelope(), type: 'ack', receipt })
-    if (receipt.status === 'rejected') return
+    if (acknowledge) this.send({ ...envelope(), type: 'ack', receipt })
+    if (receipt.status === 'rejected') return receipt
     if (command.kind === 'workspace.provision') {
       this.startProvision(commandId, command)
-      return
+      return receipt
     }
     if (command.kind === 'session.delete') {
       this.sent.delete(command.sessionId)
-      await Promise.all([...this.runtimeSessions.values()].map(manager => manager.closeSession(command.sessionId)))
-      return
+      await this.agentRunner.closeSession(command.sessionId)
+      return receipt
     }
-    if (command.kind === 'turn.stop') {
-      const handle = this.handles.get(command.sessionId)
-      if (handle?.turnId === command.turnId && (await this.store.sessions.getTurn(command.turnId))?.state === 'stopping') await handle.stop()
+    if (command.kind === 'turn.stop' && (await this.store.sessions.getTurn(command.turnId))?.state === 'stopping') {
+      await this.agentRunner.stop(command.sessionId, command.turnId)
     }
     await this.publish()
     if ('sessionId' in command) this.schedule(command.sessionId)
+    return receipt
   }
   private available(binding: import('@wemux/domain').SessionBinding) {
-    return this.store.capabilities().some(c => c.agentKey === binding.agent.agentKey && c.mode === 'execution' && c.availability.status === 'available' && c.models.some(m => m.modelId === binding.modelId))
+    const localId = this.store.localInstallation()?.installationId
+    const ownsWorker = binding.agent.workerId === this.workerId || (localId && binding.agent.workerId === `local-${localId}`)
+    return Boolean(ownsWorker) && this.store.capabilities().some(c => c.agentKey === binding.agent.agentKey && c.mode === 'execution' && c.availability.status === 'available' && c.models.some(m => m.modelId === binding.modelId))
   }
-  private async validate(command: WorkerCommand) {
+  private async validate(command: WorkerCommand, source: 'cluster' | 'local') {
     if (command.kind === 'workspace.delete') throw new Error('Workspace deletion is not supported in this MVP')
     if (command.kind === 'workspace.provision') {
+      if (source === 'local') throw new Error('Local directories are authorized directly, not provisioned')
       const existing = await this.store.workspaces.get(command.workspace.workspace.id)
       if (existing && (existing.projectId !== command.workspace.workspace.projectId || canonical(existing.spec) !== canonical(command.workspace.workspace.spec) || (existing.provisionSpec && canonical(existing.provisionSpec.repositories) !== canonical(command.workspace.repositories)))) throw new Error('Workspace binding is immutable')
       return
@@ -148,26 +179,26 @@ export class WorkerRuntime {
       const { binding } = command.session
       const workspace = await this.store.workspaces.get(binding.workspaceId)
       if (!workspace || workspace.status !== 'ready') throw new Error('Workspace is not ready')
-      if (binding.agent.workerId !== this.workerId || !this.available(binding)) throw new Error('Agent or model unavailable')
+      if (this.isLocalWorkspace(workspace) !== (source === 'local')) throw new Error('Session host scope mismatch')
+      if (!this.available(binding)) throw new Error('Agent or model unavailable')
       return
     }
-    if (command.kind === 'session.delete') return // Active protection is checked atomically in the store.
     const session = await this.store.sessions.get(command.sessionId)
     if (!session) throw new Error('Session not found')
+    if ((await this.isLocalSession(command.sessionId)) !== (source === 'local')) throw new Error('Session host scope mismatch')
+    if (command.kind === 'session.delete') return // Active protection is checked atomically in the store.
     if (command.kind === 'session.enqueue') {
       if ((await this.store.workspaces.get(session.binding.workspaceId))?.status !== 'ready' || !this.available(session.binding)) throw new Error('Workspace, agent or model unavailable')
     }
     if (command.kind === 'turn.stop' && (await this.store.sessions.getTurn(command.turnId))?.sessionId !== command.sessionId) throw new Error('Turn not found')
     if (command.kind === 'runtime.command') {
-      const manager = [...this.runtimeSessions.values()].find(item => item.has(command.sessionId))
-      if (!manager) throw new Error('Runtime session is not active')
-      await manager.command(command.sessionId, { operationId: command.operationId, name: command.name, arguments: command.arguments })
+      await this.agentRunner.command({ sessionId: command.sessionId, invocationId: command.operationId, name: command.name, arguments: command.arguments })
       return
     }
     if (command.kind === 'runtime.approval.resolve') {
-      const manager = [...this.runtimeSessions.values()].find(item => item.has(command.sessionId))
-      if (!manager) throw new Error('Runtime session is not active')
-      await manager.resolveApproval(command.sessionId, command.approvalId, command.decision)
+      const activeTurnId = (await this.store.sessions.get(command.sessionId))?.activeTurnId
+      if (!activeTurnId) throw new Error('Agent invocation is not active')
+      await this.agentRunner.resolveApproval({ sessionId: command.sessionId, invocationId: activeTurnId, approvalId: command.approvalId, decision: command.decision })
       return
     }
   }
@@ -238,23 +269,29 @@ export class WorkerRuntime {
     }
   }
   private async execute(turn: Turn) {
-    let outcome: AgentTurnOutcome = { status: 'failed', failure: { code: 'agent-error', message: 'Agent ended without a terminal signal' } }
-    let lease: RuntimeSessionLease | null = null
-    let faulted = false
+    let outcome: AgentTurnOutcome = { status: 'failed', failure: { code: 'agent-error', message: 'Agent ended without a terminal event' } }
+    let iterator: AsyncIterator<AgentEvent> | null = null
     try {
       const session = (await this.store.sessions.get(turn.sessionId))!
       const workspace = (await this.store.workspaces.get(session.binding.workspaceId))!
-      const agent = this.agents.find(a => a.agentKey === session.binding.agent.agentKey)
-      if (!agent || agent.mode !== 'execution') throw new Error('Agent unavailable')
       const prepared = await this.launchContexts.prepare(turn)
-      let handle: AgentTurnHandle | null = null
       try {
         const fingerprint = createHash('sha256').update(canonical({ cwd: workspace.rootPath, modelId: session.binding.modelId, nativeSession: session.nativeSession })).digest('hex')
-        lease = await this.runtimeManager(agent).acquire({ sessionId: turn.sessionId, cwd: workspace.rootPath, modelId: session.binding.modelId, resume: session.nativeSession }, fingerprint)
-        handle = await lease.session.execute({ operationId: turn.id, message: turn.message, launchContext: prepared.context })
-        this.handles.set(turn.sessionId, { ...handle, turnId: turn.id })
-        if (this.closing || (await this.store.sessions.getTurn(turn.id))?.state === 'stopping') await handle.stop()
-        const iterator = handle.signals[Symbol.asyncIterator]()
+        iterator = this.agentRunner.run({
+          appName: 'wemux-worker',
+          userId: this.workerId,
+          sessionId: turn.sessionId,
+          invocationId: turn.id,
+          agentKey: session.binding.agent.agentKey,
+          modelId: session.binding.modelId,
+          cwd: workspace.rootPath,
+          messageId: turn.message.messageId,
+          message: { role: 'user', parts: [{ text: turn.message.content }] },
+          resume: session.nativeSession,
+          configurationFingerprint: fingerprint,
+          launchContext: prepared.context,
+        })[Symbol.asyncIterator]()
+        if (this.closing || (await this.store.sessions.getTurn(turn.id))?.state === 'stopping') await this.agentRunner.stop(turn.sessionId, turn.id)
         const startedAt = Date.now()
         while (true) {
           const remainingMs = Math.max(1, this.agentTimeouts.maxMs - (Date.now() - startedAt))
@@ -262,33 +299,58 @@ export class WorkerRuntime {
           let timer: NodeJS.Timeout | undefined
           const result = await Promise.race([
             iterator.next(),
-            new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new AgentTimeoutError(remainingMs <= this.agentTimeouts.idleMs ? '智能体执行时间超过上限，已自动终止。' : '智能体长时间没有产生任何事件，请重试。')), timeoutMs) }),
+            new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new AgentTimeoutError(remainingMs <= this.agentTimeouts.idleMs ? '智能体长时间没有产生任何事件，请重试。' : '智能体执行时间超过上限，已自动终止。')), timeoutMs) }),
           ]).finally(() => { if (timer) clearTimeout(timer) })
           if (result.done) break
-          const signal = result.value
-          if (signal.kind === 'finished') { outcome = signal.outcome; faulted = outcome.status === 'failed'; break }
+          const event = result.value
+          const terminal = event.customMetadata?.wemux?.terminal
+          if (terminal) {
+            outcome = terminal === 'failed'
+              ? { status: 'failed', failure: { code: 'agent-error', message: event.customMetadata?.wemux?.error?.message ?? 'Agent failed' } }
+              : { status: terminal }
+            break
+          }
+          const nativeSession = event.customMetadata?.wemux?.nativeSession
+          const journalEvent = this.toJournalEvent(event)
           await this.store.transaction(async tx => {
-            if (signal.kind === 'native-session') await tx.sessions.bindNativeSession({ sessionId: turn.sessionId, nativeSession: signal.nativeSession })
-            else await tx.appendJournal(turn.sessionId, [{ occurredAt: now(), payload: { ...signal.event, turnId: turn.id } }])
+            if (nativeSession) await tx.sessions.bindNativeSession({ sessionId: turn.sessionId, nativeSession })
+            if (journalEvent) await tx.appendJournal(turn.sessionId, [{ occurredAt: event.timestamp, payload: { ...journalEvent, turnId: turn.id } }])
           })
           await this.publish()
         }
-      } catch (error) { faulted = true; throw error }
-      finally {
-        if (handle) await handle.stop()
-        if (lease) await (faulted ? lease.fault() : lease.release())
+      } finally {
+        await this.agentRunner.stop(turn.sessionId, turn.id)
+        await iterator?.return?.()
         await prepared.cleanup()
       }
-    } catch (error) { outcome = { status: 'failed', failure: { code: 'agent-error', message: error instanceof Error ? error.message : 'Agent failed' } } }
-    finally { if (this.handles.get(turn.sessionId)?.turnId === turn.id) this.handles.delete(turn.sessionId) }
+    } catch (error) {
+      outcome = { status: 'failed', failure: { code: 'agent-error', message: error instanceof Error ? error.message : 'Agent failed' } }
+    }
     await this.store.transaction(tx => tx.sessions.finishTurn(outcome.status === 'failed'
       ? { turnId: turn.id, outcome: 'failed', failure: outcome.failure, finishedAt: now() }
       : { turnId: turn.id, outcome: outcome.status, finishedAt: now() }))
     await this.publish()
   }
+  private toJournalEvent(event: AgentEvent): AgentTurnEvent | null {
+    const text = event.content?.parts.map(part => 'text' in part ? part.text : '').join('')
+    if (text) return { kind: 'assistant.text.delta', text }
+    if (event.customMetadata?.wemux?.usage) return { kind: 'usage.updated', usage: event.customMetadata.wemux.usage }
+    const provider = event.customMetadata?.provider
+    if (!provider || typeof provider.kind !== 'string') return null
+    switch (provider.kind) {
+      case 'tool.started': return { kind: 'tool.started', toolCallId: provider.toolCallId as ToolCallId, toolName: String(provider.toolName), input: provider.input }
+      case 'tool.output.delta': return { kind: 'tool.output.delta', toolCallId: provider.toolCallId as ToolCallId, text: String(provider.text ?? '') }
+      case 'tool.finished': return { kind: 'tool.finished', toolCallId: provider.toolCallId as ToolCallId, exitCode: typeof provider.exitCode === 'number' ? provider.exitCode : null }
+      case 'approval.requested': return { kind: 'approval.requested', approvalId: provider.approvalId as ApprovalId, action: provider.action, reason: typeof provider.reason === 'string' ? provider.reason : undefined }
+      case 'compaction.started': return { kind: 'compaction.started', reason: typeof provider.reason === 'string' ? provider.reason : undefined }
+      case 'compaction.finished': return { kind: 'compaction.finished', summary: typeof provider.summary === 'string' ? provider.summary : undefined }
+      default: return null
+    }
+  }
   private publish(): Promise<void> {
     const work = this.publishing.then(async () => {
       for (const head of await this.store.journal.listHeads()) {
+        if (await this.isLocalSession(head.sessionId)) continue
         let from = (this.sent.get(head.sessionId) ?? 0) + 1
         while (from <= head.lastSeq) {
           const page = await this.store.journal.read({ sessionId: head.sessionId, fromSeq: from as EventSeq, limit: 256 })
@@ -302,20 +364,11 @@ export class WorkerRuntime {
     this.publishing = work.catch(() => {})
     return work
   }
-  private runtimeManager(agent: Extract<AgentAdapter, { mode: 'execution' }>) {
-    let manager = this.runtimeSessions.get(agent.agentKey)
-    if (!manager) {
-      manager = new RuntimeSessionManager(this.runtimeAdapters.get(agent.agentKey) ?? new LegacyRuntimeSessionAdapter(agent))
-      this.runtimeSessions.set(agent.agentKey, manager)
-    }
-    return manager
-  }
   async shutdown() {
     this.closing = true
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = null
-    await Promise.all([...this.handles.values()].map(handle => handle.stop()))
-    await Promise.all([...this.runtimeSessions.values()].map(manager => manager.shutdown()))
+    await this.agentRunner.close()
     await this.provisioner.stop?.()
     await this.commands
     await Promise.all(this.provisions.values())

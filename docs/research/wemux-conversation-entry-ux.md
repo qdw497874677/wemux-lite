@@ -1,6 +1,6 @@
 # Wemux 对话入口对比与 Lite 调整建议
 
-状态：源码调研与待确认方案，未实施界面或后端变更。
+状态：历史源码调研与方案，不作为当前能力清单。后续代码已补充快捷键与创建幂等，Workspace 也已演进为多 Placement；当前对照及具体修正见 [M1 调研](wemux-m1-feature-interaction.md)，新交互提案见 [功能与交互计划](../design/feature-interaction-plan.md)。下文保留原调研快照，不据此重复实现已有能力。
 范围：本地 `../wemux-slim` 与当前 Lite 工作台。未启动参考项目做浏览器体验验证；布局和行为结论来自组件及控制器源码。
 
 ## 结论

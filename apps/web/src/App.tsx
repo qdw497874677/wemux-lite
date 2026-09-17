@@ -1,4 +1,5 @@
 import { QuickConversation, QuickStartRecovery } from './components/quick-conversation.tsx'
+import { ClusterControls } from './features/sessions/cluster-controls.tsx'
 import { QuickStartController, fillQuickChoices, initialQuickConfig, quickKey, readPreference } from './features/sessions/quick-start.ts'
 import { ProjectQuickNav } from './components/project-quick-nav'
 import { ProjectResources } from './components/project-resources'
@@ -17,6 +18,7 @@ import { RouterProvider, useRouterState, useNavigate } from '@tanstack/react-rou
 import { makeRouter } from './app/router'
 import { useResources } from './app/resources'
 import { TimelineEntry, Composer, OptimisticMessages } from './features/sessions/conversation'
+import { SessionInfoPanel } from './features/sessions/session-info-panel.tsx'
 import { Sidebar, ContextPanel } from './features/sessions/navigation'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, ChevronDown, ChevronRight, CircleCheck, CircleX, FolderGit2, LoaderCircle, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, RefreshCw, Search, Send, Server, ServerCog, Settings2, Wrench, WifiOff } from 'lucide-react'
@@ -87,6 +89,7 @@ function Workbench({ config, onSettings, onUnauthorized }: { config: ConnectionC
   const section = parts[2] ?? 'overview'
   const sessionId = section === 'sessions' ? parts[3] ?? '' : ''
   const [conversationFocus, setConversationFocus] = useState(true)
+  const [infoPanelOpen, setInfoPanelOpen] = useState(false)
   const workspaceId = section === 'workspaces' ? parts[3] ?? '' : ''
   const view: View = parts[0] === 'cluster' ? 'cluster' : 'workbench'
   const client = useQueryClient()
@@ -175,17 +178,17 @@ function Workbench({ config, onSettings, onUnauthorized }: { config: ConnectionC
       previousTimelineSizeRef.current = 0
       nearBottomRef.current = true
     }
-    if (!node || (!sessionChanged && !nearBottomRef.current && timeline.length > previousTimelineSizeRef.current)) return
+    if (!node || (!sessionChanged && !nearBottomRef.current)) return
     const frame = requestAnimationFrame(() => node.scrollTo({ top: node.scrollHeight, behavior: previousTimelineSizeRef.current ? 'smooth' : 'auto' }))
     previousTimelineSizeRef.current = timeline.length
     return () => cancelAnimationFrame(frame)
-  }, [sessionId, timeline.length])
+  }, [sessionId, history.events.at(-1)?.seq, timeline])
   const trackTimelineScroll = () => {
     const node = scrollRef.current
     if (node) nearBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 120
   }
   const refresh = useCallback(() => { setRevision(value => value + 1); void client.invalidateQueries() }, [client])
-  const visibleSessions = sessions
+  const visibleSessions = sessions.filter(item => !item.archivedAt)
   const connectionState: ConnectionState = !browserOnline ? 'offline' : loading ? 'connecting' : connected ? 'connected' : error.includes('401') || error.includes('令牌') ? 'unauthorized' : 'unreachable'
   const connectionLabel = { connecting: '正在连接服务端', connected: '服务端已连接', unauthorized: '管理员令牌无效', unreachable: '无法访问服务端', offline: '浏览器离线' }[connectionState]
   const sendBlockedReason = !browserOnline ? '浏览器当前离线' : !connected ? '尚未连接服务端' : selected?.sendCapability?.allowed ? '' : selected?.sendCapability?.reason ?? 'Authoritative capability data unavailable'
@@ -196,14 +199,19 @@ function Workbench({ config, onSettings, onUnauthorized }: { config: ConnectionC
       controller.resetCompleted()
       if (workspaceId && workspaceId !== controller.state.config.workspaceId) {
         const ws = workspaces.find(item => item.id === workspaceId)
-        if (ws) controller.configure(fillQuickChoices({ workspaceId: ws.id, workerId: ws.workerId, agentKey: '', modelId: '' }, projectId, workspaces, workers))
+        if (ws) controller.configure(fillQuickChoices({ workspaceId: ws.id, workerId: '', agentKey: '', modelId: '' }, projectId, workspaces, workers))
       }
       go(`${projectBase}/sessions`); return
     }
     setCreateWorkspaceId(workspaceId); setCreateKind(kind); setNavigation(false)
   }
   const closeCreate = () => { setCreateKind(null); setCreateWorkspaceId('') }
-  const sidebar = <Sidebar projects={projects} projectId={projectId} workspaces={workspaces} workers={workers} sessions={visibleSessions} sessionId={sessionId} query={query} loading={loading} projectLoading={projectLoading} connected={connected} onQuery={setQuery} onProject={id => go(`/projects/${encodeURIComponent(id)}/sessions`)} onSession={id => go(`/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(id)}`)} onCreate={openResource} />
+  const manageSession = async (id: string, patch: { title?: string; archived?: boolean }) => {
+    await api.patchSession(id, patch)
+    refresh()
+    if (patch.archived && id === sessionId) go(`${projectBase}/sessions`)
+  }
+  const sidebar = <Sidebar projects={projects} projectId={projectId} workspaces={workspaces} workers={workers} sessions={visibleSessions} sessionId={sessionId} query={query} loading={loading} projectLoading={projectLoading} connected={connected} onQuery={setQuery} onProject={id => go(`/projects/${encodeURIComponent(id)}/sessions`)} onSession={id => go(`/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(id)}`)} onCreate={openResource} onManageSession={manageSession} />
 
   function EmptyWorkspace() {
     const action = !connected ? { label: '连接服务端', run: onSettings } : !projects.length ? { label: '新建项目', run: () => openResource('project') } : !workspaces.length ? { label: '新建工作区', run: () => openResource('workspace') } : { label: '新建会话', run: () => openResource('session') }
@@ -230,18 +238,24 @@ function Workbench({ config, onSettings, onUnauthorized }: { config: ConnectionC
     {(error || projectError || !browserOnline) && <div role="alert" className="flex shrink-0 items-start gap-2 border-b border-amber-500/25 bg-amber-500/10 px-3 py-3 text-sm text-amber-100 sm:px-4"><WifiOff className="mt-0.5 size-4 shrink-0" /><span>{!browserOnline ? '浏览器当前离线。' : error || projectError}<span className="block text-xs text-amber-200/75">页面可能显示上次加载的数据，请先恢复连接再执行管理操作。</span></span></div>}
     {view === 'cluster' ? <ClusterPage api={api} connected={connected} onAddWorker={() => setAddingWorker(true)} onRefresh={refresh} /> : <div className={cn('workbench-layout', sessionId && conversationFocus && 'conversation-focus')}>{globalRail}
       <div className="project-column">{projectId && projectNavigation}<div className="min-h-0 flex-1">{sidebar}</div></div>
-      <MainCanvas>{projectId && !sessionId && <><ProjectQuickNav base={projectBase} name={project?.name ?? '正在加载项目…'} section={section} go={go} /><div className={cn('canvas-toolbar', section === 'sessions' && 'hidden')}><Button data-inspector-trigger size="sm" variant="ghost" onClick={() => setContextOpen(true)}>查看资源详情</Button></div></>}{(!sessionId || selection.error) ? page : <><header className="flex min-h-16 shrink-0 items-center justify-between gap-2 border-b border-border px-3 sm:px-4"><Button size="sm" variant="ghost" onClick={() => go(`${projectBase}/sessions`)}>返回</Button><div className="min-w-0"><h1 className="truncate text-sm font-semibold">{selected?.title ?? project?.name ?? '智能体工作台'}</h1>{selected ? <div className="mt-1 flex min-w-0 items-center gap-1 overflow-hidden text-xs text-muted-foreground" aria-label="当前会话所属关系"><span className="truncate">{project?.name ?? selected.projectId}</span><ChevronRight className="size-3 shrink-0" /><span className="truncate">{workspace?.name ?? selected.workspaceId}</span><ChevronRight className="size-3 shrink-0" /><span className="truncate text-foreground">{selected.title}</span><span className="shrink-0 text-muted-foreground/60">·</span><Server className="size-3 shrink-0" /><span className="truncate">{worker?.name ?? selected.workerId}</span></div> : <p className="mt-1 truncate text-xs text-muted-foreground">项目 → Workspace → Session；Worker 提供执行环境</p>}</div><Button size="sm" variant="ghost" className="hidden xl:inline-flex" aria-pressed={!conversationFocus} onClick={() => setConversationFocus(value => !value)}>{conversationFocus ? '展开导航' : '专注对话'}</Button>{selected && <button className="flex shrink-0 items-center gap-2" onClick={() => setContextOpen(true)} aria-label="查看会话详情"><Badge variant={selected.runtimeState === 'running' ? 'success' : 'outline'}>{runtimeStateLabel[selected.runtimeState]}</Badge><ChevronDown className="size-4 text-muted-foreground xl:hidden" /></button>}</header>
+      <MainCanvas>{projectId && !sessionId && <><ProjectQuickNav base={projectBase} name={project?.name ?? '正在加载项目…'} section={section} go={go} /><div className={cn('canvas-toolbar', section === 'sessions' && 'hidden')}><Button data-inspector-trigger size="sm" variant="ghost" onClick={() => setContextOpen(true)}>查看资源详情</Button></div></>}{(!sessionId || selection.error) ? page : <><header className="flex min-h-16 shrink-0 items-center justify-between gap-2 border-b border-border px-3 sm:px-4"><Button size="sm" variant="ghost" onClick={() => go(`${projectBase}/sessions`)}>返回</Button><div className="min-w-0"><h1 className="truncate text-sm font-semibold">{selected?.title ?? project?.name ?? '智能体工作台'}</h1>{selected ? <div className="mt-1 flex min-w-0 items-center gap-1 overflow-hidden text-xs text-muted-foreground" aria-label="当前会话所属关系"><span className="truncate">{project?.name ?? selected.projectId}</span><ChevronRight className="size-3 shrink-0" /><span className="truncate">{workspace?.name ?? selected.workspaceId}</span><ChevronRight className="size-3 shrink-0" /><span className="truncate text-foreground">{selected.title}</span><span className="shrink-0 text-muted-foreground/60">·</span><Server className="size-3 shrink-0" /><span className="truncate">{worker?.name ?? selected.workerId}</span></div> : <p className="mt-1 truncate text-xs text-muted-foreground">项目 → Workspace → Session；Worker 提供执行环境</p>}</div><Button size="sm" variant="ghost" className="hidden xl:inline-flex" aria-pressed={!conversationFocus} onClick={() => setConversationFocus(value => !value)}>{conversationFocus ? '展开导航' : '专注对话'}</Button><Button size="sm" variant="ghost" aria-pressed={infoPanelOpen} onClick={() => setInfoPanelOpen(value => !value)} aria-label="切换会话信息面板">{infoPanelOpen ? '隐藏信息' : '会话信息'}</Button>{selected && <button className="flex shrink-0 items-center gap-2" onClick={() => setContextOpen(true)} aria-label="查看会话详情"><Badge variant={selected.runtimeState === 'running' ? 'success' : 'outline'}>{runtimeStateLabel[selected.runtimeState]}</Badge><ChevronDown className="size-4 text-muted-foreground xl:hidden" /></button>}</header>
         {selected && <details className="shrink-0 border-b border-border px-4 py-1 text-xs"><summary className="cursor-pointer py-1 text-muted-foreground">{canSend ? '会话状态' : sendBlockedReason || '暂不可发送'}{selected.queuedMessageCount ? ` · ${selected.queuedMessageCount} 条排队` : ''}</summary><div className="space-y-1 py-2" role="status"><p className={canSend ? 'text-muted-foreground' : 'text-amber-200'}>{canSend ? freshnessLabels[selected.freshness?.status ?? 'unknown'] : sendBlockedReason || freshnessLabels[selected.freshness?.status ?? 'unknown']}{selected.queuedMessageCount ? ` · ${selected.queuedMessageCount} 条消息等待执行` : ''}</p>{history.checkedAt > 0 && <p className="text-muted-foreground">最近核对：{formatChineseTime(history.checkedAt)}{history.stream !== 'live' ? ' · 实时更新正在重连' : ''}</p>}</div></details>}
         {projectId && <QuickStartRecovery controller={quickController()} sessionId={sessionId} />}
         {history.error && <p role="alert" className="px-4 py-3 text-sm text-red-300">{history.error} 当前历史可能不完整。</p>}
-        <div ref={scrollRef} onScroll={trackTimelineScroll} className="conversation-timeline min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-6 sm:py-6" aria-live="polite" aria-relevant="additions text">{!selected ? <EmptyWorkspace /> : <div className="conversation-content space-y-5">{!timeline.length && <p className="py-8 text-center text-sm text-muted-foreground">{history.checkedAt ? canSend ? '暂无消息，可以开始对话。' : sendBlockedReason : '正在加载会话历史…'}</p>}{timeline.map(entry => <TimelineEntry key={entry.id} entry={entry} />)}{selected && <OptimisticMessages controller={submission(selected.id)} confirmedIds={confirmed} />}</div>}</div>
-        {selected && <Composer key={selected.id} controller={submission(selected.id)} session={selected} canSend={canSend} blockedReason={sendBlockedReason} confirmedIds={confirmed} />}
+        <div className="flex min-h-0 flex-1">
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <div ref={scrollRef} onScroll={trackTimelineScroll} className="conversation-timeline min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-6 sm:py-6" aria-live="polite" aria-relevant="additions text">{!selected ? <EmptyWorkspace /> : <div className="conversation-content space-y-5">{!timeline.length && <p className="py-8 text-center text-sm text-muted-foreground">{history.checkedAt ? canSend ? '暂无消息，可以开始对话。' : sendBlockedReason : '正在加载会话历史…'}</p>}{timeline.map(entry => <TimelineEntry key={entry.id} entry={entry} onOpenContext={selected ? () => setInfoPanelOpen(true) : undefined} />)}{selected && <OptimisticMessages controller={submission(selected.id)} confirmedIds={confirmed} />}</div>}</div>
+            {selected && <ClusterControls key={`controls:${selected.id}`} api={api} session={selected} activeTurnId={history.activeTurnId} queuedItems={history.queuedItems} pendingApprovals={history.pendingApprovals} enabled={connected && browserOnline && worker?.connectionState === 'online' && history.freshness?.status === 'synced' && !history.error} />}
+            {selected && <Composer key={selected.id} controller={submission(selected.id)} session={selected} canSend={canSend} blockedReason={sendBlockedReason} confirmedIds={confirmed} />}
+          </div>
+          {selected && infoPanelOpen && <SessionInfoPanel session={selected} workspace={workspace} worker={worker} project={project} onClose={() => setInfoPanelOpen(false)} />}
+        </div>
       </>}</MainCanvas>
       <InspectorHost open={validSelection && Boolean(projectId) && contextOpen && !['board', 'tasks'].includes(section)} onOpenChange={open => { setContextOpen(open); if (!open && workspaceId) go(`${projectBase}/workspaces`) }}>{!workspace && project && <section className="space-y-3 pb-5"><h2>{project.name}</h2><p className="break-all">项目 ID：{project.id}</p><p>{workspaces.length} 个工作区 · {sessions.length} 个会话</p></section>}{workspace && <section className="space-y-3 pb-5"><h2>{workspace.name}</h2><p>{workspaceStateLabel[workspace.status]}</p><code className="block whitespace-pre-wrap break-all">{workspace.location?.rootPath ?? '等待报告路径'}</code>{workspace.failureReason && <p role="alert">{workspace.failureReason}</p>}<Button disabled={!connected || workspace.status !== 'ready'} onClick={() => openResource('session', workspace.id)}>新建会话</Button></section>}<ContextPanel selected={selected} workspace={workspace} workers={validSelection ? workers.filter(item => item.id === workspace?.workerId) : []} connected={connected} onAddWorker={() => setAddingWorker(true)} /></InspectorHost>
     </div>}
-    <Sheet open={navigation} onOpenChange={setNavigation}><SheetContent side="left" className="navigation-sheet p-0"><SheetHeader><SheetTitle>工作台导航</SheetTitle></SheetHeader><div className="border-b border-border p-3 md:hidden"><label className="relative block"><Search className="absolute left-3 top-3.5 size-4 text-muted-foreground" /><Input aria-label="搜索会话" className="pl-9" placeholder="搜索会话…" value={query} onChange={event => setQuery(event.target.value)} /></label></div><div className="min-h-0 flex-1 overflow-auto">{globalRail}{projectId && projectNavigation}{sidebar}</div></SheetContent></Sheet>
+    <Sheet open={navigation} onOpenChange={setNavigation}><SheetContent side="left" className="navigation-sheet p-0"><SheetHeader><SheetTitle>工作台导航</SheetTitle></SheetHeader><div className="border-b border-border p-3 xl:hidden"><label className="relative block"><Search className="absolute left-3 top-3.5 size-4 text-muted-foreground" /><Input aria-label="搜索会话" className="pl-9" placeholder="搜索会话…" value={query} onChange={event => setQuery(event.target.value)} /></label></div><div className="min-h-0 flex-1 overflow-auto">{globalRail}{projectId && projectNavigation}{sidebar}</div></SheetContent></Sheet>
 
     {addingWorker && <WorkerEnrollmentDialog api={api} workers={workers} onRefreshWorkers={refreshWorkers} onClose={() => { setAddingWorker(false); if (quickSetup) openResource('workspace') }} />}
-    {createKind && <CreateDialog key={`${createKind}:${projectId}:${createWorkspaceId}`} kind={createKind} api={api} teamId={config.teamId} projectId={projectId} defaultWorkspaceId={createWorkspaceId} workers={workers} workspaces={workspaces} onClose={() => { setQuickSetup(false); closeCreate() }} onCreated={(kind, id, session) => { closeCreate(); refresh(); if (kind === 'project') go(`/projects/${encodeURIComponent(id)}/sessions`); else if (kind === 'workspace') { if (quickSetup) { setQuickSetup(false); void api.workspaces(projectId).then(items => { const ws = items.find(item => item.id === id); if (ws) quickController().configure(fillQuickChoices({ workspaceId: ws.id, workerId: ws.workerId, agentKey: '', modelId: '' }, projectId, items, workers)) }).catch(() => { /* Keep the draft; workspace selection remains explicit after refresh. */ }); go(`${projectBase}/sessions`) } else go(`/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(id)}`); } else if (session) go(`/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(id)}`) }} />}
+    {createKind && <CreateDialog key={`${createKind}:${projectId}:${createWorkspaceId}`} kind={createKind} api={api} teamId={config.teamId} projectId={projectId} defaultWorkspaceId={createWorkspaceId} workers={workers} workspaces={workspaces} onClose={() => { setQuickSetup(false); closeCreate() }} onCreated={(kind, id, session) => { closeCreate(); refresh(); if (kind === 'project') go(`/projects/${encodeURIComponent(id)}/sessions`); else if (kind === 'workspace') { if (quickSetup) { setQuickSetup(false); void api.workspaces(projectId).then(items => { const ws = items.find(item => item.id === id); if (ws) quickController().configure(fillQuickChoices({ workspaceId: ws.id, workerId: '', agentKey: '', modelId: '' }, projectId, items, workers)) }).catch(() => { /* Keep the draft; workspace selection remains explicit after refresh. */ }); go(`${projectBase}/sessions`) } else go(`/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(id)}`); } else if (session) go(`/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(id)}`) }} />}
   </AppShell></RunLayerContext.Provider>
 }

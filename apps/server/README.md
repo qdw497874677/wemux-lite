@@ -1,4 +1,6 @@
-# Wemux Lite Server MVP
+# Wemux Lite Server
+
+Server 是 AI Agent 集群的统一控制与授权入口。产品方向见 [产品定位](../../docs/product-direction.md)，建设与验收见 [路线图](../../docs/roadmap.md)。以下接口表是早期基础子集，不是完整 API 清单；随功能切片核对并补齐契约，不作为全面核验的前置阶段。
 
 Requires Node **22.13+** (`node:sqlite`; tested on Node 26) and npm workspace dependencies. No external database, framework or broker.
 
@@ -23,7 +25,7 @@ Configuration: `WEMUX_BOOTSTRAP_TOKEN` (required, >=16 characters), `WEMUX_DATAB
 
 ## HTTP contract
 
-All routes require `Authorization: Bearer <WEMUX_BOOTSTRAP_TOKEN>` except `GET /health`, `POST /workers/enroll`, `GET /downloads/install-worker.sh`, and `GET /downloads/worker.tgz`. The download endpoints are intentionally public so a new host can install before enrollment; anyone who can reach the Server can download the configured artifact. This is intentionally a **single trusted administrator** MVP, not multi-user authorization. Authentication decisions live in `AuthenticationService`, not the HTTP adapter. No cookies, PAT management, grants or user login endpoints yet.
+Management requests use Bearer authentication. `POST /api/auth/session` accepts the bootstrap token in the Authorization header and issues an administrator session credential; this is not a general user-login or PAT-management implementation. Health, enrollment and installer downloads have separate public/enrollment boundaries; Agent capability routes use scoped capability credentials. Download artifacts are public to hosts that can reach the Server. The current administrator-oriented access flow must not be represented as fully verified multi-user authorization. See `http/handler.ts` and `application/auth.ts` for current routing and authentication; M6 covers the complete user and resource authorization lifecycle.
 
 | Method | Route | Body / result |
 | --- | --- | --- |
@@ -50,7 +52,7 @@ All routes require `Authorization: Bearer <WEMUX_BOOTSTRAP_TOKEN>` except `GET /
 
 Enrollment tokens are one-use, expiring and atomically consumed with worker creation; only SHA-256 hashes of enrollment/worker credentials are persisted. Credentials are returned once. For retryable message submission, reuse `commandId` and identical content/messageId: same command is reused, conflicting payload returns 409. Without a messageId, commandId supplies a stable message identity. 202 means durably pending/previously acknowledged, **not execution completed**.
 
-Repository workspaces only in this slice; no composite provisioning. Provisioning never includes local paths or credentials. Workspace must be `ready` before session creation/message submission. Session creation requires an available execution capability; custom model IDs are accepted. Offline message submission is durable when workspace remains ready. Workspace deletion requires no non-deleted sessions. Project/session deletion only hides metadata: it does not stop running turns, cancel pending commands, or delete worker files. No retention GC yet.
+The following provisioning/deletion notes describe the original slice, not a verified current lifecycle contract; M3 must reconcile them with the current code as environment management is completed. Repository workspaces only in that slice; no nonempty composite provisioning. Provisioning never includes local paths or credentials. The selected Worker's Workspace Placement must be `ready` before session creation/message submission; another Placement's readiness is not sufficient. Session creation requires an available execution capability; custom model IDs are accepted. Offline message submission is durable when workspace remains ready. Workspace deletion requires no non-deleted sessions. Project/session deletion only hides metadata: it does not stop running turns, cancel pending commands, or delete worker files. No retention GC yet.
 
 SSE emits `event: session.event`, `id: <seq>`, JSON JournalEvent; emits `event: freshness` without an ID, plus heartbeat comments. It replays persisted contiguous history then tails commit notifications. Slow clients are disconnected and must reconnect using Last-Event-ID. Use fetch streaming with an Authorization header (native browser EventSource cannot set it).
 

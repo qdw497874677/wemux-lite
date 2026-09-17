@@ -1,6 +1,7 @@
 import type { Run, LaunchRequest, LaunchResponse, TaskSummary, TaskDetail, TaskCreate, TaskPatch, TaskActivity, AssignmentRequest, CreateTaskWorkspaceRequest, UnbindWorkspaceRequest } from '@wemux/web-contract/task-platform'
 import { randomId } from '../lib/random.ts'
 import type {
+  ApprovalDecisionDTO, RuntimeCommandDTO, PatchSessionDTO, CommandResultDTO,
   BootstrapResultDTO, CommandDTO, CreateEnrollmentTokenDTO, CreateProjectDTO,
   CreateSessionDTO, CreateWorkspaceDTO, EnrollmentTokenDTO, EventsPageDTO, ProjectDTO,
   SendMessageDTO, SendResultDTO, SessionDTO, SessionResourceDTO, ServerEventsPageDTO, TailnetInfoDTO, WorkerDTO, WorkspaceDTO,
@@ -25,6 +26,10 @@ export const routes = {
   session: (sessionId: string) => `/api/sessions/${id(sessionId)}`,
   deleteSession: (sessionId: string) => `/api/sessions/${id(sessionId)}`,
   messages: (sessionId: string) => `/api/sessions/${id(sessionId)}/messages`,
+  stopTurn: (sessionId: string) => `/api/sessions/${id(sessionId)}/turn/stop`,
+  cancelQueued: (sessionId: string, submissionCommandId: string) => `/api/sessions/${id(sessionId)}/messages/${id(submissionCommandId)}/cancel`,
+  runtimeCommands: (sessionId: string) => `/api/sessions/${id(sessionId)}/runtime/commands`,
+  runtimeApproval: (sessionId: string, approvalId: string) => `/api/sessions/${id(sessionId)}/runtime/approvals/${id(approvalId)}`,
   commands: '/api/commands',
   command: (commandId: string) => `/api/commands/${id(commandId)}`,
   events: (sessionId: string) => `/api/sessions/${id(sessionId)}/events`,
@@ -129,6 +134,13 @@ export function createApi(config: ConnectionConfig, onUnauthorized: () => void =
     sessionsAll: async (signal?: AbortSignal) => (await list<SessionResourceDTO>(routes.sessions, signal)).map(toSummary),
     commands: (signal?: AbortSignal) => list<CommandDTO>(`${routes.commands}?limit=200`, signal),
     cancelCommand: (commandId: string) => request<CommandDTO>(routes.command(commandId), undefined, undefined, 'DELETE'),
+    // These session-scoped routes are distinct from deleting an undelivered control command.
+    stopTurn: (sessionId: string, turnId: string, commandId: string) => request<CommandResultDTO>(routes.stopTurn(sessionId), { commandId, turnId }, undefined, 'POST'),
+    cancelQueued: (sessionId: string, submissionCommandId: string, commandId: string) => request<CommandResultDTO>(routes.cancelQueued(sessionId, submissionCommandId), { commandId }, undefined, 'POST'),
+    invokeRuntimeCommand: (sessionId: string, body: RuntimeCommandDTO) => request<CommandResultDTO>(routes.runtimeCommands(sessionId), body),
+    resolveApproval: (sessionId: string, approvalId: string, body: ApprovalDecisionDTO) => request<CommandResultDTO>(routes.runtimeApproval(sessionId, approvalId), body),
+    patchSession: async (sessionId: string, body: PatchSessionDTO) => toSummary(await request<SessionResourceDTO>(routes.session(sessionId), body, undefined, 'PATCH')),
+    renameSession: async (sessionId: string, title: string) => toSummary(await request<SessionResourceDTO>(routes.session(sessionId), { title }, undefined, 'PATCH')),
     deleteSession: (sessionId: string) => request<unknown>(routes.deleteSession(sessionId), undefined, undefined, 'DELETE'),
     revokeWorker: (workerId: string) => request<WorkerDTO>(routes.revokeWorker(workerId), {}, undefined, 'POST'),
     addWorkspacePlacement: async (workspaceId: string, workerId: string) => (await request<{ workspace: WorkspaceDTO }>(routes.workspacePlacements(workspaceId), { workerId }, undefined, 'POST')).workspace,
@@ -239,7 +251,7 @@ export function createApi(config: ConnectionConfig, onUnauthorized: () => void =
 function toSummary(resource: SessionResourceDTO): SessionDTO {
   return { id: resource.id, projectId: resource.projectId, title: resource.title, workspaceId: resource.workspaceId,
     workerId: resource.binding.agent.workerId, agentKey: resource.binding.agent.agentKey,
-    modelId: resource.binding.modelId, runtimeState: resource.runtimeState, activeTurnId: null,
+    modelId: resource.binding.modelId, runtimeState: resource.runtimeState, archivedAt: resource.archivedAt ?? null, activeTurnId: null,
     queuedMessageCount: null, freshness: { status: 'unknown' }, updatedAt: '',
     canRead: true, sendCapability: resource.sendCapability, canSend: resource.sendCapability?.allowed === true, canManage: true }
 }

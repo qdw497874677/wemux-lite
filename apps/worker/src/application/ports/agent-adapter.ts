@@ -22,7 +22,8 @@ export interface AgentTurnInput {
   readonly sessionId: SessionId
   readonly turnId: TurnId
   readonly cwd: string
-  readonly modelId: ModelId
+  /** Optional: null lets the Agent CLI use its own default model. */
+  readonly modelId: ModelId | null
   readonly message: UserMessageInput
   readonly resume: NativeSessionRef | null
   readonly launchContext: AgentLaunchContext | null
@@ -83,5 +84,4 @@ export type AgentAdapter =
       readonly agentKey: AgentKey
       readonly mode: 'execution'
       detect(): Promise<LocalAgentDetection>
-      startTurn(input: AgentTurnInput): Promise<AgentTurnHandle>
     }

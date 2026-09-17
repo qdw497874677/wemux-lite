@@ -1,57 +1,48 @@
-# Wemux Lite Web MVP
+# Wemux Lite Web
 
-所有实现限于 `apps/web`，不依赖 shared package 的编译输出。UI 使用真实 HTTP 数据；连接失败、鉴权失败和契约不匹配均明确报错，不使用 mock fallback。
+AI Agent 集群管理与协作平台的主要客户端。产品定位见 [产品方向](../../docs/product-direction.md)，实施安排见 [路线图](../../docs/roadmap.md)。Web 展示 Server 的资源与执行投影，不在浏览器编排持久任务，不使用模拟数据掩盖请求失败。
 
 ## 运行
 
+在仓库根目录执行：
+
 ```sh
-npm run dev --prefix apps/web
-npm run typecheck --prefix apps/web
-npm run build --prefix apps/web
-npm run test --prefix apps/web
+npm run build:packages
+npm run dev --workspace @wemux/web
+npm run typecheck --workspace @wemux/web
+npm run build --workspace @wemux/web
+npm test --workspace @wemux/web
 ```
 
-测试使用 Node 原生 TypeScript strip（Node 22.18+，当前验证环境 Node 26）。不增加依赖。
+Web 测试使用 Node 原生 TypeScript strip，按本地值导入的 `.ts` 扩展名执行源码；源码契约只是补充，不替代浏览器验收。
 
-打开 Web 的「Bootstrap / Token」：填写后端配置的管理员 Bootstrap Token，点击「Bootstrap 并连接」。后端初始化默认用户、Team、Project；已有环境可直接应用 Token。配置仅保存在当前页内存，不写入 localStorage，不保存 Agent/Git 凭证。
+开发服务通过 Vite 将 `/api` 代理到 Server，目标可由 `WEMUX_SERVER_ORIGIN` 配置。生产可由 Server 托管 `apps/web/dist`，提供同源 API 和静态资源，详见根 README。公共或不可信网络必须使用 TLS。
 
-创建路径：Project → 新建 Workspace（填写 Git URL / revision，后端同时创建 Repository）→ 等待 Worker 报告 ready → 选择 Worker、Workspace、可执行且 available 的 Agent、Model → 创建 Session。支持 Agent 报告模型和自定义 Model ID，不硬编码模型。当前后端是单管理员 MVP，不能宣称已支持完整多用户 ACL。
+## 两条使用路径
 
-## 集中契约 / 并行实现适配
+- 直接对话：Project → Workspace → 选择具体 Worker Placement、可执行 Agent 和模型 → Session，不要求先建 Task。
+- 任务协作：Task → Assignment → Run → Session → 人工 Review，复用同一会话与执行链路。
 
-- `src/api/dto.ts`：Web DTO、当前 Server resource DTO、命令与 Journal payload。
-- `src/api/client.ts`：路由、fetch 鉴权/超时/错误、Server resource → UI summary 适配、EventSource 生命周期。
-- `src/api/journal.ts`：按 `sessionId + seq` 去重排序、缺口检查、用户 queued/started/cancelled、assistant delta/终态、工具与失败状态。
-- `src/api/use-session.ts`：按 Session 隔离历史、AbortController 清理、分页补拉、SSE 通知后读取持久 events、每 5 秒核对。
+Workspace 是逻辑环境；路径与物化状态属于具体 Placement。不同 Worker 副本不自动同步；同一 Placement 的会话共享文件。Session 的执行绑定不能通过改选列表项静默迁移。
 
-当前对齐仓库中并行实现的 Server HTTP handler（后端路由无 `/api` 前缀）：
+## 连接与数据
 
-| Web 请求 | 响应 / 请求约定 |
-| --- | --- |
-| POST `/api/bootstrap` | `{ user, team, project }`；使用已有管理员 Token，不签发 Token |
-| GET `/api/workers`, `/api/projects`, `/api/workspaces`, `/api/sessions` | `{ items: [...] }`；Web 按 projectId 过滤 |
-| POST `/api/projects` | `{ name, teamId, shareScope }` → Project；当前 Server 固定默认 Team / owner-only |
-| POST `/api/workspaces` | `{ projectId, workerId, name, repository: { name, gitUrl, revision } }` → `{ workspace, commandId }` |
-| POST `/api/sessions` | `{ workspaceId, title, agentKey, modelId, shareScope }` → `{ session, commandId }`；当前 Server 固定 owner-only |
-| GET `/api/sessions/:id` | Session resource（含 binding） |
-| POST `/api/sessions/:id/messages` | `{ commandId, messageId, content }` → `{ commandId, messageId, status }` |
-| GET `/api/sessions/:id/events?fromSeq=1&limit=500` | `{ events, nextSeq, freshness }`；fromSeq 为 inclusive |
-| GET `/api/sessions/:id/stream?fromSeq=1` | SSE `session.event`、`freshness`；原生自动重连 |
+首屏使用内联连接表单，应用内重连使用连接对话框。管理员 bootstrap 接入与管理会话凭证不等于完整的多用户授权。连接保存策略见 `src/lib/connection-storage.ts`，不能宣称所有凭证仅保存在页内内存；Agent 和 Git 凭据不应传到 Web。
 
-SSE 是失效通知；文字只从持久 events 投影，避免 replay/delta 重复拼接。先拉历史再订阅的间隙由 SSE 从同一游标回放及 onopen 补拉覆盖。所有分页读完才提交新历史。切换 Session、项目、Token 或卸载时取消请求并关闭旧流。无 freshness 不能显示已同步。HTTP 可用而 SSE 断开时保留 5 秒补拉，并明确提示实时流不可用。
+- `src/api/client.ts`：HTTP 路由、鉴权、错误与 fetch SSE；不依赖原生 EventSource 查询参数传递长期 Token。
+- `src/api/dto.ts`：Web 资源契约与展示适配。
+- `src/api/journal.ts`、`src/api/use-session.ts`：会话事件、序号、历史与同步处理。
+- `src/features/`：项目、任务、会话、基础设施等产品入口。
 
-当前 Server 不返回 `SessionSummaryView`。`toSummary` 明确适配单管理员 resource：freshness 初始 unknown，选中会话的队列数从 Journal 投影、freshness 来自 events API；未选中会话的队列数尚未核对。未来完整 ACL/summary API 应替换该适配，不得沿用单管理员权限假设。
+页面须分别显示客户端连接、Worker 在线、执行状态与历史新鲜度。命令 pending/accepted 只是收据，Journal 才确定执行事实；未知状态不能伪装为空闲或已同步。变更连接作用域时须隔离旧请求、缓存与流。
 
-发送期间仅锁住正在进行的 HTTP 请求，不因 Session running 禁用输入。下一条消息由后端持久队列处理；accepted/pending 仅显示收据，只有 Journal 才形成聊天事实。结果不明确时保留正文与同一 commandId/messageId 供重试，防止重复入队；切换会话/刷新会丢失未确认草稿，不自动重发。
+## 浏览器硬约束
 
-## 代理与安全
-
-`vite.config.ts` 将 `/api` 代理到 `http://127.0.0.1:3001` 并去掉 `/api` 前缀。fetch 使用 Bearer Header。原生 EventSource 不能设置 Header，因此开发代理将 **仅 SSE 路径** 的 `token` 查询参数转换成 Bearer，并在转发前删除 Token 参数（有真实代理集成测试）。
-
-生产静态构建不包含 Vite proxy：部署者必须提供同等反向代理、HTTPS、禁止记录 SSE 查询凭证，或适配 HttpOnly Cookie / 短期 SSE ticket。不要直接将此开发 Token 桥暴露为公共生产认证方案。当前 Server 不支持 Cookie 时，空 Token 会得到明确 401。
+- HTTP 局域网或 Tailscale 地址可能是不安全上下文，不直接调用 `crypto.randomUUID()`；使用 `src/lib/random.ts`。
+- 剪贴板不可用时引导用户手动复制，不用 `execCommand` 的假成功掩盖失败。
+- `index.html` 保留启动失败兜底，但是否能正常启动必须用构建产物的真实浏览器验证，不能只调整提示文案。
+- 中文文案，桌面与窄屏均能完成核心操作；键盘、加载、空态、错误、重试与禁用原因都纳入验收。
 
 ## 验证边界
 
-自动测试覆盖 Journal 去重/排序/gap/跨会话拒绝、运行中 queued、完成状态、HTTP 鉴权和错误、DTO 分页适配、EventSource 监听/关闭、Vite 路径重写和 Token 转发。代理测试使用隔离本地 HTTP fixture，不是 UI fallback。
-
-尚需在实际 Server + 已注册 Worker + 可执行 Agent 上完成端到端验收；typecheck/build 与 fixture 测试不代表真实 Agent 已运行。MVP 不实现管理删除、停止 Turn、附件与完整权限管理，不保留原型中的模拟操作。
+当前已有源码契约和部分行为测试，不据此宣称真实 Agent、权限、断线恢复或全部交互已验收。M1 优先梳理功能缺口和交互设计，M2 优先落地会话工作台；浏览器验证随功能切片进行，系统性发布验证归 M7，不以全面基线审计或旧 MVP 限制阻挡功能完善。

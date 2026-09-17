@@ -7,7 +7,7 @@ import { promisify } from 'node:util'
 import { test, type TestContext } from 'node:test'
 import { config } from '../src/config.js'
 import { agentsForHome } from '../src/agents/detection.js'
-import { agentCommand, agentSelections, readAgentSettings } from '../src/config/agent-settings.js'
+import { agentCommand, agentSelections, readAgentSettings, removeAgentSelection } from '../src/config/agent-settings.js'
 import { installAgent, installCatalog, runRuntimeProcess, useAgent, type ProcessRequest, type RuntimeProcess } from '../src/runtimes/management.js'
 
 async function fixture(t: TestContext) {
@@ -100,6 +100,18 @@ test('reinstall uses a new prefix without changing old managed files; selections
   assert.notEqual(first.executable, second.executable)
   assert.match(await readFile(first.executable, 'utf8'), /console.log/)
   assert.equal(Object.keys(await readAgentSettings(home)).length, 2)
+})
+
+test('reset removes only an explicit override and reports PATH candidates as unselected', async t => {
+  const home = await fixture(t)
+  const path = join(home, 'user-pi')
+  await executable(path)
+  await useAgent(home, 'pi', path, async () => '1')
+  assert.equal(agentSelections(await readAgentSettings(home), {})[0].executable, path)
+  await removeAgentSelection(home, 'pi')
+  const settings = await readAgentSettings(home)
+  assert.equal(settings.pi, undefined)
+  assert.equal(agentSelections(settings, {})[0].source, 'PATH')
 })
 
 test('managed npm resolves only official registries offline despite inherited scope and config overrides', async t => {

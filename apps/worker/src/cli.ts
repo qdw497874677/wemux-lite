@@ -2,19 +2,16 @@
 import { chmod, mkdir, open, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { config, serverUrl } from './config.js'
+import { config } from './config.js'
 import { SqliteWorkerStore } from './storage/sqlite-store.js'
 import { defaultAgents } from './agents/detection.js'
 import { agentSelections, readAgentSettings } from './config/agent-settings.js'
 import { installAgent, installCatalog, installWarning, restartNotice, useAgent } from './runtimes/management.js'
-import { LocalProvisioner } from './workspaces/local-provisioner.js'
-import { FilesystemAgentLaunchContextProvider } from './application/agent-launch-context-provider.js'
-import { CapabilityGateway } from './capabilities/gateway.js'
-import { WorkerRuntime } from './application/runtime.js'
-import { PiRuntimeSessionAdapter } from './agents/pi-runtime-session-adapter.js'
-import { ClaudeRuntimeSessionAdapter } from './agents/claude-runtime-session-adapter.js'
-import { WebSocketTransport } from './transport/websocket.js'
-import { enroll, toSocketUrl } from './transport/enrollment.js'
+import { ClusterLifecycle } from './application/cluster-lifecycle.js'
+import { createLocalAdmin, ensureLocalInstallation } from './application/local-installation.js'
+import { createLocalWorkbenchService } from './application/local-workbench.js'
+import { startLocalControlServer } from './local-control/server.js'
+import { enroll } from './transport/enrollment.js'
 import { defaultProbe, preflightServer, probeCli, reportTailscale } from './transport/tailscale.js'
 import { openTunnels, type TunnelPool } from './transport/tailscale-tunnel.js'
 import { orderEndpoints, parseCandidateUrls, parsePreference, resolveAutoPreference, type ServerEndpoint } from './transport/endpoints.js'
@@ -53,8 +50,8 @@ async function lock(home: string) {
 export async function main(args = process.argv.slice(2)) {
   const options = config(args)
   if (options.command === 'version') { console.log('wemux-lite-worker 0.1.0'); return }
-  if (options.command === 'help') { console.log('wemux-lite-worker register --server URL [--servers URL1,URL2] [--prefer tailnet|direct|any] [--transport direct|nc] --token TOKEN | start [--prefer ...] [--transport ...] | status [--prefer ...] | detect | agent list | agent status | agent use <key> --path /absolute/executable | agent install <pi|claude> --yes | tailscale [--server URL]；所有命令支持 --home DIR；Agent 选择变更需要重启 Worker；--prefer 缺省时自动：检测到 tailscale CLI 且候选含 tailnet 地址则优先 tailnet；--transport nc 让注册与 WebSocket 全部经由 tailscale nc 隧道（不改系统路由，仅支持明文 http 端点）'); return }
-  if (!['register', 'start', 'status', 'detect', 'tailscale', 'agent'].includes(options.command)) throw new Error('Unknown command')
+  if (options.command === 'help') { console.log('wemux-lite-worker admin init [--username NAME] [--password-file FILE] | register --server URL [--servers URL1,URL2] [--prefer tailnet|direct|any] [--transport direct|nc] --token TOKEN | start [--host 127.0.0.1] [--port 3002] [--secure-cookies] [--prefer ...] [--transport ...] | status [--prefer ...] | detect | agent list | agent status | agent use <key> --path /absolute/executable | agent install <pi|claude> --yes | tailscale [--server URL]；所有命令支持 --home DIR；admin init 也可读取 WEMUX_LOCAL_ADMIN_PASSWORD；HTTPS 终止于受信反向代理时启用 --secure-cookies 或 WEMUX_WORKER_SECURE_COOKIES=1；Agent 选择变更需要重启 Worker；--prefer 缺省时自动：检测到 tailscale CLI 且候选含 tailnet 地址则优先 tailnet；--transport nc 让注册与 WebSocket 全部经由 tailscale nc 隧道（不改系统路由，仅支持明文 http 端点）'); return }
+  if (!['register', 'start', 'status', 'detect', 'tailscale', 'agent', 'admin'].includes(options.command)) throw new Error('Unknown command')
   await mkdir(options.home, { recursive: true, mode: 0o700 })
   await chmod(options.home, 0o700)
   if (options.command === 'agent') {
@@ -74,7 +71,7 @@ export async function main(args = process.argv.slice(2)) {
     } else throw new Error('使用 agent list | status | use <key> --path 绝对路径 | install <pi|claude> --yes')
     return
   }
-  const release = ['start', 'register'].includes(options.command) ? await lock(options.home) : async () => {}
+  const release = ['start', 'register', 'admin'].includes(options.command) ? await lock(options.home) : async () => {}
   let store: SqliteWorkerStore | undefined
   try {
     const database = join(options.home, 'worker.sqlite')
@@ -82,7 +79,15 @@ export async function main(args = process.argv.slice(2)) {
     await chmod(database, 0o600)
     const settings = await readAgentSettings(options.home)
     const agents = defaultAgents(settings)
-    if (options.command === 'register') {
+    const installation = ensureLocalInstallation(store, options.name)
+    if (options.command === 'admin') {
+      if (options.adminAction !== 'init' || options.extraPositionals.length || options.agentKey) throw new Error('使用 admin init [--username NAME] [--password-file FILE]')
+      if (options.agentPath || options.yes) throw new Error('admin init 不接受 --path 或 --yes')
+      const password = options.passwordFile ? (await readFile(options.passwordFile, 'utf8')).replace(/[\r\n]+$/, '') : options.localAdminPassword
+      if (!password) throw new Error('admin init requires --password-file or WEMUX_LOCAL_ADMIN_PASSWORD')
+      const admin = await createLocalAdmin(store, { username: options.username, password })
+      console.log(JSON.stringify({ installationId: installation.installationId, username: admin.username, createdAt: admin.createdAt }))
+    } else if (options.command === 'register') {
       if (store.identity()) throw new Error('Worker is already registered; use its existing identity')
       if (!(options.server ?? options.servers) || !options.token) throw new Error('register requires --server (or --servers) and --token (or environment equivalents)')
       await requireTailscaleCli(options.transport)
@@ -135,52 +140,34 @@ export async function main(args = process.argv.slice(2)) {
       console.log(JSON.stringify({ report, server: server ?? null, preflight }, null, 2))
     } else {
       const identity = store.identity()
-      if (!identity) throw new Error('Worker is not registered')
-      await requireTailscaleCli(options.transport)
-      const candidates = (identity.serverUrls ?? [identity.serverUrl]).map(url => toSocketUrl(url, options.socketPath).href)
-      const preferExplicit = options.prefer != null
-      const auto = preferExplicit ? { prefer: parsePreference(options.prefer), reason: '' } : await resolveAutoPreference(defaultProbe, candidates)
-      const prefer = auto.prefer
-      if (!preferExplicit) console.error(`[prefer] 自动选择：${auto.reason}`)
-      const ordered = orderEndpoints(candidates, prefer)
-      // 预检仅降级不阻断：error 的候选排到末尾，连接持续重试
-      const usable: ServerEndpoint[] = []
-      const deferred: ServerEndpoint[] = []
-      for (const endpoint of ordered) {
-        const preflight = await preflightServer(defaultProbe, endpoint.url)
-        if (preflight.verdict === 'error') { console.error(`[tailscale] ${endpoint.url}：${preflight.message}；已降级为末位候选`); deferred.push(endpoint) }
-        else { if (preflight.verdict !== 'skip') console.error(`[tailscale] ${endpoint.url}：${preflight.message}`); usable.push(endpoint) }
+      const admin = store.localAdmin()
+      if (!identity && !admin) throw new Error('Worker is neither registered nor locally initialized; run admin init first')
+      let stopRequested: (() => void) | null = null
+      const requestStop = async () => { stopRequested?.() }
+      const lifecycle = new ClusterLifecycle(store, agents, { home: options.home, name: installation.name, enrollmentPath: options.enrollmentPath, socketPath: options.socketPath, transport: options.transport, prefer: options.prefer })
+      const workbench = createLocalWorkbenchService(store, lifecycle)
+      const localControl = admin ? await startLocalControlServer({ host: options.host, port: options.port, state: store, secureCookies: options.secureCookies }, { shutdown: requestStop, workbench, cluster: lifecycle }) : null
+      if (localControl) {
+        console.error(`[local] Worker Web：${localControl.url}`)
+        if (!['127.0.0.1', '::1', 'localhost'].includes(options.host)) console.error('[local] 警告：当前监听非 loopback 地址；首批版本尚未提供完整公网 HTTPS/受信代理配置，请勿直接暴露到公网')
+      } else console.error('[local] 尚未初始化本机管理员，保持旧集群模式且不开放 Worker Web；运行 admin init 后重启以启用')
+      try {
+        if (identity) {
+          try { await lifecycle.connect() }
+          catch (error) {
+            if (!admin) throw error
+            console.error(`[connect] 集群连接失败，本地工作台继续可用：${error instanceof Error ? error.message : String(error)}`)
+          }
+        } else await lifecycle.initializeLocalRuntime()
+        await new Promise<void>(resolve => {
+          const stop = () => { process.off('SIGINT', stop); process.off('SIGTERM', stop); stopRequested = null; resolve() }
+          stopRequested = stop
+          process.on('SIGINT', stop); process.on('SIGTERM', stop)
+        })
+      } finally {
+        try { await localControl?.close() }
+        finally { await lifecycle.close() }
       }
-      const originalOrder = usable.concat(deferred).map(endpoint => endpoint.url)
-      console.error(`[connect] 候选地址（prefer=${prefer}${options.transport === 'nc' ? '，transport=nc' : ''}）：${originalOrder.join(' → ')}`)
-      // nc 模式：每个候选一条 tailscale nc 隧道，WebSocket/心跳/能力网关全部走本地隧道地址；
-      // 轮换、重连、回切优先地址等语义与直连完全一致。
-      const tunneled = await tunnelIfNc(options.transport, originalOrder)
-      const finalOrder = tunneled.urls as string[]
-      if (tunneled.pool) for (let index = 0; index < originalOrder.length; index++) console.error(`[nc] ${originalOrder[index]} → ${finalOrder[index]}`)
-      serverUrl(finalOrder[0])
-      const credential = await readFile(join(options.home, 'credential'), 'utf8')
-      let runtime: WorkerRuntime
-      const gateway = new CapabilityGateway(finalOrder[0])
-      const capabilityEndpoint = await gateway.listen()
-      const transport = new WebSocketTransport({ url: finalOrder[0], urls: finalOrder, credential }, message => runtime.receive(message), () => runtime.connected(), console.error, (url, reason) => console.error(`[connect] 切换到候选地址 ${originalOrder[finalOrder.indexOf(url)] ?? url}（${reason === 'connect-failed' ? '连接失败' : '连续重连失败'}）`))
-      const runtimeAdapters = new Map()
-      const selected = await readAgentSettings(options.home)
-      for (const agent of agents) {
-        if (agent.agentKey === 'pi') runtimeAdapters.set(agent.agentKey, new PiRuntimeSessionAdapter(selected.pi?.executable ?? 'pi'))
-        if (agent.agentKey === 'claude') runtimeAdapters.set(agent.agentKey, new ClaudeRuntimeSessionAdapter(selected['claude-code']?.executable ?? 'claude'))
-      }
-      runtime = new WorkerRuntime(store, new LocalProvisioner(join(options.home, 'workspaces')), agents, transport, identity.workerId, identity.name ?? options.name, new FilesystemAgentLaunchContextProvider(options.home, capabilityEndpoint), undefined, runtimeAdapters)
-      await runtime.initialize()
-      transport.start()
-      await new Promise<void>(resolve => {
-        const stop = () => { process.off('SIGINT', stop); process.off('SIGTERM', stop); resolve() }
-        process.on('SIGINT', stop); process.on('SIGTERM', stop)
-      })
-      transport.stop()
-      await runtime.shutdown()
-      await gateway.close()
-      await tunneled.pool?.close()
     }
   } finally { store?.close(); await release() }
 }

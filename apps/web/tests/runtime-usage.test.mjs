@@ -23,5 +23,5 @@ test('projects approval and compaction lifecycle as readable notices', () => {
     { sessionId: 'session-1', seq: 2, occurredAt: '2026-01-01T00:00:01.000Z', payload: { kind: 'compaction.started', turnId: 'turn-1', reason: '' } },
     { sessionId: 'session-1', seq: 3, occurredAt: '2026-01-01T00:00:02.000Z', payload: { kind: 'compaction.finished', turnId: 'turn-1' } },
   ]
-  assert.deepEqual(projectJournal(events).timeline.map(item => item.kind === 'notice' ? item.text : ''), ['', '', ''])
+  assert.deepEqual(projectJournal(events).timeline.map(item => item.kind === 'notice' ? item.text : ''), ['\u7b49\u5f85\u5ba1\u6279', '\u6b63\u5728\u538b\u7f29\u4e0a\u4e0b\u6587', '\u4e0a\u4e0b\u6587\u538b\u7f29\u5b8c\u6210'])
 })

@@ -5,14 +5,22 @@ import type { AgentSignal, AgentTurnHandle } from '../application/ports/agent-ad
 import { parseJsonLines } from './json-lines.js'
 import { mapRuntimeRecord } from './runtime-event-mapper.js'
 
+/** Bounded stderr tail kept for diagnostics when the child dies unexpectedly. */
+const MAX_STDERR_BYTES = 8192
+
+/**
+ * Writes one JSON line to the child's stdin.
+ *
+ * The persistent `'error'` listener installed in {@link PiRuntimeSession.ensureChild}
+ * prevents unhandled stream errors from crashing the Worker process. This function
+ * only needs to surface the write-callback error (if any) to the caller so that the
+ * awaiting operation rejects with a meaningful reason instead of hanging.
+ */
 async function writeLine(child: ReturnType<typeof spawn>, value: Record<string, unknown>) {
   const stdin = child.stdin
   if (!stdin || stdin.destroyed || !child.pid) throw new Error('Pi runtime input unavailable')
-  await new Promise<void>((resolve, reject) => {
-    const onError = (error: Error) => { cleanup(); reject(error) }
-    const cleanup = () => stdin.off('error', onError)
-    stdin.once('error', onError)
-    stdin.write(`${JSON.stringify(value)}\n`, error => { cleanup(); error ? reject(error) : resolve() })
+  return new Promise<void>((resolve, reject) => {
+    stdin.write(`${JSON.stringify(value)}\n`, error => error ? reject(error) : resolve())
   })
 }
 
@@ -24,6 +32,15 @@ export class PiRuntimeSessionAdapter implements RuntimeSessionAdapter {
 class PiRuntimeSession implements AgentRuntimeSession {
   private child: ReturnType<typeof spawn> | null = null
   private activeOperation: RuntimeOperationInput['operationId'] | null = null
+  /** Most recent failure reason captured from stdin/child error or exit events. */
+  private childFailure: { code: string; message: string } | null = null
+  /** Rolling tail of the child's stderr, capped at {@link MAX_STDERR_BYTES}. */
+  private stderrTail = ''
+  /** Set once the child process has exited; prevents reuse of a dead child. */
+  private exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null = null
+  /** Resolves when the current child's stdio streams and process have fully closed. */
+  private childClosed: Promise<void> = Promise.resolve()
+
   constructor(private readonly executable: string, private readonly input: RuntimeSessionOpenInput) {}
 
   async execute(request: RuntimeOperationInput): Promise<AgentTurnHandle> {
@@ -47,19 +64,68 @@ class PiRuntimeSession implements AgentRuntimeSession {
 
   async close(): Promise<void> { if (this.child && !this.child.killed) this.child.kill('SIGTERM'); this.child = null }
 
+  /**
+   * Returns a live child process, spawning a fresh one when the previous child has
+   * exited or was never started.
+   *
+   * A persistent `'error'` listener is attached to `child.stdin` for the child's
+   * entire lifetime. Without it, an asynchronous EPIPE (child dies while a write is
+   * buffered) becomes an unhandled `'error'` event and crashes the whole Worker
+   * process — the root cause of sessions stuck in "正在处理" with 0/1 nodes online.
+   */
   private async ensureChild() {
-    if (this.child && !this.child.killed) return this.child
+    if (this.child && !this.child.killed && !this.exitInfo) return this.child
+
+    // Reset per-child diagnostic state before spawning.
+    this.childFailure = null
+    this.stderrTail = ''
+    this.exitInfo = null
+
     const args = ['--mode', 'rpc']
     if (this.input.modelId) args.push('--model', this.input.modelId)
     if (this.input.resume) args.push('--session', this.input.resume)
-    this.child = spawn(this.executable, args, { cwd: this.input.cwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] })
-    if (!this.child.stdin || !this.child.stdout || !this.child.stderr) throw new Error('Pi runtime streams unavailable')
-    this.child.stderr.resume()
-    return this.child
+    const child = spawn(this.executable, args, { cwd: this.input.cwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] })
+    if (!child.stdin || !child.stdout || !child.stderr) throw new Error('Pi runtime streams unavailable')
+
+    // Persistent listeners — never removed while the child lives.
+    child.stdin.on('error', error => {
+      if (!this.childFailure) this.childFailure = { code: 'stdin-error', message: error.message }
+    })
+    child.on('error', error => {
+      if (!this.childFailure) this.childFailure = { code: 'spawn-error', message: error.message }
+    })
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', (chunk: string) => {
+      this.stderrTail = (this.stderrTail + chunk).slice(-MAX_STDERR_BYTES)
+    })
+    // 'close' fires after all stdio streams end AND the process exits, guaranteeing
+    // that childFailure/exitInfo are populated before any awaiting code proceeds.
+    this.childClosed = new Promise<void>(resolve => {
+      child.once('close', (code, signal) => {
+        this.exitInfo = { code, signal }
+        if (!this.childFailure) {
+          const detail = [
+            code !== null ? `code ${code}` : null,
+            signal ? `signal ${signal}` : null,
+          ].filter(Boolean).join(', ')
+          const stderr = this.stderrTail.trim()
+          this.childFailure = {
+            code: 'child-exited',
+            message: `Pi runtime exited unexpectedly${detail ? ` (${detail})` : ''}${stderr ? `: ${stderr}` : ''}`,
+          }
+        }
+        resolve()
+      })
+    })
+
+    this.child = child
+    return child
   }
 
   private async interrupt(operationId: RuntimeOperationInput['operationId']) {
-    if (this.activeOperation === operationId && this.child && !this.child.killed) await writeLine(this.child, { type: 'abort', id: operationId })
+    if (this.activeOperation !== operationId) return
+    if (!this.child || this.child.killed || this.exitInfo) return
+    await writeLine(this.child, { type: 'abort', id: operationId })
   }
 
   private async *signals(operationId: RuntimeOperationInput['operationId'], child: ReturnType<typeof spawn>): AsyncIterable<AgentSignal> {
@@ -73,7 +139,20 @@ class PiRuntimeSession implements AgentRuntimeSession {
           if (signal.kind === 'finished') return
         }
       }
-      yield { kind: 'finished', outcome: { status: 'failed', failure: { code: 'agent-error', message: 'Pi RPC stream closed before completion' } } }
+      // stdout closed without a terminal record — wait for the child to fully close
+      // so that childFailure captures the exit code and stderr tail, then surface it.
+      await this.childClosed
+      const failure = this.childFailure
+      yield {
+        kind: 'finished',
+        outcome: {
+          status: 'failed',
+          failure: {
+            code: 'agent-error',
+            message: failure?.message ?? 'Pi RPC stream closed before completion',
+          },
+        },
+      }
     } catch (error) {
       yield { kind: 'finished', outcome: { status: 'failed', failure: { code: 'agent-error', message: error instanceof Error ? error.message : 'Pi runtime failed' } } }
     } finally { if (this.activeOperation === operationId) this.activeOperation = null }

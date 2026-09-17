@@ -23,7 +23,9 @@ export type TurnState = 'running' | 'stopping' | 'completed' | 'cancelled' | 'fa
 export interface SessionBinding {
   readonly workspaceId: WorkspaceId
   readonly agent: AgentRef
-  readonly modelId: ModelId
+  /** Optional: a Session binds the Agent runtime, not a specific model.
+   * When null the Agent CLI uses its own default model; users may switch models mid-conversation. */
+  readonly modelId: ModelId | null
 }
 
 export interface SessionExecutionSpec {

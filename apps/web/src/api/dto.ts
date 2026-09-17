@@ -61,8 +61,9 @@ export interface SessionDTO {
   workspaceId: string
   workerId: string
   agentKey: string
-  modelId: string
+  modelId: string | null
   runtimeState: RuntimeState
+  archivedAt: string | null
   activeTurnId: string | null
   queuedMessageCount: number | null
   freshness: FreshnessDTO
@@ -98,6 +99,7 @@ export type EventPayloadDTO =
   | { kind: 'tool.output.delta'; turnId: string; toolCallId: string; text: string }
   | { kind: 'tool.finished'; turnId: string; toolCallId: string; exitCode: number | null }
   | { kind: 'approval.requested'; turnId: string; approvalId: string; action: unknown; reason?: string }
+  | { kind: 'approval.resolved'; turnId: string; approvalId: string; decision: 'approve' | 'deny' }
   | { kind: 'usage.updated'; turnId: string; usage: RuntimeUsageDTO }
   | { kind: 'compaction.started'; turnId: string; reason?: string }
   | { kind: 'compaction.finished'; turnId: string; summary?: string }
@@ -106,15 +108,19 @@ export interface EventsPageDTO { events: JournalEventDTO[]; throughSeq: number; 
 export interface BootstrapResultDTO { user: { id: string }; team: { id: string; name: string }; project: ProjectDTO }
 export interface SessionResourceDTO {
   sendCapability?: import('@wemux/web-contract/task-platform').ActionCapability
-  id: string; projectId: string; workspaceId: string; title: string; runtimeState: RuntimeState
-  binding: { agent: { workerId: string; agentKey: string }; modelId: string }
+  id: string; projectId: string; workspaceId: string; title: string; runtimeState: RuntimeState; archivedAt?: string | null
+  binding: { agent: { workerId: string; agentKey: string }; modelId: string | null }
 }
 export interface ServerEventsPageDTO { events: JournalEventDTO[]; nextSeq: number | null; freshness: FreshnessDTO }
 export interface CreateProjectDTO { teamId: string; name: string; shareScope: 'owner-only' }
 export type CreateWorkspaceDTO =
   | { workerId: string; name: string; source: 'empty' }
   | { workerId: string; name: string; source: 'git'; repository: { name: string; gitUrl: string; revision: string } }
-export interface CreateSessionDTO { requestId: string; workspaceId: string; title: string; agentKey: string; modelId: string; shareScope: 'owner-only' }
+export interface CreateSessionDTO { requestId: string; workspaceId: string; workerId: string; title: string; agentKey: string; modelId: string | null; shareScope: 'owner-only' }
+export interface RuntimeCommandDTO { commandId: string; operationId: string; name: 'compact' | 'set_model' | 'set_thinking_level'; arguments?: Record<string, unknown> }
+export interface ApprovalDecisionDTO { commandId: string; decision: 'approve' | 'deny' }
+export interface PatchSessionDTO { title?: string; archived?: boolean }
+export interface CommandResultDTO { commandId: string }
 export interface SendMessageDTO { commandId: string; messageId: string; content: string }
 export interface SendResultDTO { commandId: string; messageId: string; status: 'pending' | 'accepted' | 'queued' | 'rejected' | 'completed' | 'failed' }
 export interface TailnetInfoDTO { available: boolean; state: string; dnsName: string | null; selfIps: string[]; lanIps: string[]; error?: string }

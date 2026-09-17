@@ -1,10 +1,12 @@
 # AGENTS.md — Wemux Lite 代理工作指南
 
-面向在本仓库工作的 AI 编码代理（以及新成员）。项目定位、领域术语见 `CONTEXT.md`；快速上手见 `README.md`。
+面向在本仓库工作的 AI 编码代理（以及新成员）。产品定位见 `docs/product-direction.md`，领域术语见 `CONTEXT.md`，里程碑见 `docs/roadmap.md`；快速上手见 `README.md`。
 
 ## 项目是什么
 
-Wemux Lite 是一个最小化的团队智能体协作控制台：**Server**（HTTP + WebSocket 控制面）集中管理注册上来的 **Worker**（执行节点），Worker 发现并上报本机 **Agent** 与模型清单；用户通过 **Web** 控制台从 **Project → Workspace → Session** 快速开始与任意 Worker 上的 Agent 对话；任务看板是可选的计划、指派与审查入口，使用 **Task → Run → Session** 执行追踪，不是自由对话的前置步骤。设计参照 `~/profiles/scribe/workspace/wemux-slim`（调研见 `docs/research/`）。当前形态已按任务看板型 Agent 协作平台规格演进，规格见 `docs/specs/0001-task-board-agent-platform.md`。
+Wemux Lite 是面向个人与团队、自托管的 AI Agent 集群管理与协作平台，不是 MVP。轻量约束作用于部署和不必要的依赖，不削减必要产品能力、测试与可靠性：**Server**（HTTP + WebSocket 控制面）集中管理注册上来的 **Worker**（执行节点），Worker 发现并上报本机 **Agent** 与模型清单；用户通过 **Web** 控制台从 **Project → Workspace → Session** 快速开始与任意 Worker 上的 Agent 对话；任务看板是可选的计划、指派与审查入口，使用 **Task → Run → Session** 执行追踪，不是自由对话的前置步骤。设计参照 `~/profiles/scribe/workspace/wemux-slim`（调研见 `docs/research/`）。旧任务规格 `docs/specs/0001-task-board-agent-platform.md` 只描述任务能力切片，不再定义整个产品定位；其历史限制不得覆盖当前产品方向。
+
+已确认目标：Worker 可独立安装、无需注册集群即可使用自身鉴权的 Web/API，并支持显式公网 HTTPS；Web 提供主动加入集群、重试与退出。集群注册身份和 Web 用户凭据分离，不自动共享本地会话。运行时及会话 UI 按双宿主复用，设计见 `docs/design/worker-web-workbench.md`。此为待实施方向，勿把现有 CLI 当作已支持独立 Web；旧“全部远程会话必须经 Server”仅适用于集群控制路径。
 
 ## 仓库布局
 
@@ -14,7 +16,7 @@ apps/worker    # @wemux/worker：Worker CLI，可 npm pack 成 tgz 分发
 apps/web       # @wemux/web：React + Vite + TanStack Router/Query + Tailwind v4
 apps/e2e       # 端到端验证脚本
 packages/      # domain / server-domain / web-contract / wire-protocol（先构建这些）
-docs/          # specs（规格）/ design（交互与视觉系统）/ research（调研）
+docs/          # product-direction.md / roadmap.md / specs / design / research
 .scratch/task-board-agent-platform/   # 票据 + 验收证据（tickets 01–08）
 ```
 
@@ -69,20 +71,22 @@ node apps/worker/dist/cli.js tailscale --server http://100.101.102.103:8010
 1. **禁止直接调用 `crypto.randomUUID()`**（`apps/web/src` 全目录）。经局域网/Tailscale IP 的 HTTP 访问是不安全上下文，该 API 不存在，点击会静默崩溃。统一用 `src/lib/random.ts` 的 `randomId()`。`tests/insecure-context.test.mjs` 会扫描源码强制执行。
 2. **非安全上下文禁止用 execCommand 写剪贴板**。HTTP 访问时 `navigator.clipboard` 不存在，而现代 Chromium 对 `document.execCommand('copy')` 静默忽略却仍返回 true（假成功）。`src/lib/utils.ts` 的 `copyText()` 在非安全上下文直接返回 false；调用方需降级为 `selectElementText()` 全选 + 引导用户 Ctrl+C / 长按复制（同文件测试强制执行）。
 2. **src 内本地值导入必须带 `.ts` 扩展名**（如 `from '../lib/random.ts'`）：web 测试用 `node --experimental-strip-types` 直接 import 源码，node ESM 不会自动补扩展名；tsconfig 已开 `allowImportingTsExtensions`。`import type` 不受影响（运行前会被剥离）。
-3. 测试风格是**源码契约**：读源码文本做断言（见 `tests/landing.test.mjs`），不强制起浏览器；真实浏览器验证脚本放 `/tmp` 或 `.scratch`，产物存 `.scratch/task-board-agent-platform/evidence/`。
+3. 保留**源码契约**测试作为补充，但不能替代行为和真实浏览器验证。影响启动、路由、对话、权限、重连的交付必须做真实浏览器验收；可重复脚本纳入仓库，临时探针与原始证据放 `/tmp` 或 `.scratch`，脱敏验收摘要随规格保存。
 4. 首屏是**落地页内联表单**（`src/components/landing.tsx`），不是弹窗；应用内重连才用 ConnectionDialog。`index.html` 内嵌脚本加载失败兜底横幅，勿删。
 5. 静态服务：`index.html` 为 no-cache，assets 为 `max-age=3600`（带 hash 文件名）。
 
 ## 领域模型速记
 
-- 层级：Team → Project → Task → Workspace（绑定 Worker 的执行环境）→ Run（一次指派执行）→ Session（Agent 对话）。
+- 组织：Team → Project；Project 下有 Repository、Workspace、Session 和可选 Task，不是 Task → Workspace → Run 的单一所有权树。
+- Workspace 是逻辑环境，Workspace Placement 是 `(workspaceId, workerId)` 的物理落点；不同节点的路径和状态独立，不隐式同步文件或迁移会话。
+- 直接对话：Project → Workspace → Session；任务追踪：Task → Run → Session。Session 固定 Worker/Workspace/Agent/Model 绑定。
 - Task 状态机：`backlog | todo | in_progress | in_review | blocked | done | cancelled`；**Run 成功不得自动 done**，需人工审查（approve→done / changes_requested→blocked）。
 - 写操作带 `requestId` 幂等 + CAS 乐观并发；Run 取消有排队/启动/完成三态竞态处理；Session 可跨 Run 复用（reuse mode）。
 - 术语严格按 `CONTEXT.md`（Worker/Agent/Project/Task/Task Workflow/Task Link 等，含 Avoid 列表）。写代码注释、测试、文档时遵守。
 
 ## 票据与证据
 
-功能开发按 `.scratch/task-board-agent-platform/issues/01..08` 垂直切片推进（01–07 已完成，08 发布验证部分完成：8 项勾选 2 项，证据在 `evidence/ticket-08/`）。改动要附可复查的运行证据（日志、截图、断言输出），写到对应 `evidence/ticket-XX/`，票据内的勾选框只在真实验证后勾。
+后续开发按 `docs/roadmap.md` 的里程碑推进，开工前拆成可独立验收的纵向切片。`.scratch/task-board-agent-platform/issues/01..08` 及证据是历史任务切片记录，不作为当前版本全量完成证明。改动要附可复查的日志、截图或断言输出；原始证据留在 `.scratch`，脱敏验收摘要与可重复测试纳入仓库。只在真实验证后勾选；明确区分已实现、已验证、部分完成和未开始。
 
 ## Worker 与 Agent 安装边界
 
@@ -96,4 +100,4 @@ node apps/worker/dist/cli.js tailscale --server http://100.101.102.103:8010
 - Git 远端为 `git@github.com:qdw497874677/wemux-lite.git`，默认分支 `main`。提交前检查 diff，禁止提交 `data/`、`.scratch/`、凭据与本机构建产物。
 - Node ≥ 22.13（本机 v26）；npm workspaces，无 pnpm/yarn。
 - UI 中文文案；零 em-dash（—）装饰、无装饰性圆点；图标用 lucide；设计 token 沿用 Tailwind v4 + 现有 CSS 变量（深色优先，自动亮色）。
-- 最小依赖是明确目标：Server 端坚持 node:http/node:sqlite 原生实现，新增任何中间件依赖前先质疑必要性。
+- 必要依赖与轻量部署是明确目标：保留 node:http/node:sqlite 默认方案，新增中间件需说明真实问题、替代方案与运维成本；不得以“最小化”为由省略安全、恢复、测试和完整生命周期。

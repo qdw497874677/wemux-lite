@@ -12,6 +12,10 @@ references:
 
 # 任务看板与 Agent 协作平台改造 — Spec
 
+> 适用范围更新：本文保留任务能力切片的历史规格，不再定义整个产品。当前定位以 [产品方向](../product-direction.md)、术语以 [CONTEXT](../../CONTEXT.md)、实施顺序以 [路线图](../roadmap.md) 为准。
+> 已替代的历史要求：Task 作为唯一主路径、必须先建任务的空项目引导、Workspace 固定单 Worker、MVP 限制作为永久边界，以及浏览器验收可选的发布标准。直接对话与任务协作均为一等路径，Workspace readiness 必须针对目标 Placement。
+> 任务幂等、取消收敛等细节以 [任务契约裁定](../design/task-platform-contract-decisions.md) 为准。下文旧 M/P/V 编号仅指历史阶段，不能映射为新路线图进度；保留正文是为了追溯，不代表当前全部已完成。
+
 ## 修订记录
 
 - **v1.1 · 2026-01-06**：按子代理审查修订全部 2 项 blocker、8 项 major、3 项 minor，并落实跨文档统一裁定；无跳过项。本条为 SPEC 修订版本，不代表下文产品 v1.1 能力已纳入首版。

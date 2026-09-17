@@ -27,7 +27,8 @@ export class ClaudeAgent implements Extract<AgentAdapter, { mode: 'execution' }>
 
   async startTurn(input: AgentTurnInput) {
     if (this.command.includes('/')) await access(this.command, constants.X_OK)
-    const args = ['-p', '--output-format=stream-json', '--input-format=stream-json', '--verbose', '--include-partial-messages', '--replay-user-messages', '--permission-mode', process.env.WEMUX_CLAUDE_PERMISSION_MODE ?? 'bypassPermissions', '--model', input.modelId]
+    const args = ['-p', '--output-format=stream-json', '--input-format=stream-json', '--verbose', '--include-partial-messages', '--replay-user-messages', '--permission-mode', process.env.WEMUX_CLAUDE_PERMISSION_MODE ?? 'bypassPermissions']
+    if (input.modelId) args.push('--model', input.modelId)
     const capabilityInstructions = [input.launchContext?.instructions, input.launchContext?.skillsRoot ? `Wemux project skills are materialized under ${input.launchContext.skillsRoot}. Inspect the relevant SKILL.md files before applying a skill.` : null].filter(Boolean).join('\n\n')
     if (capabilityInstructions) args.push('--append-system-prompt', capabilityInstructions)
     if (input.launchContext?.capabilityEndpoint && input.launchContext.capabilityToken) {

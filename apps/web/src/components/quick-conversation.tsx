@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { WorkerDTO, WorkspaceDTO } from '../api/dto'
 import { QuickStartController, fillQuickChoices, quickConfigReason } from '../features/sessions/quick-start.ts'
+import { workspaceStateLabel, workerStateLabel } from '../lib/display.ts'
 import { isExecutable } from '../lib/capability.ts'
 import { Button } from './ui/button.tsx'
 import { Textarea } from './ui/textarea.tsx'
@@ -13,7 +14,7 @@ export function QuickStartRecovery({ controller, sessionId }: { controller: Quic
   return <aside role="status" className="shrink-0 space-y-2 border-b border-border px-4 py-3 text-sm">
     <p>{state.error || '首条消息尚未确认，内容已保留。'}</p>
     <details><summary className="cursor-pointer text-xs">查看保留的首条消息</summary><p className="max-h-32 overflow-auto whitespace-pre-wrap break-words">{state.draft}</p></details>
-    <Button type="button" size="sm" variant="outline" disabled={state.pending} onClick={() => { void controller.start() }}>{state.pending ? '…' : ''}</Button>
+    <Button type="button" size="sm" variant="outline" disabled={state.pending} onClick={() => { void controller.start() }}>{state.pending ? '正在重试…' : '重试首条消息'}</Button>
   </aside>
 }
 
@@ -44,16 +45,19 @@ export function QuickConversation({ controller, projectId, workers, workspaces, 
       <Textarea autoFocus aria-label="首条消息" placeholder="输入你的需求…" className="min-h-32 text-base" value={state.draft} readOnly={locked} onChange={event => controller.edit(event.target.value)} onKeyDown={event => {
         if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && (event.ctrlKey || event.metaKey || window.matchMedia('(pointer: fine)').matches)) { event.preventDefault(); start() }
       }} />
-      <button type="button" aria-expanded={expanded || Boolean(reason)} className="w-full break-words text-left text-xs text-muted-foreground" onClick={() => setExpanded(!expanded)}>{ws?.name ?? (config.workspaceId || '选择工作区')} · {worker?.name ?? (config.workerId || '节点随工作区确定')} · {agent?.displayName ?? (config.agentKey || '选择智能体')} · {config.modelId || '选择模型'}　配置</button>
-      {(expanded || reason) && <fieldset disabled={locked} className="grid gap-3 sm:grid-cols-3">
-        <label className="grid min-w-0 gap-1 text-xs">工作区<select aria-label="工作区" className={selectClass} value={config.workspaceId} onChange={event => { const next = workspaces.find(w => w.id === event.target.value); controller.configure(fillQuickChoices({ workspaceId: next?.id ?? '', workerId: next?.workerId ?? '', agentKey: '', modelId: '' }, projectId, workspaces, workers)) }}><option value="">选择工作区</option>{missing(config.workspaceId, Boolean(ws))}{workspaces.map(w => <option key={w.id} value={w.id}>{w.name}{w.status !== 'ready' ? `（${w.status}）` : ''}</option>)}</select></label>
-        <label className="grid min-w-0 gap-1 text-xs">智能体<select aria-label="智能体" className={selectClass} value={config.agentKey} onChange={event => controller.configure(fillQuickChoices({ ...config, agentKey: event.target.value, modelId: '' }, projectId, workspaces, workers))}><option value="">选择智能体</option>{missing(config.agentKey, Boolean(agent))}{worker?.capabilities.map(a => <option key={a.agentKey} value={a.agentKey} disabled={!isExecutable(a)}>{a.displayName}{!isExecutable(a) ? '（不可执行）' : ''}</option>)}</select></label>
-        <label className="grid min-w-0 gap-1 text-xs">模型<select aria-label="模型" className={selectClass} value={config.modelId} onChange={event => controller.configure({ ...config, modelId: event.target.value })}><option value="">选择模型</option>{missing(config.modelId, Boolean(agent?.models.some(m => m.modelId === config.modelId)))}{agent?.models.map(m => <option key={m.modelId} value={m.modelId}>{m.displayName}</option>)}</select></label>
+      <button type="button" aria-expanded={expanded || Boolean(reason)} className="w-full break-words text-left text-xs text-muted-foreground" onClick={() => setExpanded(!expanded)}>{ws?.name ?? (config.workspaceId || '选择工作区')} · {worker?.name ?? (config.workerId || '选择工作节点')} · {agent?.displayName ?? (config.agentKey || '选择智能体')} · {config.modelId || '选择模型'}　配置</button>
+      {(expanded || reason) && <fieldset disabled={locked} className="grid gap-3 sm:grid-cols-2">
+        <label className="grid min-w-0 gap-1 text-xs">工作区<select aria-label="工作区" className={selectClass} value={config.workspaceId} onChange={event => { const next = workspaces.find(w => w.id === event.target.value); controller.configure(fillQuickChoices({ workspaceId: next?.id ?? '', workerId: '', agentKey: '', modelId: '' }, projectId, workspaces, workers)) }}><option value="">选择工作区</option>{missing(config.workspaceId, Boolean(ws))}{workspaces.filter(w => w.projectId === projectId).map(w => <option key={w.id} value={w.id}>{w.name}（关联 {w.placements.length} 个工作节点）</option>)}</select></label>
+        <label className="grid min-w-0 gap-1 text-xs">工作节点<select aria-label="工作节点" className={selectClass} value={config.workerId} onChange={event => controller.configure(fillQuickChoices({ ...config, workerId: event.target.value, agentKey: '', modelId: '' }, projectId, workspaces, workers))}><option value="">选择工作节点</option>{missing(config.workerId, Boolean(ws?.placements.some(p => p.workerId === config.workerId)))}{ws?.placements.map(p => { const node = workers.find(w => w.id === p.workerId); return <option key={p.workerId} value={p.workerId}>{node?.name ?? p.workerId}（{workspaceStateLabel[p.status]} / {node ? workerStateLabel[node.connectionState] : '节点不可访问'}）</option> })}</select></label>
+        <label className="grid min-w-0 gap-1 text-xs">智能体<select aria-label="智能体" className={selectClass} value={config.agentKey} onChange={event => controller.configure(fillQuickChoices({ ...config, agentKey: event.target.value, modelId: '' }, projectId, workspaces, workers))}><option value="">选择智能体</option>{missing(config.agentKey, Boolean(agent))}{worker?.capabilities.map(a => <option key={a.agentKey} value={a.agentKey} disabled={!isExecutable(a)}>{a.displayName}{!isExecutable(a) ? `（${a.availability.reason || '不可执行或尚未认证'}）` : !a.models.length ? '（未报告可用模型）' : ''}</option>)}</select></label>
+        <label className="grid min-w-0 gap-1 text-xs">模型（可选）<select aria-label="模型" className={selectClass} value={config.modelId} onChange={event => controller.configure({ ...config, modelId: event.target.value })}><option value="">使用智能体默认模型</option>{missing(config.modelId, Boolean(agent?.models.some(m => m.modelId === config.modelId)))}{agent?.models.map(m => <option key={m.modelId} value={m.modelId}>{m.displayName}</option>)}</select></label>
       </fieldset>}
+      {ws && <ul aria-label="工作区节点状态" className="space-y-1 text-xs text-muted-foreground">{ws.placements.map(p => <li key={p.workerId}>{workers.find(w => w.id === p.workerId)?.name ?? p.workerId}：{workspaceStateLabel[p.status]}{p.location?.rootPath && `，${p.location.rootPath}`}{p.failureReason && <span className="text-red-300">，{p.failureReason}</span>}</li>)}</ul>}
+      {worker?.capabilities.filter(a => !isExecutable(a) || !a.models.length).map(a => <p key={a.agentKey} className="text-xs text-muted-foreground">{a.displayName}：{a.availability.reason || (!isExecutable(a) ? '不可执行或尚未认证' : '未报告可用模型')}</p>)}
       {reason && <p role="status" className="text-xs text-muted-foreground">{reason}</p>}
-      {!workspaces.some(w => w.status === 'ready') && <Button type="button" variant="outline" disabled={!connected || locked} onClick={onSetup}>准备工作区</Button>}
+      {!workspaces.some(w => w.projectId === projectId && w.placements.some(p => p.status === 'ready')) && <Button type="button" variant="outline" disabled={!connected || locked} onClick={onSetup}>准备工作区</Button>}
       {state.error && <p role="alert" className="text-sm text-red-300">{state.error}</p>}
-      {state.attempt && !state.completed && <p className="text-xs text-muted-foreground">。{state.attempt.sessionId ? state.attempt.rejected ? '，。' : '，。' : '， requestId ，。'}</p>}
+      {state.attempt && !state.completed && <p className="text-xs text-muted-foreground">草稿和请求身份已保留。{state.attempt.sessionId ? state.attempt.rejected ? '首条消息已被拒绝，重试将在同一会话发送新请求。' : '重试将复用原消息身份，避免重复发送。' : '重试将复用原 requestId，避免重复创建会话。'}</p>}
       <div className="flex flex-wrap justify-end gap-2">
         {state.attempt?.sessionId && <Button type="button" variant="outline" onClick={() => onOpen(state.attempt!.sessionId!)}>查看已创建会话</Button>}
         {state.completed ? <Button type="button" onClick={() => controller.resetCompleted()}>再开新对话</Button> : <Button type="submit" disabled={!connected || Boolean(reason) || state.pending || !state.draft.trim()}>{state.pending ? '正在启动…' : state.attempt ? '重试首条消息' : '发送并开始对话'}</Button>}

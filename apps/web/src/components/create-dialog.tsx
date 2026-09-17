@@ -59,7 +59,7 @@ export function CreateDialog({ kind, api, teamId, projectId, defaultWorkspaceId 
           onCreated(kind, result.id); break
         }
         case 'session': {
-          const result = await api.createSession({ requestId: randomId(), title: name.trim(), workspaceId, agentKey, modelId: modelId.trim(), shareScope: 'owner-only' })
+          const result = await api.createSession({ requestId: randomId(), title: name.trim(), workspaceId, workerId: selectedWorkerId, agentKey, modelId: modelId.trim(), shareScope: 'owner-only' })
           onCreated(kind, result.id, result); break
         }
       }

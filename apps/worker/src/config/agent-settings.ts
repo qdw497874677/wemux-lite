@@ -32,7 +32,7 @@ export async function readAgentSettings(home: string): Promise<AgentSettings> {
 }
 
 /** A short write lock and atomic rename preserve other selections and the previous file on failure. */
-export async function saveAgentSelection(home: string, key: RuntimeKey, selection: AgentSelection): Promise<void> {
+async function updateAgentSettings(home: string, update: (settings: AgentSettings) => void): Promise<void> {
   await mkdir(home, { recursive: true, mode: 0o700 })
   const lockPath = join(home, 'agents.lock')
   const lock = await open(lockPath, 'wx', 0o600).catch(error => {
@@ -42,7 +42,7 @@ export async function saveAgentSelection(home: string, key: RuntimeKey, selectio
   const temporary = join(home, `agents.${randomUUID()}.tmp`)
   try {
     const settings = await readAgentSettings(home)
-    settings[key] = selection
+    update(settings)
     await writeFile(temporary, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600, flag: 'wx' })
     await rename(temporary, join(home, 'agents.json'))
   } finally {
@@ -50,6 +50,14 @@ export async function saveAgentSelection(home: string, key: RuntimeKey, selectio
     await rm(temporary, { force: true })
     await rm(lockPath, { force: true })
   }
+}
+
+export async function saveAgentSelection(home: string, key: RuntimeKey, selection: AgentSelection): Promise<void> {
+  await updateAgentSettings(home, settings => { settings[key] = selection })
+}
+
+export async function removeAgentSelection(home: string, key: RuntimeKey): Promise<void> {
+  await updateAgentSettings(home, settings => { delete settings[key] })
 }
 
 export function agentCommand(key: RuntimeKey, settings: AgentSettings, env: NodeJS.ProcessEnv = process.env): string {

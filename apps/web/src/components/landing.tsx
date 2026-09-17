@@ -35,16 +35,16 @@ export function LandingScreen({ config, onSave }: { config: ConnectionConfig; on
     } finally { api.dispose(); if (active()) setBusy(false) }
   }
 
-  return <main className="landing-root" aria-labelledby="landing-title">
+  return <main className="landing-root grain-overlay" aria-labelledby="landing-title">
     <div className="landing-grid">
       <section className="landing-intro">
-        <p className="flex items-center gap-3"><span aria-hidden className="grid size-10 place-items-center rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 text-lg font-black text-white">W</span><strong className="text-base">Wemux Lite</strong></p>
+        <p className="flex items-center gap-3"><span aria-hidden className="grid size-10 place-items-center rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 text-lg font-black text-white shadow-[0_2px_12px_hsl(244_75%_64%_/.3)]">W</span><strong className="text-base tracking-tight">Wemux Lite</strong></p>
         <h1 id="landing-title" className="text-3xl font-bold leading-tight tracking-tight sm:text-4xl">自托管的智能体协作控制台</h1>
         <p className="max-w-xl text-sm leading-6 text-muted-foreground sm:text-base sm:leading-7">注册工作节点、组织项目与工作区，和运行在各节点上的智能体对话，并在任务看板上完成分派与人工审查。</p>
-        <ul className="space-y-3 text-sm">
-          <li className="flex items-start gap-3"><Network aria-hidden className="mt-0.5 size-4 shrink-0 text-violet-300" /><span>工作节点注册与探活，智能体和模型清单自动上报</span></li>
-          <li className="flex items-start gap-3"><FolderGit2 aria-hidden className="mt-0.5 size-4 shrink-0 text-violet-300" /><span>项目到工作区到会话的统一层级，跨节点集中管理</span></li>
-          <li className="flex items-start gap-3"><MessagesSquare aria-hidden className="mt-0.5 size-4 shrink-0 text-violet-300" /><span>与任意节点上的智能体对话，执行过程与人工审查留痕</span></li>
+        <ul>
+          <li className="flex items-start gap-3"><span className="landing-feature-icon" aria-hidden><Network className="size-4" /></span><span className="pt-1 text-sm leading-6">工作节点注册与探活，智能体和模型清单自动上报</span></li>
+          <li className="flex items-start gap-3"><span className="landing-feature-icon" aria-hidden><FolderGit2 className="size-4" /></span><span className="pt-1 text-sm leading-6">项目到工作区到会话的统一层级，跨节点集中管理</span></li>
+          <li className="flex items-start gap-3"><span className="landing-feature-icon" aria-hidden><MessagesSquare className="size-4" /></span><span className="pt-1 text-sm leading-6">与任意节点上的智能体对话，执行过程与人工审查留痕</span></li>
         </ul>
       </section>
       <form className="landing-card" noValidate onSubmit={event => { event.preventDefault(); if (busy) return; if (token.trim().length < 16) { setError('管理员令牌长度不足，请粘贴启动服务端时设置的完整 WEMUX_BOOTSTRAP_TOKEN 值。'); return } void connect() }}>
@@ -61,7 +61,7 @@ export function LandingScreen({ config, onSave }: { config: ConnectionConfig; on
         <p className="flex gap-2 rounded-lg border border-border bg-muted/30 p-3 text-xs leading-5 text-muted-foreground"><ShieldCheck aria-hidden className="mt-0.5 size-4 shrink-0 text-emerald-400" /><span>管理员密钥只用于换取访问令牌，不会保存在浏览器中。访问令牌默认有效 7 天，过期后需要重新输入。</span></p>
         {plainHttp && <p className="flex gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 p-3 text-xs leading-5 text-amber-100"><AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0" />当前为 HTTP 明文连接，令牌可能被同网络设备看到，仅建议用于可信内网或本机。</p>}
         {error && <p role="alert" className="rounded-lg border border-red-500/25 bg-red-500/10 p-3 text-sm text-red-200">{error}</p>}
-        <Button type="submit" className="h-10 w-full text-sm font-semibold" disabled={busy}>{busy ? '正在验证连接…' : '连接并进入控制台'}</Button>
+        <Button type="submit" className="press-feedback h-10 w-full text-sm font-semibold" disabled={busy}>{busy ? '正在验证连接…' : '连接并进入控制台'}</Button>
       </form>
     </div>
   </main>

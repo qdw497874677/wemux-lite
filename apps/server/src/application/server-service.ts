@@ -1,6 +1,6 @@
 import { sessionIdleReason } from './session-idle.js'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import type { AgentKey, ApprovalId, CommandId, EventSeq, Id, MessageId, ModelId, ProjectId, RuntimeOperationId, SessionId, TeamId, Timestamp, UserId, WorkerId, WorkspaceId } from '@wemux/domain'
+import type { AgentKey, ApprovalId, CommandId, EventSeq, Id, MessageId, ModelId, ProjectId, RuntimeOperationId, SessionId, TeamId, Timestamp, TurnId, UserId, WorkerId, WorkspaceId } from '@wemux/domain'
 import type { AuditResource, CommandProjection, Project, Session, Worker, Workspace, WorkspacePlacement } from '@wemux/server-domain'
 import type { WorkerCommand } from '@wemux/wire-protocol'
 import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
@@ -46,12 +46,18 @@ export class ServerService {
     return await this.getCommand(id)
   }
   async revokeWorker(id: WorkerId, disconnect: (workerId: WorkerId) => void) {
+    return this.revokeWorkerAs(id, disconnect, 'worker.revoke')
+  }
+  async leaveWorker(id: WorkerId, disconnect: (workerId: WorkerId) => void) {
+    return this.revokeWorkerAs(id, disconnect, 'worker.leave')
+  }
+  private async revokeWorkerAs(id: WorkerId, disconnect: (workerId: WorkerId) => void, action: 'worker.revoke' | 'worker.leave') {
     const worker = await this.getWorker(id)
     if (worker.connectionState === 'revoked') return worker
     await this.store.transaction(async tx => {
       await tx.resources.saveWorker({ ...worker, connectionState: 'revoked', lastSeenAt: now() })
       await tx.identity.revokeWorkerCredential(id, now())
-      await this.audit(tx, 'worker.revoke', { kind: 'worker', id })
+      await this.audit(tx, action, { kind: 'worker', id })
     })
     disconnect(id)
     for (const session of await this.store.resources.listSessions()) if (session.binding.agent.workerId === id) this.notifications.session(session.id)
@@ -169,8 +175,38 @@ export class ServerService {
   sessionView(id: SessionId) {
     return this.store.transaction(async tx => {
       const session = await this.getSession(id, tx.resources)
-      return { ...session, sendCapability: await sendCapability(tx, session) }
+      return { ...session, archivedAt: session.archivedAt ?? null, ...await this.executionState(tx, id), sendCapability: await sendCapability(tx, session) }
     })
+  }
+  private async executionState(tx: ServerStoreTx, id: SessionId) {
+    const queued = new Map<MessageId, { commandId: CommandId; messageId: MessageId; content: string; position: number | null }>()
+    const observed = new Set<CommandId>(), settled = new Set<MessageId>()
+    let activeTurnId: TurnId | null = null
+    let from = 1 as EventSeq
+    for (;;) {
+      const page = await tx.cache.readEvents(id, from, 500)
+      for (const { payload: p } of page.events) {
+        if (p.kind === 'message.queued') {
+          observed.add(p.commandId)
+          queued.set(p.messageId, { commandId: p.commandId, messageId: p.messageId, content: p.content, position: p.position })
+        }
+        if (p.kind === 'message.cancelled' || p.kind === 'turn.started') {
+          queued.delete(p.messageId)
+          settled.add(p.messageId)
+        }
+        if (p.kind === 'turn.started') activeTurnId = p.turnId
+        if (p.kind === 'turn.finished' && activeTurnId === p.turnId) activeTurnId = null
+      }
+      if (!page.nextSeq) break
+      from = page.nextSeq
+    }
+    for (const pending of await tx.commands.listUnsettledEnqueues(id)) {
+      const command = pending.command
+      if (command.kind === 'session.enqueue' && !observed.has(pending.commandId) && !settled.has(command.message.messageId)) {
+        queued.set(command.message.messageId, { commandId: pending.commandId, ...command.message, position: null })
+      }
+    }
+    return { activeTurnId, queuedMessages: [...queued.values()], freshness: await tx.cache.getFreshness(id) }
   }
   async getSession(id: SessionId, resources = this.store.resources): Promise<Session> {
     const s = requireValue(await resources.getSession(id)); await this.getProject(s.projectId, resources)
@@ -240,7 +276,10 @@ export class ServerService {
     const selected = requestedWorkerId ? readyPlacements.find(placement => placement.workerId === requestedWorkerId) : readyPlacements.length === 1 ? readyPlacements[0] : undefined
     if (!selected) throw new AppError(409, requestedWorkerId ? 'Workspace is not ready on selected Worker' : readyPlacements.length ? 'workerId is required when Workspace is ready on multiple Workers' : 'Workspace has no ready placement')
     const worker = requireValue(await tx.resources.getWorker(selected.workerId))
-    const agentKey = text(b.agentKey, 'agentKey') as AgentKey, modelId = text(b.modelId, 'modelId') as ModelId
+    const agentKey = text(b.agentKey, 'agentKey') as AgentKey
+    // modelId is optional: a Session binds the Agent runtime, not a specific model.
+    // When omitted the Agent CLI uses its own default; users may switch models mid-conversation.
+    const modelId = b.modelId === undefined || b.modelId === null ? null : text(b.modelId, 'modelId') as ModelId
     const title = text(b.title, 'title', 200)
     if (!source && Object.keys(b).some(key => !['requestId', 'workspaceId', 'workerId', 'title', 'agentKey', 'modelId', 'shareScope'].includes(key))) throw new AppError(400, 'Invalid Session creation request')
     if (!source && b.shareScope !== undefined && b.shareScope !== 'owner-only') throw new AppError(400, 'Invalid Session shareScope')
@@ -256,9 +295,9 @@ export class ServerService {
     }
     const agent = worker.capabilities?.find(c => c?.agentKey === agentKey)
     if (worker.connectionState === 'revoked' || !agent || agent.mode !== 'execution' || agent.availability?.status !== 'available') throw new AppError(409, 'Agent unavailable')
-    if (!agent.models?.some(model => model?.modelId === modelId)) throw new AppError(409, 'Model unavailable')
+    if (modelId !== null && !agent.models?.some(model => model?.modelId === modelId)) throw new AppError(409, 'Model unavailable')
     const sessionId = newId<'SessionId'>(), commandId = newId<'CommandId'>()
-    const session: Session = { id: sessionId, projectId: workspace.projectId, ownerId: userId, workspaceId: workspace.id, title, shareScope: 'owner-only', binding: { workspaceId: workspace.id, agent: { workerId: worker.id, agentKey }, modelId }, runtimeState: 'idle', deletedAt: null, ...(requestId ? { creation: { requestId, fingerprint, commandId } } : {}), ...source }
+    const session: Session = { id: sessionId, projectId: workspace.projectId, ownerId: userId, workspaceId: workspace.id, title, shareScope: 'owner-only', binding: { workspaceId: workspace.id, agent: { workerId: worker.id, agentKey }, modelId }, runtimeState: 'idle', archivedAt: null, deletedAt: null, ...(requestId ? { creation: { requestId, fingerprint, commandId } } : {}), ...source }
     await tx.resources.saveSession(session)
     await this.command(tx, worker.id, { kind: 'session.create', session: { sessionId: session.id, binding: session.binding } }, commandId)
     await this.audit(tx, 'session.create', { kind: 'session', id: session.id })
@@ -288,31 +327,56 @@ export class ServerService {
     await this.audit(tx, 'session.enqueue', { kind: 'session', id })
     return { commandId, messageId, workerId: session.binding.agent.workerId }
   }
-  async invokeRuntimeCommand(id: SessionId, input: unknown) {
-    const b = object(input), session = await this.getSession(id)
+  async cancelQueued(id: SessionId, submissionCommandId: CommandId, input: unknown) {
+    const b = object(input)
     const commandId = b.commandId === undefined ? newId<'CommandId'>() : text(b.commandId, 'commandId', 200) as CommandId
-    const operationId = text(b.operationId, 'operationId', 200) as RuntimeOperationId
+    return this.sessionControl(id, commandId, async tx => {
+      const submission = await tx.commands.getPendingCommand(submissionCommandId)
+      if (!submission || submission.command.kind !== 'session.enqueue' || submission.command.sessionId !== id) throw new AppError(404, 'Queued submission not found in Session')
+      return { kind: 'session.cancel-queued', sessionId: id, submissionCommandId }
+    })
+  }
+  async stopTurn(id: SessionId, input: unknown) {
+    const b = object(input)
+    const commandId = b.commandId === undefined ? newId<'CommandId'>() : text(b.commandId, 'commandId', 200) as CommandId
+    return this.sessionControl(id, commandId, async tx => {
+      // A retry must retain its original target, even after another Turn starts.
+      const previous = await tx.commands.getPendingCommand(commandId)
+      const turnId = b.turnId === undefined
+        ? previous?.command.kind === 'turn.stop' && previous.command.sessionId === id ? previous.command.turnId : (await this.executionState(tx, id)).activeTurnId
+        : text(b.turnId, 'turnId', 200) as TurnId
+      if (!turnId) throw new AppError(409, 'Session has no observed active Turn')
+      if (!previous && turnId !== (await this.executionState(tx, id)).activeTurnId) throw new AppError(409, 'Turn is not active in Session')
+      return { kind: 'turn.stop', sessionId: id, turnId }
+    })
+  }
+  private async sessionControl(id: SessionId, commandId: CommandId, build: (tx: ServerStoreTx) => Promise<WorkerCommand>) {
+    const workerId = await this.store.transaction(async tx => {
+      const session = await this.getSession(id, tx.resources)
+      const command = await build(tx)
+      const existing = await tx.commands.get(commandId)
+      await this.command(tx, session.binding.agent.workerId, command, commandId)
+      if (!existing) await this.audit(tx, command.kind, { kind: 'session', id })
+      return session.binding.agent.workerId
+    })
+    this.notifications.commands(workerId)
+    return { commandId }
+  }
+  async invokeRuntimeCommand(id: SessionId, input: unknown) {
+    const b = object(input)
+    const commandId = b.commandId === undefined ? newId<'CommandId'>() : text(b.commandId, 'commandId', 200) as CommandId
+    const operationId = (b.operationId === undefined ? commandId : text(b.operationId, 'operationId', 200)) as RuntimeOperationId
     const name = text(b.name, 'name', 200)
     if (name !== 'compact' && name !== 'set_model' && name !== 'set_thinking_level') throw new AppError(400, 'Unsupported runtime command')
     const args = b.arguments === undefined ? {} : object(b.arguments)
     const runtimeName = name as Extract<WorkerCommand, { kind: 'runtime.command' }>['name']
-    await this.store.transaction(async tx => {
-      await this.command(tx, session.binding.agent.workerId, { kind: 'runtime.command', sessionId: id, operationId, name: runtimeName, arguments: args }, commandId)
-      await this.audit(tx, 'session.runtime-command', { kind: 'session', id })
-    })
-    this.notifications.commands(session.binding.agent.workerId)
-    return { commandId }
+    return this.sessionControl(id, commandId, async () => ({ kind: 'runtime.command', sessionId: id, operationId, name: runtimeName, arguments: args }))
   }
   async resolveRuntimeApproval(id: SessionId, approvalId: ApprovalId, input: unknown) {
-    const b = object(input), session = await this.getSession(id), decision = text(b.decision, 'decision')
+    const b = object(input), decision = text(b.decision, 'decision')
     if (decision !== 'approve' && decision !== 'deny') throw new AppError(400, 'decision must be approve or deny')
     const commandId = b.commandId === undefined ? newId<'CommandId'>() : text(b.commandId, 'commandId', 200) as CommandId
-    await this.store.transaction(async tx => {
-      await this.command(tx, session.binding.agent.workerId, { kind: 'runtime.approval.resolve', sessionId: id, approvalId, decision }, commandId)
-      await this.audit(tx, 'session.runtime-approval', { kind: 'session', id })
-    })
-    this.notifications.commands(session.binding.agent.workerId)
-    return { commandId }
+    return this.sessionControl(id, commandId, async () => ({ kind: 'runtime.approval.resolve', sessionId: id, approvalId, decision }))
   }
   async events(id: SessionId, from: number, limit: number) {
     await this.getSession(id)
@@ -324,7 +388,12 @@ export class ServerService {
       await this.audit(tx, `${kind}.update`, kind === 'projects' ? { kind: 'project', id: id as ProjectId } : kind === 'workspaces' ? { kind: 'workspace', id: id as WorkspaceId } : { kind: 'session', id: id as SessionId })
       if (kind === 'projects') { const p = { ...await this.getProject(id as ProjectId, tx.resources), name: text(b.name, 'name', 200) }; await tx.resources.saveProject(p); return p }
       if (kind === 'workspaces') { const w = { ...await this.getWorkspace(id as WorkspaceId, tx.resources), name: text(b.name, 'name', 200) }; await tx.resources.saveWorkspace(w); return w }
-      const s = { ...await this.getSession(id as SessionId, tx.resources), title: text(b.title, 'title', 200) }; await tx.resources.saveSession(s); return s
+      if (Object.keys(b).some(key => !['title', 'archived'].includes(key)) || (b.title === undefined && b.archived === undefined)) throw new AppError(400, 'Expected title or archived')
+      if (b.archived !== undefined && typeof b.archived !== 'boolean') throw new AppError(400, 'archived must be boolean')
+      const session = await this.getSession(id as SessionId, tx.resources)
+      const s = { ...session, title: b.title === undefined ? session.title : text(b.title, 'title', 200), archivedAt: b.archived === undefined ? session.archivedAt ?? null : b.archived ? session.archivedAt ?? now() : null }
+      await tx.resources.saveSession(s)
+      return s
     })
   }
   async delete(kind: 'projects' | 'workspaces' | 'sessions', id: string) {
@@ -373,10 +442,10 @@ export class ServerService {
       workspace => projectIds.has(workspace.projectId) && !workspace.deletedAt,
     )
   }
-  async listSessions(): Promise<Session[]> {
+  async listSessions(filter: { archived?: boolean } = {}): Promise<Session[]> {
     const projectIds = new Set((await this.listProjects()).map(project => project.id))
     return (await this.store.resources.listSessions()).filter(
-      session => projectIds.has(session.projectId) && !session.deletedAt,
+      session => projectIds.has(session.projectId) && !session.deletedAt && (filter.archived === undefined || Boolean(session.archivedAt) === filter.archived),
     )
   }
 }

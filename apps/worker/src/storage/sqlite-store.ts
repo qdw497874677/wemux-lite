@@ -1,16 +1,18 @@
 import { DatabaseSync } from 'node:sqlite'
 import { retentionDestinationInvariants, retentionInvariants } from './retention-invariants.js'
 import { randomUUID } from 'node:crypto'
+import type { AgentEvent, AgentSession, SessionKey, SessionStore } from '@wemux/agent-interchange'
 import type { EventSeq, JournalEvent, JournalEventDraft, QueuedMessage, SessionId, Timestamp, Turn, TurnId } from '@wemux/domain'
 import type { WorkerStore, WorkerStoreTx } from '../application/ports/worker-store.js'
 import type { LocalState } from '../application/ports/local-state.js'
 import type { CommandRecord, SessionExecution } from '../domain/session-execution.js'
 import type { LocalWorkspace, RepositoryCheckout } from '../domain/local-workspace.js'
+import type { LocalAdminRecord, LocalInstallationIdentity } from '../domain/local-installation.js'
 
 export const now = () => new Date().toISOString() as Timestamp
 
 /** Serialized transactions also isolate async port callbacks from other transactions. */
-export class SqliteWorkerStore implements WorkerStore, LocalState {
+export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore {
   private readonly db: DatabaseSync
   private tail: Promise<unknown> = Promise.resolve()
 
@@ -34,7 +36,7 @@ export class SqliteWorkerStore implements WorkerStore, LocalState {
     }
   }
   close() { this.db.close() }
-  private get<T>(bucket: string, id: string): T | null {
+  private getDocument<T>(bucket: string, id: string): T | null {
     const row = this.db.prepare('SELECT body FROM documents WHERE bucket=? AND id=?').get(bucket, id)
     return row ? JSON.parse(String(row.body)) as T : null
   }
@@ -44,23 +46,85 @@ export class SqliteWorkerStore implements WorkerStore, LocalState {
   private put(bucket: string, id: string, value: unknown) {
     this.db.prepare('INSERT INTO documents VALUES (?,?,?) ON CONFLICT(bucket,id) DO UPDATE SET body=excluded.body').run(bucket, id, JSON.stringify(value))
   }
-  identity: LocalState['identity'] = () => this.get('identity', 'worker')
+  private agentSessionId({ appName, userId, sessionId }: SessionKey) {
+    return `${appName}\u0000${userId}\u0000${sessionId}`
+  }
+  async getOrCreate(request: SessionKey & { readonly state?: Readonly<Record<string, unknown>> }): Promise<AgentSession> {
+    await this.tail
+    const id = this.agentSessionId(request)
+    const existing = this.getDocument<AgentSession>('agent-sessions', id)
+    if (existing) return existing
+    const session: AgentSession = {
+      appName: request.appName,
+      userId: request.userId,
+      sessionId: request.sessionId,
+      state: { ...request.state },
+      events: [],
+      lastUpdateTime: now(),
+    }
+    this.put('agent-sessions', id, session)
+    return session
+  }
+  async get(request: SessionKey): Promise<AgentSession | undefined> {
+    await this.tail
+    return this.getDocument<AgentSession>('agent-sessions', this.agentSessionId(request)) ?? undefined
+  }
+  async appendEvent({ session, event }: { readonly session: AgentSession; readonly event: AgentEvent }): Promise<AgentEvent> {
+    if (event.partial) return event
+    const result = this.tail.then(async () => {
+      this.db.exec('BEGIN IMMEDIATE')
+      try {
+        const id = this.agentSessionId(session)
+        const current = this.getDocument<AgentSession>('agent-sessions', id)
+        if (!current) throw new Error('Agent session not found')
+        const events = current.events.some(item => item.id === event.id)
+          ? current.events.map(item => item.id === event.id ? event : item)
+          : [...current.events, event]
+        this.put('agent-sessions', id, {
+          ...current,
+          state: { ...current.state, ...event.actions.stateDelta },
+          events,
+          lastUpdateTime: event.timestamp,
+        })
+        this.db.exec('COMMIT')
+        return event
+      } catch (error) {
+        this.db.exec('ROLLBACK')
+        throw error
+      }
+    })
+    this.tail = result.catch(() => {})
+    return result
+  }
+  async delete(request: SessionKey): Promise<void> {
+    const result = this.tail.then(() => {
+      this.db.prepare('DELETE FROM documents WHERE bucket=? AND id=?').run('agent-sessions', this.agentSessionId(request))
+    })
+    this.tail = result.catch(() => {})
+    await result
+  }
+  identity: LocalState['identity'] = () => this.getDocument('identity', 'worker')
   saveIdentity: LocalState['saveIdentity'] = identity => this.put('identity', 'worker', identity)
-  capabilities: LocalState['capabilities'] = () => this.get('capabilities', 'snapshot') ?? []
+  clearIdentity: LocalState['clearIdentity'] = () => { this.db.prepare('DELETE FROM documents WHERE bucket=? AND id=?').run('identity', 'worker') }
+  localInstallation: LocalState['localInstallation'] = () => this.getDocument<LocalInstallationIdentity>('identity', 'installation')
+  saveLocalInstallation: LocalState['saveLocalInstallation'] = identity => this.put('identity', 'installation', identity)
+  localAdmin: LocalState['localAdmin'] = () => this.getDocument<LocalAdminRecord>('identity', 'local-admin')
+  saveLocalAdmin: LocalState['saveLocalAdmin'] = record => this.put('identity', 'local-admin', record)
+  capabilities: LocalState['capabilities'] = () => this.getDocument('capabilities', 'snapshot') ?? []
   saveCapabilities: LocalState['saveCapabilities'] = value => this.put('capabilities', 'snapshot', value)
   listSessions = async () => { await this.tail; return this.list<SessionExecution>('sessions') }
   listWorkspaces = async () => { await this.tail; return this.list<LocalWorkspace>('workspaces') }
   workspaces: WorkerStore['workspaces'] = {
-    get: async id => { await this.tail; return this.get('workspaces', id) },
+    get: async id => { await this.tail; return this.getDocument('workspaces', id) },
     listRepositoryCheckouts: async id => { await this.tail; return this.list<RepositoryCheckout>('checkouts').filter(item => item.workspaceId === id) },
   }
   sessions: WorkerStore['sessions'] = {
-    get: async id => { await this.tail; return this.get('sessions', id) },
-    getTurn: async id => { await this.tail; return this.get('turns', id) },
+    get: async id => { await this.tail; return this.getDocument('sessions', id) },
+    getTurn: async id => { await this.tail; return this.getDocument('turns', id) },
     listQueued: async id => { await this.tail; return this.queued(id) },
   }
   commands: WorkerStore['commands'] = {
-    get: async id => { await this.tail; return this.get('commands', id) },
+    get: async id => { await this.tail; return this.getDocument('commands', id) },
     listRecoverable: async limit => { await this.tail; return this.list<CommandRecord>('commands').filter(c => c.state === 'accepted' || c.state === 'running').slice(0, limit) },
   }
   journal: WorkerStore['journal'] = {
@@ -84,7 +148,7 @@ export class SqliteWorkerStore implements WorkerStore, LocalState {
     return this.list<QueuedMessage>('queue').filter(q => q.sessionId === id && q.state === 'queued').sort((a,b) => a.position - b.position)
   }
   private session(id: SessionId) {
-    const session = this.get<SessionExecution>('sessions', id)
+    const session = this.getDocument<SessionExecution>('sessions', id)
     if (!session) throw new Error('Session not found')
     return session
   }
@@ -120,26 +184,26 @@ export class SqliteWorkerStore implements WorkerStore, LocalState {
     },
     commands: {
       record: async (command, receipt) => {
-        if (this.get('commands', command.commandId)) throw new Error('Command already recorded')
+        if (this.getDocument('commands', command.commandId)) throw new Error('Command already recorded')
         this.put('commands', command.commandId, { ...command, state: receipt.status === 'accepted' ? 'accepted' : 'rejected', result: receipt, recordedAt: now(), updatedAt: now() })
       },
       setExecutionState: async input => {
-        const record = this.get<CommandRecord>('commands', input.commandId)
+        const record = this.getDocument<CommandRecord>('commands', input.commandId)
         if (!record) throw new Error('Command not found')
         this.put('commands', input.commandId, { ...record, state: input.state, result: input.result, updatedAt: input.updatedAt })
       },
     },
     sessions: {
       deleteSession: async id => {
-        const session = this.get<import('../domain/session-execution.js').SessionExecution>('sessions', id)
+        const session = this.getDocument<import('../domain/session-execution.js').SessionExecution>('sessions', id)
         if (session?.activeTurnId || this.queued(id).length) throw new Error('Session is active')
-        if (!this.get('deleted-sessions', id)) this.put('deleted-sessions', id, { deletedAt: now() })
+        if (!this.getDocument('deleted-sessions', id)) this.put('deleted-sessions', id, { deletedAt: now() })
         this.db.prepare('DELETE FROM journal WHERE session_id=?').run(id)
         this.db.prepare("DELETE FROM documents WHERE (bucket='sessions' AND id=?) OR (bucket IN ('queue','turns') AND json_extract(body,'$.sessionId')=?)").run(id, id)
       },
       createSession: async (id, binding) => {
-        if (this.get('deleted-sessions', id)) throw new Error('Session deleted')
-        if (this.get('sessions', id)) throw new Error('Session already exists')
+        if (this.getDocument('deleted-sessions', id)) throw new Error('Session deleted')
+        if (this.getDocument('sessions', id)) throw new Error('Session already exists')
         this.put('sessions', id, { sessionId: id, binding, runtimeState: 'idle', activeTurnId: null, nativeSession: null, updatedAt: now() })
         this.append(id, [{ occurredAt: now(), payload: { kind: 'session.runtime.changed', state: 'idle', reason: null } }])
       },
@@ -154,7 +218,7 @@ export class SqliteWorkerStore implements WorkerStore, LocalState {
         return item
       },
       cancelQueued: async (id, commandId) => {
-        const item = this.get<QueuedMessage>('queue', commandId)
+        const item = this.getDocument<QueuedMessage>('queue', commandId)
         if (!item || item.sessionId !== id || item.state === 'cancelled') return { status: 'not-found' }
         if (item.state === 'claimed') {
           const turn = this.list<Turn>('turns').find(t => t.sessionId === id && t.message.messageId === item.message.messageId)!
@@ -180,7 +244,7 @@ export class SqliteWorkerStore implements WorkerStore, LocalState {
       },
       bindNativeSession: async ({ sessionId, nativeSession }) => this.put('sessions', sessionId, { ...this.session(sessionId), nativeSession }),
       requestStop: async (id, turnId) => {
-        const turn = this.get<Turn>('turns', turnId)
+        const turn = this.getDocument<Turn>('turns', turnId)
         if (!turn || turn.sessionId !== id) return { status: 'not-found' }
         if (turn.finishedAt) return { status: 'already-finished' }
         this.put('turns', turnId, { ...turn, state: 'stopping' })
@@ -189,7 +253,7 @@ export class SqliteWorkerStore implements WorkerStore, LocalState {
       },
       setRuntimeState: async (id, state) => this.state(id, state),
       finishTurn: async result => {
-        const turn = this.get<Turn>('turns', result.turnId)
+        const turn = this.getDocument<Turn>('turns', result.turnId)
         if (!turn || turn.finishedAt) return
         this.put('turns', turn.id, { ...turn, state: result.outcome, finishedAt: result.finishedAt, failure: result.outcome === 'failed' ? result.failure : null })
         const session = this.session(turn.sessionId)

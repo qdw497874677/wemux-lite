@@ -2,10 +2,16 @@ import type { AgentCapability, SessionId } from '@wemux/domain'
 import type { WorkerIdentity } from '../../domain/worker-identity.js'
 import type { SessionExecution } from '../../domain/session-execution.js'
 import type { LocalWorkspace } from '../../domain/local-workspace.js'
+import type { LocalAdminRecord, LocalInstallationIdentity } from '../../domain/local-installation.js'
 
 export interface LocalState {
   identity(): WorkerIdentity | null
   saveIdentity(identity: WorkerIdentity): void
+  clearIdentity(): void
+  localInstallation(): LocalInstallationIdentity | null
+  saveLocalInstallation(identity: LocalInstallationIdentity): void
+  localAdmin(): LocalAdminRecord | null
+  saveLocalAdmin(record: LocalAdminRecord): void
   capabilities(): readonly AgentCapability[]
   saveCapabilities(capabilities: readonly AgentCapability[]): void
   listSessions(): Promise<readonly SessionExecution[]>

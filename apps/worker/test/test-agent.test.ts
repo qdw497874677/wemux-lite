@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import type { MessageId, ModelId, SessionId, TurnId } from '@wemux/domain'
-import { TestAgent } from '../src/agents/test-agent.js'
+import type { MessageId, ModelId, RuntimeOperationId, SessionId } from '@wemux/domain'
+import { TestRuntimeSessionAdapter } from '../src/agents/test-runtime-session-adapter.js'
 
-const input = (content: string) => ({ sessionId: 'test-session' as SessionId, turnId: 'test-turn' as TurnId, cwd: '/tmp', modelId: 'test' as ModelId, message: { messageId: 'test-message' as MessageId, content }, resume: null, launchContext: null })
+const sessionId = 'test-session' as SessionId
+const input = (content: string) => ({ operationId: 'test-turn' as RuntimeOperationId, message: { messageId: 'test-message' as MessageId, content }, launchContext: null })
+const open = () => new TestRuntimeSessionAdapter(0).openSession({ sessionId, cwd: '/tmp', modelId: 'test' as ModelId, resume: null })
 
 test('TestAgent ordinary prompts retain tools, exact echo and completed outcome', async () => {
-  const handle = await new TestAgent(0).startTurn(input('ordinary test'))
+  const handle = await (await open()).execute(input('ordinary test'))
   const signals = []
   for await (const signal of handle.signals) signals.push(signal)
   assert.deepEqual(signals.at(-1), { kind: 'finished', outcome: { status: 'completed' } })
@@ -15,7 +17,7 @@ test('TestAgent ordinary prompts retain tools, exact echo and completed outcome'
 })
 
 test('TestAgent explicit slow marker pauses before tools and stop interrupts the pause', async () => {
-  const handle = await new TestAgent(0).startTurn(input('[test-agent:pause-ms=120000] slow'))
+  const handle = await (await open()).execute(input('[test-agent:pause-ms=120000] slow'))
   const iterator = handle.signals[Symbol.asyncIterator]()
   assert.equal((await iterator.next()).value.kind, 'native-session')
   let settled = false

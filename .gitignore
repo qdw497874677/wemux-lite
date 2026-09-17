@@ -20,3 +20,6 @@ artifacts/
 # Machine-local agent configuration
 .claude/
 .agents/
+
+# Runtime state (logs, PIDs)
+.runtime/

@@ -38,6 +38,9 @@ export interface TimelineUsage {
   usage: RuntimeUsageDTO
 }
 
+export interface QueuedItem { commandId: string; messageId: string; content: string; position: number }
+export interface PendingApproval { approvalId: string; turnId: string; action: unknown; reason?: string }
+
 export type ChatTimelineItem = TimelineMessage | TimelineTool | TimelineNotice | TimelineUsage
 
 // Rebuild from the ordered, durable journal. The timeline keeps assistant text
@@ -47,6 +50,10 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
   const timeline: ChatTimelineItem[] = []
   const notices: string[] = []
   let runtimeState: RuntimeState | undefined
+  let activeTurnId: string | null = null
+  const queued = new Map<string, QueuedItem>()
+  const approvals = new Map<string, PendingApproval>()
+  const turnMessages = new Map<string, string>()
 
   const assistantMessage = (turnId: string) => {
     let message = messages.find(item => item.id === `assistant:${turnId}`)
@@ -61,12 +68,14 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
     const payload = event.payload
     switch (payload.kind) {
       case 'message.queued': {
+        queued.set(payload.messageId, { commandId: payload.commandId, messageId: payload.messageId, content: payload.content, position: payload.position })
         const message: ChatMessage = { id: payload.messageId, role: 'user', text: payload.content, status: 'queued' }
         messages.push(message)
         timeline.push({ kind: 'message', ...message })
         break
       }
       case 'message.cancelled': {
+        queued.delete(payload.messageId)
         const message = messages.find(item => item.id === payload.messageId)
         if (message) message.status = 'cancelled'
         const entry = timeline.find(item => item.kind === 'message' && item.id === payload.messageId)
@@ -74,6 +83,7 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
         break
       }
       case 'message.rejected': {
+        queued.delete(payload.messageId)
         const message = messages.find(item => item.id === payload.messageId)
         if (message) message.status = 'rejected'
         const entry = timeline.find(item => item.kind === 'message' && item.id === payload.messageId)
@@ -83,6 +93,9 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
         break
       }
       case 'turn.started': {
+        queued.delete(payload.messageId)
+        activeTurnId = payload.turnId
+        turnMessages.set(payload.turnId, payload.messageId)
         const message = messages.find(item => item.id === payload.messageId)
         if (message) message.status = 'started'
         const entry = timeline.find(item => item.kind === 'message' && item.id === payload.messageId)
@@ -102,9 +115,11 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
         break
       }
       case 'turn.finished': {
+        if (activeTurnId === payload.turnId) activeTurnId = null
+        for (const [id, approval] of approvals) if (approval.turnId === payload.turnId) approvals.delete(id)
         const message = messages.find(item => item.id === `assistant:${payload.turnId}`)
         if (message) message.status = payload.outcome
-        const completedUserMessage = [...messages].reverse().find(item => item.role === 'user' && item.status === 'started')
+        const completedUserMessage = messages.find(item => item.id === turnMessages.get(payload.turnId))
         if (completedUserMessage) completedUserMessage.status = payload.outcome
         for (const entry of timeline) {
           if (entry.kind === 'message' && entry.role === 'assistant' && entry.turnId === payload.turnId) entry.status = payload.outcome
@@ -154,17 +169,22 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
         break
       }
       case 'approval.requested':
-        timeline.push({ kind: 'notice', id: `approval:${payload.approvalId}`, text: payload.reason ? `：${payload.reason}` : '', tone: 'info' })
+        approvals.set(payload.approvalId, { approvalId: payload.approvalId, turnId: payload.turnId, action: payload.action, reason: payload.reason })
+        timeline.push({ kind: 'notice', id: `approval:${payload.approvalId}`, text: `等待审批${payload.reason ? `：${payload.reason}` : ''}`, tone: 'info' })
+        break
+      case 'approval.resolved':
+        approvals.delete(payload.approvalId)
+        timeline.push({ kind: 'notice', id: `approval-resolved:${event.seq}`, text: payload.decision === 'approve' ? '审批已批准' : '审批已拒绝', tone: 'info' })
         break
       case 'compaction.started':
-        timeline.push({ kind: 'notice', id: `compaction:${payload.turnId}:${event.seq}`, text: payload.reason ? `：${payload.reason}` : '', tone: 'info' })
+        timeline.push({ kind: 'notice', id: `compaction:${payload.turnId}:${event.seq}`, text: `正在压缩上下文${payload.reason ? `：${payload.reason}` : ''}`, tone: 'info' })
         break
       case 'compaction.finished':
-        timeline.push({ kind: 'notice', id: `compaction:${payload.turnId}:${event.seq}`, text: payload.summary ? `：${payload.summary}` : '', tone: 'info' })
+        timeline.push({ kind: 'notice', id: `compaction:${payload.turnId}:${event.seq}`, text: `上下文压缩完成${payload.summary ? `：${payload.summary}` : ''}`, tone: 'info' })
         break
     }
   }
-  return { messages, timeline, notices, runtimeState }
+  return { messages, timeline, notices, runtimeState, activeTurnId, queuedItems: [...queued.values()].sort((a, b) => a.position - b.position), pendingApprovals: [...approvals.values()] }
 }
 
 export function appendPage(current: readonly JournalEventDTO[], incoming: readonly JournalEventDTO[], sessionId: string) {

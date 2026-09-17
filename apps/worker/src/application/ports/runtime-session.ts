@@ -4,7 +4,8 @@ import type { AgentLaunchContext, AgentTurnHandle } from './agent-adapter.js'
 export interface RuntimeSessionOpenInput {
   readonly sessionId: SessionId
   readonly cwd: string
-  readonly modelId: ModelId
+  /** Optional: null lets the Agent CLI use its own default model. */
+  readonly modelId: ModelId | null
   readonly resume: NativeSessionRef | null
 }
 

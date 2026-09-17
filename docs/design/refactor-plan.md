@@ -1,8 +1,8 @@
 # Wemux Lite 重构与改造实施方案
 
-> 状态：v1.1 修订方案，完成 M1 契约冻结后按阶段实施。
+> 状态：历史任务切片重构方案，保留原始阶段与事实快照供追溯，不作为当前进度。新的产品定位、阶段编号和发布门槛见 [产品方向](../product-direction.md) 与 [路线图](../roadmap.md)。
 >
-> Ticket06 当前为 in-progress：已实现核心取消/reuse/安全软删除并通过全量 build/typecheck/test 与核心 fresh E2E；不代表完整验收。P0–P2 缺口、200px 溢出和证据见 `.scratch/task-board-agent-platform/evidence/ticket-06/current/status.md`。Ticket07/08 未启动。
+> 下文单屏代码规模、Ticket 状态、M/P/V 编号和 MVP 限制属于当时基线；旧 Task 主路径与单 Worker Workspace 已被替代。领域细则中仍有效的幂等与取消规则以 [契约裁定](task-platform-contract-decisions.md) 为准。新的 UI 交付必须真实浏览器验收；不可按旧“可选 E2E”标准发布。
 
 ## 修订记录
 

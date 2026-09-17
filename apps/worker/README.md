@@ -1,7 +1,24 @@
 # @wemux/worker
 
-Wemux Lite Worker MVP. Node **>=22.13** (`node:sqlite`); Node 24+ recommended.
-All session control comes from the authenticated Server, not a local CLI.
+## 独立本机模式（M2 W1/W2/W3）
+
+Worker 不需要先注册 Server 即可启动本机控制面：
+
+```bash
+printf '%s\n' 'replace-with-a-long-local-password' > /tmp/wemux-worker-password
+chmod 600 /tmp/wemux-worker-password
+wemux-lite-worker admin init --password-file /tmp/wemux-worker-password
+wemux-lite-worker start
+```
+
+默认地址是 `http://127.0.0.1:3002`。本机管理员和安装 ID 独立于集群身份；`admin init` 不接受 Enrollment Token 或 Worker Credential。也可用 `WEMUX_LOCAL_ADMIN_PASSWORD` 初始化自动化环境，但不要把密码写进命令参数。
+
+当前入口已提供：本机登录、Agent/模型检测结果、允许目录管理、本地 Session 创建/切换/删除、消息发送、Journal 实时事件流与停止当前回合。目录会解析为规范绝对路径并只作为本地执行授权边界，它不是文件系统沙箱。本地 Session 使用独立安装身份，不会因加入集群自动上传正文、目录或历史；同一 Worker 进程复用唯一持久队列、Journal 和 Agent runtime。
+
+Worker Web 已支持探测 Server、主动加入、连接、暂停和退出集群；注册口令仅用于一次性凭据交换。公网 HTTPS 仍应由同机受信反向代理终止，并通过 `--secure-cookies` 或 `WEMUX_WORKER_SECURE_COOKIES=1` 启用 Secure Cookie。`--host 0.0.0.0` 是显式高风险设置，不应把明文 Worker Web 直接暴露到公网。
+
+Wemux Lite Worker is the managed execution node of the AI Agent cluster platform. Product scope and delivery gates are defined in [product direction](../../docs/product-direction.md) and [roadmap](../../docs/roadmap.md), not by an MVP label. Node **>=22.13** (`node:sqlite`); Node 24+ recommended.
+The Worker now has an independently authenticated local Web/API and can run local sessions without joining a Server. Optional HTTPS remote access and opt-in cluster enrollment from the Web remain planned; see [Worker Web design](../../docs/design/worker-web-workbench.md). Enrollment must not automatically publish local sessions.
 
 ## Install and run
 
@@ -112,7 +129,7 @@ Supports `workspace.provision`, `session.create`, `session.enqueue`,
 Empty directories use `{ kind: 'composite', memberWorkspaceIds: [] }` and no
 repositories. Git uses a repository workspace with one matching checkout spec;
 repository URL/revision are immutable after provisioning. Nonempty composites
-are explicitly unsupported in this MVP. Paths are never accepted as input.
+are not yet a delivered capability; see roadmap M3. Paths are never accepted as input.
 Git uses the Worker OS credentials; no private keys are sent by Server.
 
 `test` / model `test` is the deterministic E2E agent. Pi and Claude Code are
@@ -141,7 +158,7 @@ Connection sends hello, a complete capability snapshot and complete journal head
 Events are committed before sending. Reconnect reports heads; Server requests
 inclusive `fromSeq`, Worker replies with count/byte-bounded batches and `hasMore`.
 Unavailable/non-contiguous ranges produce `gap`. Journal is retained indefinitely
-in this MVP, so duplicate event delivery is safe using `(sessionId, seq)`.
+under the current retention policy; duplicate event delivery is handled using `(sessionId, seq)`. Retention, backup and restore guarantees require the M7 operational acceptance.
 
 ## Service supervision
 

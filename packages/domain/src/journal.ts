@@ -53,6 +53,12 @@ export type SessionEventPayload =
       readonly reason?: string
     }
   | {
+      readonly kind: 'approval.resolved'
+      readonly turnId: TurnId
+      readonly approvalId: ApprovalId
+      readonly decision: 'approve' | 'deny'
+    }
+  | {
       readonly kind: 'usage.updated'
       readonly turnId: TurnId
       readonly usage: RuntimeUsage
