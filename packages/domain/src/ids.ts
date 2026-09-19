@@ -11,6 +11,7 @@ export type RepositoryId = Id<'RepositoryId'>
 export type WorkerId = Id<'WorkerId'>
 export type WorkspaceId = Id<'WorkspaceId'>
 export type SessionId = Id<'SessionId'>
+export type SessionForkId = Id<'SessionForkId'>
 export type MessageId = Id<'MessageId'>
 export type CommandId = Id<'CommandId'>
 export type TurnId = Id<'TurnId'>

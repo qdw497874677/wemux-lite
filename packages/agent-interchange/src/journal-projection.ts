@@ -33,6 +33,18 @@ export function projectAgentEventToSessionPayload(event: AgentEvent, turnId: Tur
       return { kind: 'compaction.started', turnId, ...(typeof provider.reason === 'string' ? { reason: provider.reason } : {}) }
     case 'compaction.finished':
       return { kind: 'compaction.finished', turnId, ...(typeof provider.summary === 'string' ? { summary: provider.summary } : {}) }
+    case 'runtime.notice': {
+      const retry = provider.retry && typeof provider.retry === 'object' ? provider.retry as Record<string, unknown> : null
+      return {
+        kind: 'runtime.notice',
+        level: provider.level === 'info' ? 'info' : 'warning',
+        code: typeof provider.code === 'string' && provider.code ? provider.code : 'agent.notice',
+        message: typeof provider.message === 'string' && provider.message ? provider.message : '运行时提示',
+        ...(retry
+          ? { retry: { attempt: typeof retry.attempt === 'number' ? retry.attempt : 1, maxAttempts: typeof retry.maxAttempts === 'number' ? retry.maxAttempts : null, delayMs: typeof retry.delayMs === 'number' ? retry.delayMs : null } }
+          : {}),
+      }
+    }
     default:
       return null
   }

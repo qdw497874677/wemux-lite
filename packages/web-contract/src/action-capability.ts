@@ -1,4 +1,5 @@
-import { taskStatuses, runStatuses, type TaskStatus } from './task-platform.js'
+import { taskStatuses, workflowTargets, type TaskStatus } from '@wemux/domain'
+import { runStatuses } from './task-platform.js'
 
 export type CapabilityReasonCode = 'allowed' | 'invalid_metadata' | 'invalid_transition' | 'active_run' | 'assignment_changed' | 'workspace_not_ready' | 'runtime_unavailable' | 'reuse_ineligible' | 'not_found'
 export interface ActionCapability { readonly allowed: boolean; readonly reasonCode: CapabilityReasonCode; readonly reason: string }
@@ -36,17 +37,6 @@ const equalFacts = (a: unknown, b: unknown): boolean => {
 }
 const allowed: ActionCapability = { allowed: true, reasonCode: 'allowed', reason: '' }
 export const unavailableCapability: ActionCapability = deny('invalid_metadata', 'Authoritative capability data unavailable')
-export function workflowTargets(task: { status: TaskStatus; blockedFrom: unknown; cancelledFrom: unknown }): readonly TaskStatus[] {
-  switch (task.status) {
-    case 'backlog': return ['todo', 'blocked', 'cancelled']
-    case 'todo': return ['in_progress', 'blocked', 'cancelled']
-    case 'in_progress': return ['in_review', 'blocked', 'cancelled']
-    case 'in_review': return ['done', 'in_progress', 'blocked', 'cancelled']
-    case 'done': return ['in_progress', 'blocked', 'cancelled']
-    case 'blocked': return [...(status(task.blockedFrom) && task.blockedFrom !== 'blocked' ? [task.blockedFrom] : []), 'cancelled']
-    case 'cancelled': return [...(status(task.cancelledFrom) && task.cancelledFrom !== 'cancelled' ? [task.cancelledFrom] : []), 'blocked']
-  }
-}
 /** The single semantic decision source for authoritative readers, mutations and Web consumers. */
 export function evaluateCapability(action: CapabilityAction, f: CapabilityFacts): ActionCapability {
   const task = record(f.task), run = record(f.run), review = record(f.review)

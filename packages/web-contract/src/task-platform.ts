@@ -1,10 +1,12 @@
 /** M1 wire DTOs. Dependency-free so domain, Server and Web share one contract.
  * Runtime validation, persistence, endpoints and UI belong to later tickets.
  */
-export { evaluateCapability, workflowTargets, unavailableCapability, validReviewMetadata } from './action-capability.js'
+export { evaluateCapability, unavailableCapability, validReviewMetadata } from './action-capability.js'
 export type { ActionCapability, CapabilityFacts, CapabilityAction, TaskCapabilities, RunCapabilities } from './action-capability.js'
-export const taskStatuses = ['backlog', 'todo', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled'] as const
-export type TaskStatus = typeof taskStatuses[number]
+/** Status vocabulary and transition rule are domain invariants; re-exported so Web, Server and Worker share one contract. */
+export { taskStatuses, workflowTargets } from '@wemux/domain'
+export type { TaskStatus, BlockedFrom, CancelledFrom, TaskWorkflowState } from '@wemux/domain'
+import type { TaskStatus } from '@wemux/domain'
 export const boardStatuses = ['backlog', 'todo', 'in_progress', 'in_review', 'done', 'blocked'] as const
 export type BoardStatus = typeof boardStatuses[number]
 export type TaskPriority = 'none' | 'low' | 'medium' | 'high'

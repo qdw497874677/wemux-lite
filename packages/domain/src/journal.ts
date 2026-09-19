@@ -80,10 +80,53 @@ export type SessionEventPayload =
       readonly failure: TurnFailure | null
     }
   | {
+      /** 运行时非致命提示（自动重试、额度冷却等）：让用户看到「为什么还没回复」。 */
+      readonly kind: 'runtime.notice'
+      readonly level: 'info' | 'warning'
+      readonly code: string
+      readonly message: string
+      readonly retry?: SessionNoticeRetry
+    }
+  | {
       readonly kind: 'session.runtime.changed'
       readonly state: SessionRuntimeState
       readonly reason: string | null
     }
+
+export interface SessionNoticeRetry {
+  readonly attempt: number
+  readonly maxAttempts: number | null
+  readonly delayMs: number | null
+}
+
+/**
+ * 事件种类清单：Server 校验、Worker 投影与测试共用一份，避免新增 kind 时出现白名单漂移
+ * （历史上 approvals / compaction / usage 已因此被拒收为 400 Unknown event kind）。
+ */
+export const SESSION_EVENT_KINDS = [
+  'message.queued',
+  'message.cancelled',
+  'turn.started',
+  'assistant.text.delta',
+  'tool.started',
+  'tool.output.delta',
+  'tool.finished',
+  'approval.requested',
+  'approval.resolved',
+  'usage.updated',
+  'compaction.started',
+  'compaction.finished',
+  'runtime.notice',
+  'turn.finished',
+  'session.runtime.changed',
+] as const satisfies readonly SessionEventPayload['kind'][]
+
+export type SessionEventKind = (typeof SESSION_EVENT_KINDS)[number]
+
+// 新增 kind 却忘记登记时，下面这行会编译失败（MissingSessionEventKind 不再是 never）。
+type MissingSessionEventKind = Exclude<SessionEventPayload['kind'], SessionEventKind>
+const sessionEventKindsAreComplete: MissingSessionEventKind extends never ? true : never = true
+void sessionEventKindsAreComplete
 
 export interface JournalEventDraft {
   readonly occurredAt: Timestamp
