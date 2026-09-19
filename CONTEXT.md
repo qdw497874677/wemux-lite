@@ -15,8 +15,8 @@ _Avoid_: Agent 执行机器、集群浏览器直连 Worker、第二套对话模�
 _Avoid_: GPU 训练集群、模型 API 网关、共享文件系统
 
 **Agent Network**:
-由 Wemux Server 统一管理和编排的 Agent 执行能力网络：不同 Worker 提供异构 Agent，团队成员通过受控的 Project、Workspace 与 Session 访问这些能力，Agent 也可在用户授权范围内经 Server 发起结构化委托。Agent 与 Worker 不直接横向互连。
-_Avoid_: P2P Agent 网络、Agent 自主扩大权限或组队、公共 Agent 市场、Worker 互联网络
+由 Wemux Server 统一管理和编排的 Agent 执行能力网络：不同 Worker 通过 Adapter Bridge 把异构 Agent 统一到 Wemux ADK Profile，并以主动长连接加入网络；团队成员通过受控的 Project、Workspace、Session 和协作画布访问这些能力，Agent 也可在用户授权范围内经 Server 发起结构化委托。Agent 与 Worker 不直接横向互连。
+_Avoid_: P2P Agent 网络、Agent 自主扩大权限或组队、公共 Agent 市场、Worker 互联网络、要求 Agent 原生实现 Server transport
 
 **Agent Delegation**:
 父 Invocation 经 Server 鉴权、路由和审计后向目标 Agent 发起的结构化子调用；子调用拥有独立 Session 或 Invocation，并以 Tool Result 返回父调用。执行链记录 `parentInvocationId`、发起 Agent、目标 Agent 与实际用户身份；首版可以先提供人工编排，再演进自动委托。
@@ -127,8 +127,24 @@ _Avoid_: 自动发布的集群 Workspace、任意目录即授权、文件系统�
 _Avoid_: Native Session、Task 的子资源、Turn、按成员隐式复制的对话、私有聊天即文件隔离、跨 Worker 透明故障转移
 
 **Session Fork**:
-从现有 Session 显式创建的独立 Session，用于在不改变原对话的情况下继续探索；Fork 拥有自己的后续上下文和 Journal，是否沿用原 Workspace Placement 由创建时明确选择。
-_Avoid_: 打开共享 Session 时自动复制、同一 Session 的私人视图、修改原 Session
+从现有 Session 的固定 `sourceEventCursor` 显式创建的独立 Session，用于在不改变原对话的情况下继续探索；Fork 拥有自己的后续上下文和 Journal，来源 Session 在 cursor 之后的消息不会自动进入目标，是否沿用原 Workspace Placement、Worker、Agent 与 Model 由创建时明确选择。Fork 与目标 Session 创建是后端幂等、可审计的领域操作。
+_Avoid_: 打开共享 Session 时自动复制、同一 Session 的私人视图、修改原 Session、前端画一条边即完成 Fork、隐式继承后续消息或扩大权限
+
+**Session Lineage**:
+Session 之间由显式 Fork 形成的可追溯来源关系，以及从 Invocation Delegation 投影出的执行派生关系。血缘记录来源身份、固定分支点、操作者和目标身份；归档或删除来源不把后代改写为无来源 Session。
+_Avoid_: UI 节点位置、消息时间相近即推断来源、所有关系都称 Fork、删除来源级联删除后代
+
+**Session Collaboration Canvas**:
+Project 内对获权 Session、Session Lineage 与其他受控关系的可交互空间投影；节点可直接对话并展开为专注 Session Surface，边展示后端权威关系。画布位置、缩放和折叠是布局状态，不改变 Session、Journal、权限或执行绑定。
+_Avoid_: 自由白板、领域数据权威、浏览器端编排器、打开或拖动节点即 Fork、无列表/移动端替代路径
+
+**Session Surface**:
+同一 Session 在画布摘要、画布交互、专注对话和 Run 视图中的共享交互表面；各形态复用同一草稿、Journal 订阅、队列与控制状态，只改变信息密度和容器。
+_Avoid_: 四套聊天实现、最大化时创建新 Session、切换视图重新生成 invocation、组件局部状态成为历史权威
+
+**Canvas Layout**:
+用户或团队对 Session Collaboration Canvas 的节点位置、折叠和 viewport 偏好，带图 revision 持久化并与 Session Lineage 分离。自动布局只计算位置，不创建、删除或重写关系。
+_Avoid_: React Flow node/edge 作为领域记录、拖动节点改变 Fork 来源、布局冲突覆盖血缘、布局失败阻断会话
 
 **Native Session**:
 Agent 自身维护的上下文恢复身份或记录，由 Worker 关联到产品 Session。
@@ -193,6 +209,18 @@ _Avoid_: 必然专属文件副本、随任务销毁的临时目录
 _Avoid_: Turn 终态、模型自评等同于人工验收
 
 ## 共享与治理
+
+**User**:
+Server 内稳定的人类账号主体，可关联多种登录身份并加入多个 Team；资源所有权、授权与审计归属该主体，而非邮箱或某次登录。
+_Avoid_: Google 账号即 Team 成员、邮箱即永久身份、Worker 注册身份、共享管理员账号
+
+**Login Identity**:
+User 证明自身身份的一种登录方式，如本地密码或外部身份提供方账号；关联新方式不改变 User 的资源归属，也不扩大权限。
+_Avoid_: 同邮箱自动合并账号、登录方式即资源授权、Google 登录即 Agent Provider 授权
+
+**Team Invitation**:
+邀请特定接收者加入指定 Team 的有限时效授权，接受后建立 Team Membership；账号注册与接受邀请是不同过程。
+_Avoid_: 持有邀请即已有资源权限、注册自动加入已有团队、邀请即 Worker Enrollment
 
 **Team Membership**:
 User 与 Team 的成员关系，团队治理角色为 `owner | admin | member`，不自动授予私人资源读取权或执行权。

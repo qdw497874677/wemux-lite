@@ -488,6 +488,7 @@ CREATE TABLE transport_outbox (
 
 - 领域写入和 outbox insert 必须在同一事务。
 - ACK 后可删除或进入可压缩状态；诊断只保留元数据，不长期复制 payload。
+- ACK 删除行、推进水位、清理去重记录必须同一事务；去重索引只屏蔽「仍在 outbox 里等传输确认」的重复项，不得永久屏蔽同一领域身份的重投（见 10.2）。
 - `coalesce_key` 只允许替换尚未发送的 snapshot；已进入 inflight 的记录不可原位改 payload。
 - durable 队列达到条数或字节配额时，新的可靠写入必须明确失败或回压，不能退化为直接 `ws.send()`。
 - 过期项记录 expired disposition，再从发送集合移除；不静默消失。
@@ -556,6 +557,14 @@ Task review
 ```
 
 任何一层都不能替代下一层。产品对外只宣称 durable at-least-once delivery + idempotent effects，不宣称分布式 exactly-once。
+
+### 10.2 重投边界与忙循环禁止
+
+传输确认只证明接收端持久接收，**不等于应用层收据**。以下三条是实现必须满足的不变量（历史 P0 缺陷即违反它们：丢收据的 Command 永久停发，或者被无限重发）：
+
+- **允许重投**：只有 transport ACK 而没有应用层收据的 durable 项必须可以重新入队，分配新的 `directionSeq`，保持领域身份（同一 `commandId`）不变，接收方按长期 `messageId` 与领域身份双重去重。
+- **收到收据即停发**：收到该领域身份的应用层收据后，应当立即丢弃「尚未重新发送」的待发行与对应去重记录；Worker 已处理该身份，不会出现序号空洞。
+- **入队只在有界事件发生**：deliverable 项的重新入队只允许由握手/重连、新领域事件（命令入队、状态变化）或收据触发。纯 ACK 驱动的 flush 只能重放 outbox，不得重新入队，否则同一 Command 会在一条连接上形成 ACK→入队→发送的忙循环。
 
 ## 11. Session Journal 恢复
 

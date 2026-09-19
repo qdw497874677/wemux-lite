@@ -12,6 +12,8 @@
 4. **不要制造串行依赖**：会话优化复用已有节点和环境能力，不必等所有集群管理、多仓库或团队功能完成。明确不可用组合，而不是静默降级。
 5. **目标与现状分开**：用户确认基本流程可用；新增功能仍需实现与验收。仅有类型、按钮或原型不能算已交付。
 6. **轻量架构不变**：必要依赖、单 Server 默认形态与本机 Agent 执行继续保留，不以“完善产品”为由引入不必要的中间件。
+7. **能力分层、Module 深化**：领域事实、应用编排、宿主端口、基础设施 Adapter 和 UI 投影单向依赖。每个 Module 通过小 Interface 隐藏事务、恢复、权限和 Provider 差异，调用方与测试走同一 Seam。
+8. **可插拔必须有真实变化点**：Pi/OpenCode、Server/Worker 宿主是现有真实 Adapter；React Flow 先封装在单一画布 Adapter 中。没有第二种实现前不预建插件市场、任意关系注册表或通用布局框架。
 
 ## 2. 新的里程碑顺序
 
@@ -23,7 +25,7 @@
 | M3 项目与工作环境 | 统一组织项目、会话与多 Worker 环境 | M1 环境设计、已有 Placement 能力 | 未开始 |
 | M4 集群与能力管理 | 完善 Worker、Agent、模型的管理与诊断体验 | M1 集群设计；与 M2/M3 共用选择契约 | 未开始 |
 | M5 任务协作与交付 | 完善目标、指派、运行、审查与成果追踪 | M2/M3，复用现有执行能力 | 未开始 |
-| M6 团队授权与开放客户端 | 多用户共享、资源权限、PAT 与审计闭环 | 前述资源与操作契约；安全设计提前贯穿 | 未开始 |
+| M6 账号、团队授权与开放客户端 | 本地注册、Google 登录、多用户共享、资源权限、PAT 与审计 | 账号线 A0–A3；安全设计提前贯穿 | 部分交付：A0 账号与登录（Ticket 04 部署声明管理员与登录会话、Ticket 05 邮箱注册验证找回、Ticket 07 Google OIDC）已验证，Wave A/B 跨票据验收通过（`apps/server/scripts/verify-wave-ab.mjs`，含与 Ticket 17 血缘授权的授权面交叉复验）；团队邀请、PAT 作用域、审计检索与授权执行点未开始 |
 | M7 运维与正式发布 | 升级、备份、恢复、容量与发布验收 | M1–M6 交付及跨阶段回归 | 未开始 |
 | M8 受控自动化 | 能力推荐、批量分派和多 Agent 协作 | M7，另行确认投入 | 后续增强 |
 
@@ -35,7 +37,41 @@ Agent Network 近期采用独立的纵向优先级，不改变上述产品阶段
 - **P1 真正支持多 Agent（当前优先，Pi + OpenCode）**：实现 OpenCode 检测、配置、运行时 Adapter 与安装生命周期；用真实 Pi/OpenCode 验证同一 AgentRunner/AgentEvent 合同；形成 resume、tool、approval、usage、cancel、structured output 能力矩阵，并补双 Agent 真实验收证据。
 - **P2 团队协作与 Agent Network 编排**：在稳定的单 Agent 语义上增加委派、handoff、父子 invocation、跨 Worker 路由、审批、预算、取消传播和审计；保持直接对话无需任务看板。
 
+会话协作画布采用独立 C0–C6 纵向线，详细合同见 [会话协作画布与血缘模块设计](design/session-collaboration-canvas.md)：
+
+- **C0 模块合同与依赖门**：冻结 Session Fork、图读模型、Session Surface 状态所有权及 Domain → Application → Host Adapter → Presentation 的依赖方向；禁止 React Flow 类型进入领域/Server 契约。
+- **C1 Fork 与血缘权威**：交付固定 `sourceEventCursor`、目标 Session 原子创建、幂等、权限收窄、审计、祖先/后代查询；先完成 API 和测试，不依赖画布 UI。
+- **C2 基础协作画布**：仅新增 `@xyflow/react`，封装在 Canvas Viewport Adapter；交付摘要节点、Fork 边、选择、平移缩放、深链、确定性默认位置及手动布局。
+- **C3 交互 Session Surface**：画布节点可直接对话，与专注视图共享草稿、Journal、队列和控制状态；复用现有 `framer-motion` 完成最大化/缩回及 viewport/scroll/focus 恢复。
+- **C4 授权实时同步与撤权**：交付权威图增量、最小 Presence、cursor 缺口恢复和打开中实时流撤权；不被团队布局阻塞。
+- **C5 布局持久化与大型图性能**：交付个人/团队布局、冲突保护、性能基线与预算；只有实测需要时动态引入 `elkjs`。
+- **C6 编排关系与开放接口**：先按 Ticket 23 冻结 Delegation、handoff、Artifact Reference、Run Attachment 合同，再由 Ticket 21 投影到图；CLI/SDK/外部自动化调用同一 Application Interface。
+
+C0/C1 可在账号线继续推进时独立实施；C2 依赖 C1 稳定图契约，C3 依赖现有双宿主 Session Runtime，C4 的不互信团队实时能力依赖 A3，C5 依赖 C2/C4，C6 依赖 Ticket 23 的 P2 合同。画布不是 P2 编排的前置条件，P2 也不应把领域状态塞进画布实现。
+
 这不是要求所有阶段全量串行完成：M1 的会话设计确认后即可实施 M2，其余页面继续细化；M3/M4 的共享执行目标选择先定契约。M5 先在受信管理员范围交付任务功能，多成员评论、提及与通知待 M6 权限门槛通过后开放。不互信用户共享必须等待 M6。
+
+### 账号与身份线（A0–A3，独立优先级）
+
+账号系统是近期必需能力，包含邮箱密码注册、验证与找回、Google OAuth/OIDC 注册和登录、显式账号绑定与团队加入。完整设计见 [账号、注册与 Google 登录](design/account-identity-system.md)，状态为设计提案而非实现声明。A 编号与 M 阶段并行；A3 是不互信用户共享与 P2 委派的授权门槛。
+
+现状（已核对代码）：
+
+- 已交付（A0.1，Ticket 04）：实例管理员由部署声明 `WEMUX_ADMIN_EMAILS` 决定（大小写不敏感、命中即管理员，审计 `instance.administrator_assigned`；声明邮箱不受邀请制/关闭限制，仍需自己注册并验证邮箱）、独立 `login_sessions` 表与 HttpOnly Cookie 会话（CSRF、Origin 校验、空闲/绝对过期、限流、设备会话列表与撤销）、`node dist/cli.js credentials` 主机本地恢复、秘密屏蔽回归。引导令牌、`instance_claim` 与 `POST /auth/setup` 已从代码移除，旧实例重写历史归属未实现。设计与实现形态见 [账号、注册与 Google 登录](design/account-identity-system.md) 第 5.1 节，验收摘要 [部署者即管理员](acceptance/account-identity-deployer-admin.md)。
+- 已交付（A0.2，Ticket 05）：邮箱密码注册与重发、邮件验证、忘记/重置密码、`open | invite_only | closed` 注册策略（默认仅邀请，实例管理员可改并审计）、SMTP 与本地出件箱投递、反枚举与分维度限流、邮件链接站内确认页（扫描器 GET 不消耗凭据）。实现形态见同文档第 5.2 节，验收摘要 `evidence/05-email-registration-and-verification.md`。
+- 已交付（A0.3，Ticket 07）：Google OIDC 注册与登录（Authorization Code + PKCE S256、一次性 state/nonce、`jose` 验签与声明校验、失败一律 302 带 `oauth_error` 回落地页）、`login_identities` 按 `(issuer, subject)` 唯一绑定、同邮箱不自动合并、第三方邮箱权威边界、客户端秘密不进审计与日志。实现形态见同文档第 5.3 节，验收摘要 `evidence/07-google-registration-and-login.md`。
+- 仍未实现：邀请与成员（A1）、PAT 作用域与设备/审计管理（A2）、审计检索、已有密码账号主动绑定 Google 的账号页入口、三种 Grant 的授权执行点（A3）。
+- 类型与存储入口成套：`packages/server-domain/src/identity.ts`（`User`/`Team`/`Membership`/`LocalAccountCredential`/`TeamRole`）、`access.ts`（`WorkerGrant`/`ProjectGrant`/`SessionGrant`、`ResourceShareScope`/`SessionShareScope`）、`credentials.ts`（`PersonalAccessTokenRecord`/`EnrollmentTokenRecord`/`WorkerCredentialRecord`）、`audit.ts`（`AuditEntry`）；`ServerIdentityReader`/`ServerIdentityWriter` 读写方法齐备。
+- 身份实体可复用通用 `records(kind,id,data)` KV 表，但邮箱/外部身份唯一约束、记录版本和旧会话/PAT 退役仍需升级设计与恢复演练，不能据此承诺无迁移。Ticket 04 的升级路径已用 `apps/server/src/test/account-upgrade.test.ts` 锁定：旧实例管理员归属保留，歧义时报告 `ambiguous_administrator` 而不是自动接管。
+- Worker 宿主已有可用本地账号实现（`apps/worker/src/application/local-installation.ts`，scrypt + 盐 + `timingSafeEqual`），且不读 Server 账号库（回归：`apps/worker/test/host-isolation.test.ts`）。
+- Grant 执行点为 0：`apps/server/src/http/handler.ts` 与 `apps/server/src/application/server-service.ts` 内无任何 Grant 检查；`bootstrap()` 只建一个 `admin` 用户、`Default team` 与 `owner-only` 的 `Default project`。
+
+- **A0 账号、注册与登录（前置）**：分 A0.1 身份/登录会话与升级、A0.2 邮箱密码注册/验证/找回与 SMTP、A0.3 Google OIDC 注册/登录与显式绑定。稳定 User 与登录方式分离，外部身份按 `(issuer, subject)` 唯一，不凭同邮箱自动合并；Web 登录会话独立于 PAT 与对话 Session，bootstrap 仅作安装者初始化。支持 `open | invite_only | closed` 注册策略，建议默认仅邀请；登录安全、CSRF、限流、邮件与 OAuth 一次性事务随 A0 交付。**A0.1（Ticket 04）、A0.2（Ticket 05）、A0.3（Ticket 07）已交付；显式绑定 UI 与真实 Google 部署实测仍未实现（A0.3 的绑定/解绑入口留待后续 Ticket）。**
+- **A1 Team 与成员**：Team 创建/选择、邮箱定向邀请与接受、成员增删、角色变更（`owner|admin|member`）、所有权转移与最后一个 Owner 保护；注册不自动加入 Default team 或授权已有 Worker。邀请消费与成员建立、成员移除与 Grant 撤销分别保持原子性。
+- **A2 凭证管理与安全完善**：PAT 签发/列表/撤销/轮换与作用域、设备会话管理、审计检索与安全策略完善；旧无 scope PAT 失效后重签，不猜测旧权限。A0 必需的基础防护不延后到 A2；日志与审计不记密码、Token、OAuth code 或完整聊天。
+- **A3 授权执行点穿透**：把三种 Grant 与两类 `ShareScope` 接进每个读写点（`http/handler.ts`、`application/server-service.ts`、`application/task-service.ts`），执行取权限交集，明确进行中执行的撤权/停止策略；复用已为交集设计的 `getIdentityRecords`。验证跨 Team 拒绝、搜索侧漏、已打开 SSE 撤权即断、Web/CLI 一致。
+
+A0 与 M3/M4 可并行，A1/A3 需共同定义成员与资源授权契约；A0 单独完成只允许受控验收，A3 未验收前不得开放不互信多用户。Google 首版在 Server 配置，Worker 保留独立本地账号，不自动共享登录身份或本地会话。Google 实测需合规 HTTPS 域名、Client 配置与测试账号；未配置只标真实验收阻塞，不以模拟测试宣称已支持。
 
 ### 与上一版的变化
 
@@ -66,6 +102,8 @@ Agent Network 近期采用独立的纵向优先级，不改变上述产品阶段
 5. **任务与设置**：任务列表/看板、Run/Review，团队与权限管理的预留结构，不让任务成为对话前置。
 6. **交互状态与开发拆分**：桌面/手机、加载/空态/失败、危险操作确认、键盘操作；记录需新增的 API/DTO、迁移和逐项验收场景。
 7. **Worker 独立宿主**：首次本机身份初始化、Web 登录、本地环境/Agent 选择、可选集群连接向导及退出；设计公网安全配置与双入口归属，不要求先加入集群。
+8. **会话协作画布**：定义 Session Surface、固定 cursor 的 Fork、血缘图、画布/专注连续切换、权限过滤、布局持久化和移动端降级；画布不是自由白板或浏览器编排器。
+9. **模块合同**：为画布、血缘、运行时、授权和编排分别声明 Interface、依赖方向、状态所有者与测试表面；只有真实多 Adapter 的 Seam 才允许做成可插拔点。
 
 交付物：
 
@@ -93,6 +131,8 @@ M2 范围因此扩大，W2 独立工作台和 W3 集群接入分别验收，不�
 5. 运行详情与次级信息：用量、模型、执行位置和同步状态；浏览器连接与 Worker 离线分开显示。
 
 后续同阶段切片：可用原生命令、附件支持矩阵与限制、长历史分页、必要的原生上下文恢复和运行时回收。已有实现直接接入；仅为产品能力需要修补运行时，不启动无目标重构。
+
+M2 已交付的双宿主会话能力作为 C3 的运行时基础，但不据此宣称画布已实现。C3 必须复用同一 Session Runtime/Journal/Composer 状态，禁止另建“画布聊天”状态机。
 
 交付：会话工作台、所需 API/Worker 补充、桌面和窄屏行为测试。
 
@@ -132,9 +172,9 @@ M2 范围因此扩大，W2 独立工作台和 W3 集群接入分别验收，不�
 
 验收：至少两个 Worker 的身份、能力和会话不串用；模型消失不静默替换；仅检测 Agent 不允许启动。Pi/Claude 作为执行基线，Codex/OpenCode 的执行适配另定规格和测试，不能因可检测而宣称可执行。新连接替换旧连接时，旧 socket 的迟到关闭不得把 Worker 标记离线；网络重试不得改变 `messageId`、`invocationId`、Event `id` 或管理 `commandId`。系统性断网、重启、磁盘与大规模重连演练仍在 M7 汇总验收。
 
-## 8. M5：任务、审查与成果追踪
+## 8. M5：任务、审查、成果追踪与会话血缘
 
-**目标**：在直接对话之外补全可选的任务闭环，不先建设完整团队系统才允许完善任务体验。
+**目标**：在直接对话之外补全可选的任务闭环，并建立可独立于任务使用的 Session Fork/血缘权威；不先建设完整团队系统才允许完善任务体验。
 
 优先交付：
 
@@ -142,24 +182,27 @@ M2 范围因此扩大，W2 独立工作台和 W3 集群接入分别验收，不�
 2. Assignment、Run 历史、reuse/new、新尝试与取消；快照、幂等和独立消息归属清楚。
 3. Review、要求修改、重新执行、结果证据与变更/提交/PR 关联，不由 Agent 自报决定完成。
 4. 外部 issue/PR 关联与受控导入；写回与读取分开授权，写回预览/确认及重试幂等。
+5. 按 C0/C1 交付 Session Fork 与血缘查询：固定来源 cursor、目标 Session 原子创建、独立 Journal、明确执行绑定、权限收窄和审计；Task/Run 可以关联这些 Session，但不拥有其生命周期。
+6. 按 C2 交付基础协作画布：项目内获权 Session 摘要、Fork 边、深链和本地视图状态；列表和专注会话保持完整替代入口。个人/团队布局、冲突保护与大型图自动布局归 C5/Ticket 22。
 
-多人责任归属、评论、提及与通知先设计，随 M6 授权实现后开放；不要把执行 Assignment 混同人类责任人。既有任务契约见 `docs/design/task-platform-contract-decisions.md`。
+多人责任归属、评论、提及与通知先设计，随 M6 授权实现后开放；不要把执行 Assignment 混同人类责任人。既有任务契约见 `docs/design/task-platform-contract-decisions.md`，画布与血缘合同见 `docs/design/session-collaboration-canvas.md`。
 
-交付：受信管理员可用的完整任务/审查体验、外部关联与证据记录、后续多人协作契约。
+交付：受信管理员可用的完整任务/审查体验、外部关联与证据记录、Session Fork/血缘权威、基础协作画布及后续多人协作契约。
 
-验收：完成指派 → 执行 → 要求修改 → 新尝试 → 人工完成；改指派不改历史；取消不影响其他消息；外部写回重试不重复。多人通知与私有内容隔离在 M6 联合验收，不提前宣称已支持。
+验收：完成指派 → 执行 → 要求修改 → 新尝试 → 人工完成；改指派不改历史；取消不影响其他消息；外部写回重试不重复。Fork 重试不重复创建目标 Session，来源 cursor 后的消息不进入目标，画布边与 API 血缘一致。多人通知、实时协作与私有内容隔离在 M6/C4 联合验收，不提前宣称已支持。
 
-## 9. M6：团队授权、安全与开放客户端
+## 9. M6：账号、团队授权、安全与开放客户端
 
-**目标**：支持有明确边界的团队共享，Web 与其他客户端一致受控。
+**目标**：完整支持本地注册、Google 登录与账号生命周期，并提供有明确边界的团队共享；Web 与其他客户端一致受控。
 
 工作切片：
 
-1. 本地用户、登录退出、Team 成员、所有权转移与最后一个 Owner 保护；bootstrap 不作为日常共享万能凭据。
-2. Worker/Project/Session 的独立共享策略与 Grant；执行取权限交集，治理身份不自动读取私人内容。
-3. 列表、搜索、详情、下载、通知、SSE 与执行的统一授权和撤权；明确进行中执行的撤权/停止策略。
-4. PAT 作用域、到期、撤销与轮换；公共 API、事件、分页、幂等、错误和版本文档，提供 CLI/脚本示例。
+1. 邮箱注册/验证/找回、Google OIDC 注册/登录/绑定、登录退出、账号生命周期、Team 邀请与成员、所有权转移与最后一个 Owner 保护；bootstrap 不作为日常共享万能凭据（设计见账号线 A0/A1）。
+2. Worker/Project/Session 的独立共享策略与 Grant；执行取权限交集，治理身份不自动读取私人内容（实现见账号线 A3）。
+3. 列表、搜索、详情、下载、通知、SSE 与执行的统一授权和撤权；明确进行中执行的撤权/停止策略（实现见账号线 A3）。
+4. PAT 作用域、到期、撤销与轮换；公共 API、事件、分页、幂等、错误和版本文档，提供 CLI/脚本示例（实现见账号线 A2）。
 5. 安全会话、TLS、CSRF 等对应防护、限流与审计；承接 M5 多人责任分配、评论和通知。
+6. 按 C3/C4 完成共享 Session Surface、画布内直接对话、最小 Presence、授权图增量与撤权；无权节点、标题、摘要、关系和实时事件均不得侧漏。个人/团队布局、冲突保护与大型图性能作为 C5/Ticket 22 独立验收，不阻塞实时撤权闭环。
 
 交付：用户/成员/授权/凭证/审计界面、客户端指南、安全矩阵与协作验收。
 
@@ -177,9 +220,9 @@ M2 范围因此扩大，W2 独立工作台和 W3 集群接入分别验收，不�
 4. 系统性故障注入：响应丢失、重复提交/回执、断线补传、取消竞态、Server/Worker 重启与执行状态收敛。
 5. 浏览器兼容、生产构建/缓存/启动、长历史和负载验证，健康、日志、指标、诊断包与故障手册。
 
-交付：运维与升级手册、可重复脚本、容量/支持环境矩阵、发布候选报告。
+交付：运维与升级手册、可重复脚本、容量/支持环境矩阵、发布候选报告。执行票为 `.scratch/product-convergence/issues/24-release-readiness-and-recovery-gate.md`。
 
-验收：安装、旧版本升级、升级失败、两端恢复及 Worker 永久丢失分别演练；报告真实 RPO/RTO 和负载，不承诺未验证的恢复时间。M1–M6 跨阶段回归与已支持 Agent 冒烟通过；已知阻断缺陷清零，非阻断风险有发行说明与后续票据。
+验收：对固定 commit 和候选构建执行 Ticket 24；安装、旧版本升级、升级失败、两端恢复及 Worker 永久丢失分别演练；报告真实 RPO/RTO 和负载，不承诺未验证的恢复时间。M1–M6 跨阶段回归与已支持 Agent 冒烟通过；已知阻断缺陷清零，非阻断风险有发行说明与后续票据。
 
 ## 11. M8：受控自动化
 
@@ -195,6 +238,8 @@ M2 范围因此扩大，W2 独立工作台和 W3 集群接入分别验收，不�
 - **设计完成**：入口、流程、正常/等待/失败/恢复状态、数据需求与验收场景明确；不以静态截图代表功能完成。
 - **实现完成**：相关 Web/API/Worker 及迁移闭环，必要鉴权和错误处理同步交付，无假按钮或模拟成功。
 - **切片验证**：类型检查、相关测试及真实浏览器操作；按改动风险覆盖队列、重试、断线、取消、权限或清理，不每次重跑所有故障场景，也不全部推迟到 M7。
+- **Module 验收**：调用方与测试必须从公开 Interface 穿过同一 Seam；不得用直接读数据库、React Flow 内部对象或 Provider 原生事件替代行为验收。删除 Module 后若复杂度不会重新散落到调用方，应合并或删除该浅 Module。
+- **依赖门**：`@xyflow/react` 只进入前端 Canvas Viewport Adapter；`framer-motion` 继续用于呈现动画；`elkjs` 只有性能/布局证据和第二种布局实现需求时才引入并动态加载。
 - **证据**：`docs/acceptance/mN-<topic>.md` 记录版本、环境、命令、实际结果、失败/跳过和残余风险；原始制品放 `.scratch` 或受控 CI，摘要脱敏、脚本可复跑。实际执行时再创建报告，不能预填通过。
 - **阶段状态**：未开始、设计中、实施中、待验收、已验收、阻塞；只有指定版本通过对应门槛才标已验收。基础可用的用户反馈不替代新增功能的验收。
 - **性能**：随会话、环境、任务切片记录相关交互耗时；M3 至少双 Worker，M2 长历史与多会话，M5 100+ Task，M7 验证声明支持规模，避免凭功能数量推断容量。
@@ -206,3 +251,6 @@ M2 范围因此扩大，W2 独立工作台和 W3 集群接入分别验收，不�
 3. 原型到稿后对照评审；无原型也可用已编写线框推进，不阻塞所有设计。
 4. 按 S4 队列/停止、S5 时间线/详情、S6 查找/重命名继续纵向交付；环境、集群页面逐步细化。
 5. 现有或新增阻断问题按证据处理；历史 Web 启动提示仅在仍可复现或阻碍当前路径时优先修复，不再作为默认前置任务。
+6. 账号线 A0 已走完 A0.1（Ticket 04）/A0.2（Ticket 05）/A0.3（Ticket 07）三个切片，并已通过 Wave A/B 跨票据验收（`apps/server/scripts/verify-wave-ab.mjs`，断言三种身份来源共存互不影响、同邮箱与第三方邮箱的权威边界、注册策略只挡新账号、秘密只存哈希、与 Ticket 17 血缘授权的授权面交叉）；下一步是 A1 团队邀请与成员和 A2 凭证/审计，与环境/集群切片并行；A1/A3 联合设计并作为开放团队共享的门槛。采用 [账号系统设计](design/account-identity-system.md) 的交互与验收矩阵；真实 Google 部署实测仍需合规 HTTPS 域名、Client 配置与测试账号，未配置时只标注真实验收阻塞。
+7. 画布线先执行 C0 模块合同，再执行 C1 Fork/血缘权威；两者不改现有 UI 依赖。C1 稳定后才安装 `@xyflow/react` 推进 C2，避免先画静态假图后补领域语义。
+8. C3 复用已交付双宿主 Session Runtime，实现同一 Session Surface 的画布/专注连续切换；C4 等待 A3 权限门，C5 独立验收布局性能，C6 先完成 Ticket 23 编排合同再推进 Ticket 21 投影。

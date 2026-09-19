@@ -52,8 +52,11 @@ packages/web-contract    Web 展示契约
 npm install
 npm run build:packages
 
-# 终端 1：Server，默认 http://127.0.0.1:3001
-WEMUX_BOOTSTRAP_TOKEN='replace-with-a-long-random-secret' npm run dev:server
+# 终端 1：Server，默认 http://127.0.0.1:3001；WEMUX_ADMIN_EMAILS 声明实例管理员（必填）
+# 邮件三项是自举前置：没有它，连部署者自己都注不了册（WEMUX_MAIL_OUTBOX 把邮件写到本地目录，链接从 .eml 里取）
+WEMUX_ADMIN_EMAILS='you@example.com' WEMUX_PUBLIC_URL='http://127.0.0.1:8002' \
+  WEMUX_SMTP_FROM='Wemux <no-reply@example.com>' WEMUX_MAIL_OUTBOX=/tmp/wemux-mail \
+  npm run dev:server
 
 # 终端 2：Web，默认 http://127.0.0.1:8002，/api 代理到 Server（WEMUX_SERVER_ORIGIN 可改上游）
 npm run dev:web
@@ -64,19 +67,21 @@ npm run dev:web
 先构建 Web，再直接由 Server 托管静态资源，一个端口同时提供控制台、API 和 Worker 数据面（即本机部署时浏览器和 Worker 用的是同一个地址）：
 
 ```bash
-npm run build:web
-WEMUX_BOOTSTRAP_TOKEN='replace-with-a-long-random-secret' PORT=8010 HOST=0.0.0.0 npm run start:server
+npm run build --workspace @wemux/web
+WEMUX_ADMIN_EMAILS='you@example.com' WEMUX_PUBLIC_URL='http://<主机>:8010' \
+  WEMUX_SMTP_FROM='Wemux <no-reply@example.com>' WEMUX_SMTP_URL='smtp://user:pass@smtp.example.com:587' \
+  PORT=8010 HOST=0.0.0.0 npm run start --workspace @wemux/server
 # 打开 http://<主机>:8010/ 即控制台；Worker 的 Server URL 也是 http://<主机>:8010
 ```
 
 静态目录默认取 `apps/web/dist`，可用 `WEMUX_WEB_DIST` 覆盖；未配置或目录不存在时仅提供 API。SPA 回退只对带 `text/html` 的浏览器导航生效，API 客户端未命中路由仍返回 JSON 404；控制台的同源 `/api/*` 调用由 Server 直接兼容。
 
-第一次打开 Web 时会看到落地页：在右侧连接卡片粘贴启动 Server 时设的 `WEMUX_BOOTSTRAP_TOKEN`（即环境变量的值）并点击「连接并进入控制台」即可 - 首次连接会自动创建默认团队与项目，之后直接进入控制台；该令牌同时也是日常调用管理接口的凭证。应用内更换连接时使用「连接设置」弹窗。Worker 注册流程：
+第一次打开 Web 时会看到落地页：填「账号或邮箱 + 密码」登录，没有账号时用邮箱注册（收到验证邮件并确认后即创建账号）。实例管理员由部署声明：`WEMUX_ADMIN_EMAILS` 里的邮箱一旦注册并验证，账号就自动获得实例管理权限；没有声明任何邮箱时实例不会启动（也不会让第一个公开注册者当管理员）。**部署者要能注册成管理员，必须先配好邮件投递**：`WEMUX_PUBLIC_URL`（拼邮件链接的公开地址）+ `WEMUX_SMTP_FROM`，再加 `WEMUX_SMTP_URL`（SMTP 连接串）或 `WEMUX_MAIL_OUTBOX=<目录>`（本机联调：把邮件写成 `.eml`）。缺配置时注册与找回会以 503 明确拒绝并在界面说明原因，不会静默当作成功。登录态是独立的 HttpOnly Cookie 会话（不属于 PAT），可在账号页看到设备会话列表并逐条撤销；CLI 或脚本调用管理接口用账号页签发的 PAT。忘了密码时在 Server 所在主机上运行 `node apps/server/dist/cli.js credentials reset-password --username <用户名>`（可选 `--database`、`--keep-tokens`），它只在本机可用、会撤销该账号全部登录会话并写审计。应用内更换连接时使用「连接设置」弹窗。Worker 注册流程：
 
 ```bash
-# 用管理 Token 请求一次性注册 Token
+# 用账号页签发的 PAT 请求一次性注册 Token
 curl -sS -X POST http://127.0.0.1:3001/enrollment-tokens \
-  -H 'Authorization: Bearer replace-with-a-long-random-secret' \
+  -H 'Authorization: Bearer <PAT>' \
   -H 'Content-Type: application/json' -d '{}'
 
 # 在待接入机器上执行一条命令完成 安装→注册→启动（目标机器需要 curl 和 Node.js/npm）
@@ -137,7 +142,7 @@ Web 侧边栏新增「集群阶段」页，集中管理集群中所有阶段性�
 
 ## 当前基础与验证边界
 
-- 当前以 bootstrap 管理员接入为主；不能宣称已完成多用户、团队资源授权与客户端凭证的完整闭环。
+- 当前以部署声明的管理员接入为主（`WEMUX_ADMIN_EMAILS`）；不能宣称已完成多用户、团队资源授权与客户端凭证的完整闭环。
 - 已有逻辑 Workspace 与 Placement 类型和相关实现；多节点生命周期与客户端一致性纳入里程碑核验，非空 Composite Workspace 不作为已交付能力。
 - `test` Agent 提供确定性执行验证；Pi 与 Claude Code 有本机 CLI 执行适配，需对版本、认证与真实运行分别验收。Codex、OpenCode 不因可检测就被宣称可执行。
 - Server 是缓存与控制面，Worker Journal 是会话历史权威。

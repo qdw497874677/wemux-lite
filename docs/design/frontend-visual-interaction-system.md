@@ -7,6 +7,7 @@
 
 ## 修订记录
 
+- **v1.2，2026-09-19，采纳 TailGrids 组件与令牌层。** 新增 §14 记录组件资产分层、来源与验收方式；存量页面通过语义别名继续使用旧类名，无需改类名即可换装。
 - **v1.1，2026-01-06，按子代理审查修订。** 落实 6 项 major 与 5 项 minor，无拒绝项；补齐阶段边界、字段契约、输入方式、颜色迁移、Run 启动、页面覆盖、响应式与验收规则。
 - 跨文档统一裁定优先于参考文档中尚未同步的旧阶段编号与测试表述；本次仅修订本文件。
 - V*/P* 对齐：V0（token/组件状态统一，纯样式层，行为零变化）→ P0–P1 期间并行落地；V1（App Shell 视觉）→ 挂 P3 路由；V2（看板视觉）→ 挂 P4；V3（Run 时间线视觉）→ 挂 P5；V4（视觉 QA）→ P7 之后、发布前。
@@ -483,3 +484,12 @@ V0（token/组件状态统一，纯样式层，行为零变化）→ P0–P1 期
 | 多用户登录、身份/团队/PAT 管理 | 否 | 明确不在当前承诺内，不作为四张页面遗漏项补做 |
 
 四张及其变体按阶段单独确认；V4 对矩阵中全部当前范围页面做双主题、输入方式、断点和真实链路复核，而不把存量页面合规推迟到 V4。
+## 14. 组件资产分层与来源
+
+- **来源**：基础组件样式与令牌取自 TailGrids（MIT），本地以稀疏检出取用其 `components/ui/*` 与样式表作为实现参照，仅借鉴视觉与结构，不引入第三方运行时依赖，也不复制其演示页代码。
+- **分层**：`styles.css`（令牌）→ `src/components/ui/*`（基础组件，含 `alert/avatar/card/checkbox/field/separator/skeleton/spinner/ai-prompt-input`）→ `src/components/task-board/*`（任务工作流组件）→ `src/features/*`（业务页）→ `/components`（展示页与目录导航）。
+- **令牌规则**：TailGrids 原始色名（`gray/primary/success/error/warning` 等）与 Wemux 语义别名（`bg-surface`、`text-text-100`、`border-border-100` 等）指向同一批变量，深色为默认，亮色覆盖同名字面值；新增界面优先组合已有令牌，不为单页新造颜色。
+- **组件规则**：基础组件的对外 API（variant、size、`asChild`、受控与非受控语义）保持稳定，换装只发生在实现内部；页面不再自行拼装按钮、输入框、浮层的视觉实现，而是复用 `components/ui`。
+- **展示页**：`/components` 不要求连接凭据，用于比对真实组件与令牌；它展示的是生产组件本身，不是静态原型，因此可作为后续页面的视觉基线。
+- **验收**：`node apps/web/scripts/verify-component-library.mjs`（配 `WEMUX_VERIFY_BASE`）在真实 Chromium 中检查分区、目录锚点、令牌色卡、任务列，并实际打开对话框/抽屉/底部抽屉/菜单/提示/标签页；截图与 JSON 结论输出到 `/tmp/wemux-component-library/`。验收摘要见 [组件库采纳 TailGrids](../acceptance/component-library-tailgrids.md)。
+- **对 TailGrids 的有意偏差**（其余一律照搬）：亮色 `--border-color-base-200` 用 gray-300（#d1d5db）而不是上游的 gray-200，保证表单边界在白底可见；带 `--color-button-*-disabled-*` 令牌的按钮不再叠加全局 `:disabled` 的 55% 透明度（否则双重减淡），`ghost`/`secondary` 仍靠全局透明度表达禁用；卡片网格用 `align-items: start` 让卡片贴合内容高度。

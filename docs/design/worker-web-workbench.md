@@ -64,17 +64,19 @@ Worker Web 用户凭据、Worker API Token、Server Enrollment Token、长期 Wo
 
 首批可采用单本机管理员，不等待 M6 完整团队体系；但本机认证与公网安全是 Worker Web 开放的前置条件，不能延后至 M7。长期凭据保护、目录授权与审计随功能实现；操作系统管理员的物理控制权不作为普通 Web 用户越权的理由。
 
-## 7. 可复用模块与实施顺序
+## 7. 可复用 Module 与实施顺序
 
-建议在现有 monorepo 内维护，先形成真实复用，再决定是否独立发布包：
+建议在现有 monorepo 内维护，先形成真实复用，再决定是否独立发布包。Module 通过小 Interface 暴露能力，宿主使用 Adapter 组合；不得为了共享 UI 把 Server Team/Project 权限塞进 Worker Runtime，也不得为了本地入口复制一套 Session 状态机：
 
 | 模块 | 职责 | 宿主保留的职责 |
 | --- | --- | --- |
-| 运行时契约与内核 | Agent Adapter、生命周期、续接、队列、标准事件与持久化 | 项目、团队、集群注册、HTTP 登录 |
-| 会话客户端 | 发送、订阅、游标补传、重试与状态投影 | Server/Worker 连接与认证适配 |
-| 会话 Web 模块 | Composer、时间线、工具、队列、运行详情 | 集群项目外壳或 Worker 本地外壳 |
+| Agent Interchange Module | Agent Adapter、Provider 会话生命周期、标准事件和终态保证 | 项目、团队、集群注册、HTTP 登录与 transport 重连 |
+| Session Runtime Module | 发送、订阅、游标补传、队列、停止、批准、恢复与状态投影 | Server/Worker 连接、认证和资源授权 Adapter |
+| Session Surface Module | Composer、时间线、工具、队列、运行详情及 presentation 密度 | 集群项目外壳、画布容器或 Worker 本地外壳 |
+| Session Lineage Module | Fork cursor、目标 Session 原子创建、血缘查询和生命周期 | 各宿主的权限策略、路由与布局 |
+| Canvas Projection Module | 将获权图读模型投影为节点/边和分级详情 | React Flow viewport、URL、个人/团队布局 Adapter |
 
-契约暴露操作能力与不可用原因，不强迫独立模式提供虚假 Project/Worker 注册 ID。独立安装身份与集群注册身份须分离，本地 Session 的稳定身份不随加入/退出变化。不允许两个独立进程同时写同一个运行时状态库或操纵同一个 Native Session。
+契约暴露操作能力与不可用原因，不强迫独立模式提供虚假 Project/Worker 注册 ID。独立安装身份与集群注册身份须分离，本地 Session 的稳定身份不随加入/退出变化。不允许两个独立进程同时写同一个运行时状态库或操纵同一个 Native Session。画布和 Fork 首批属于集群 Project 能力；未来若本地工作台需要本地图，必须通过本地 Host Adapter 复用同一 Lineage/Surface Interface，不复制实现，也不因 Worker 加入集群自动发布本地血缘。
 
 M1 增加双宿主交互和权限设计。M2 增加以下切片，与已有 S1–S6 共用实现，不重建两套聊天：
 

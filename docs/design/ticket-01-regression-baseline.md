@@ -72,7 +72,7 @@ Server 既有 server.test.ts 保留真实 HTTP + SQLite + 伪 Worker WebSocket +
 
 可复现前置与操作清单（由下一次授权验收执行）：
 
-1. Node >=22.13、现有 npm 依赖及构建产物；独立临时根目录，独立 Server SQLite 和 Worker home，选择空闲端口，不复用共享数据库/Worker。`npm run build`；Server 使用 `WEMUX_DATABASE_PATH=<临时目录>/server.sqlite WEMUX_BOOTSTRAP_TOKEN=<随机秘密> HOST=127.0.0.1 PORT=<空闲端口> npm run dev:server`，确认构建 Web 静态文件被服务。
+1. Node >=22.13、现有 npm 依赖及构建产物；独立临时根目录，独立 Server SQLite 和 Worker home，选择空闲端口，不复用共享数据库/Worker。`npm run build`；Server 使用 `WEMUX_DATABASE_PATH=<临时目录>/server.sqlite WEMUX_ADMIN_EMAILS=<部署者邮箱> HOST=127.0.0.1 PORT=<空闲端口> npm run dev:server`（原为引导令牌 `WEMUX_BOOTSTRAP_TOKEN`，已由部署声明模型取代，见 `docs/acceptance/account-identity-deployer-admin.md`），确认构建 Web 静态文件被服务。
 2. 浏览器连接填写上述 origin/bootstrap secret；API POST /auth/session 获取 admin token，POST /bootstrap 初始化。带 Bearer admin token 创建 enrollment token；不要把 token 写入日志或 URL。创建隔离项目。
 3. `WEMUX_WORKER_HOME=<临时目录>/worker WEMUX_ENROLLMENT_TOKEN=<一次性token> node apps/worker/dist/cli.js register --server <origin> --name ticket01-test`；同一 home 执行 `node apps/worker/dist/cli.js start`。等待在线及 capability 上报。确定选择 execution/available 的 **test Agent / test model**，缺失则停止验收，不回退随机 Pi/Claude。真实付费模型另需本机认证和用户授权，不上传 provider key。
 4. 用浏览器创建空 Workspace，等待 pending→provisioning→ready，再显式选择 test/test 新建 Session；发送固定普通文本，观察可见回复、工具/进度标签、发送期间输入可编辑、排队、重连补传及无重复 echo。记录 URL、固定 Agent/model、资源 ID、Journal 完成事件、截图和检查结果。额外检查项目/工作区/会话层级与预选。

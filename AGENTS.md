@@ -34,15 +34,20 @@ npm run pack:check --workspace @wemux/worker
 
 ## 运行与调试（重要）
 
-环境变量（`apps/server/src/main.ts`）：`PORT`（默认 3001）、`HOST`（默认 127.0.0.1）、`WEMUX_BOOTSTRAP_TOKEN`（≥16 字符，管理员引导令牌）、`WEMUX_DATABASE_PATH`、`WEMUX_WEB_DIST`、`WEMUX_WORKER_PACKAGE_PATH`、`WEMUX_CAPABILITY_SECRET`。
+环境变量（`apps/server/src/main.ts`）：`PORT`（默认 3001）、`HOST`（默认 127.0.0.1）、`WEMUX_ADMIN_EMAILS`（**必填**，逗号分隔的实例管理员邮箱；声明邮箱命中即管理员，缺失时 Server 拒绝启动）、`WEMUX_DATABASE_PATH`、`WEMUX_WEB_DIST`、`WEMUX_WORKER_PACKAGE_PATH`、`WEMUX_CAPABILITY_SECRET`。
+
+邮件与 OAuth（`apps/server/src/server.ts` 读环境）：`WEMUX_SMTP_URL`（或 `WEMUX_MAIL_OUTBOX` 本地出件箱）+ `WEMUX_SMTP_FROM` + `WEMUX_PUBLIC_URL`（邮件链接只由它拼，不从请求头推）；`WEMUX_GOOGLE_CLIENT_ID`/`WEMUX_GOOGLE_CLIENT_SECRET`/`WEMUX_PUBLIC_URL`（半配置时分启动失败）。没有邮件投递时注册与找回明确不可用（503 + 界面说明），而部署者注册自己就是管理员的前提，所以自托管必须先配邮件。
 
 手工联调环境（当前可用）：
 
 ```bash
-# Server：绑定 0.0.0.0 供局域网/Tailscale 手机访问
-PORT=8010 HOST=0.0.0.0 WEMUX_BOOTSTRAP_TOKEN='replace-with-a-long-random-secret' \
+# Server：绑定 0.0.0.0 供局域网/Tailscale 手机访问（自托管第一次启动必须能收验证邮件，否则自己注不了册）
+PORT=8010 HOST=0.0.0.0 WEMUX_ADMIN_EMAILS='you@example.com' \
   WEMUX_DATABASE_PATH=/tmp/wemux-lite-manual-8010/server.sqlite \
+  WEMUX_PUBLIC_URL='http://192.168.1.10:8010' WEMUX_SMTP_FROM='Wemux <no-reply@example.com>' \
+  WEMUX_MAIL_OUTBOX=/tmp/wemux-lite-manual-8010/outbox \
   setsid nohup node apps/server/dist/main.js > /tmp/wemux-lite-manual-8010/server.log 2>&1 < /dev/null &
+# 注册后验证链接在出件箱的 .eml 里（把邮件正文 base64 解码即可）；上生产换成 WEMUX_SMTP_URL
 # Worker：先 register（--server --token）拿到凭据，之后 start --home
 node apps/worker/dist/cli.js start --home /tmp/wemux-lite-manual-8010/worker
 # Worker 多候选地址：`--servers`（或 WEMUX_SERVER_URLS，逗号分隔）连接失败自动轮换；
@@ -64,7 +69,13 @@ node apps/worker/dist/cli.js tailscale --server http://100.101.102.103:8010
 - **不要用 `pgrep -f <模式>` 后直接 kill**：模式会匹配到执行命令的 shell 自身，把自己杀掉。用 `pidof node` + 读 `/proc/<pid>/cmdline` 过滤，或维护 pidfile。
 - 后台服务要用 `setsid nohup ... & disown`（独立进程组），否则宿主清理任务会连带杀掉服务。
 - 本沙箱里 **curl/ss 输出不可靠**：验证端口用 `node -e "fetch(...)..."`。
-- Worker 列表 API 响应是 `{ items: [...] }`；管理员会话接口是 `POST /api/auth/session`，bootstrap 令牌放 `Authorization: Bearer` 头（不是 JSON body）。
+- Worker 列表 API 响应是 `{ items: [...] }`；账号接口分工（Ticket 04/05 之后）：管理员由部署声明 `WEMUX_ADMIN_EMAILS` 决定，没有引导令牌与首次认领接口；登录 `POST /api/auth/login`（JSON 体 `login`（兼容 `username`）/`password`，返回 `Set-Cookie`），管理员写操作带 Cookie + `x-csrf-token`，CSRF 明文由 `GET /api/auth/me` 一次性下发/轮换（安全读 GET 不需要 CSRF 头）。旧入口 `POST /api/auth/session` 已退役返回 410；`POST /api/auth/setup` 已删除。
+- **Worker 有两种安装并存**：仓库构建（`node apps/worker/dist/cli.js start --home <home>`）与安装脚本装的全局包（`/opt/data/.npm-global/lib/node_modules/@wemux/worker`，命令 `wemux-lite-worker`）。两者可同时在线，节点名都是默认的“工作节点 01”，列表里会出现多个。判断哪个是你关心的节点：读 `<home>/worker.sqlite` 的 `documents(bucket='identity', id='worker')` 里的 `workerId`，再到 `GET /api/workers` 里比 `id`。
+- Worker home 目录直接含 `credential` / `runtime.lock` / `transport.sqlite` / `worker.sqlite` / `workspaces/`（**没有** `identity/` 子目录）。
+- **诊断“节点一直离线”先看它自己的队列**：`<home>/transport.sqlite` 里比较 `transport_meta` 的 `outbound_last_seq` 与 `outbound_ack:<outbound_epoch>`，并 `SELECT COUNT(*) FROM transport_outbox`。`SELECT seq,last_sent_at,payload_json FROM transport_outbox ORDER BY seq LIMIT 5` 的最老一行就是堵住重放的帧；`last_sent_at` 一直不推进 = 服务器拒绝后 worker 反复重发同一帧。
+- **`artifacts/wemux-lite-worker.tgz`（`/downloads/worker.tgz`）只由 `npm run pack:worker`（或根 `npm run build`）刷新**，单独 `npm run build --workspace @wemux/worker` 不会更新它。让用户重装前先在 tgz 里 grep 验证修复已进包：`tar -xzf artifacts/wemux-lite-worker.tgz -C /tmp/x package/dist/transport/transport-store.js && grep -c <新符号> /tmp/x/package/dist/transport/transport-store.js`。
+- 手工环境的节点清理：`POST /api/workers/:id/revoke` 只把 `connectionState` 置为 `revoked`（无硬删除接口），测试残留节点会一直留在列表里。
+- 多会话并行改动时：server/worker 与 web 分属不同 workspace，但 `apps/web/**` 是共享文件；避免两个会话同时跑根 `npm run build`（会写共享的 `artifacts/` 与 `apps/web/dist`），优先 `npm run build:packages` + 单 workspace 构建。
 
 ## Web 端硬约束（回归测试锁定）
 
@@ -101,3 +112,5 @@ node apps/worker/dist/cli.js tailscale --server http://100.101.102.103:8010
 - Node ≥ 22.13（本机 v26）；npm workspaces，无 pnpm/yarn。
 - UI 中文文案；零 em-dash（—）装饰、无装饰性圆点；图标用 lucide；设计 token 沿用 Tailwind v4 + 现有 CSS 变量（深色优先，自动亮色）。
 - 必要依赖与轻量部署是明确目标：保留 node:http/node:sqlite 默认方案，新增中间件需说明真实问题、替代方案与运维成本；不得以“最小化”为由省略安全、恢复、测试和完整生命周期。
+- **Worker 在线状态只由拥有连接的进程重置**：`SqliteServerStore` 默认不重置持久化的 `worker`/`cache` 状态，只有 `createWemuxServer` 传 `presenceReset: true`。本机 CLI、验收脚本、备份等只读入口打开同一个数据库时不得把在线 Worker 刷成离线（历史缺陷：读取状态反而把连接中的 Worker 置为 offline）。
+- **投递入队只允许有界事件触发**：握手/重连、新领域事件、应用层收据；纯传输 ACK 驱动的 flush 只能重放 outbox，不得重新入队，否则同一 Command 会在一条连接上形成 ACK→入队→发送的忙循环。收到收据即丢弃该领域身份的待发行，重投保持领域身份、只换 `directionSeq`（见 `docs/design/worker-reliable-connection.md` §9.2、§10.1）。
