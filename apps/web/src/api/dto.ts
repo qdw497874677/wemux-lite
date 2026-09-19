@@ -157,3 +157,33 @@ export interface CommandResultDTO { commandId: string }
 export interface SendMessageDTO { commandId: string; messageId: string; content: string }
 export interface SendResultDTO { commandId: string; messageId: string; status: 'pending' | 'accepted' | 'queued' | 'rejected' | 'completed' | 'failed' }
 export interface TailnetInfoDTO { available: boolean; state: string; dnsName: string | null; selfIps: string[]; lanIps: string[]; error?: string }
+
+/**
+ * 账号安全（Ticket 06/08）：登录方式、密码状态与邮件能力。
+ * 响应里没有令牌、哈希，也没有“待确认的新邮箱”——那个地址只存在于邮件里。
+ */
+export interface LoginMethodDTO {
+  kind: 'password' | 'google'
+  id: string
+  label: string
+  email: string | null
+  createdAt: string | null
+  lastSignInAt: string | null
+  /** 唯一的登录方式不可移除：解绑后账号将无法登录，服务端也会拒绝。 */
+  removable: boolean
+}
+export interface AccountSecurityViewDTO {
+  methods: LoginMethodDTO[]
+  passwordSet: boolean
+  email: string | null
+  emailDelivery: boolean
+  emailDeliveryReason: string | null
+  /** 当前会话是否在强认证窗口内（刚登录或刚用 Google 授权过）。 */
+  reauthenticated: boolean
+  reauthenticateWindowMs: number
+}
+export interface PasswordChangeDTO { status: 'changed'; created: boolean; revokedSessions: number; revokedTokens: number }
+export interface EmailChangeAcceptedDTO { status: 'accepted'; email: string; expiresAt: string }
+export interface EmailChangeConfirmedDTO { status: 'changed'; email: string; previousEmail: string | null }
+export interface GoogleLinkStartDTO { authorizeUrl: string; expiresAt: string }
+export interface LoginMethodUnboundDTO { status: 'unbound'; kind: LoginMethodDTO['kind']; methods: LoginMethodDTO[] }

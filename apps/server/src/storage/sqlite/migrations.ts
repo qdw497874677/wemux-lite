@@ -488,6 +488,40 @@ const accountMigrations = [
      OR json_extract(NEW.data,'$.source') IS NOT json_extract(OLD.data,'$.source')
    BEGIN SELECT RAISE(ABORT, 'Instance administrator identity is immutable'); END;
    DROP TABLE IF EXISTS instance_claim;`,
+  // Ticket 06：修改邮箱需要先验证新邮箱，因此挑战用途扩展到 `change_email`。
+  // purpose 上的 CHECK 约束在 SQLite 里不能就地修改，只能重建表；重建在同一事务里完成，
+  // 已有的验证/重置挑战（含其哈希与消费状态）原样搬过去，不丢任何进行中的流程。
+  `CREATE TABLE verification_challenges_rebuilt (
+     id TEXT PRIMARY KEY,
+     token_hash TEXT NOT NULL UNIQUE,
+     purpose TEXT NOT NULL CHECK(purpose IN ('verify_email','reset_password','change_email')),
+     target_email TEXT NOT NULL,
+     registration_id TEXT REFERENCES registration_attempts(id),
+     user_id TEXT,
+     created_at TEXT NOT NULL,
+     expires_at TEXT NOT NULL,
+     consumed_at TEXT,
+     data TEXT NOT NULL CHECK(json_valid(data)),
+     CHECK(json_extract(data,'$.id') IS id AND json_extract(data,'$.tokenHash') IS token_hash
+       AND json_extract(data,'$.purpose') IS purpose AND json_extract(data,'$.targetEmail') IS target_email
+       AND json_extract(data,'$.registrationId') IS registration_id AND json_extract(data,'$.userId') IS user_id
+       AND json_extract(data,'$.consumedAt') IS consumed_at),
+     CHECK((registration_id IS NULL) <> (user_id IS NULL)),
+     CHECK(length(trim(target_email)) > 0 AND target_email = lower(trim(target_email))),
+     CHECK(datetime(created_at) IS NOT NULL AND datetime(expires_at) IS NOT NULL
+       AND julianday(expires_at) > julianday(created_at)),
+     CHECK(consumed_at IS NULL OR julianday(consumed_at) >= julianday(created_at)));
+   INSERT INTO verification_challenges_rebuilt(id,token_hash,purpose,target_email,registration_id,user_id,created_at,expires_at,consumed_at,data)
+     SELECT id,token_hash,purpose,target_email,registration_id,user_id,created_at,expires_at,consumed_at,data FROM verification_challenges;
+   DROP TABLE verification_challenges;
+   ALTER TABLE verification_challenges_rebuilt RENAME TO verification_challenges;
+   CREATE INDEX IF NOT EXISTS verification_challenges_target ON verification_challenges(target_email,purpose);
+   CREATE TRIGGER IF NOT EXISTS verification_challenge_identity BEFORE UPDATE ON verification_challenges
+   WHEN NEW.id IS NOT OLD.id OR NEW.token_hash IS NOT OLD.token_hash OR NEW.purpose IS NOT OLD.purpose
+     OR NEW.target_email IS NOT OLD.target_email OR NEW.registration_id IS NOT OLD.registration_id
+     OR NEW.user_id IS NOT OLD.user_id OR NEW.expires_at IS NOT OLD.expires_at
+     OR (OLD.consumed_at IS NOT NULL AND NEW.consumed_at IS NOT OLD.consumed_at)
+   BEGIN SELECT RAISE(ABORT, 'Verification challenge identity is immutable'); END;`,
 ]
 
 const migrations = [...legacyMigrations, ...accountMigrations]

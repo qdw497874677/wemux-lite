@@ -8,7 +8,7 @@
  * 邮件链接就是按这里生成（见 `mail/email-delivery.ts`），改动必须与
  * `apps/web/src/app/router.tsx` 的 `paths` 保持同步。
  */
-export const WEB_CONSOLE_AUTH_PATHS = { verifyEmail: '/auth/verify-email', passwordReset: '/auth/password/reset' } as const
+export const WEB_CONSOLE_AUTH_PATHS = { verifyEmail: '/auth/verify-email', passwordReset: '/auth/password/reset', confirmEmailChange: '/auth/confirm-email-change' } as const
 
 const webConsoleAuthPaths: ReadonlySet<string> = new Set(Object.values(WEB_CONSOLE_AUTH_PATHS))
 

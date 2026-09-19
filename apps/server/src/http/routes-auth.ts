@@ -6,6 +6,7 @@ import type { IdentityService, IssuedLoginSession, LoginSessionView } from '../a
 import type { ServerService } from '../application/server-service.js'
 import type { EmailRegistrationService } from '../application/email-registration.js'
 import type { GoogleAuthenticationService } from '../application/google-authentication.js'
+import type { AccountSecurityService } from '../application/account-security-service.js'
 import type { InstanceSettingsService } from '../application/instance-settings.js'
 import { AppError } from '../application/errors.js'
 import { clearedSessionCookie, isSecureRequest, readCookie, sessionCookie } from './cookies.js'
@@ -17,6 +18,8 @@ import { clearedSessionCookie, isSecureRequest, readCookie, sessionCookie } from
  * Ticket 05 在同一模块里挂上邮箱注册、验证与找回：它们共享同一套 Cookie 与限流约定。
  * Ticket 07 加上 Google 登录：start 返回授权地址并把一次性 state 写进短时 Cookie，
  * callback 校验后签发同一套 Cookie 会话；失败一律重定向回登录页带错误码，不返回 JSON。
+ * Ticket 06/08 加上账号安全页所需的管理入口：改密码、改邮箱（需确认链接）、绑定/解绑登录方式。
+ * 这些路由只做输入收集与 CSRF 判定，脱离旧密码判定、验证单次消费、会话撤销全在服务层。
  */
 export interface AuthRouteContext {
   readonly request: IncomingMessage
@@ -32,10 +35,16 @@ export interface AuthRouteContext {
   readonly registration?: EmailRegistrationService | null
   readonly settings?: InstanceSettingsService | null
   readonly google?: GoogleAuthenticationService | null
+  readonly security?: AccountSecurityService | null
 }
 
 /** 一次性 state 的 Cookie 名：与发起浏览器绑定，回调后立即清除。 */
 export const oauthStateCookieName = 'wemux_oauth_state'
+/**
+ * 绑定流的意图标记：真正的意图记在一次性事务里，这个 Cookie 只决定失败时把用户送回哪个页面。
+ * 没有它的话，在账号页并发起绑定、授权被拒后会被丢回落地页，看起来像把登录弄坏了。
+ */
+export const oauthIntentCookieName = 'wemux_oauth_intent'
 
 interface AccountPayload {
   readonly user: IssuedLoginSession['user']
@@ -101,15 +110,44 @@ const requireGoogle = (google: GoogleAuthenticationService | null | undefined): 
   return google
 }
 
+const requireSecurity = (security: AccountSecurityService | null | undefined): AccountSecurityService => {
+  if (!security) throw new AppError(503, '账号安全功能未启用', 'security_disabled')
+  return security
+}
+
 /**
- * OAuth state 的短时 Cookie：Path=/ 是为了兼容反向代理下的 API 前缀差异，
- * 安全性由 HttpOnly + SameSite=Lax + 5 分钟有效期 + 一次性事务共同保证。
+ * 账号安全类操作的限流键：按账号与来源 IP 两条独立窗口，避免换 IP 绕过或反向代理后面互相连坐。
  */
-const oauthStateCookie = (input: { value: string; expiresAt: string; secure: boolean }): string => {
-  const attributes = [`${oauthStateCookieName}=${encodeURIComponent(input.value)}`, 'Path=/', 'HttpOnly', 'SameSite=Lax', `Expires=${new Date(input.expiresAt).toUTCString()}`]
+const accountThrottleKeys = (context: AuthRouteContext, session: LoginSession): string[] => [
+  `user:${session.userId}`,
+  `ip:${context.request.socket.remoteAddress ?? 'unknown'}`,
+]
+
+/** 成功重定向不能丢掉 `returnTo` 自带的查询串，`?linked=google` 要能叠加到已有参数之后。 */
+const withQuery = (location: string, additions: Readonly<Record<string, string>>): string => {
+  const url = new URL(location, 'http://localhost')
+  for (const [key, value] of Object.entries(additions)) url.searchParams.set(key, value)
+  return `${url.pathname}${url.search}`
+}
+
+/**
+ * 短时一次性 Cookie 的公共形状：Path=/ 是为了兼容反向代理下的 API 前缀差异，
+ * 安全性由 HttpOnly + SameSite=Lax + 短有效期 + 一次性事务共同保证。
+ */
+const shortLivedCookie = (name: string, input: { value: string; expiresAt: string; secure: boolean }): string => {
+  const attributes = [`${name}=${encodeURIComponent(input.value)}`, 'Path=/', 'HttpOnly', 'SameSite=Lax', `Expires=${new Date(input.expiresAt).toUTCString()}`]
   if (input.secure) attributes.push('Secure')
   return attributes.join('; ')
 }
+
+/** OAuth 登录流的 state Cookie。 */
+const oauthStateCookie = (input: { value: string; expiresAt: string; secure: boolean }): string => shortLivedCookie(oauthStateCookieName, input)
+
+/**
+ * 绑定意图标记：真正的意图由一次性事务判定，这个值只决定失败时把用户送回哪个页面。
+ * 没有它，在账号页发起绑定、授权被拒后会被丢回落地页，看起来像把登录弄坏了。
+ */
+const oauthIntentCookie = (input: { value: string; expiresAt: string; secure: boolean }): string => shortLivedCookie(oauthIntentCookieName, input)
 
 /**
  * 限流键：IP 限单机刷量，邮箱限定向轰炸，两条都进服务层的滑动窗口。
@@ -121,7 +159,7 @@ const throttleKeys = (context: AuthRouteContext, email: unknown): string[] => [
 ]
 
 export async function handleAuthRoute(context: AuthRouteContext): Promise<boolean> {
-  const { request, response, path, method } = context
+  const { request, response, path, method, security } = context
   const respond = (status: number, data: unknown): boolean => {
     response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     response.end(JSON.stringify(data))
@@ -163,22 +201,38 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<boolea
     const identity = requireIdentity(context.identity)
     const query = new URL(request.url ?? '/', 'http://localhost').searchParams
     let location = '/'
+    const intentCookieValue = readCookie(request.headers.cookie, oauthIntentCookieName)
+    // 回调是浏览器流：两个短时 Cookie 无论成败都不留给下一次。
+    const clearOauthCookies = (): void => {
+      response.setHeader('Set-Cookie', [
+        clearedSessionCookie({ name: oauthStateCookieName, secure: isSecureRequest(request) }),
+        clearedSessionCookie({ name: oauthIntentCookieName, secure: isSecureRequest(request) }),
+      ])
+    }
     try {
-      const finished = await google.finish({
+      const finished = await google.callback({
         code: query.get('code') ?? undefined, state: query.get('state') ?? undefined,
         cookieState: readCookie(request.headers.cookie, oauthStateCookieName),
-        client: header(request, 'user-agent'), supersede: context.loginSession,
+        client: header(request, 'user-agent'), session: context.loginSession,
       })
-      response.setHeader('Set-Cookie', [
-        sessionCookie({ name: identity.cookieName, value: finished.issued.token, expiresAt: finished.issued.expiresAt, secure: isSecureRequest(request) }),
-        clearedSessionCookie({ name: oauthStateCookieName, secure: isSecureRequest(request) }),
-      ])
-      location = finished.returnTo ?? '/'
+      if (finished.kind === 'login') {
+        response.setHeader('Set-Cookie', [
+          sessionCookie({ name: identity.cookieName, value: finished.login.issued.token, expiresAt: finished.login.issued.expiresAt, secure: isSecureRequest(request) }),
+          clearedSessionCookie({ name: oauthStateCookieName, secure: isSecureRequest(request) }),
+          clearedSessionCookie({ name: oauthIntentCookieName, secure: isSecureRequest(request) }),
+        ])
+        location = finished.login.returnTo ?? '/'
+      } else {
+        // 绑定不签发新会话：当前登录态原封不动，只回账号页并带上结果标记。
+        clearOauthCookies()
+        location = withQuery(finished.link.returnTo ?? '/settings', finished.link.alreadyBound ? { linked: 'google', already: '1' } : { linked: 'google' })
+      }
     } catch (error) {
-      // 浏览器流不能把 JSON 错误当页面：清掉 state 后回登录页，错误码由前端翻译成人话。
+      // 浏览器流不能把 JSON 错误当页面：清掉状态后回对应页面，错误码由前端翻译成人话。
       if (!(error instanceof AppError)) throw error
-      response.setHeader('Set-Cookie', [clearedSessionCookie({ name: oauthStateCookieName, secure: isSecureRequest(request) })])
-      location = `/?oauth_error=${encodeURIComponent(error.code ?? 'oauth_failed')}`
+      clearOauthCookies()
+      const failure = error.code ?? 'oauth_failed'
+      location = intentCookieValue === 'link' ? withQuery('/settings', { link_error: failure }) : withQuery('/', { oauth_error: failure })
     }
     // 302 而非 307：回调是 GET 且目标由服务端决定，不携带原始查询与授权码。
     response.writeHead(302, { Location: location, 'Cache-Control': 'no-store' })
@@ -219,6 +273,12 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<boolea
     // 重置会撤销全部会话：当前浏览器若有旧 Cookie 也一并清掉。
     response.setHeader('Set-Cookie', [clearedSessionCookie({ name: requireIdentity(context.identity).cookieName, secure: isSecureRequest(request) })])
     return respond(200, outcome)
+  }
+  // Ticket 06：确认改邮箱。用户从邮件链接进来时未登录也合法（链接本身就是凭证），
+  // 因此不做会话与 CSRF 判定，只靠一次性令牌成立，令牌一用即废。
+  if (method === 'POST' && path === '/auth/email/change/confirm') {
+    const input = await context.readBody() as { token?: unknown }
+    return respond(200, await requireSecurity(context.security).confirmEmailChange({ token: input.token }))
   }
   if (method === 'POST' && path === '/auth/session') {
     throw new AppError(410, '旧登录入口已退役：浏览器请使用 POST /auth/login', 'retired_endpoint')
@@ -276,6 +336,52 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<boolea
     if (target[1] === session.id) response.setHeader('Set-Cookie', [clearedSessionCookie({ name: identity.cookieName, secure: isSecureRequest(request) })])
     response.writeHead(204).end()
     return true
+  }
+  // Ticket 06：账号安全概览。解绑、改密码、改邮箱都要先知道当前绑了哪些登录方式。
+  if (method === 'GET' && path === '/auth/account/security') {
+    return respond(200, await requireSecurity(security).view(await identity.user(session.userId), session))
+  }
+  // Ticket 06：改密码需旧密码（或近期 Google 强认证）；改完撤销本人其它会话与 PAT，当前会话保留。
+  if (method === 'POST' && path === '/auth/password/change') {
+    assertCookieWriteAllowed(identity, request, session)
+    const input = await context.readBody() as { currentPassword?: unknown; newPassword?: unknown }
+    return respond(200, await requireSecurity(security).changePassword({
+      user: await identity.user(session.userId), session,
+      currentPassword: input.currentPassword, newPassword: input.newPassword,
+      throttleKeys: accountThrottleKeys(context, session),
+    }))
+  }
+  // Ticket 06：改邮箱只发确认链接，旧地址在确认前继续有效。
+  if (method === 'POST' && path === '/auth/email/change') {
+    assertCookieWriteAllowed(identity, request, session)
+    const input = await context.readBody() as { newEmail?: unknown; currentPassword?: unknown }
+    return respond(200, await requireSecurity(security).requestEmailChange({
+      user: await identity.user(session.userId), session,
+      newEmail: input.newEmail, currentPassword: input.currentPassword,
+      throttleKeys: accountThrottleKeys(context, session),
+    }))
+  }
+  // Ticket 08：发起绑定。与登录共用一套 state/nonce/PKCE，但事务记下发起会话，回调必须对得上。
+  if (method === 'POST' && path === '/auth/identities/google/start') {
+    assertCookieWriteAllowed(identity, request, session)
+    const input = await context.readBody() as { returnTo?: unknown }
+    const started = await requireGoogle(context.google).startLink({ userId: session.userId, sessionId: session.id, returnTo: input.returnTo })
+    response.setHeader('Set-Cookie', [
+      oauthStateCookie({ value: started.state, expiresAt: started.expiresAt, secure: isSecureRequest(request) }),
+      oauthIntentCookie({ value: 'link', expiresAt: started.expiresAt, secure: isSecureRequest(request) }),
+    ])
+    return respond(200, { authorizeUrl: started.authorizeUrl, expiresAt: started.expiresAt })
+  }
+  const loginMethodTarget = path.match(/^\/auth\/identities\/([^/]+)$/)
+  // Ticket 08：解绑。未绑密码时不允许解绑，否则账号会失去所有登录方式。
+  if (method === 'DELETE' && loginMethodTarget) {
+    assertCookieWriteAllowed(identity, request, session)
+    const input = await context.readBody() as { currentPassword?: unknown }
+    return respond(200, await requireSecurity(security).unbind({
+      user: await identity.user(session.userId), session,
+      methodId: decodeURIComponent(loginMethodTarget[1]!), currentPassword: input.currentPassword,
+      throttleKeys: accountThrottleKeys(context, session),
+    }))
   }
   throw new AppError(404, 'Route not found')
 }

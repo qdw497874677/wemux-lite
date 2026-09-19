@@ -146,8 +146,12 @@ export interface ServerIdentityWriter {
   saveUser(user: User): Promise<void>
   /** 占用主邮箱；邮箱已被其他账号占用时拒绝，不静默改派。 */
   saveUserEmail(record: UserEmail): Promise<void>
+  /** 释放主邮箱占用（邮箱变更后清理旧行）；不存在也视为成功。 */
+  deleteUserEmail(emailNormalized: string): Promise<void>
   saveTeam(team: Team): Promise<void>
   saveLocalAccountCredential(credential: LocalAccountCredential): Promise<void>
+  /** 移除本地密码（解绑最后一种密码登录方式）；不存在也视为成功，调用方已先校验剩余登录方式。 */
+  deleteLocalAccountCredential(userId: UserId): Promise<void>
   saveRegistrationAttempt(attempt: RegistrationAttempt): Promise<void>
   /** 待验证注册的终态迁移（verified/expired/superseded）；未注册记录拒绝。 */
   updateRegistrationAttempt(attempt: RegistrationAttempt): Promise<void>
@@ -173,8 +177,7 @@ export interface ServerIdentityWriter {
   revokeLoginSession(id: string, revokedAt: Timestamp): Promise<void>
   /** Revokes one user's active login sessions (logout-all and credential changes) and reports how many changed. */
   revokeLoginSessions(userId: UserId, revokedAt: Timestamp): Promise<number>
-  /** 写入管理员归属；同一用户重复写入必须是拒绝而不是静默改派。 */
-  saveInstanceAdministrator(record: InstanceAdministrator): Promise<void>
+  /** 写入管理员归属；同一用户重复写入必须是拒绝而不是静默改派。 */  saveInstanceAdministrator(record: InstanceAdministrator): Promise<void>
   saveEnrollmentToken(record: EnrollmentTokenRecord): Promise<void>
   consumeEnrollmentToken(input: {
     readonly tokenHash: string
@@ -187,6 +190,8 @@ export interface ServerIdentityWriter {
   saveLoginIdentity(identity: ExternalLoginIdentity): Promise<void>
   /** 只推进最近登录时间；绑定关系与创建时间不可变。 */
   touchLoginIdentity(input: { readonly id: string; readonly lastSignInAt: Timestamp }): Promise<void>
+  /** 解绑外部登录身份（Ticket 08）；不存在也视为成功，调用方已先校验剩余登录方式。 */
+  deleteLoginIdentity(id: string): Promise<void>
   /** 保存登录事务并顺带清理早已过期的旧事务，避免一次性材料无限堆积。 */
   saveOAuthTransaction(transaction: OAuthTransaction): Promise<void>
   /** 单次消费：不存在、已消费或已过期都返回 null，重放与跨浏览器 state 绝不复用。 */

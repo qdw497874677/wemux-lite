@@ -3,8 +3,8 @@ import { randomId } from '../lib/random.ts'
 import { readDeviceId } from '../lib/device-scope.ts'
 import type {
   ApprovalDecisionDTO, RuntimeCommandDTO, PatchSessionDTO, CommandResultDTO,
-  AccountPayloadDTO, AccountViewDTO, AcceptedEmailDTO, AuthOptionsDTO, CommandDTO, CreateEnrollmentTokenDTO, CreateProjectDTO,
-  CreateSessionDTO, CreateWorkspaceDTO, EnrollmentTokenDTO, EventsPageDTO, LoginSessionDTO, PasswordResetDTO, ProjectDTO,
+  AccountPayloadDTO, AccountViewDTO, AcceptedEmailDTO, AccountSecurityViewDTO, AuthOptionsDTO, CommandDTO, CreateEnrollmentTokenDTO, CreateProjectDTO,
+  CreateSessionDTO, CreateWorkspaceDTO, EmailChangeAcceptedDTO, EmailChangeConfirmedDTO, EnrollmentTokenDTO, EventsPageDTO, GoogleLinkStartDTO, LoginMethodUnboundDTO, LoginSessionDTO, PasswordChangeDTO, PasswordResetDTO, ProjectDTO,
   RegistrationPolicyDTO, RegistrationPolicyViewDTO, SendMessageDTO, SendResultDTO, SessionDTO, SessionResourceDTO, ServerEventsPageDTO, TailnetInfoDTO, VerifiedEmailDTO, WorkerDTO, WorkspaceDTO,
 } from './dto'
 
@@ -28,6 +28,13 @@ export const routes = {
   authVerifyEmail: '/api/auth/email/verify',
   authForgotPassword: '/api/auth/password/forgot',
   authResetPassword: '/api/auth/password/reset',
+  // Ticket 06/08：账号安全面板用到的入口，全部需要 Cookie 会话与 CSRF 令牌。
+  authPasswordChange: '/api/auth/password/change',
+  authEmailChange: '/api/auth/email/change',
+  authEmailChangeConfirm: '/api/auth/email/change/confirm',
+  authGoogleLinkStart: '/api/auth/identities/google/start',
+  authIdentity: (methodId: string) => `/api/auth/identities/${id(methodId)}`,
+  accountSecurity: '/api/auth/account/security',
   registrationPolicy: '/api/settings/registration-policy',
   loginSessions: '/api/auth/sessions',
   loginSession: (sessionId: string) => `/api/auth/sessions/${id(sessionId)}`,
@@ -183,6 +190,15 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     },
     forgotPassword: (email: string) => request<AcceptedEmailDTO>(routes.authForgotPassword, { email }),
     resetPassword: (token: string, password: string) => request<PasswordResetDTO>(routes.authResetPassword, { token, password }),
+    // 账号安全（Ticket 06/08）。改密码、改邮箱与解绑都要求旧密码或近期强认证，服务端把关，前端只负责不隐藏入口。
+    accountSecurity: (signal?: AbortSignal) => request<AccountSecurityViewDTO>(routes.accountSecurity, undefined, signal),
+    changePassword: (body: { currentPassword?: string; newPassword: string }) => request<PasswordChangeDTO>(routes.authPasswordChange, body),
+    requestEmailChange: (body: { newEmail: string; currentPassword?: string }) => request<EmailChangeAcceptedDTO>(routes.authEmailChange, body),
+    // 确认链接在未登录的浏览器里也可能被打开：这是公开路由，成功即已换好邮箱，不再签发新会话。
+    confirmEmailChange: (token: string) => request<EmailChangeConfirmedDTO>(routes.authEmailChangeConfirm, { token }),
+    // 绑定用整页跳转（与登录同一套 state/nonce/PKCE），回调把结果写回地址栏。
+    startGoogleLink: (returnTo?: string) => request<GoogleLinkStartDTO>(routes.authGoogleLinkStart, returnTo ? { returnTo } : {}),
+    unbindLoginMethod: (methodId: string, body: { currentPassword?: string }) => request<LoginMethodUnboundDTO>(routes.authIdentity(methodId), body, undefined, 'DELETE'),
     registrationPolicy: (signal?: AbortSignal) => request<RegistrationPolicyViewDTO>(routes.registrationPolicy, undefined, signal),
     setRegistrationPolicy: (policy: RegistrationPolicyDTO) => request<RegistrationPolicyViewDTO>(routes.registrationPolicy, { policy }, undefined, 'PATCH'),
     logoutAll: async () => { const result = await request<{ revoked: number }>(routes.authLogoutAll, {}); csrfToken = ''; return result },

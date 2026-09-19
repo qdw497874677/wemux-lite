@@ -97,6 +97,13 @@ export interface GoogleFinish {
   readonly returnTo: string | null
 }
 
+/** 绑定回调结果：不签发新会话，只带回绑定行与「本来就绑着」标记。 */
+export interface GoogleLinkFinish {
+  readonly identity: ExternalLoginIdentity
+  readonly alreadyBound: boolean
+  readonly returnTo: string | null
+}
+
 export class GoogleAuthenticationService {
   private readonly clock: Clock
   private readonly verifier: GoogleTokenVerifier
@@ -164,16 +171,36 @@ export class GoogleAuthenticationService {
     return { authorizeUrl: `${googleAuthorizeEndpoint}?${query.toString()}`, state, expiresAt }
   }
 
-  private async loadTransaction(state: unknown, cookieState: unknown): Promise<{ id: string; stateHash: string; nonce: string; codeVerifier: string; returnTo: string | null; issuer: string }> {
+  private async loadTransaction(state: unknown, cookieState: unknown, expectedIntent: 'login' | 'link' | null): Promise<{ id: string; stateHash: string; nonce: string; codeVerifier: string; returnTo: string | null; issuer: string; intent: 'login' | 'link'; userId: UserId | null; sessionId: string | null }> {
     if (typeof state !== 'string' || state.length === 0 || state.length > 200) throw new AppError(400, '登录状态缺失或无效，请重新发起 Google 登录', 'invalid_state')
     // state 必须来自发起它的浏览器：只有拿到同一个 Cookie 才能继续，避免把回调塞给别人的浏览器。
     if (typeof cookieState !== 'string' || cookieState !== state) throw new AppError(400, '登录状态与发起浏览器不匹配，请在同一个浏览器里重新发起 Google 登录', 'state_mismatch')
     const transaction = await this.input.store.identity.findOAuthTransactionByStateHash(hashSecret(state))
     if (!transaction) throw new AppError(400, '登录状态无效或已过期，请重新发起 Google 登录', 'invalid_state')
-    if (transaction.intent !== 'login') throw new AppError(409, '该登录状态不属于登录流程，请重新发起', 'intent_mismatch')
+    if (expectedIntent !== null && transaction.intent !== expectedIntent) throw new AppError(409, expectedIntent === 'link' ? '该登录状态不属于绑定流程，请重新发起绑定' : '该登录状态不属于登录流程，请重新发起', 'intent_mismatch')
     if (transaction.consumedAt !== null) throw new AppError(409, '该登录状态已被使用，请重新发起 Google 登录', 'state_replayed')
     if (Date.parse(transaction.expiresAt) <= this.clock.now().getTime()) throw new AppError(410, '登录状态已过期，请重新发起 Google 登录', 'state_expired')
-    return { id: transaction.id, stateHash: transaction.stateHash, nonce: transaction.nonce, codeVerifier: transaction.codeVerifier, returnTo: transaction.returnTo, issuer: transaction.issuer }
+    return { id: transaction.id, stateHash: transaction.stateHash, nonce: transaction.nonce, codeVerifier: transaction.codeVerifier, returnTo: transaction.returnTo, issuer: transaction.issuer, intent: transaction.intent, userId: transaction.userId, sessionId: transaction.sessionId }
+  }
+
+  /**
+   * 回调总入口：同一地址既处理登录也处理绑定，先看事务意图再分发。
+   * 让路由层自己猜意图的话，以后新增一种意图就要在两处同步改判断，早晚会漏一处。
+   */
+  async callback(input: { readonly code?: unknown; readonly state?: unknown; readonly cookieState?: unknown; readonly client?: string; readonly session: LoginSession | null }): Promise<{ readonly kind: 'login'; readonly login: GoogleFinish } | { readonly kind: 'link'; readonly link: GoogleLinkFinish }> {
+    if (await this.intentOf(input.state, input.cookieState) === 'link') {
+      return { kind: 'link', link: await this.finishLink(input) }
+    }
+    return { kind: 'login', login: await this.finish({ ...input, supersede: input.session }) }
+  }
+
+  /** 只读意图探测：真正的校验仍由 finish/finishLink 做，探测失败一律当作登录流（错误文案更通用）。 */
+  private async intentOf(state: unknown, cookieState: unknown): Promise<'login' | 'link'> {
+    try {
+      return (await this.loadTransaction(state, cookieState, null)).intent
+    } catch {
+      return 'login'
+    }
   }
 
   /**
@@ -182,7 +209,7 @@ export class GoogleAuthenticationService {
    */
   async finish(input: { readonly code?: unknown; readonly state?: unknown; readonly cookieState?: unknown; readonly client?: string; readonly supersede?: LoginSession | null }): Promise<GoogleFinish> {
     const provider = this.provider()
-    const transaction = await this.loadTransaction(input.state, input.cookieState)
+    const transaction = await this.loadTransaction(input.state, input.cookieState, 'login')
     const code = input.code
     if (typeof code !== 'string' || code.length === 0 || code.length > 4096) throw new AppError(400, '缺少 Google 授权码，请重新发起登录', 'invalid_request')
     let claims: GoogleIdentityClaims
@@ -210,6 +237,128 @@ export class GoogleAuthenticationService {
     }
     const issued = await this.resolveAccount({ claims, client: input.client, supersede: input.supersede ?? null, returnTo: transaction.returnTo, consumedAt })
     return issued
+  }
+
+  /**
+   * 发起绑定（Ticket 08 ②）：与登录同一套 state/nonce/PKCE，但事务记下发起账号与会话。
+   * 回调必须来自同一个会话，否则一次误点就能把别人的 Google 身份绑到自己账号上。
+   */
+  async startLink(input: { readonly userId: UserId; readonly sessionId: string; readonly returnTo?: unknown }): Promise<GoogleStart> {
+    const provider = this.provider()
+    const at = this.clock.now()
+    const state = randomBytes(32).toString('base64url')
+    const nonce = randomBytes(16).toString('base64url')
+    const codeVerifier = randomBytes(32).toString('base64url')
+    const expiresAt = new Date(at.getTime() + this.transactionMs).toISOString() as Timestamp
+    // 没传 returnTo 时回到全局设置页：账号安全面板就在这里，而 `/account` 并不是可路由地址。
+    const returnTo = safeReturnTo(input.returnTo) ?? '/settings'
+    const transaction = {
+      id: randomUUID(),
+      provider: 'google' as const,
+      issuer: provider.issuer,
+      stateHash: hashSecret(state),
+      nonce,
+      codeVerifier,
+      intent: 'link' as const,
+      userId: input.userId,
+      sessionId: input.sessionId,
+      returnTo,
+      createdAt: at.toISOString() as Timestamp,
+      expiresAt,
+      consumedAt: null,
+    }
+    await this.input.store.transaction(async tx => {
+      await tx.identity.saveOAuthTransaction(transaction)
+      await tx.audit.append({
+        id: randomUUID() as AuditEntryId, actorId: input.userId, action: 'credentials.login_method_bind_started',
+        resource: { kind: 'user', id: input.userId }, result: 'succeeded', occurredAt: transaction.createdAt,
+        metadata: { provider: 'google', intent: 'link' },
+      })
+    })
+    const query = new URLSearchParams({
+      client_id: provider.clientId,
+      redirect_uri: provider.redirectUri,
+      response_type: 'code',
+      scope: googleScopes,
+      state,
+      nonce,
+      code_challenge: createHash('sha256').update(codeVerifier).digest('base64url'),
+      code_challenge_method: 'S256',
+      prompt: 'select_account',
+    })
+    return { authorizeUrl: `${googleAuthorizeEndpoint}?${query.toString()}`, state, expiresAt }
+  }
+
+  /**
+   * 绑定回调：验证 ID token → 校验发起会话 → 单次消费 state → 落库绑定行。
+   * 已绑到自己账号视为成功（幂等），已绑到别的账号一律 409，绝不静默抢绑。
+   */
+  async finishLink(input: { readonly code?: unknown; readonly state?: unknown; readonly cookieState?: unknown; readonly session: LoginSession | null }): Promise<GoogleLinkFinish> {
+    const provider = this.provider()
+    const transaction = await this.loadTransaction(input.state, input.cookieState, 'link')
+    // 发起时的会话必须还活着且仍是同一个账号：退出登录、换账号、换浏览器都不能继续这次绑定。
+    if (!input.session) throw new AppError(401, '绑定必须在发起它的已登录浏览器里完成，请重新登录后再试', 'session_required')
+    if (transaction.userId === null || transaction.sessionId === null || input.session.id !== transaction.sessionId || input.session.userId !== transaction.userId) {
+      await this.note('credentials.login_method_bind_rejected', { provider: 'google', reason: 'session_mismatch' }, transaction.userId)
+      throw new AppError(409, '绑定请求来自另一个会话或账号，请在发起绑定的那个浏览器里完成', 'session_mismatch')
+    }
+    const code = input.code
+    if (typeof code !== 'string' || code.length === 0 || code.length > 4096) throw new AppError(400, '缺少 Google 授权码，请重新发起绑定', 'invalid_request')
+    let claims: GoogleIdentityClaims
+    try {
+      claims = await this.verifier.verify({
+        code,
+        redirectUri: provider.redirectUri,
+        codeVerifier: transaction.codeVerifier,
+        expectedNonce: transaction.nonce,
+        expectedIssuer: provider.issuer,
+        clientId: provider.clientId,
+        clientSecret: provider.clientSecret,
+      })
+    } catch (error) {
+      const reason = error instanceof Error ? error.message.slice(0, 200) : String(error)
+      await this.note('credentials.login_method_bind_failed', { provider: 'google', reason, stage: error instanceof GoogleExchangeError ? 'token_exchange' : error instanceof GoogleVerificationError ? 'id_token' : 'unknown' }, transaction.userId)
+      if (error instanceof GoogleExchangeError) throw new AppError(502, 'Google 令牌交换失败，本次绑定已中止；请稍后重新发起', 'google_unavailable')
+      // 400 而不是 401：发起绑定的会话是好的，错的是这次回传的身份凭据；
+      // 401 会被 Web 的全局拦截当成“会话失效”把用户登出。
+      throw new AppError(400, 'Google 身份校验失败，本次绑定已中止；请重新发起', 'google_verification_failed')
+    }
+    const consumedAt = this.clock.now().toISOString() as Timestamp
+    if (!(await this.input.store.transaction(tx => tx.identity.consumeOAuthTransaction({ stateHash: transaction.stateHash, consumedAt })))) {
+      throw new AppError(409, '该绑定状态已被使用，请重新发起', 'state_replayed')
+    }
+    const issuer = normalizeGoogleIssuer(claims.issuer)
+    const existing = await this.input.store.identity.findLoginIdentity('google', issuer, claims.subject)
+    if (existing && existing.userId !== transaction.userId) {
+      await this.note('credentials.login_method_bind_rejected', { provider: 'google', reason: 'identity_taken', identityId: existing.id }, transaction.userId)
+      throw new AppError(409, '该 Google 账号已经绑定到本实例的另一个账号；请先在那个账号上解绑', 'identity_taken')
+    }
+    if (existing) {
+      await this.note('credentials.login_method_bind_skipped', { provider: 'google', reason: 'already_bound', identityId: existing.id }, transaction.userId)
+      return { identity: existing, alreadyBound: true, returnTo: transaction.returnTo }
+    }
+    const identity: ExternalLoginIdentity = {
+      id: randomUUID(), provider: 'google', issuer, subject: claims.subject, userId: transaction.userId,
+      emailAtSignIn: claims.email, emailVerified: claims.emailVerified, createdAt: consumedAt, lastSignInAt: consumedAt,
+    }
+    try {
+      await this.input.store.transaction(async tx => {
+        await tx.identity.saveLoginIdentity(identity)
+        await tx.audit.append({
+          id: randomUUID() as AuditEntryId, actorId: transaction.userId, action: 'credentials.login_method_bound',
+          resource: { kind: 'user', id: transaction.userId! }, result: 'succeeded', occurredAt: consumedAt,
+          metadata: { provider: 'google', identityId: identity.id, email: claims.email ? maskEmail(claims.email) : null, emailAuthority: isGoogleAuthoritativeEmail(claims) ? 'site_verified' : 'provider_claim' },
+        })
+      })
+    } catch (error) {
+      // 并发绑定：另一请求先落库，这里按既成事实返回，不产生第二行。
+      if (error instanceof AppError && error.status === 409 && String(error.message).includes('登录身份')) {
+        const raced = await this.input.store.identity.findLoginIdentity('google', issuer, claims.subject)
+        if (raced && raced.userId === transaction.userId) return { identity: raced, alreadyBound: true, returnTo: transaction.returnTo }
+      }
+      throw error
+    }
+    return { identity, alreadyBound: false, returnTo: transaction.returnTo }
   }
 
   private async resolveAccount(input: { readonly claims: GoogleIdentityClaims; readonly client?: string; readonly supersede: LoginSession | null; readonly returnTo: string | null; readonly consumedAt: Timestamp }): Promise<GoogleFinish> {

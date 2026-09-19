@@ -9,7 +9,7 @@ export function useTaskNavigationGuard(dirty: RefObject<boolean>) {
   })
 }
 
-export const paths = ['/', '/projects', '/projects/$projectId', '/projects/$projectId/overview', '/projects/$projectId/board', '/projects/$projectId/tasks', '/projects/$projectId/tasks/$taskId', '/projects/$projectId/activity', '/projects/$projectId/settings', '/projects/$projectId/workspaces', '/projects/$projectId/workspaces/$workspaceId', '/projects/$projectId/sessions', '/projects/$projectId/sessions/$sessionId', '/runtime', '/runtimes', '/cluster', '/components', '/settings', '/auth/verify-email', '/auth/password/reset'] as const
+export const paths = ['/', '/projects', '/projects/$projectId', '/projects/$projectId/overview', '/projects/$projectId/board', '/projects/$projectId/tasks', '/projects/$projectId/tasks/$taskId', '/projects/$projectId/activity', '/projects/$projectId/settings', '/projects/$projectId/workspaces', '/projects/$projectId/workspaces/$workspaceId', '/projects/$projectId/sessions', '/projects/$projectId/sessions/$sessionId', '/runtime', '/runtimes', '/cluster', '/components', '/settings', '/auth/verify-email', '/auth/password/reset', '/auth/confirm-email-change'] as const
 export function makeRouter(component: () => React.ReactNode, page: () => React.ReactNode) {
   const root = createRootRoute({ component, errorComponent: () => <p role="alert">链接无效。<a href="/projects">返回项目列表</a></p>, notFoundComponent: () => <p role="alert">链接不存在。<a href="/projects">返回项目列表</a></p> })
   const layout = createRoute({ getParentRoute: () => root, id: 'workbench', component: page })

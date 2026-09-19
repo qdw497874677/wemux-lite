@@ -371,7 +371,10 @@ export class EmailRegistrationService {
       const user = await tx.identity.getUser(challenge.userId!)
       if (!user) throw new AppError(400, '重置链接无效', 'invalid_token')
       await tx.identity.saveLocalAccountCredential({ userId: user.id, passwordHash, updatedAt: at })
-      await tx.identity.consumeVerificationChallenge({ tokenHash: challenge.tokenHash, consumedAt: at })
+      // 单次消费要显式判定：并发重放的两个请求只有一个能改密码，另一个必须整笔回滚。
+      if (!(await tx.identity.consumeVerificationChallenge({ tokenHash: challenge.tokenHash, consumedAt: at }))) {
+        throw new AppError(409, '该链接刚刚已被使用；如需继续，请重新发起找回密码', 'token_consumed')
+      }
       revokedSessions = await tx.identity.revokeLoginSessions(user.id, at)
       revokedTokens = await tx.identity.revokePersonalAccessTokens(user.id, at)
       await tx.audit.append({

@@ -19,6 +19,7 @@ import { assertCookieWriteAllowed, handleAuthRoute } from './routes-auth.js'
 import type { IdentityService } from '../application/identity-service.js'
 import type { EmailRegistrationService } from '../application/email-registration.js'
 import type { GoogleAuthenticationService } from '../application/google-authentication.js'
+import type { AccountSecurityService } from '../application/account-security-service.js'
 import type { InstanceSettingsService } from '../application/instance-settings.js'
 import type { SessionLineageService } from '../application/session-lineage-service.js'
 import { readCookie } from './cookies.js'
@@ -42,7 +43,7 @@ function json(response: ServerResponse, status: number, data: unknown): void {
 
 export interface WorkerControl { disconnectWorker(workerId: import('@wemux/domain').WorkerId): void }
 
-export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, _adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams, identity?: IdentityService | null, registration?: EmailRegistrationService | null, settings?: InstanceSettingsService | null, google?: GoogleAuthenticationService | null, lineage?: SessionLineageService | null) {
+export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, _adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams, identity?: IdentityService | null, registration?: EmailRegistrationService | null, settings?: InstanceSettingsService | null, google?: GoogleAuthenticationService | null, lineage?: SessionLineageService | null, security?: AccountSecurityService | null) {
   return (request: IncomingMessage, response: ServerResponse): void => {
     void (async () => {
       const url = new URL(request.url ?? '/', 'http://localhost'), rawPath = url.pathname === '/' ? '/' : url.pathname.replace(/\/$/, '')
@@ -89,7 +90,7 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
       const resolved = identity ? await identity.resolveSession(readCookie(request.headers.cookie, identity.cookieName)) : null
       const loginSession = resolved && identity ? await identity.touch(resolved) : null
       const credential: RequestCredential = { bearer, loginSession }
-      if (await handleAuthRoute({ request, response, path, method, readBody: () => body(request), auth, identity: identity ?? null, service, loginSession, bearer, registration, settings, google })) return
+      if (await handleAuthRoute({ request, response, path, method, readBody: () => body(request), auth, identity: identity ?? null, service, loginSession, bearer, registration, settings, google, security })) return
       const unsafe = method !== 'GET' && method !== 'HEAD'
       if (unsafe && loginSession) assertCookieWriteAllowed(identity ?? null, request, loginSession)
       const projectEvents = path.match(/^\/projects\/([^/]+)\/events$/)

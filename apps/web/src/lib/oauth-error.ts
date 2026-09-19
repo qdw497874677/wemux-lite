@@ -30,6 +30,50 @@ export function readOauthError(search: string): string | null {
   return oauthErrorText(code)
 }
 
+/**
+ * 绑定流程专用措辞：同一条回调链路，但用户此刻已经登录，说“登录”会让人以为把账号弄丢了。
+ * 登录侧已有的映射不重复写，靠下面的回退共享。
+ */
+const linkMessages: Record<string, string> = {
+  session_required: '绑定必须在发起它的已登录浏览器里完成。请重新登录后再点绑定。',
+  session_mismatch: '这次绑定是在另一个会话或账号里发起的，换回原来的窗口重试。',
+  identity_taken: '这个 Google 账号已经绑定到本实例的另一个账号；先在那个账号上解绑，或换一个 Google 账号。',
+  intent_mismatch: '这次跳转不属于绑定流程，请重新点击「绑定 Google 登录」。',
+}
+
+/** 绑定回调的结果码转人话；未知码也给下一步（Ticket 08）。 */
+export function linkErrorText(code: string | null | undefined): string | null {
+  if (typeof code !== 'string' || code.length === 0) return null
+  return linkMessages[code] ?? messages[code] ?? 'Google 绑定未完成，请重试。'
+}
+
+/** 从查询串读取 `link_error`（绑定失败）。 */
+export function readLinkError(search: string): string | null {
+  return linkErrorText(new URLSearchParams(search.startsWith('?') ? search : `?${search}`).get('link_error'))
+}
+
+/**
+ * 从查询串读取绑定成功标记。`already=1` 是幂等语义：点两次绑定不该被当成出错。
+ * 返回空串表示没有绑定结果，调用方不渲染横幅。
+ */
+export function readLinkNotice(search: string): string {
+  const query = new URLSearchParams(search.startsWith('?') ? search : `?${search}`)
+  if (query.get('linked') !== 'google') return ''
+  return query.get('already') === '1'
+    ? '这个 Google 账号本来就绑定在当前账号上，没有重复绑定。'
+    : 'Google 登录已绑定：现在可以用它登录这个账号。'
+}
+
+/** 去掉绑定结果参数后的地址：提示只展示一次，刷新不再复现，也不会被误分享出去。 */
+export function withoutLinkParams(pathname: string, search: string): string {
+  const query = new URLSearchParams(search.startsWith('?') ? search : `?${search}`)
+  query.delete('linked')
+  query.delete('already')
+  query.delete('link_error')
+  const rest = query.toString()
+  return rest.length === 0 ? pathname : `${pathname}?${rest}`
+}
+
 /** 去掉 `oauth_error` 后的地址：错误提示只展示一次，刷新页面不再复现。 */
 export function withoutOauthError(pathname: string, search: string): string {
   const query = new URLSearchParams(search.startsWith('?') ? search : `?${search}`)

@@ -98,8 +98,8 @@ export interface RegistrationAttempt {
   readonly userId: UserId | null
 }
 
-/** 用途不可互换：验证邮件挑战不能当成密码重置凭据使用。 */
-export type VerificationPurpose = 'verify_email' | 'reset_password'
+/** 用途不可互换：验证邮件挑战不能当成密码重置或邮箱变更凭据使用。 */
+export type VerificationPurpose = 'verify_email' | 'reset_password' | 'change_email'
 
 /** 只保存令牌哈希；明文只在邮件链接中出现一次。 */
 export interface VerificationChallenge {
@@ -111,6 +111,11 @@ export interface VerificationChallenge {
   readonly registrationId: string | null
   /** 已有账号挑战（找回、邮箱变更）的归属；与 `registrationId` 互斥。 */
   readonly userId: UserId | null
+  /**
+   * 邮箱变更挑战发起时的主邮箱。消费时若账号主邮箱已不是它，说明期间又发生了变更，
+   * 该链接必须作废重发，绝不用一个旧链接覆盖更新的归属（Ticket 06）。
+   */
+  readonly previousEmail?: string | null
   readonly createdAt: Timestamp
   readonly expiresAt: Timestamp
   readonly consumedAt: Timestamp | null

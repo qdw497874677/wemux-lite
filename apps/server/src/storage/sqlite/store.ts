@@ -338,6 +338,8 @@ export class SqliteServerStore implements ServerStore {
           throw error
         }
       },
+      // 释放旧主邮箱：变更成功后新行已占位，旧行必须同事务删除，否则一个账号会留下两个“主邮箱”。
+      deleteUserEmail: async emailNormalized => { this.db.prepare('DELETE FROM user_emails WHERE email_normalized=?').run(emailNormalized) },
       saveRegistrationAttempt: async r => {
         try {
           this.db.prepare('INSERT INTO registration_attempts(id,email_normalized,status,created_at,expires_at,consumed_at,data) VALUES(?,?,?,?,?,?,?)').run(r.id, r.emailNormalized, r.status, r.createdAt, r.expiresAt, r.consumedAt, JSON.stringify(r))
@@ -368,6 +370,8 @@ export class SqliteServerStore implements ServerStore {
       },
       saveTeam: async r => this.put('team', r.id, r),
       saveLocalAccountCredential: async r => this.put('local-credential', r.userId, r),
+      // 移除密码登录方式：records 行删掉即是权威消失，不保留“空哈希”这种可以冒充凭据的行。
+      deleteLocalAccountCredential: async userId => this.remove('local-credential', userId),
       saveMembership: async r => this.put('membership', `${r.teamId}:${r.userId}`, r),
       removeMembership: async (team, user) => this.remove('membership', `${team}:${user}`),
       saveWorkerGrant: async r => this.put('worker-grant', `${r.workerId}:${r.userId}`, r),
@@ -449,6 +453,8 @@ export class SqliteServerStore implements ServerStore {
         if (!identity) throw new AppError(404, 'Unknown login identity')
         this.db.prepare('UPDATE login_identities SET last_sign_in_at=?,data=? WHERE id=?').run(input.lastSignInAt, JSON.stringify({ ...identity, lastSignInAt: input.lastSignInAt }), input.id)
       },
+      // 解绑身份：绑定行的唯一权威就是这一行，删除后无法再用该 (issuer, subject) 登录。
+      deleteLoginIdentity: async id => { this.db.prepare('DELETE FROM login_identities WHERE id=?').run(id) },
       saveOAuthTransaction: async transaction => {
         // 一次性材料只活几分钟：保存时顺手清理早已过期的旧行，避免无上限堆积。
         this.db.prepare("DELETE FROM oauth_transactions WHERE julianday(expires_at) < julianday(?, '-1 day')").run(transaction.createdAt)

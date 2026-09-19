@@ -7,6 +7,7 @@ import { AdministratorDirectory, parseAdministratorEmails } from './application/
 import { IdentityService, defaultLoginSessionPolicy, defaultSessionCookieName, systemClock } from './application/identity-service.js'
 import { InstanceSettingsService } from './application/instance-settings.js'
 import { EmailRegistrationService } from './application/email-registration.js'
+import { AccountSecurityService } from './application/account-security-service.js'
 import { GoogleAuthenticationService, resolveGoogleSettings, type GoogleEnvironment } from './application/google-authentication.js'
 import type { GoogleTokenVerifier } from './application/google-oidc.js'
 import { resolveMailSettings, type MailEnv, type MailSettings } from './application/mail/email-delivery.js'
@@ -69,7 +70,9 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const store = new SqliteServerStore(options.databasePath, { presenceReset: true })
   const administrators = new AdministratorDirectory(store.identity, parseAdministratorEmails(options.administratorEmails ?? process.env.WEMUX_ADMIN_EMAILS))
   const auth = new AuthenticationService(store, administrators)
-  const identity = new IdentityService(store, administrators, systemClock, options.adminSessionTtlMs ? { ...defaultLoginSessionPolicy, idleMs: options.adminSessionTtlMs } : defaultLoginSessionPolicy, process.env.WEMUX_SESSION_COOKIE_NAME ?? defaultSessionCookieName)
+  // 浏览器会话策略只有一份：账号安全里的强认证窗口与撤销语义必须和登录态完全一致。
+  const sessionPolicy = options.adminSessionTtlMs ? { ...defaultLoginSessionPolicy, idleMs: options.adminSessionTtlMs } : defaultLoginSessionPolicy
+  const identity = new IdentityService(store, administrators, systemClock, sessionPolicy, process.env.WEMUX_SESSION_COOKIE_NAME ?? defaultSessionCookieName)
   const settings = new InstanceSettingsService(store, systemClock)
   const mail = resolveMailSafely(options.mail ?? {
     WEMUX_SMTP_URL: process.env.WEMUX_SMTP_URL,
@@ -85,6 +88,8 @@ export function createWemuxServer(options: WemuxServerOptions) {
     WEMUX_PUBLIC_URL: process.env.WEMUX_PUBLIC_URL,
   })
   const google = new GoogleAuthenticationService({ store, identity, settings, google: googleSettings.settings, reason: googleSettings.reason, verifier: options.googleVerifier })
+  // 账号安全（Ticket 06/08）与会话策略共用同一套参数：强认证窗口与撤销规则不允许有两份实现。
+  const security = new AccountSecurityService({ store, identity, mail: mail.settings, mailReason: mail.reason, sessionPolicy })
   const notifications = new Notifications()
   const capabilitySecret = options.capabilitySecret ?? process.env.WEMUX_CAPABILITY_SECRET ?? randomCapabilitySecret()
   const capabilities = new CapabilityService(store, now, new CapabilityTokenService(capabilitySecret, now))
@@ -94,7 +99,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const lineage = new SessionLineageService(store, service, administrators, undefined, notifications)
   const projectStreams = new ProjectStreams(notifications)
   let gateway: WorkerGateway | undefined
-  const server = createServer(httpHandler(service, auth, streams, capabilities, options.workerPackagePath ? { tarballPath: options.workerPackagePath } : undefined, { disconnectWorker: id => gateway?.disconnect(id) }, options.webStaticPath ? { root: options.webStaticPath } : undefined, options.adminSessionTtlMs, new TaskService(store, event => notifications.project(event), service), projectStreams, identity, registration, settings, google, lineage))
+  const server = createServer(httpHandler(service, auth, streams, capabilities, options.workerPackagePath ? { tarballPath: options.workerPackagePath } : undefined, { disconnectWorker: id => gateway?.disconnect(id) }, options.webStaticPath ? { root: options.webStaticPath } : undefined, options.adminSessionTtlMs, new TaskService(store, event => notifications.project(event), service), projectStreams, identity, registration, settings, google, lineage, security))
   const workers = new WorkerService(store, notifications)
   gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))
   let closed = false

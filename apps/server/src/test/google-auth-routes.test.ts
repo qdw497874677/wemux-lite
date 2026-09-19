@@ -5,123 +5,20 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createServer } from 'node:http'
-import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { SignJWT, exportJWK, generateKeyPair } from 'jose'
 import type { UserId } from '@wemux/domain'
 import { createWemuxServer } from '../server.js'
 import { administratorEmail, seedLocalAccount } from './fixtures/administrator.js'
 import { SqliteServerStore } from '../storage/sqlite/store.js'
 import { hashSecret } from '../application/auth.js'
-import { googleIssuer, createGoogleTokenVerifier } from '../application/google-oidc.js'
+import { googleIssuer } from '../application/google-oidc.js'
 import { googleCallbackPath } from '../application/google-authentication.js'
+import { browser, fakeGoogle, googleClientId as clientId, googleClientSecret as clientSecret, googleProviderSettings, handoff } from './fixtures/google-provider.js'
 
-const clientId = 'wemux-test-client.apps.googleusercontent.com'
-const clientSecret = 'test-client-secret'
 const sessionCookie = 'wemux_login_session'
 const stateCookie = 'wemux_oauth_state'
-
-/** 替身 Google：/jwks 提供公钥，/token 做真实 PKCE 校验后换取签好名的 ID token。 */
-async function fakeGoogle() {
-  const { publicKey, privateKey } = await generateKeyPair('RS256')
-  const jwk = { ...await exportJWK(publicKey), kid: 'fake-google-key', alg: 'RS256', use: 'sig' }
-  const pending: { codeChallenge?: string; nonce?: string; redirectUri?: string; verifier?: string } = {}
-  let behavior: 'ok' | 'http-500' | 'bad-audience' | 'bad-nonce' = 'ok'
-  const server = createServer((request, response) => {
-    const send = (status: number, data: unknown): void => {
-      response.writeHead(status, { 'Content-Type': 'application/json' })
-      response.end(JSON.stringify(data))
-    }
-    if (request.method === 'GET' && request.url === '/jwks') return send(200, { keys: [jwk] })
-    if (request.method !== 'POST' || request.url !== '/token') return send(404, {})
-    const chunks: Buffer[] = []
-    request.on('data', chunk => chunks.push(Buffer.from(chunk)))
-    request.on('end', () => {
-      const form = new URLSearchParams(Buffer.concat(chunks).toString('utf8'))
-      void (async () => {
-        if (behavior === 'http-500') return send(500, { error: 'server_error' })
-        assert.equal(form.get('client_id'), clientId)
-        assert.equal(form.get('client_secret'), clientSecret)
-        assert.equal(form.get('grant_type'), 'authorization_code')
-        assert.equal(form.get('redirect_uri'), pending.redirectUri)
-        assert.equal(form.get('code'), 'authorization-code')
-        // 真实的 PKCE 校验：收到的 code_verifier 必须还原出授权请求里的 challenge。
-        pending.verifier = form.get('code_verifier') ?? ''
-        assert.equal(createHash('sha256').update(pending.verifier).digest('base64url'), pending.codeChallenge)
-        const now = Math.floor(Date.now() / 1000)
-        const token = await new SignJWT({
-          iss: `https://${googleIssuer}`, aud: behavior === 'bad-audience' ? 'other-client' : clientId, azp: clientId,
-          sub: 'google-subject-1', email: 'ada@example.com', email_verified: true, name: 'Ada Lovelace',
-          hd: 'example.com', nonce: behavior === 'bad-nonce' ? 'not-the-nonce' : pending.nonce, iat: now, exp: now + 600,
-        }).setProtectedHeader({ alg: 'RS256', kid: 'fake-google-key', typ: 'JWT' }).sign(privateKey)
-        send(200, { access_token: 'fake-access-token-1', id_token: token })
-      })().catch(error => send(400, { error: String(error) }))
-    })
-  })
-  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
-  const port = (server.address() as { port: number }).port
-  return {
-    jwksUri: `http://127.0.0.1:${port}/jwks`, tokenEndpoint: `http://127.0.0.1:${port}/token`,
-    setBehavior: (next: typeof behavior): void => { behavior = next },
-    setAuthorization: (input: { codeChallenge: string; nonce: string; redirectUri: string }): void => { Object.assign(pending, input) },
-    close: () => new Promise<void>(resolve => server.close(() => resolve())),
-  }
-}
-
-interface CallOptions {
-  readonly method?: string
-  readonly body?: unknown
-  readonly bearer?: string
-  readonly csrf?: string | null
-  readonly origin?: string | null
-  readonly cookie?: string | null
-  readonly accept?: string
-}
-
-/** 最小浏览器：显式管理 Cookie，手动跟随 302，便于断言中间跳转与清除行为。 */
-function browser(base: string) {
-  const jar = new Map<string, string>()
-  let csrf = ''
-  const cookieHeader = (override?: string | null): string | undefined => {
-    if (override !== undefined) return override ?? undefined
-    return jar.size === 0 ? undefined : [...jar].map(([name, value]) => `${name}=${value}`).join('; ')
-  }
-  const call = async (path: string, init: CallOptions = {}) => {
-    const headers: Record<string, string> = { Accept: init.accept ?? 'application/json' }
-    const cookie = cookieHeader(init.cookie)
-    if (cookie) headers.Cookie = cookie
-    if (init.bearer) headers.Authorization = `Bearer ${init.bearer}`
-    const token = init.csrf === undefined ? csrf : init.csrf
-    if (token) headers['X-CSRF-Token'] = token
-    if (init.origin !== null) headers.Origin = init.origin ?? base
-    const response = await fetch(`${base}${path}`, {
-      method: init.method ?? (init.body === undefined ? 'GET' : 'POST'), redirect: 'manual',
-      headers, ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
-    })
-    for (const raw of response.headers.getSetCookie()) {
-      const [pair, ...attributes] = raw.split(';')
-      const separator = pair!.indexOf('=')
-      const name = pair!.slice(0, separator).trim(), value = pair!.slice(separator + 1).trim()
-      if (value.length === 0 || attributes.some(attribute => attribute.trim().toLowerCase() === 'max-age=0')) jar.delete(name)
-      else jar.set(name, decodeURIComponent(value))
-    }
-    const text = await response.text()
-    let data: unknown = null
-    try { data = text.length === 0 ? null : JSON.parse(text) } catch { data = null }
-    if (data && typeof data === 'object' && typeof (data as { csrfToken?: unknown }).csrfToken === 'string') csrf = (data as { csrfToken: string }).csrfToken
-    return { status: response.status, headers: response.headers, location: response.headers.get('location'), data, text }
-  }
-  return {
-    call,
-    cookie: (name: string): string | undefined => jar.get(name),
-    get: (path: string, init: CallOptions = {}) => call(path, { ...init, method: 'GET' }),
-    post: (path: string, body: unknown, init: CallOptions = {}) => call(path, { ...init, method: 'POST', body }),
-    errorCode: (response: { data: unknown }): string | undefined => (response.data as { error?: { code?: string } } | null)?.error?.code,
-  }
-}
 
 async function fixture(t: { after: (fn: () => Promise<void> | void) => void }, options: { google?: boolean; webStaticPath?: string; administratorEmails?: readonly string[] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'wemux-google-'))
@@ -129,10 +26,7 @@ async function fixture(t: { after: (fn: () => Promise<void> | void) => void }, o
   const provider = options.google === false ? null : await fakeGoogle()
   const app = createWemuxServer({
     databasePath, administratorEmails: options.administratorEmails ?? [administratorEmail], ...(options.webStaticPath ? { webStaticPath: options.webStaticPath } : {}),
-    ...(provider ? {
-      google: { WEMUX_GOOGLE_CLIENT_ID: clientId, WEMUX_GOOGLE_CLIENT_SECRET: clientSecret, WEMUX_PUBLIC_URL: 'http://localhost:4100' },
-      googleVerifier: createGoogleTokenVerifier({ tokenEndpoint: provider.tokenEndpoint, jwksUri: provider.jwksUri }),
-    } : {}),
+    ...(provider ? googleProviderSettings(provider, 'http://localhost:4100') : {}),
   })
   const base = await app.listen(0, '127.0.0.1')
   // 只读的第二连接：用于断言真实的落库结果，而不是只信 HTTP 表面。
@@ -144,13 +38,6 @@ async function fixture(t: { after: (fn: () => Promise<void> | void) => void }, o
     await rm(directory, { recursive: true, force: true })
   })
   return { app, store, base, provider, browser: browser(base) }
-}
-
-/** 模拟 Google 收到授权请求：把 challenge/nonce/redirect_uri 交给替身 Provider。 */
-function handoff(provider: Awaited<ReturnType<typeof fakeGoogle>>, authorizeUrl: string) {
-  const query = new URL(authorizeUrl).searchParams
-  provider.setAuthorization({ codeChallenge: query.get('code_challenge')!, nonce: query.get('nonce')!, redirectUri: query.get('redirect_uri')! })
-  return { state: query.get('state')!, nonce: query.get('nonce')!, challenge: query.get('code_challenge')!, redirectUri: query.get('redirect_uri')! }
 }
 
 /** 走完一次真实回调，返回授权参数。 */

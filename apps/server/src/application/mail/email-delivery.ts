@@ -125,3 +125,8 @@ export function verificationLink(publicUrl: string, token: string): string {
 export function passwordResetLink(publicUrl: string, token: string): string {
   return `${publicUrl.replace(/\/+$/, '')}${WEB_CONSOLE_AUTH_PATHS.passwordReset}?token=${encodeURIComponent(token)}`
 }
+
+/** 邮箱变更确认链接（Ticket 06）：同样落在前端确认页，邮件扫描器 GET 不直接消费凭据。 */
+export function changeEmailLink(publicUrl: string, token: string): string {
+  return `${publicUrl.replace(/\/+$/, '')}${WEB_CONSOLE_AUTH_PATHS.confirmEmailChange}?token=${encodeURIComponent(token)}`
+}
