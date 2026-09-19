@@ -55,6 +55,33 @@ test('pi runtime session maps new pi RPC protocol without duplicating assistant 
   if (last?.kind === 'finished') assert.deepEqual(last.outcome, { status: 'completed' })
 })
 
+test('pi runtime session 把自动重试变成用户可见事件，且重试后的正文与回合结果不受影响', async () => {
+  // 限额、冷却或瞬时错误时 Pi 会自行退避重试（默认最多 10 次）。重试不发出去，用户在退避期间
+  // 只能看到一个沉默的「正在处理」，无法区分“在重试”和“卡死了”。
+  const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"agent_end\",\"messages\":[],\"willRetry\":true}' '{\"type\":\"auto_retry_start\",\"attempt\":2,\"maxAttempts\":10,\"delayMs\":8000,\"errorMessage\":\"429 Too Many Requests\"}' '{\"type\":\"auto_retry_end\",\"success\":true,\"attempt\":2}' '{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"重试后拿到正文\"}}' '{\"type\":\"agent_settled\"}'")
+  const adapter = new PiRuntimeSessionAdapter(cli)
+  const session = await adapter.openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  const handle = await session.execute({ operationId: 'turn-retry' as TurnId, message: { content: '你好' } })
+  const signals = await collect(handle.signals)
+  const notices = signals.flatMap(s => s.kind === 'event' && s.event.kind === 'runtime.notice' ? [s.event] : [])
+  assert.deepEqual(notices[0], { kind: 'runtime.notice', level: 'warning', code: 'agent.auto-retry', message: '运行时错误，正在自动重试：429 Too Many Requests', retry: { attempt: 2, maxAttempts: 10, delayMs: 8000 } })
+  assert.deepEqual(notices[1], { kind: 'runtime.notice', level: 'info', code: 'agent.retry-recovered', message: '自动重试成功，继续执行', retry: { attempt: 2, maxAttempts: null, delayMs: null } })
+  assert.deepEqual(signals.flatMap(s => s.kind === 'event' && s.event.kind === 'assistant.text.delta' ? [s.event.text] : []), ['重试后拿到正文'])
+  assert.deepEqual(signals.at(-1), { kind: 'finished', outcome: { status: 'completed' } })
+})
+
+test('pi runtime session 重试用尽后报出失败并保留最终错误', async () => {
+  const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"agent_end\",\"messages\":[],\"willRetry\":true}' '{\"type\":\"auto_retry_start\",\"attempt\":10,\"maxAttempts\":10,\"delayMs\":60000,\"errorMessage\":\"usage limit reached\"}' '{\"type\":\"auto_retry_end\",\"success\":false,\"attempt\":10,\"finalError\":\"usage limit reached\"}' '{\"type\":\"agent_settled\"}'")
+  const adapter = new PiRuntimeSessionAdapter(cli)
+  const session = await adapter.openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  const handle = await session.execute({ operationId: 'turn-retry-failed' as TurnId, message: { content: '你好' } })
+  const signals = await collect(handle.signals)
+  const notices = signals.flatMap(s => s.kind === 'event' && s.event.kind === 'runtime.notice' ? [s.event] : [])
+  assert.equal(notices[1]?.code, 'agent.retry-failed')
+  assert.equal(notices[1]?.level, 'warning')
+  assert.equal(notices[1]?.message, '自动重试仍然失败：usage limit reached')
+})
+
 test('pi runtime session keeps every assistant message in a multi-message turn', async () => {
   // Regression: a turn can contain several assistant messages (e.g. text, tool
   // call, more text). Each message streams cumulative text and message_end may
@@ -71,6 +98,36 @@ test('pi runtime session keeps every assistant message in a multi-message turn',
   const last = signals.at(-1)
   assert.equal(last?.kind, 'finished')
   if (last?.kind === 'finished') assert.deepEqual(last.outcome, { status: 'completed' })
+})
+
+test('pi runtime session surfaces a model error instead of an empty success', async () => {
+  // P0：模型拒绝或额度用尽时 Pi 把错误放在 assistant 的 stopReason/errorMessage 上，
+  // 正文为空。只把这种终止当作 completed 会让界面什么都没显示。
+  const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"session\",\"sessionId\":\"pi-error\"}' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[],\"stopReason\":\"error\",\"errorMessage\":\"403 Usage limit reached (AccessDenied.Unpurchased)\"}}' '{\"type\":\"agent_end\",\"messages\":[{\"role\":\"assistant\",\"content\":[],\"stopReason\":\"error\",\"errorMessage\":\"403 Usage limit reached (AccessDenied.Unpurchased)\"}]}' '{\"type\":\"agent_settled\"}'")
+  const adapter = new PiRuntimeSessionAdapter(cli)
+  const session = await adapter.openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  const handle = await session.execute({ operationId: 'turn-pi-error' as TurnId, message: { content: '你好' } })
+  const signals = await collect(handle.signals)
+  const last = signals.at(-1)
+  assert.equal(last?.kind, 'finished')
+  if (last?.kind === 'finished') assert.deepEqual(last.outcome, { status: 'failed', failure: { code: 'agent-error', message: '403 Usage limit reached (AccessDenied.Unpurchased)' } })
+})
+
+test('pi runtime session fails a completed turn that produced no output', async () => {
+  const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"session\",\"sessionId\":\"pi-empty\"}' '{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\"}}' '{\"type\":\"agent_end\"}' '{\"type\":\"agent_settled\"}'")
+  const adapter = new PiRuntimeSessionAdapter(cli)
+  const session = await adapter.openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  const handle = await session.execute({ operationId: 'turn-pi-empty' as TurnId, message: { content: '你好' } })
+  const signals = await collect(handle.signals)
+  const last = signals.at(-1)
+  assert.equal(last?.kind, 'finished')
+  if (last?.kind === 'finished') {
+    assert.equal(last.outcome.status, 'failed')
+    if (last.outcome.status === 'failed') {
+      assert.equal(last.outcome.failure.code, 'agent-error')
+      assert.match(last.outcome.failure.message, /没有输出任何内容/)
+    }
+  }
 })
 
 test('pi runtime session reports failure when child exits without completing stdout', async () => {

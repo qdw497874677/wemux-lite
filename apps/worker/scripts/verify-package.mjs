@@ -3,22 +3,16 @@ import { accessSync, constants, mkdtempSync, mkdirSync, readFileSync, readdirSyn
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { buildWorkerTarball } from './build-worker-tarball.mjs'
 
 const packageDirectory = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const repositoryRoot = resolve(packageDirectory, '..', '..')
 const temporaryDirectory = mkdtempSync(join(tmpdir(), 'wemux-lite-worker-package-'))
-const packedDirectory = join(temporaryDirectory, 'packed')
 const prefix = join(temporaryDirectory, 'prefix')
-mkdirSync(packedDirectory)
+mkdirSync(prefix, { recursive: true })
 
 try {
-  execFileSync('npm', ['pack', '--pack-destination', packedDirectory], {
-    cwd: packageDirectory,
-    stdio: 'inherit',
-  })
-  const tarball = join(
-    packedDirectory,
-    readdirSync(packedDirectory).find(file => file.endsWith('.tgz')) ?? fail('npm pack did not create a tarball'),
-  )
+  const { tarball } = buildWorkerTarball({ repositoryRoot, packDestination: temporaryDirectory })
   execFileSync('npm', ['install', '--global', '--ignore-scripts', '--no-audit', '--no-fund', tarball, '--prefix', prefix], {
     cwd: temporaryDirectory,
     stdio: 'inherit',
@@ -58,7 +52,15 @@ try {
       const content = readFileSync(file, 'utf8')
       return content.includes("from '@wemux/") || content.includes('from "@wemux/') ? [file] : []
     })
-  if (runtimeImports.length) fail(`published JavaScript imports private packages:\n${runtimeImports.join('\n')}`)
+  const bundled = new Set(installedManifest.bundleDependencies ?? [])
+  const unbundled = runtimeImports.filter(file => {
+    const imports = [...readFileSync(file, 'utf8').matchAll(/from ['\"](@wemux\/[a-z-]+)['\"]/g)].map(match => match[1])
+    return imports.some(name => !bundled.has(name))
+  })
+  if (unbundled.length) fail(`published JavaScript imports private packages outside bundleDependencies:\n${unbundled.join('\n')}`)
+  for (const name of bundled) {
+    accessSync(join(packageRoot, 'node_modules', '@wemux', name.replace('@wemux/', ''), 'package.json'))
+  }
 } finally {
   rmSync(temporaryDirectory, { recursive: true, force: true })
 }

@@ -1,10 +1,14 @@
-import type { ApprovalId, ToolCallId } from '@wemux/domain'
+import type { ApprovalId, ToolCallId, TurnFailure } from '@wemux/domain'
 import type { AgentSignal, AgentTurnEvent } from '../application/ports/agent-adapter.js'
 import type { RuntimeOperationInput } from '../application/ports/runtime-session.js'
 
 const text = (value: unknown) => typeof value === 'string' ? value : null
 const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : undefined
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+const count = (value: unknown) => {
+  const parsed = number(value)
+  return parsed !== undefined && Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null
+}
 const assistantText = (record: Record<string, unknown>) => {
   const direct = text(record.text) ?? text(object(record.delta).text) ?? text(object(record.message).content)
   if (direct) return direct
@@ -13,6 +17,34 @@ const assistantText = (record: Record<string, unknown>) => {
   const content = object(record.message).content
   if (!Array.isArray(content)) return null
   return content.map(item => text(object(item).text) ?? '').join('') || null
+}
+
+/**
+ * 终止记录里内嵌的 assistant 消息：Pi 把模型错误放在 `stopReason: 'error'` + `errorMessage`
+ * 上，content 为空。只看 `is_error`/`status`/`success` 会把「模型拒绝或额度用尽」当成
+ * 正常完成，界面上于是什么也没有（历史 P0：发送消息一直没有响应，但回合显示已完成）。
+ */
+const terminalAssistantMessages = (record: Record<string, unknown>) => {
+  const records = Array.isArray(record.messages) ? record.messages : []
+  const embedded = Array.isArray(record.messages) ? records : [record.message]
+  return embedded
+    .map(object)
+    .filter(message => message.role === 'assistant')
+    .filter(message => Object.keys(message).length > 0)
+}
+
+const terminalOutcome = (provider: 'pi' | 'claude', record: Record<string, unknown>): TurnFailure | null => {
+  const assistants = terminalAssistantMessages(record)
+  const errored = assistants.find(message => text(message.stopReason) === 'error' || text(message.errorMessage))
+  if (errored) {
+    const detail = text(errored.errorMessage)
+    const scope = [text(errored.provider), text(errored.model)].filter(Boolean).join('/')
+    const fallback = `${provider} runtime reported an error${scope ? ` for ${scope}` : ''}`
+    return { code: 'agent-error', message: detail ?? fallback }
+  }
+  if (assistants.some(message => text(message.stopReason) === 'aborted')) return null
+  if (record.is_error === true || record.status === 'failed' || record.success === false) return { code: 'agent-error', message: text(record.error) ?? text(record.message) ?? `${provider} runtime failed` }
+  return null
 }
 
 export function mapRuntimeRecord(provider: 'pi' | 'claude', operationId: RuntimeOperationInput['operationId'], record: Record<string, unknown>): AgentSignal[] {
@@ -60,7 +92,42 @@ export function mapRuntimeRecord(provider: 'pi' | 'claude', operationId: Runtime
   }
   if (type === 'auto_compaction_start' || type === 'compaction_started') return [{ kind: 'event', event: { kind: 'compaction.started', reason: text(record.reason) ?? undefined } as AgentTurnEvent }]
   if (type === 'auto_compaction_end' || type === 'compaction_finished') return [{ kind: 'event', event: { kind: 'compaction.finished', summary: text(record.summary) ?? undefined } as AgentTurnEvent }]
-  if (type === 'done' || type === 'result' || type === 'completed' || type === 'turn_end' || type === 'agent_end' || type === 'agent_settled') return [{ kind: 'finished', outcome: record.is_error === true || record.status === 'failed' || record.success === false ? { status: 'failed', failure: { code: 'agent-error', message: text(record.error) ?? text(record.message) ?? `${provider} runtime failed` } } : { status: 'completed' } }]
+  if (type === 'auto_retry_start') {
+    // Pi 遇到 429 冷却或额度限制时会自行退避重试（默认最多 10 次）。不把这件事发出去，
+    // 用户在退避期间只能看到一个沉默的「正在处理」。
+    return [{
+      kind: 'event',
+      event: {
+        kind: 'runtime.notice',
+        level: 'warning',
+        code: 'agent.auto-retry',
+        message: `运行时错误，正在自动重试：${text(record.errorMessage) ?? '未知错误'}`,
+        retry: { attempt: count(record.attempt) ?? 1, maxAttempts: count(record.maxAttempts), delayMs: count(record.delayMs) },
+      } as AgentTurnEvent,
+    }]
+  }
+  if (type === 'auto_retry_end') {
+    const failed = record.success === false
+    return [{
+      kind: 'event',
+      event: {
+        kind: 'runtime.notice',
+        level: failed ? 'warning' : 'info',
+        code: failed ? 'agent.retry-failed' : 'agent.retry-recovered',
+        message: failed ? `自动重试仍然失败：${text(record.finalError) ?? '未知错误'}` : '自动重试成功，继续执行',
+        retry: { attempt: count(record.attempt) ?? 1, maxAttempts: null, delayMs: null },
+      } as AgentTurnEvent,
+    }]
+  }
+  if (type === 'done' || type === 'result' || type === 'completed' || type === 'turn_end' || type === 'agent_end' || type === 'agent_settled') {
+    // Pi 在自动重试时先发 agent_end（willRetry=true）再发 auto_retry_start。此时不能结束
+    // 回合：提前收尾会把后续重试产生的正文全部丢掉，只剩下一个空的「已完成」。
+    if (record.willRetry === true) return []
+    const failure = terminalOutcome(provider, record)
+    if (failure) return [{ kind: 'finished', outcome: { status: 'failed', failure } }]
+    if (terminalAssistantMessages(record).some(message => text(message.stopReason) === 'aborted')) return [{ kind: 'finished', outcome: { status: 'cancelled' } }]
+    return [{ kind: 'finished', outcome: { status: 'completed' } }]
+  }
   if (type === 'error' || (type === 'response' && record.success === false)) return [{ kind: 'finished', outcome: { status: 'failed', failure: { code: 'agent-error', message: text(record.error) ?? text(record.message) ?? `${provider} runtime failed` } } }]
   return []
 }

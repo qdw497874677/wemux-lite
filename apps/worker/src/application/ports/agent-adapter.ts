@@ -11,6 +11,7 @@ import type {
   UserMessageInput,
   ApprovalId,
   RuntimeUsage,
+  SessionNoticeRetry,
 } from '@wemux/domain'
 
 export interface LocalAgentDetection extends AgentCapability {
@@ -57,6 +58,13 @@ export type AgentTurnEvent =
   | { readonly kind: 'usage.updated'; readonly usage: RuntimeUsage }
   | { readonly kind: 'compaction.started'; readonly reason: string | undefined }
   | { readonly kind: 'compaction.finished'; readonly summary: string | undefined }
+  | {
+      readonly kind: 'runtime.notice'
+      readonly level: 'info' | 'warning'
+      readonly code: string
+      readonly message: string
+      readonly retry?: SessionNoticeRetry
+    }
 
 export type AgentTurnOutcome =
   | { readonly status: 'completed' }

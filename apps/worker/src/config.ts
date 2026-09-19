@@ -14,12 +14,12 @@ export function config(args: string[], env: NodeJS.ProcessEnv = process.env) {
     home: { type: 'string' }, server: { type: 'string' }, servers: { type: 'string' }, token: { type: 'string' }, name: { type: 'string' }, prefer: { type: 'string' }, transport: { type: 'string' },
     host: { type: 'string' }, port: { type: 'string' }, username: { type: 'string' }, 'password-file': { type: 'string' },
     'enrollment-path': { type: 'string' }, 'socket-path': { type: 'string' }, version: { type: 'boolean' },
-    path: { type: 'string' }, yes: { type: 'boolean' }, 'secure-cookies': { type: 'boolean' },
+    path: { type: 'string' }, yes: { type: 'boolean' }, 'secure-cookies': { type: 'boolean' }, force: { type: 'boolean' },
   } })
   const port = Number(values.port ?? env.WEMUX_WORKER_PORT ?? '3002')
   if (!Number.isSafeInteger(port) || port < 0 || port > 65535) throw new Error('Worker Web port must be an integer between 0 and 65535')
   return { command: values.version ? 'version' : positionals[0] ?? 'help',
-    agentAction: positionals[1], agentKey: positionals[2], extraPositionals: positionals.slice(3), agentPath: values.path, yes: values.yes ?? false,
+    agentAction: positionals[1], agentKey: positionals[2], extraPositionals: positionals.slice(3), agentPath: values.path, yes: values.yes ?? false, force: values.force ?? false,
     adminAction: positionals[1], username: values.username ?? env.WEMUX_LOCAL_ADMIN_USERNAME ?? 'admin', passwordFile: values['password-file'], localAdminPassword: env.WEMUX_LOCAL_ADMIN_PASSWORD,
     host: values.host ?? env.WEMUX_WORKER_HOST ?? '127.0.0.1', port,
     secureCookies: values['secure-cookies'] ?? env.WEMUX_WORKER_SECURE_COOKIES === '1',

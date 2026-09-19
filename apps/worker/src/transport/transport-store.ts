@@ -66,8 +66,9 @@ export class WorkerTransportStore {
     if (serverCursor.deliveryEpoch !== this.outboundEpoch && serverCursor.ackThrough > 0) throw new Error('transport integrity error: server acknowledged unknown worker delivery epoch')
     if (serverCursor.deliveryEpoch === this.outboundEpoch) this.setOutboundAckThrough(serverCursor.ackThrough)
     const inbound = frame.authoritativeCursors.serverToWorker
-    const currentInboundEpoch = this.meta('inbound_epoch')
-    if (currentInboundEpoch && currentInboundEpoch !== inbound.deliveryEpoch && this.inboundAckThrough(currentInboundEpoch) > 0) throw new Error('transport integrity error: server changed delivery epoch')
+    // Server 可能因自身数据库重建开启新的 serverToWorker 世代。恢复被拒绝时本端不得把旧的 ACK 水位当权威
+    // （docs/design/worker-reliable-connection.md 第 6 节），直接采用 Server 的权威水位；长期 messageId
+    // 仍是跨世代去重键，重放不会重复产生领域副作用。
     this.setMeta('inbound_epoch', inbound.deliveryEpoch)
     this.setMeta(`inbound_ack:${inbound.deliveryEpoch}`, String(inbound.ackThrough))
   }
@@ -107,6 +108,27 @@ export class WorkerTransportStore {
     if (frame.deliveryEpoch !== this.outboundEpoch) return
     this.setOutboundAckThrough(frame.ackThrough)
     this.database.prepare('DELETE FROM transport_outbox WHERE seq <= ?').run(frame.ackThrough)
+  }
+
+  /**
+   * A non-retryable data rejection refers to the oldest unacknowledged frame because
+   * Worker sends durable frames in order and Server rejects at that sequence boundary.
+   * Advance the durable cursor together with deletion so the next reconnect cannot
+   * recreate a gap behind the discarded frame.
+   */
+  async dropOldestUnacked(): Promise<{ readonly seq: number; readonly payload: WorkerPayload } | null> {
+    this.database.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.database.prepare('SELECT seq, payload_json FROM transport_outbox WHERE seq > ? ORDER BY seq LIMIT 1').get(this.outboundAckThrough()) as { seq: number; payload_json: string } | undefined
+      if (!row) { this.database.exec('COMMIT'); return null }
+      this.database.prepare('DELETE FROM transport_outbox WHERE seq = ?').run(row.seq)
+      this.setOutboundAckThrough(row.seq)
+      this.database.exec('COMMIT')
+      return { seq: row.seq, payload: JSON.parse(row.payload_json) as WorkerPayload }
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
   }
 
   async acceptInbound(frame: Extract<ServerDataFrame, { readonly durability: 'durable' }>): Promise<{ readonly isNew: boolean; readonly ack: WorkerTransportAckFrame }> {

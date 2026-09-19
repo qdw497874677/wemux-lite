@@ -50,7 +50,7 @@ async function lock(home: string) {
 export async function main(args = process.argv.slice(2)) {
   const options = config(args)
   if (options.command === 'version') { console.log('wemux-lite-worker 0.1.0'); return }
-  if (options.command === 'help') { console.log('wemux-lite-worker admin init [--username NAME] [--password-file FILE] | register --server URL [--servers URL1,URL2] [--prefer tailnet|direct|any] [--transport direct|nc] --token TOKEN | start [--host 127.0.0.1] [--port 3002] [--secure-cookies] [--prefer ...] [--transport ...] | status [--prefer ...] | detect | agent list | agent status | agent use <key> --path /absolute/executable | agent install <pi|opencode|claude> --yes | tailscale [--server URL]；所有命令支持 --home DIR；admin init 也可读取 WEMUX_LOCAL_ADMIN_PASSWORD；HTTPS 终止于受信反向代理时启用 --secure-cookies 或 WEMUX_WORKER_SECURE_COOKIES=1；Agent 选择变更需要重启 Worker；--prefer 缺省时自动：检测到 tailscale CLI 且候选含 tailnet 地址则优先 tailnet；--transport nc 让注册与 WebSocket 全部经由 tailscale nc 隧道（不改系统路由，仅支持明文 http 端点）'); return }
+  if (options.command === 'help') { console.log('wemux-lite-worker admin init [--username NAME] [--password-file FILE] | register --server URL [--servers URL1,URL2] [--prefer tailnet|direct|any] [--transport direct|nc] [--force] --token TOKEN | start [--host 127.0.0.1] [--port 3002] [--secure-cookies] [--prefer ...] [--transport ...] | status [--prefer ...] | detect | agent list | agent status | agent use <key> --path /absolute/executable | agent install <pi|opencode|claude> --yes | tailscale [--server URL]；所有命令支持 --home DIR；admin init 也可读取 WEMUX_LOCAL_ADMIN_PASSWORD；register --force 用于替换已存在的本机身份（例如服务器数据被重置后凭据失效）；HTTPS 终止于受信反向代理时启用 --secure-cookies 或 WEMUX_WORKER_SECURE_COOKIES=1；Agent 选择变更需要重启 Worker；--prefer 缺省时自动：检测到 tailscale CLI 且候选含 tailnet 地址则优先 tailnet；--transport nc 让注册与 WebSocket 全部经由 tailscale nc 隧道（不改系统路由，仅支持明文 http 端点）'); return }
   if (!['register', 'start', 'status', 'detect', 'tailscale', 'agent', 'admin'].includes(options.command)) throw new Error('Unknown command')
   await mkdir(options.home, { recursive: true, mode: 0o700 })
   await chmod(options.home, 0o700)
@@ -88,8 +88,16 @@ export async function main(args = process.argv.slice(2)) {
       const admin = await createLocalAdmin(store, { username: options.username, password })
       console.log(JSON.stringify({ installationId: installation.installationId, username: admin.username, createdAt: admin.createdAt }))
     } else if (options.command === 'register') {
-      if (store.identity()) throw new Error('Worker is already registered; use its existing identity')
+      const existing = store.identity()
+      // 换身份会丢弃旧 workerId（旧会话/工作区仍绑定它），因此必须显式 --force：
+      // 服务器数据被重置后本机凭据已失效，默认拒绝会让“重新注册”变成空操作。
+      if (existing && !options.force) throw new Error(`Worker already has identity ${existing.workerId}；确需换用新身份重新注册请加 --force（旧会话与工作区仍绑定旧 workerId）`)
       if (!(options.server ?? options.servers) || !options.token) throw new Error('register requires --server (or --servers) and --token (or environment equivalents)')
+      if (existing) {
+        // transport.sqlite 里是上一个身份的 epoch/cursor 与待发队列，留着只会重放旧帧。
+        await rm(join(options.home, existing.credentialRef), { force: true })
+        await rm(join(options.home, 'transport.sqlite'), { force: true })
+      }
       await requireTailscaleCli(options.transport)
       const candidates = parseCandidateUrls(options.servers, options.server)
       // 未显式指定 prefer：候选含 tailnet 且本机有 tailscale CLI 时自动优先 tailnet
@@ -144,7 +152,27 @@ export async function main(args = process.argv.slice(2)) {
       if (!identity && !admin) throw new Error('Worker is neither registered nor locally initialized; run admin init first')
       let stopRequested: (() => void) | null = null
       const requestStop = async () => { stopRequested?.() }
-      const lifecycle = new ClusterLifecycle(store, agents, { home: options.home, name: installation.name, enrollmentPath: options.enrollmentPath, socketPath: options.socketPath, transport: options.transport, prefer: options.prefer })
+      const lifecycle = new ClusterLifecycle(store, agents, {
+        home: options.home,
+        name: installation.name,
+        enrollmentPath: options.enrollmentPath,
+        socketPath: options.socketPath,
+        transport: options.transport,
+        prefer: options.prefer,
+        // start 也认 --server/--servers/WEMUX_SERVER_URLS；显式给出时覆盖 identity 里持久化的候选。
+        servers: parseCandidateUrls(options.servers, options.server),
+        // 连接状态原本只存在内存里，凭据失效这类终态失败在日志里完全隐形；
+        // 这里把每次状态转换打出来，让运维能在不看 UI 的情况下定位。
+        onStateChange: change => {
+          const where = change.endpoint ? ` ${change.endpoint}` : ''
+          if (change.current === 'connecting') console.error(`[connect]${where} 正在连接`)
+          else if (change.current === 'open') console.error(`[connect]${where} 已连接`)
+          else if (change.current === 'backoff') console.error(`[connect]${where} ${change.reason}；${change.retryInMs ?? 0}ms 后重试（第 ${change.attempt} 次）`)
+          else if (change.current === 'needs-attention') console.error(`[connect]${where} 需要人工处理：${change.reason}`)
+          else if (change.current === 'stopped') console.error(`[connect]${where} 已停止连接`)
+        },
+        onNotice: message => console.error(`[connect] ${message}`),
+      })
       const workbench = createLocalWorkbenchService(store, lifecycle)
       const localControl = admin ? await startLocalControlServer({ host: options.host, port: options.port, state: store, secureCookies: options.secureCookies }, { shutdown: requestStop, workbench, cluster: lifecycle }) : null
       if (localControl) {

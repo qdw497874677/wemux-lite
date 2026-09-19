@@ -10,7 +10,7 @@ import type { Timestamp, WorkerId } from '@wemux/domain'
 import { SqliteWorkerStore } from '../src/storage/sqlite-store.js'
 import { ensureLocalInstallation } from '../src/application/local-installation.js'
 import { createLocalWorkbenchService } from '../src/application/local-workbench.js'
-import { ClusterLifecycle } from '../src/application/cluster-lifecycle.js'
+import { ClusterLifecycle, clusterCandidateUrls } from '../src/application/cluster-lifecycle.js'
 import { TestAgent } from '../src/agents/test-agent.js'
 import { TestRuntimeSessionAdapter } from '../src/agents/test-runtime-session-adapter.js'
 import { WorkerRuntime } from '../src/application/runtime.js'
@@ -263,4 +263,32 @@ test('connect proceeds when previous runtime shutdown hangs on a stuck agent tur
     await new Promise<void>(resolve => server.close(() => resolve()))
     await f.close().catch(() => {})
   }
+})
+
+test('explicit start candidates override persisted identity urls', () => {
+  const identity = ['http://10.0.0.1:8010', 'http://10.0.0.2:8010']
+  assert.deepEqual(clusterCandidateUrls(identity, ['http://100.64.0.9:8010'], 'cluster'), ['ws://100.64.0.9:8010/cluster'])
+  assert.deepEqual(clusterCandidateUrls(identity, [], 'cluster'), ['ws://10.0.0.1:8010/cluster', 'ws://10.0.0.2:8010/cluster'])
+  assert.deepEqual(clusterCandidateUrls(identity, undefined, 'cluster'), ['ws://10.0.0.1:8010/cluster', 'ws://10.0.0.2:8010/cluster'])
+})
+
+test('register refuses to silently no-op on an existing identity and --force replaces it', async t => {
+  // 回归：服务器数据被重置后凭据失效，提示用户“重新注册”；若 register 直接拒绝，
+  // 用户按提示执行却什么都没发生，节点就永远回不来。
+  const f = await fixture()
+  f.identity()
+  await writeFile(join(f.home, 'credential'), 'stale-credential')
+  await writeFile(join(f.home, 'transport.sqlite'), '')
+  const args = ['register', '--home', f.home, '--server', 'http://127.0.0.1:1', '--token', 'enrollment-token']
+  try {
+    await assert.rejects(() => main(args), /--force/)
+    t.mock.method(globalThis, 'fetch', async () => Response.json({ workerId: 'replacement-worker', credential: 'fresh-credential' }))
+    await main([...args, '--force'])
+    const store = new SqliteWorkerStore(join(f.home, 'worker.sqlite'))
+    try {
+      assert.equal(store.identity()?.workerId, 'replacement-worker')
+      assert.equal((await readFile(join(f.home, 'credential'), 'utf8')).trim(), 'fresh-credential')
+      await assert.rejects(() => readFile(join(f.home, 'transport.sqlite'), 'utf8'), /ENOENT/)
+    } finally { store.close() }
+  } finally { await f.close() }
 })

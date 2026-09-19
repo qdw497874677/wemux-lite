@@ -22,6 +22,8 @@ export interface WebSocketTransportOptions {
   readonly onMessage: (payload: ServerPayload) => void
   readonly onConnected: () => void
   readonly onDisconnected?: () => void
+  /** User-visible diagnostic notice that does not itself change transport state. */
+  readonly onNotice?: (message: string) => void
   readonly onStateChange?: (change: StateChange) => void
   readonly random?: () => number
   /** Test/embedding override; production defaults preserve bounded exponential backoff. */
@@ -47,6 +49,7 @@ export class WebSocketTransport implements WorkerTransport {
   private idleTimer: NodeJS.Timeout | undefined
   private stableTimer: NodeJS.Timeout | undefined
   private flushing = false
+  private processingMessages: Promise<void> = Promise.resolve()
   private stopped = true
   private attempts = 0
   private generation = 0
@@ -88,7 +91,15 @@ export class WebSocketTransport implements WorkerTransport {
     this.socket = socket
     this.connectTimer = setTimeout(() => socket.terminate(), connectTimeoutMs)
     socket.on('open', () => this.handleOpen(socket, generation))
-    socket.on('message', (data) => this.handleMessage(socket, generation, data.toString()))
+    socket.on('message', (data) => {
+      const raw = data.toString()
+      this.processingMessages = this.processingMessages
+        .then(() => this.handleMessage(socket, generation, raw))
+        .catch((error) => {
+          this.options.onNotice?.(`传输消息处理失败：${error instanceof Error ? error.message : String(error)}`)
+          if (this.isCurrent(socket, generation)) socket.close(1002, 'transport processing failed')
+        })
+    })
     socket.on('pong', () => this.armIdleTimer(socket, generation))
     socket.on('error', () => undefined)
     socket.on('close', () => this.handleClose(socket, generation))
@@ -137,8 +148,15 @@ export class WebSocketTransport implements WorkerTransport {
     }
     if (frame.frameType === 'transport.error') {
       if (!frame.retryable) {
-        this.transition('needs-attention', frame.message)
-        this.stopped = true
+        const dropped = await this.options.store.dropOldestUnacked()
+        if (dropped) {
+          const notice = `丢弃服务器永久拒绝的消息（序号 ${dropped.seq}，${dropped.payload.type}，${frame.code}）：${frame.message}`
+          this.options.onNotice?.(notice)
+          console.warn(`[wemux-worker] ${notice}`)
+        } else {
+          this.transition('needs-attention', frame.message)
+          this.stopped = true
+        }
       }
       return socket.close(frame.code === 'revoked' ? 1008 : 1002, frame.code)
     }

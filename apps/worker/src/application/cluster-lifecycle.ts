@@ -4,16 +4,18 @@ import type { AgentAdapter } from './ports/agent-adapter.js'
 import type { LocalState } from './ports/local-state.js'
 import type { WorkerStore } from './ports/worker-store.js'
 import type { SessionStore } from '@wemux/agent-interchange'
-import type { CommandId } from '@wemux/domain'
+import type { AgentKey, CommandId } from '@wemux/domain'
 import { WorkerTransportStore } from '../transport/transport-store.js'
 import type { CommandReceipt, WorkerCommand } from '@wemux/wire-protocol'
 import type { WorkerIdentity } from '../domain/worker-identity.js'
 import { enroll, toSocketUrl } from '../transport/enrollment.js'
 import { WebSocketTransport } from '../transport/websocket.js'
+import type { StateChange } from '../transport/types.js'
 import { WorkerRuntime } from './runtime.js'
 import { LocalWorkbenchError } from './local-workbench.js'
 import { LocalProvisioner } from '../workspaces/local-provisioner.js'
 import { runtimeAdaptersFor } from './runtime-adapters.js'
+import type { RuntimeSessionAdapter } from './ports/runtime-session.js'
 import { agentsForHome } from '../agents/detection.js'
 import { agentSelections, readAgentSettings, removeAgentSelection, runtimeKey } from '../config/agent-settings.js'
 import { useAgent } from '../runtimes/management.js'
@@ -30,6 +32,15 @@ export type WorkerConnectionState = {
   readonly failure: string | null
 }
 
+/**
+ * start 的候选地址选择：显式 --server/--servers/WEMUX_SERVER_URLS 覆盖 identity 里持久化的地址，
+ * 便于在不重新注册的前提下改走另一条链路。
+ */
+export function clusterCandidateUrls(identityUrls: readonly string[], override: readonly string[] | undefined, socketPath: string): string[] {
+  const source = override && override.length > 0 ? override : identityUrls
+  return source.map(url => toSocketUrl(url, socketPath).href)
+}
+
 export interface ClusterLifecycleOptions {
   readonly home: string
   readonly name: string
@@ -37,6 +48,14 @@ export interface ClusterLifecycleOptions {
   readonly socketPath: string
   readonly transport?: WorkerTransport
   readonly prefer?: string
+  /** 显式候选地址（--server/--servers/WEMUX_SERVER_URLS）。给了就覆盖 identity 里持久化的地址，
+   *  便于在不重新注册的前提下改走另一条链路。 */
+  readonly servers?: readonly string[]
+  /** 测试或嵌入宿主可注入 runtime；生产默认按已检测 Agent 构建。 */
+  readonly runtimeAdapters?: ReadonlyMap<AgentKey, RuntimeSessionAdapter>
+  readonly onStateChange?: (change: StateChange) => void
+  /** 不改状态但需要让使用者看到的通报，例如丢弃服务器永久拒绝的消息。 */
+  readonly onNotice?: (message: string) => void
 }
 
 export class ClusterLifecycle {
@@ -135,7 +154,7 @@ export class ClusterLifecycle {
     const installation = this.store.localInstallation()
     if (!installation) throw new Error('Worker local installation is not initialized')
     const selected = await readAgentSettings(this.options.home)
-    const runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, { send: () => {} }, `local-${installation.installationId}` as import('@wemux/domain').WorkerId, installation.name, undefined, undefined, runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }))
+    const runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, { send: () => {} }, `local-${installation.installationId}` as import('@wemux/domain').WorkerId, installation.name, undefined, undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }))
     try {
       await runtime.initialize()
       this.runtime = runtime
@@ -156,7 +175,7 @@ export class ClusterLifecycle {
         const cli = await probeCli(defaultProbe)
         if (!cli.available) throw new Error(`WEMUX_TRANSPORT=nc 需要本机 tailscale CLI（${cli.error}）`)
       }
-      const candidates = (identity.serverUrls ?? [identity.serverUrl]).map(url => toSocketUrl(url, this.options.socketPath).href)
+      const candidates = clusterCandidateUrls(identity.serverUrls ?? [identity.serverUrl], this.options.servers, this.options.socketPath)
       const auto = this.options.prefer == null ? await resolveAutoPreference(defaultProbe, candidates) : null
       const ordered = orderEndpoints(candidates, this.options.prefer == null ? auto!.prefer : parsePreference(this.options.prefer))
       const usable: string[] = []
@@ -191,11 +210,19 @@ export class ClusterLifecycle {
           this.state = { phase: 'online', retryAt: null, failure: null }
           void runtime.connected()
         },
+        onNotice: message => this.options.onNotice?.(message),
         onStateChange: change => {
           if (this.transport !== transport) return
           if (change.current === 'connecting') this.state = { phase: 'connecting', retryAt: null, failure: null }
           if (change.current === 'backoff') this.state = { phase: 'degraded', retryAt: change.retryInMs == null ? null : new Date(Date.now() + change.retryInMs).toISOString(), failure: change.reason }
-          if (change.current === 'needs-attention') this.state = { phase: 'degraded', retryAt: null, failure: change.reason }
+          if (change.current === 'needs-attention') {
+            this.state = { phase: 'degraded', retryAt: null, failure: change.reason }
+            // 终态失败：释放这条连接，让重新注册后的 resume()/connect() 能重新建立，
+            // 而不是留一个再也不会重连的 transport 把后续连接请求静默挡掉。
+            this.transport = null
+            transport.stop()
+          }
+          this.options.onStateChange?.(change)
         },
       })
       // Only replace the runtime once connection resources are ready. The failure
@@ -212,7 +239,7 @@ export class ClusterLifecycle {
           new Promise<void>(resolve => setTimeout(resolve, 1000).unref()),
         ])
       }
-      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint), undefined, runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }))
+      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }))
       this.runtime = runtime
       await runtime.initialize()
       this.transport = transport

@@ -159,6 +159,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
   private async *signals(operationId: RuntimeOperationInput['operationId'], child: ReturnType<typeof spawn>): AsyncIterable<AgentSignal> {
     if (!child.stdout) throw new Error('Pi runtime output unavailable')
     let emittedText = ''
+    let sawToolActivity = false
     const dedupeText = (signal: AgentSignal): AgentSignal | null => {
       if (signal.kind !== 'event' || signal.event.kind !== 'assistant.text.delta') return signal
       const text = signal.event.text
@@ -178,8 +179,24 @@ class PiRuntimeSession implements AgentRuntimeSession {
         if (record.type === 'message_start') emittedText = ''
         const mapped = mapRuntimeRecord('pi', operationId, record)
         for (const signal of mapped) {
+          if (signal.kind === 'event' && signal.event.kind.startsWith('tool.')) sawToolActivity = true
           const deduped = dedupeText(signal)
           if (!deduped) continue
+          // Pi 在模型拒绝、额度用尽或凭据失效时会结束回合但不产生任何正文；把它当成完成会让界面
+          // 空白（历史 P0：发送消息一直没有响应）。宁可显式失败，也不要假成功。
+          if (deduped.kind === 'finished' && deduped.outcome.status === 'completed' && !sawToolActivity && !emittedText.trim()) {
+            yield {
+              kind: 'finished',
+              outcome: {
+                status: 'failed',
+                failure: {
+                  code: 'agent-error',
+                  message: `Pi 结束回合但没有输出任何内容，模型可能拒绝请求、额度已用尽或凭据失效${this.childFailure ? `（${this.childFailure.message}）` : ''}`,
+                },
+              },
+            }
+            return
+          }
           yield deduped
           if (signal.kind === 'finished') return
         }

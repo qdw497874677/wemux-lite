@@ -7,6 +7,7 @@ import type { ModelId } from '@wemux/domain'
 import { ClaudeAgent } from '../src/agents/claude-agent.js'
 import { PiAgent } from '../src/agents/pi-agent.js'
 import { OpenCodeAgent } from '../src/agents/opencode-agent.js'
+import { OpenCodeRuntimeSessionAdapter } from '../src/agents/opencode-runtime-session-adapter.js'
 import { modelId } from '@wemux/domain'
 
 async function fixtureScript(body: string) {
@@ -88,6 +89,51 @@ else if (process.argv.includes('auth')) console.log('0 credentials')
     assert.equal(detected.availability.status, 'available')
     assert.deepEqual(detected.runtime, { resume: true, tools: true, approvals: false, usage: true, cancel: true, structuredOutput: false, commands: [] })
     assert.deepEqual(detected.models.map(model => model.modelId), ['opencode::big-pickle', 'my-provider::my-model'])
+  } finally { await fixture.close() }
+})
+
+test('OpenCode runtime maps native session, text, tools and usage to the shared contract and resumes exactly', async () => {
+  const fixture = await fixtureScript(`
+if (!process.argv.includes('run') || !process.argv.includes('--format') || !process.argv.includes('json')) process.exit(9)
+const resume = process.argv.indexOf('--session')
+if (process.env.EXPECT_RESUME && (resume < 0 || process.argv[resume + 1] !== process.env.EXPECT_RESUME)) process.exit(8)
+console.log(JSON.stringify({type:'text',sessionID:'open-native-1',part:{text:'Hello'}}))
+console.log(JSON.stringify({type:'tool_use',sessionID:'open-native-1',part:{callID:'tool-1',tool:'read',state:{status:'running',input:{path:'README.md'},output:'one'}}}))
+console.log(JSON.stringify({type:'tool_use',sessionID:'open-native-1',part:{callID:'tool-1',tool:'read',state:{status:'completed',input:{path:'README.md'},output:'one two',metadata:{exit:0}}}}))
+console.log(JSON.stringify({type:'step_finish',sessionID:'open-native-1',part:{reason:'stop',tokens:{input:3,output:4,reasoning:1,cache:{read:2,write:1}},cost:0.01}}))
+`)
+  try {
+    const adapter = new OpenCodeRuntimeSessionAdapter(fixture.path)
+    const session = await adapter.openSession({ sessionId: 'open-session' as any, cwd: fixture.home, modelId: 'provider::model' as ModelId, resume: null })
+    const first = await collect(await session.execute({ operationId: 'open-turn-1' as any, message: { content: 'hello' }, launchContext: null }))
+    assert(first.some(signal => signal.kind === 'native-session' && signal.nativeSession === 'open-native-1'))
+    assert(first.some(signal => signal.kind === 'event' && signal.event.kind === 'assistant.text.delta' && signal.event.text === 'Hello'))
+    assert(first.some(signal => signal.kind === 'event' && signal.event.kind === 'tool.started' && signal.event.toolName === 'read'))
+    assert.equal(first.filter(signal => signal.kind === 'event' && signal.event.kind === 'tool.finished').length, 1)
+    const usage = first.find(signal => signal.kind === 'event' && signal.event.kind === 'usage.updated')
+    assert.deepEqual(usage && usage.kind === 'event' ? usage.event.usage : null, { scope: 'operation', subjectId: 'open-turn-1', source: 'runtime', revision: 1, completeness: 'complete', inputTokens: 3, outputTokens: 5, cacheReadTokens: 2, cacheWriteTokens: 1, costUsd: 0.01, totalTokens: 11, currency: 'USD' })
+    assert.deepEqual(first.at(-1), { kind: 'finished', outcome: { status: 'completed' } })
+
+    const previousExpected = process.env.EXPECT_RESUME
+    process.env.EXPECT_RESUME = 'open-native-1'
+    const resumed = await adapter.openSession({ sessionId: 'open-session' as any, cwd: fixture.home, modelId: 'provider::model' as ModelId, resume: 'open-native-1' as any })
+    const second = await collect(await resumed.execute({ operationId: 'open-turn-2' as any, message: { content: 'again' }, launchContext: null }))
+    if (previousExpected === undefined) delete process.env.EXPECT_RESUME
+    else process.env.EXPECT_RESUME = previousExpected
+    assert(!second.some(signal => signal.kind === 'native-session'), '恢复同一 native session 不应重复持久化引用')
+    assert.deepEqual(second.at(-1), { kind: 'finished', outcome: { status: 'completed' } })
+  } finally { await fixture.close() }
+})
+
+test('OpenCode runtime cancels an active invocation and rejects unsupported approvals', async () => {
+  const fixture = await fixtureScript(`setInterval(() => {}, 1000)`)
+  try {
+    const session = await new OpenCodeRuntimeSessionAdapter(fixture.path).openSession({ sessionId: 'open-session' as any, cwd: fixture.home, modelId: 'provider::model' as ModelId, resume: null })
+    const handle = await session.execute({ operationId: 'open-turn' as any, message: { content: 'hello' }, launchContext: null })
+    await new Promise(resolve => setTimeout(resolve, 25))
+    await handle.stop()
+    assert.deepEqual((await collect(handle)).at(-1), { kind: 'finished', outcome: { status: 'cancelled' } })
+    await assert.rejects(session.resolveApproval('approval' as any, 'approve'), /does not expose interactive approval/)
   } finally { await fixture.close() }
 })
 

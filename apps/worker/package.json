@@ -29,12 +29,16 @@
       "test": "node --import tsx --test test/*.test.ts"
    },
    "dependencies": {
+      "@wemux/agent-interchange": "0.1.0",
+      "@wemux/wire-protocol": "0.1.0",
       "ws": "^8.21.3"
    },
+   "bundleDependencies": [
+      "@wemux/agent-interchange",
+      "@wemux/wire-protocol"
+   ],
    "devDependencies": {
       "@types/ws": "^8.18.1",
-      "@wemux/agent-interchange": "0.1.0",
-      "@wemux/domain": "0.1.0",
-      "@wemux/wire-protocol": "0.1.0"
+      "@wemux/domain": "0.1.0"
    }
 }
