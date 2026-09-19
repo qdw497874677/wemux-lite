@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createWemuxServer } from '../server/src/server.js'
+import { provisionAdministrator } from './session.js'
 
-const bootstrapToken = 'full-stack-bootstrap-token-12345'
+const administratorEmail = 'e2e-owner@example.com'
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 async function eventually<T>(read: () => Promise<T>, accept: (value: T) => boolean): Promise<T> {
@@ -39,7 +40,7 @@ test('real Server and Worker CLI complete the project-to-agent conversation loop
   const directory = await mkdtemp(join(tmpdir(), 'wemux-full-stack-'))
   const workerHome = join(directory, 'worker')
   const repository = join(directory, 'repository')
-  const server = createWemuxServer({ databasePath: join(directory, 'server.sqlite'), bootstrapToken })
+  const server = createWemuxServer({ databasePath: join(directory, 'server.sqlite'), administratorEmails: [administratorEmail] })
   const baseUrl = await server.listen(0)
   let worker: ChildProcess | undefined
   t.after(async () => {
@@ -51,24 +52,15 @@ test('real Server and Worker CLI complete the project-to-agent conversation loop
     await rm(directory, { recursive: true, force: true })
   })
 
-  async function api(path: string, method = 'GET', body?: unknown) {
-    const response = await fetch(baseUrl + path, {
-      method,
-      headers: { Authorization: `Bearer ${bootstrapToken}`, 'Content-Type': 'application/json' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    })
-    const data = response.status === 204 ? null : await response.json()
-    if (!response.ok) throw new Error(`${method} ${path}: ${response.status} ${JSON.stringify(data)}`)
-    return data as any
-  }
+  const session = await provisionAdministrator({ store: server.store, baseUrl })
+  const api = session.api
 
   console.error('[e2e] init repository')
   const gitInit = await completed(spawn('git', ['init', '--initial-branch=main', repository], { stdio: ['ignore', 'pipe', 'pipe'] }))
   assert.equal(gitInit.code, 0, gitInit.stderr)
   const commit = await completed(spawn('git', ['-C', repository, '-c', 'user.name=E2E', '-c', 'user.email=e2e@example.com', 'commit', '--allow-empty', '-m', 'initial'], { stdio: ['ignore', 'pipe', 'pipe'] }))
   assert.equal(commit.code, 0, commit.stderr)
-  console.error('[e2e] bootstrap and register')
-  await api('/bootstrap', 'POST', {})
+  console.error('[e2e] provision administrator and register')
   const enrollment = await api('/enrollment-tokens', 'POST', {})
   const registration = await completed(workerProcess(['register', '--home', workerHome, '--server', baseUrl, `--token=${enrollment.token}`, '--name', 'E2E Worker'], {}))
   assert.equal(registration.code, 0, registration.stderr)

@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createWemuxServer } from '../server/src/server.js'
+import { provisionAdministrator } from './session.js'
 
-const bootstrapToken = 'real-pi-e2e-bootstrap-token'
+const administratorEmail = 'real-pi-owner@example.com'
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 async function eventually<T>(read: () => Promise<T>, accept: (value: T) => boolean, timeoutMs = 30_000): Promise<T> {
@@ -49,7 +50,7 @@ test('Server and Worker execute and resume a real Pi session', { timeout: 240_00
   const directory = await mkdtemp(join(tmpdir(), 'wemux-real-pi-'))
   const workerHome = join(directory, 'worker')
   const localRepository = join(directory, 'repository')
-  const server = createWemuxServer({ databasePath: join(directory, 'server.sqlite'), bootstrapToken })
+  const server = createWemuxServer({ databasePath: join(directory, 'server.sqlite'), administratorEmails: [administratorEmail] })
   const baseUrl = await server.listen(0)
   let worker: ChildProcess | undefined
   let workerStderr = ''
@@ -59,16 +60,7 @@ test('Server and Worker execute and resume a real Pi session', { timeout: 240_00
     await rm(directory, { recursive: true, force: true })
   })
 
-  async function api(path: string, method = 'GET', body?: unknown) {
-    const response = await fetch(baseUrl + path, {
-      method,
-      headers: { Authorization: `Bearer ${bootstrapToken}`, 'Content-Type': 'application/json' },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    })
-    const data = response.status === 204 ? null : await response.json()
-    if (!response.ok) throw new Error(`${method} ${path}: ${response.status} ${JSON.stringify(data)}`)
-    return data as any
-  }
+  const api = (await provisionAdministrator({ store: server.store, baseUrl })).api
 
   let repository = process.env.WEMUX_E2E_GIT_URL
   let revision = process.env.WEMUX_E2E_GIT_REVISION
@@ -83,7 +75,6 @@ test('Server and Worker execute and resume a real Pi session', { timeout: 240_00
     assert.ok(revision, 'WEMUX_E2E_GIT_REVISION is required for an external repository')
   }
 
-  await api('/bootstrap', 'POST', {})
   const enrollment = await api('/enrollment-tokens', 'POST', {})
   const registered = await completed(workerProcess(['register', '--home', workerHome, '--server', baseUrl, `--token=${enrollment.token}`, '--name', 'Real Pi Worker'], true))
   assert.equal(registered.code, 0, registered.stderr)
