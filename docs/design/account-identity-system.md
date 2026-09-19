@@ -150,9 +150,29 @@ Server → 签发本站 HttpOnly Cookie → 团队选择 / 原授权页面
 - 回跳与路径边界：回调路径固定为 `/api/auth/oauth/google/callback`，`returnTo` 经 `safeReturnTo` 只接受站内相对路径（拒绝协议相对、绝对 URL、反斜杠与控制字符）；`/api` 命名空间内的未知路径不再回落 SPA，端点拼错时返回 404 而不是 200 HTML。
 - 秘密边界：client secret、authorization code、ID/access token、state、nonce 与 PKCE verifier 不进审计与日志（`apps/server/src/test/google-auth-routes.test.ts` 以审计序列化字符串扫描回归锁定）；access token 不落盘、不转发给浏览器，退出登录不影响 Google 侧会话。
 
+### 5.4 已交付：密码与邮箱恢复管理（Ticket 06）
+
+- 路由与视图：`POST /auth/password/forgot`、`POST /auth/password/reset`、`POST /auth/password/change`、`POST /auth/email/change`、`POST /auth/email/change/confirm`、`GET /auth/account/security`；界面是 `apps/web/src/components/account-page.tsx` 的「密码」「邮箱」两个分区，一次性链接落地在 `apps/web/src/routes/auth-link.tsx`（密码重置与邮箱变更共用，先展示后 POST 消费）。
+- 强认证：敏感操作要求「当前密码」或「近期的强登录」（本地账号验密码、Google-only 验 `session.authenticatedAt` 是否在窗口内，默认 5 分钟）。**强认证失败是 400 而不是 401**：401 会被 Web 客户端当成会话失效并登出，用户只是打错一次密码不该被踢出。
+- 撤销面：改密码与重置都只撤销「其它」会话与 PAT（当前设备保留并轮换令牌），响应回显撤销数以便界面如实告知；审计 `credentials.reset` / `credentials.password_changed` 带 `revokedSessions`/`revokedTokens`。
+- 邮箱变更：新邮箱收确认链接、旧邮箱收变更提醒（两封都发）；确认时整体替换 `user.email` 与 `user_emails` 索引，不新旧并存、不合并任何 User；目标邮箱已被占用给 `credentials.email_change_rejected`，链接被后发变更超越给 409 `email_change_superseded`，被消耗后的重放给 409「该链接已被使用」。旧邮箱立即不能登录，**登录名与团队归属不受影响**。
+- 反枚举与凭据：找回对已注册/未注册邮箱同形（202 + `accepted` + 掩码邮箱）；两类挑战都只存 SHA-256 哈希（`verification_challenges.purpose` 为 `reset_password` / `change_email` / `verify_email`）且用后消费；密码、PAT、令牌原文都不进库文件与审计。
+- 证据：`apps/server/src/test/account-security.test.ts`（9 用例）、`apps/web/tests/account-security.test.mjs`、`apps/server/scripts/verify-wave-c.mjs`（真实浏览器）。验收摘要见 `docs/acceptance/account-identity-security-and-linking.md`，逐条断言与截图见 `.scratch/product-convergence/evidence/wave-c-cross-ticket-acceptance.md`。
+
+### 5.5 已交付：登录方式绑定与解绑（Ticket 08）
+
+- 视图与模型：`GET /auth/account/security` 只读列出登录方式（密码为内置方式，Google 为 `login_identities` 行）、邮箱投递状态与强认证窗口；`methods[].id` 是解绑目标，密码也行（删密码要求仍有另一种方式）。
+- 绑定：`POST /auth/identities/google/start` 创建带 `intent: 'link'` 的 OAuth 事务并绑定发起会话，回调只能落在发起它的浏览器与会话；成功后 302 回 `/settings?linked=google`，**不签发新会话**，身份行以 `(provider, issuer, subject)` 落库；身份已属于其他 User 时拒绝，首版不提供自动合并，绑定邮箱不同也不改主邮箱与 Team Membership。
+- 解绑与最后一种方式：`DELETE /auth/identities/:id` 要求强认证，删除身份行后若只剩一种方式则不能再删；前端对唯一方式的按钮置为禁用，后端同时以 409 `last_login_method` 兜底（只靠界面不算数，直接调接口也拿不到别的答案）。
+- Google-only 账号：可以在强认证窗口内直接设置本地密码（走 `POST /auth/password/change`），因此也就有了第二条登录方式；反过来本地账号绑定 Google 后可解绑其中任一条。
+- 审计与秘密：`credentials.login_method_bound` / `credentials.login_method_unbound` 留痕，审计只记渠道与结果，不含 code、state、密码或令牌。
+- 证据：`apps/server/src/test/account-security.test.ts`（含绑定会话归属、他人身份抢绑、Google-only 设密码、最后方式保护）、`apps/web/tests/account-security.test.mjs`、`apps/server/scripts/verify-wave-c.mjs`。验收摘要见 `docs/acceptance/account-identity-security-and-linking.md`。
+
 ## 6. API 与交互切片
 
 以下全部为设计目标，统一挂 `/api`，不暗示已存在这些接口。鉴权写操作遵循幂等、CAS 和专用一次性令牌语义，不能缓存含秘密响应。
+
+已完成（对照下表：账号安全组已交付密码/邮箱/登录方式三条，团队与客户端两组仍未开始）：登录/会话、注册/验证/找回、Google 与账号安全组的接口已按 §5.1–§5.5 的实际形态存在，见各节列出的路由。
 
 | 分组 | 拟议入口 |
 | --- | --- |
