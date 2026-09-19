@@ -17,6 +17,11 @@ artifacts/
 .scratch/
 *-current.png
 
+# 保真工装运行时产物（上游源码副本、样式副本、截图与报告）
+apps/web/scripts/tailgrids-fidelity/.out/
+apps/web/scripts/tailgrids-fidelity/playground/src/up-core/
+apps/web/scripts/tailgrids-fidelity/playground/src/wemux-styles.css
+
 # Machine-local agent configuration
 .claude/
 .agents/
