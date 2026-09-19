@@ -15,6 +15,7 @@
     "@wemux/server-domain": "0.1.0",
     "@wemux/web-contract": "0.1.0",
     "@wemux/wire-protocol": "0.1.0",
+    "jose": "^6.2.12",
     "ws": "^8.21.3"
   },
   "devDependencies": {

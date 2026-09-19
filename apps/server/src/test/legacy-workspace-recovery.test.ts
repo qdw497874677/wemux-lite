@@ -7,6 +7,7 @@ import { SqliteServerStore } from '../storage/sqlite/store.js'
 import { ServerService, newId } from '../application/server-service.js'
 import { WorkerService } from '../application/worker-service.js'
 import { Notifications } from '../application/notifications.js'
+import { seedOperator } from './fixtures/administrator.js'
 
 const workspaceId = 'legacy-workspace' as WorkspaceId
 const workerId = 'legacy-worker' as WorkerId
@@ -32,7 +33,7 @@ for (const workspaceStatus of ['pending', 'failed'] as const) {
 
         store = new SqliteServerStore(path) // Real migrations, then application bootstrap.
         let server = new ServerService(store, new Notifications())
-        await server.bootstrap()
+        await seedOperator(store, server)
         assert.equal((await store.resources.getWorkspace(workspaceId))!.provisioning, undefined)
         assert.equal((await store.commands.get(legacyCommandId))?.status, commandStatus === 'none' ? undefined : commandStatus)
         const recovered = await server.reprovisionWorkspace(workspaceId, 'first-recovery')
@@ -45,7 +46,7 @@ for (const workspaceStatus of ['pending', 'failed'] as const) {
         store.close(); store = undefined
         store = new SqliteServerStore(path)
         server = new ServerService(store, new Notifications())
-        await server.bootstrap()
+        await seedOperator(store, server)
         const before = await store.resources.getWorkspace(workspaceId)
         assert.equal(before!.provisioning!.commandId, recovered.commandId)
         for (const request of ['first-recovery', 'network-retry', 'after-restart']) {

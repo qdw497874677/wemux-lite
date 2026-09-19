@@ -1,4 +1,6 @@
 import test from 'node:test'
+import { administratorEmail, seedAdministrator, seedLocalAccount } from './fixtures/administrator.js'
+import { migrationCount } from '../storage/sqlite/migrations.js'
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { chmodSync, readFileSync, writeFileSync } from 'node:fs'
@@ -12,7 +14,6 @@ import { createWemuxServer } from '../server.js'
 import { TransportV2Peer } from './transport-v2-peer.js'
 
 const realDateNow = Date.now
-const token = 'integration-bootstrap-token-12345'
 
 const capability = { agentKey: 'pi', displayName: 'Pi', version: '1', mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'test-model', displayName: 'Test', source: 'configured' }] }
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
@@ -24,7 +25,8 @@ async function eventually(check: () => Promise<boolean>) {
 test('serves an installer and configured Worker tarball without exposing enrollment credentials', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'wemux-lite-download-')), tarballPath = join(dir, 'wemux-lite-worker.tgz')
   await writeFile(tarballPath, Buffer.from('fake-worker-package'))
-  const app = createWemuxServer({ databasePath: ':memory:', bootstrapToken: token, workerPackagePath: tarballPath })
+  const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail], workerPackagePath: tarballPath })
+  const { token } = await seedAdministrator(app.store)
   const base = await app.listen(0)
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }) })
   const scriptResponse = await fetch(`${base}/downloads/install-worker.sh`)
@@ -48,7 +50,8 @@ test('serves an installer and configured Worker tarball without exposing enrollm
 
 test('rejects a directory configured as the Worker package', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'wemux-lite-download-directory-'))
-  const app = createWemuxServer({ databasePath: ':memory:', bootstrapToken: token, workerPackagePath: dir })
+  const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail], workerPackagePath: dir })
+  const { token } = await seedAdministrator(app.store)
   const base = await app.listen(0)
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }) })
   const response = await fetch(`${base}/downloads/worker.tgz`)
@@ -57,7 +60,8 @@ test('rejects a directory configured as the Worker package', async t => {
 })
 
 test('returns 503 when the Worker package was not configured', async t => {
-  const app = createWemuxServer({ databasePath: ':memory:', bootstrapToken: token })
+  const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail] })
+  const { token } = await seedAdministrator(app.store)
   const base = await app.listen(0)
   t.after(() => app.close())
   const response = await fetch(`${base}/downloads/worker.tgz`)
@@ -71,7 +75,8 @@ test('serves the web UI bundle with SPA fallback without masking API 404s', asyn
   await mkdir(join(root, 'assets'), { recursive: true })
   await writeFile(join(root, 'index.html'), '<!doctype html><title>wemux</title>')
   await writeFile(join(root, 'assets', 'app.js'), 'console.log(1)')
-  const app = createWemuxServer({ databasePath: ':memory:', bootstrapToken: token, webStaticPath: root })
+  const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail], webStaticPath: root })
+  const { token } = await seedAdministrator(app.store)
   const base = await app.listen(0)
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }) })
 
@@ -106,7 +111,8 @@ test('installer downloads, installs, registers and starts with stubbed tools', {
   const dir = await mkdtemp(join(tmpdir(), 'wemux-lite-installer-'))
   const workerPackage = join(dir, 'worker.tgz')
   await writeFile(workerPackage, 'fake-worker-package')
-  const app = createWemuxServer({ databasePath: ':memory:', bootstrapToken: token, workerPackagePath: workerPackage })
+  const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail], workerPackagePath: workerPackage })
+  const { token } = await seedAdministrator(app.store)
   const base = await app.listen(0)
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }) })
   const script = await (await fetch(`${base}/downloads/install-worker.sh`)).text()
@@ -188,23 +194,26 @@ test('installer downloads, installs, registers and starts with stubbed tools', {
   assert.equal(ncLines.some(line => line.startsWith('curl')), false)
 })
 
-test('bootstrap secret issues an expiring persisted admin session', async t => {
-  // Keep HTTP scheduling real, but make expiry independent of CI load.
-  let currentTime = Date.now()
-  t.mock.method(Date, 'now', () => currentTime)
-  const app = createWemuxServer({ databasePath: ':memory:', bootstrapToken: token, adminSessionTtlMs: 25 })
+test('管理员登录会话持久化在服务端，并随空闲过期失效', async () => {
+  // 用真实时钟而不用日期桩：会话过期要真走完空闲窗口，桩只能让断言跟着桩走，测不出真实行为。
+  const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail], adminSessionTtlMs: 60 })
+  const password = 'correct horse battery staple'
+  await seedLocalAccount(app.store, { username: 'owner', email: administratorEmail, password, administrator: true })
   const base = await app.listen(0)
   try {
-    const issued = await fetch(`${base}/auth/session`, { method: 'POST', headers: { authorization: `Bearer ${token}` } })
-    assert.equal(issued.status, 201)
-    const session = await issued.json() as { token: string; expiresAt: string; teamId: string }
-    assert.match(session.token, /^wemux-session-/)
-    assert.equal(typeof session.expiresAt, 'string')
-    assert.equal(typeof session.teamId, 'string')
-    assert.equal((await fetch(`${base}/workers`, { headers: { authorization: `Bearer ${session.token}` } })).status, 200)
-    currentTime += 35
-    assert.equal((await fetch(`${base}/workers`, { headers: { authorization: `Bearer ${session.token}` } })).status, 401)
-    assert.equal((await fetch(`${base}/auth/session`, { method: 'POST', headers: { authorization: `Bearer ${session.token}` } })).status, 401)
+    // 浏览器登录：会话令牌只以 HttpOnly Cookie 形式送达，响应体里没有令牌。
+    const login = await fetch(`${base}/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ login: 'owner', password }) })
+    assert.equal(login.status, 200, JSON.stringify(await login.clone().json()))
+    const cookie = login.headers.getSetCookie().find(value => value.startsWith('wemux_login_session='))!.split(';')[0]!
+    const account = await login.json() as { teamId: string; expiresAt: string; instanceAdministrator: boolean; token?: string }
+    assert.equal(account.token, undefined, '代理令牌不再下发给浏览器')
+    assert.equal(account.instanceAdministrator, true)
+    assert.equal(typeof account.teamId, 'string')
+    assert.equal(typeof account.expiresAt, 'string')
+    assert.equal((await fetch(`${base}/workers`, { headers: { cookie } })).status, 200)
+    await delay(90)
+    assert.equal((await fetch(`${base}/workers`, { headers: { cookie } })).status, 401, '空闲过期后会话立即失效')
+    assert.equal((await fetch(`${base}/auth/me`, { headers: { cookie } })).status, 401)
   } finally { await app.close() }
 })
 
@@ -217,7 +226,8 @@ test('the test after admin session expiry has the real clock (no filesystem)', a
 })
 
 test('a new connection replaces the old socket without marking the worker offline', async t => {
-  const app = createWemuxServer({ databasePath: ':memory:', bootstrapToken: token })
+  const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail] })
+  const { token } = await seedAdministrator(app.store)
   const base = await app.listen(0)
   t.after(() => app.close())
   const request = async (path: string, method = 'GET', body?: unknown, bearer: string | null = token) => {
@@ -255,7 +265,8 @@ test('a new connection replaces the old socket without marking the worker offlin
 
 test('HTTP + SQLite + Worker WS + SSE durable end-to-end loop', { timeout: 20000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'wemux-lite-server-')), databasePath = join(dir, 'server.sqlite')
-  let app = createWemuxServer({ databasePath, bootstrapToken: token }), base = await app.listen(0)
+  let app = createWemuxServer({ databasePath, administratorEmails: [administratorEmail] }), base = await app.listen(0)
+  const { token } = await seedAdministrator(app.store)
   const peers: TransportV2Peer[] = []
   t.after(async () => { for (const p of peers) await p.close(); await app.close(); await rm(dir, { recursive: true, force: true }) })
   async function request(path: string, method = 'GET', body?: unknown, bearer: string | null = token) {
@@ -384,7 +395,7 @@ test('HTTP + SQLite + Worker WS + SSE durable end-to-end loop', { timeout: 20000
   assert.equal((await request(`/sessions/${session.id}/messages`, 'POST', { content: 'reject\0before-persist' })).status, 400)
   const offline = await request(`/sessions/${session.id}/messages`, 'POST', { content: 'persist across restart' })
   await app.close()
-  app = createWemuxServer({ databasePath, bootstrapToken: token }); base = await app.listen(0)
+  app = createWemuxServer({ databasePath, administratorEmails: [administratorEmail] }); base = await app.listen(0)
   peer = await connect(workerId, credential)
   await peer.wait(m => m.type === 'command' && m.commandId === offline.data.commandId)
   assert.equal(peer.messages.some(m => m.type === 'command' && m.commandId === 'stable-command'), false)
@@ -402,14 +413,15 @@ test('HTTP + SQLite + Worker WS + SSE durable end-to-end loop', { timeout: 20000
   assert.equal((await request(`/projects/${project.id}`, 'DELETE')).status, 409)
   assert.equal((await request('/sessions')).data.items.length, 2)
   const db = new DatabaseSync(databasePath)
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()!.count, 14)
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()!.count, migrationCount)
   const records = db.prepare('SELECT data FROM records').all().map(r => String(r.data)).join('\n')
   assert.equal(records.includes(credential), false); assert.equal(records.includes(enrollment.token), false)
   db.close()
 })
 
 test('reject unauthorized, malformed and cross-worker protocol writes; atomic enrollment', { timeout: 10000 }, async t => {
-  const app = createWemuxServer({ databasePath: ':memory:', bootstrapToken: token }), base = await app.listen(0)
+  const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail] }), base = await app.listen(0)
+  const { token } = await seedAdministrator(app.store)
   t.after(() => app.close())
   async function post(path: string, data: unknown) {
     const r = await fetch(base + path, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(data) })
@@ -429,9 +441,12 @@ test('reject unauthorized, malformed and cross-worker protocol writes; atomic en
   })
   assert.equal(unauthorized, 401)
   const ws = new WebSocket(base.replace('http:', 'ws:') + '/worker/ws', { headers: { Authorization: `Bearer ${first.credential}` } })
+  // 关闭监听得先挂上：服务器可能在握手拒绝后很快关闭，错过事件会让断言永远等下去（假超时）。
+  const closed = once(ws, 'close')
   const peer = new TransportV2Peer(ws, second.workerId)
   await peer.connect({ name: 'Spoof', workerVersion: '1' }).catch(() => undefined)
-  await once(ws, 'close')
+  assert.ok(peer.frames.some(frame => frame.frameType === 'transport.error'), '冒充其他 Worker 身份必须收到传输层错误')
+  await closed
   await peer.close()
   const malformed = await fetch(base + '/projects', { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: '{' })
   assert.equal(malformed.status, 400)

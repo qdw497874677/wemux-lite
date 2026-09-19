@@ -13,9 +13,29 @@ import { integer, object, text } from './validation.js'
 
 export const newId = <N extends string>(): Id<N> => randomUUID() as Id<N>
 export const now = (): Timestamp => new Date().toISOString() as Timestamp
-const userId = 'bootstrap-admin' as UserId
 const teamId = 'default-team' as TeamId
 const projectId = 'default-project' as ProjectId
+
+/** Creation provenance a composing service may attach without re-implementing binding validation. */
+export interface SessionProvenance {
+  readonly taskId?: string | null
+  readonly runId?: string | null
+  /** Operator the Session belongs to; defaults to the instance administrator. */
+  readonly ownerId?: UserId
+}
+
+/** Inputs the Session Lineage module may set on a Fork target; binding validation stays here. */
+export interface ForkTargetSessionInput {
+  readonly projectId: ProjectId
+  readonly workspaceId: WorkspaceId
+  readonly workerId: WorkerId
+  readonly agentKey: AgentKey
+  readonly modelId: ModelId | null
+  readonly title: string
+  readonly ownerId: UserId
+  /** 发起 Fork 的 requestId；目标 Session 的创建身份由它派生，不另开一套幂等键。 */
+  readonly requestId: string
+}
 
 export class ServerService {
   constructor(private readonly store: ServerStore, readonly notifications: Notifications, private readonly capabilities?: CapabilityService) {}
@@ -63,14 +83,14 @@ export class ServerService {
     for (const session of await this.store.resources.listSessions()) if (session.binding.agent.workerId === id) this.notifications.session(session.id)
     return await this.getWorker(id)
   }
-  async reprovisionWorkspace(id: WorkspaceId, requestId: string = randomUUID(), workerId?: WorkerId) {
+  async reprovisionWorkspace(id: WorkspaceId, requestId: string = randomUUID(), workerId?: WorkerId, actor?: UserId) {
     const result = await this.store.transaction(async tx => {
       const result = await this.reprovisionWorkspaceInTx(tx, id, requestId, workerId)
       const binding = await tx.tasks.binding(id)
       if (result.created && binding) {
         const task = requireValue(await tx.tasks.get(binding.taskId)), at = now()
         await tx.tasks.save({ ...task, updatedAt: at, lastActivityAt: at })
-        await tx.tasks.append({ taskId: task.id, projectId: task.projectId, type: 'workspace.retried', actor: userId, requestId, occurredAt: at, payload: { workspaceId: id, workerId: result.workerId, commandId: result.commandId } })
+        await tx.tasks.append({ taskId: task.id, projectId: task.projectId, type: 'workspace.retried', actor: actor ?? await this.operator(undefined, tx), requestId, occurredAt: at, payload: { workspaceId: id, workerId: result.workerId, commandId: result.commandId } })
       }
       return { ...result, taskId: binding?.taskId }
     })
@@ -122,30 +142,55 @@ export class ServerService {
     if (!placement) throw new AppError(409, 'Workspace is not prepared on selected Worker', 'workspace_not_ready')
     return placement
   }
-  private async audit(tx: ServerStoreTx, action: string, resource: AuditResource): Promise<void> {
-    await tx.audit.append({ id: newId(), actorId: userId, action, resource, result: 'succeeded', occurredAt: now(), metadata: {} })
+  private async audit(tx: ServerStoreTx, action: string, resource: AuditResource, actor?: UserId): Promise<void> {
+    await tx.audit.append({ id: newId(), actorId: actor ?? await this.operator(undefined, tx), action, resource, result: 'succeeded', occurredAt: now(), metadata: {} })
   }
-  async bootstrap() {
+  /**
+   * 写操作的归属用户：集群控制面只有管理员能进来，调用方知道确切身份时用 `actor` 参数显式传入。
+   * 没有管理员账号时直接失败，不再伪造 `bootstrap-admin` 这类合成用户；多管理员逐请求归属随团队授权一起做。
+   * 已经在事务里的调用方必须传 `tx`，否则读到的是事务外的快照（存储层会直接报错，不静默漂移）。
+   */
+  private async operator(explicit?: UserId, tx?: ServerStoreTx): Promise<UserId> {
+    if (explicit) return explicit
+    const readers = tx ?? this.store
+    const roster = [...await readers.identity.listInstanceAdministrators()].sort((a, b) => a.assignedAt.localeCompare(b.assignedAt))
+    const record = roster[0]
+    if (!record) throw new AppError(409, '实例还没有管理员账号：请先用部署声明的邮箱（WEMUX_ADMIN_EMAILS）注册或登录', 'administrator_not_configured')
+    return record.userId
+  }
+  /**
+   * 认领后默认环境的归属绑定：默认 Team 与 Project 仍用稳定 ID（单 Team 部署），
+   * 但 owner 必须指向真实管理员，不创建合成用户。既有 Team/Project 不被改名或转移。
+   */
+  async ensureDefaultEnvironment(administratorUserId: UserId) {
+    const at = now()
     return this.store.transaction(async tx => {
-      const at = now()
-      if (!await tx.identity.getUser(userId)) await tx.identity.saveUser({ id: userId, username: 'admin', email: null, createdAt: at })
-      if (!await tx.identity.getTeam(teamId)) {
+      const team = await tx.identity.getTeam(teamId)
+      if (!team) {
         await tx.identity.saveTeam({ id: teamId, name: 'Default team', createdAt: at })
-        await tx.identity.saveMembership({ teamId, userId, role: 'owner', joinedAt: at })
+        await this.audit(tx, 'team.create', { kind: 'team', id: teamId })
       }
-      if (!await tx.resources.getProject(projectId)) await tx.resources.saveProject({ id: projectId, teamId, ownerId: userId, name: 'Default project', shareScope: 'owner-only', deletedAt: null })
-      return { user: await tx.identity.getUser(userId), team: await tx.identity.getTeam(teamId), project: await tx.resources.getProject(projectId) }
+      const memberships = await tx.identity.listMemberships(administratorUserId)
+      if (!memberships.some(membership => membership.teamId === teamId)) {
+        await tx.identity.saveMembership({ teamId, userId: administratorUserId, role: 'owner', joinedAt: at })
+      }
+      let project = await tx.resources.getProject(projectId)
+      if (!project) {
+        project = { id: projectId, teamId, ownerId: administratorUserId, name: 'Default project', shareScope: 'owner-only', deletedAt: null }
+        await tx.resources.saveProject(project)
+      }
+      return { team: await tx.identity.getTeam(teamId), project }
     })
   }
-  async createEnrollment(input: unknown) {
+  async createEnrollment(input: unknown, actor?: UserId) {
     const b = object(input)
     const ttl = b.ttlSeconds === undefined ? 3600 : integer(b.ttlSeconds, 'ttlSeconds', 1, 86400)
     requireValue(await this.store.identity.getTeam(teamId), 'Bootstrap required')
     const token = randomBytes(32).toString('base64url')
     const expiresAt = new Date(Date.now() + ttl * 1000).toISOString() as Timestamp
     await this.store.transaction(async tx => {
-      await tx.identity.saveEnrollmentToken({ id: newId(), teamId, createdBy: userId, tokenHash: hashSecret(token), expiresAt, consumedByWorkerId: null, consumedAt: null })
-      await this.audit(tx, 'enrollment-token.create', { kind: 'team', id: teamId })
+      await tx.identity.saveEnrollmentToken({ id: newId(), teamId, createdBy: actor ?? await this.operator(undefined, tx), tokenHash: hashSecret(token), expiresAt, consumedByWorkerId: null, consumedAt: null })
+      await this.audit(tx, 'enrollment-token.create', { kind: 'team', id: teamId }, actor)
     })
     return { token, expiresAt }
   }
@@ -213,11 +258,11 @@ export class ServerService {
     if (s.deletedAt) throw new AppError(404, 'Session deleted')
     return s
   }
-  async createProject(input: unknown) {
+  async createProject(input: unknown, actor?: UserId) {
     const b = object(input)
     requireValue(await this.store.identity.getTeam(teamId), 'Bootstrap required')
-    const project: Project = { id: newId(), teamId, ownerId: userId, name: text(b.name, 'name', 200), shareScope: 'owner-only', deletedAt: null }
-    await this.store.transaction(async tx => { await tx.resources.saveProject(project); await this.audit(tx, 'project.create', { kind: 'project', id: project.id }) })
+    const project: Project = { id: newId(), teamId, ownerId: actor ?? await this.operator(), name: text(b.name, 'name', 200), shareScope: 'owner-only', deletedAt: null }
+    await this.store.transaction(async tx => { await tx.resources.saveProject(project); await this.audit(tx, 'project.create', { kind: 'project', id: project.id }, actor) })
     return project
   }
   private async command(tx: ServerStoreTx, workerId: WorkerId, command: WorkerCommand, id = newId<'CommandId'>()) {
@@ -268,9 +313,26 @@ export class ServerService {
     if (result.created) this.notifications.commands(result.session.binding.agent.workerId)
     return result
   }
+  /**
+   * Lineage seam (Ticket 17): create a Fork target inside the caller's transaction so the
+   * target Session, its Worker command and the Fork row commit or roll back together. The
+   * Project check is here because a Fork edge must not span Projects or Teams.
+   */
+  async createForkTargetInTx(tx: ServerStoreTx, input: ForkTargetSessionInput) {
+    const workspace = requireValue(await tx.resources.getWorkspace(input.workspaceId))
+    if (workspace.projectId !== input.projectId) throw new AppError(409, 'Fork target Workspace belongs to another Project', 'fork_target_scope')
+    if (workspace.deletedAt !== null) throw new AppError(409, 'Fork target Workspace is deleted', 'fork_target_deleted')
+    // Session 级幂等键必须与 Fork 自己的键分开命名空间，否则一个客户端用同一个 requestId
+    // 创建普通 Session 时会与 Fork 目标撞车。
+    const created = await this.createSessionInTx(tx, { requestId: `fork:${input.requestId}`, workspaceId: input.workspaceId, workerId: input.workerId, agentKey: input.agentKey, modelId: input.modelId, title: input.title }, { ownerId: input.ownerId })
+    // 走到这里说明 Fork 记录还不存在却已有同 requestId 的目标：宁可失败，也不能给同一个目标补第二条边。
+    if (!created.created) throw new AppError(409, 'Fork target Session already exists for this requestId', 'request_id_conflict')
+    return created.session
+  }
   /** Internal composition seam; never opens a transaction or notifies. */
-  async createSessionInTx(tx: ServerStoreTx, input: unknown, source?: { taskId: string; runId: string | null }) {
+  async createSessionInTx(tx: ServerStoreTx, input: unknown, provenance?: SessionProvenance) {
     const b = object(input), workspace = await this.getWorkspace(text(b.workspaceId, 'workspaceId') as WorkspaceId, tx.resources)
+    const source = provenance === undefined || (provenance.taskId === undefined && provenance.runId === undefined) ? undefined : { taskId: provenance.taskId ?? null, runId: provenance.runId ?? null }
     const requestedWorkerId = b.workerId === undefined ? undefined : text(b.workerId, 'workerId') as WorkerId
     const readyPlacements = workspace.placements.filter(placement => placement.status === 'ready')
     const selected = requestedWorkerId ? readyPlacements.find(placement => placement.workerId === requestedWorkerId) : readyPlacements.length === 1 ? readyPlacements[0] : undefined
@@ -292,15 +354,16 @@ export class ServerService {
     const modelId = requestedModelId ?? agent.models?.map(model => model?.modelId).find(id => !!id) ?? null
     if (modelId === null) throw new AppError(409, 'Agent exposes no models')
     const fingerprint = createHash('sha256').update(canonicalCommand({ workspaceId: workspace.id, workerId: worker.id, agentKey, modelId, title, shareScope: 'owner-only' })).digest('hex')
+    const ownerId = provenance?.ownerId ?? await this.operator(undefined, tx)
     if (requestId) {
-      const previous = await tx.resources.getSessionByCreateRequest(userId, workspace.projectId, requestId)
+      const previous = await tx.resources.getSessionByCreateRequest(ownerId, workspace.projectId, requestId)
       if (previous) {
         if (previous.creation?.fingerprint !== fingerprint) throw new AppError(409, 'requestId already belongs to a different Session request', 'request_id_conflict')
         return { session: previous, commandId: previous.creation.commandId as CommandId, created: false }
       }
     }
     const sessionId = newId<'SessionId'>(), commandId = newId<'CommandId'>()
-    const session: Session = { id: sessionId, projectId: workspace.projectId, ownerId: userId, workspaceId: workspace.id, title, shareScope: 'owner-only', binding: { workspaceId: workspace.id, agent: { workerId: worker.id, agentKey }, modelId }, runtimeState: 'idle', archivedAt: null, deletedAt: null, ...(requestId ? { creation: { requestId, fingerprint, commandId } } : {}), ...source }
+    const session: Session = { id: sessionId, projectId: workspace.projectId, ownerId, workspaceId: workspace.id, title, shareScope: 'owner-only', binding: { workspaceId: workspace.id, agent: { workerId: worker.id, agentKey }, modelId }, runtimeState: 'idle', archivedAt: null, deletedAt: null, ...(requestId ? { creation: { requestId, fingerprint, commandId } } : {}), ...source }
     await tx.resources.saveSession(session)
     await this.command(tx, worker.id, { kind: 'session.create', session: { sessionId: session.id, binding: session.binding } }, commandId)
     await this.audit(tx, 'session.create', { kind: 'session', id: session.id })
@@ -460,7 +523,7 @@ function canonicalFingerprint(command: WorkerCommand): string {
   return createHash('sha256').update(canonicalCommand(value)).digest('hex')
 }
 
-function canonicalCommand(value: unknown): string {
+export function canonicalCommand(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value)
   if (Array.isArray(value)) return `[${value.map(canonicalCommand).join(',')}]`
   return `{${Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)).map(([key, child]) => `${JSON.stringify(key)}:${canonicalCommand(child)}`).join(',')}}`

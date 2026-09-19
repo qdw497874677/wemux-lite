@@ -31,8 +31,14 @@ export class WorkerService {
       this.notifications.project({ id: newId(), projectId: change.projectId, taskId: change.taskId, runId: change.runId, type: 'run.changed' })
     }
   }
+  /**
+   * Worker 上报的会话必须先确认归属。会话不存在（例如服务器数据被重置后 Worker 重放旧帧）
+   * 返回 null 让调用方跳过：服务器已经没有任何该会话的记录可保护，
+   * 回 transport.error 只会把还在线的节点永久打成离线。归属不符仍然是 403。
+   */
   private async ownSession(workerId: WorkerId, sessionId: SessionId, resources = this.store.resources) {
-    const session = requireValue(await resources.getSession(sessionId))
+    const session = await resources.getSession(sessionId)
+    if (!session) return null
     if (session.binding.agent.workerId !== workerId) throw new AppError(403, 'Session belongs to another worker')
     return session
   }
@@ -75,7 +81,10 @@ export class WorkerService {
           await tx.resources.saveWorker({ ...worker, capabilities: message.capabilities, lastSeenAt: now() })
           break
         case 'ack': {
-          const command = requireValue(await tx.commands.get(message.receipt.commandId))
+          const command = await tx.commands.get(message.receipt.commandId)
+          // 服务器数据被重置后，Worker 持久化的 outbox 仍会重放旧 commandId 的 receipt。
+          // 已经没有可对账的对象，忽略；回 transport.error 会把这个节点永久停在离线。
+          if (!command) break
           if (command.workerId !== workerId) throw new AppError(403, 'Command belongs to another worker')
           await tx.commands.recordReceipt(message.receipt, now())
           if (command.status === message.receipt.status) break
@@ -105,7 +114,9 @@ export class WorkerService {
         }
         case 'event':
           if (message.scope === 'workspace') {
-            const r = message.report, w = requireValue(await tx.resources.getWorkspace(r.workspaceId))
+            const r = message.report, w = await tx.resources.getWorkspace(r.workspaceId)
+            // 与 ownSession 同理：服务器没有该 workspace 的记录时跳过重放的旧报告，而不是回 transport.error。
+            if (!w) break
             const placement = w.placements.find(value => value.workerId === workerId)
             if (!placement || (r.location && (r.location.workerId !== workerId || r.location.workspaceId !== w.id))) throw new AppError(403, 'Workspace ownership placement mismatch')
             // Attempt identity is authoritative. Legacy reports are accepted only
@@ -122,7 +133,8 @@ export class WorkerService {
             await tx.resources.saveWorkspace({ ...w, workerId, status: next.status, failureReason: next.failureReason, provisioning: next.provisioning, location: next.location, placements: w.placements.map(value => value.workerId === workerId ? next : value) })
             if (!same) await workspaceActivity(w.id, r.status, r.reason, r.occurredAt)
           } else {
-            if ((await this.ownSession(workerId, message.event.sessionId, tx.resources)).deletedAt) break
+            const owner = await this.ownSession(workerId, message.event.sessionId, tx.resources)
+            if (!owner || owner.deletedAt) break
             const before = await tx.cache.getFreshness(message.event.sessionId)
             const existing = await tx.cache.readEvents(message.event.sessionId, message.event.seq, 1)
             const state = await tx.cache.applyEvents(message.event.sessionId, [message.event])
@@ -135,14 +147,16 @@ export class WorkerService {
         case 'sync':
           if (message.kind === 'heads') {
             for (const head of message.heads) {
-              if ((await this.ownSession(workerId, head.sessionId, tx.resources)).deletedAt) continue
+              const owner = await this.ownSession(workerId, head.sessionId, tx.resources)
+              if (!owner || owner.deletedAt) continue
               const state = await tx.cache.recordWorkerHead(head.sessionId, head.lastSeq)
               changed.add(head.sessionId)
               if (state.contiguousSeq < head.lastSeq) replies.push(this.request(head.sessionId, state.contiguousSeq))
               if (state.contiguousSeq > head.lastSeq) throw new AppError(409, 'Worker journal head regressed')
             }
           } else {
-            if ((await this.ownSession(workerId, message.sessionId, tx.resources)).deletedAt) break
+            const owner = await this.ownSession(workerId, message.sessionId, tx.resources)
+            if (!owner || owner.deletedAt) break
             const previous = await tx.cache.getFreshness(message.sessionId)
             let inserted = false
             if (message.kind === 'gap') {
@@ -169,17 +183,22 @@ export class WorkerService {
           break
       }
       async function workspaceActivity(workspaceId: string, status: string, reason: string | null, occurredAt: string) {
-        const workspace = requireValue(await tx.resources.getWorkspace(workspaceId as import('@wemux/domain').WorkspaceId))
+        // 服务器数据被重置后，Worker 的持久发件箱里还带着旧工作区的事件；
+        // 对未知工作区报 404 会让服务器拒绝 ack，那一条之后的全部帧永远重放，节点从此无法同步。
+        const workspace = await tx.resources.getWorkspace(workspaceId as import('@wemux/domain').WorkspaceId)
+        if (!workspace) return
         const binding = await tx.tasks.binding(workspaceId)
         projectEvents.set(`workspace:${workspaceId}`, { id: newId(), projectId: workspace.projectId, workspaceId, ...(binding ? { taskId: binding.taskId } : {}), type: 'workspace.provisioning' })
         if (!binding) return
-        const task = requireValue(await tx.tasks.get(binding.taskId))
+        const task = await tx.tasks.get(binding.taskId)
+        if (!task) return
         await tx.tasks.save({ ...task, lastActivityAt: now() })
         await tx.tasks.append({ taskId: task.id, projectId: task.projectId, type: 'workspace.provisioning', actor: workerId, requestId: newId(), occurredAt, payload: { workspaceId, status, reason } })
       }
       // Only contiguous journal entries influence the display projection.
       async function projectRuntime(sessionId: SessionId, start: number, through: EventSeq) {
-        const session = requireValue(await tx.resources.getSession(sessionId))
+        const session = await tx.resources.getSession(sessionId)
+        if (!session) return
         let from = start as EventSeq, runtimeState = session.runtimeState
         while (from <= through) {
           const page = await tx.cache.readEvents(sessionId, from, 500)

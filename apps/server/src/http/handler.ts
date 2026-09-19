@@ -2,18 +2,27 @@ import { randomUUID } from 'node:crypto'
 import { TaskError, type TaskService } from '../application/task-service.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { CapabilityToolName } from '@wemux/domain'
-import type { ApprovalId, CommandId, ProjectId, SessionId, WorkerId, WorkspaceId } from '@wemux/domain'
+import type { ApprovalId, CommandId, ProjectId, SessionForkId, SessionId, WorkerId, WorkspaceId } from '@wemux/domain'
 import { AuthenticationService } from '../application/auth.js'
 import { CapabilityError, CapabilityService } from '../application/capability-service.js'
 import { CapabilityTokenError } from '../application/capability-token-service.js'
 import { AppError } from '../application/errors.js'
 import { ServerService } from '../application/server-service.js'
 import { integer } from '../application/validation.js'
+import { isWebConsoleAuthPath } from '../application/web-console-routes.js'
 import { readTailnetSelf } from '../application/tailnet-info.js'
 import { SessionStreams } from './sse.js'
 import type { ProjectStreams } from './project-sse.js'
 import { serveWorkerDownload, type WorkerDownloads } from './worker-downloads.js'
 import { serveStaticSite, type StaticSite } from './static.js'
+import { assertCookieWriteAllowed, handleAuthRoute } from './routes-auth.js'
+import type { IdentityService } from '../application/identity-service.js'
+import type { EmailRegistrationService } from '../application/email-registration.js'
+import type { GoogleAuthenticationService } from '../application/google-authentication.js'
+import type { InstanceSettingsService } from '../application/instance-settings.js'
+import type { SessionLineageService } from '../application/session-lineage-service.js'
+import { readCookie } from './cookies.js'
+import type { RequestCredential } from '../application/auth.js'
 
 async function body(request: IncomingMessage): Promise<unknown> {
   let size = 0
@@ -33,13 +42,17 @@ function json(response: ServerResponse, status: number, data: unknown): void {
 
 export interface WorkerControl { disconnectWorker(workerId: import('@wemux/domain').WorkerId): void }
 
-export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams) {
+export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, _adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams, identity?: IdentityService | null, registration?: EmailRegistrationService | null, settings?: InstanceSettingsService | null, google?: GoogleAuthenticationService | null, lineage?: SessionLineageService | null) {
   return (request: IncomingMessage, response: ServerResponse): void => {
     void (async () => {
       const url = new URL(request.url ?? '/', 'http://localhost'), rawPath = url.pathname === '/' ? '/' : url.pathname.replace(/\/$/, '')
       // The web console calls same-origin "/api/*" paths; accept the prefix directly so
       // single-origin deployments (server hosting the built web bundle) work without a proxy.
       const path = rawPath === '/api' || rawPath.startsWith('/api/') ? (rawPath.slice(4) || '/') : rawPath, method = request.method
+      // API 命名空间不参与 SPA 回退：GET 回调（如 Google OAuth 302 目标）必须到路由，
+      // 不能被 index.html 截走。例外是邮件链接目标（`/auth/verify-email`、`/auth/password/reset`）：
+      // 它们是 Web 控制台的页面，一律当 API 处理会让收件人看到 401 JSON。
+      const apiNamespace = rawPath === '/api' || rawPath.startsWith('/api/') || ((rawPath === '/auth' || rawPath.startsWith('/auth/')) && !isWebConsoleAuthPath(rawPath))
       if (method === 'GET' && path === '/health') { json(response, 200, { status: 'ok' }); return }
       if (method === 'GET' && await serveWorkerDownload(response, path, downloads)) return
       if (method === 'POST' && path === '/workers/enroll') { json(response, 201, await service.enroll(await body(request))); return }
@@ -52,7 +65,7 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
         await service.leaveWorker(workerId, id => control?.disconnectWorker(id))
         response.writeHead(204).end(); return
       }
-      if (staticSite && method === 'GET' && await serveStaticSite(response, path, request.headers.accept, staticSite)) return
+      if (staticSite && method === 'GET' && !apiNamespace && await serveStaticSite(response, path, request.headers.accept, staticSite)) return
       if (method === 'POST' && path.startsWith('/agent-capabilities/')) {
         if (!capabilities) throw new AppError(503, 'Agent capabilities are disabled')
         const header = request.headers.authorization
@@ -70,17 +83,18 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
         json(response, 200, result); return
       }
       const header = request.headers.authorization
-      const adminToken = header?.startsWith('Bearer ') ? header.slice(7) : undefined
-      if (method === 'POST' && path === '/auth/session') {
-        if (!auth.isBootstrapToken(adminToken)) throw new AppError(401, 'Unauthorized')
-        const defaults = await service.bootstrap()
-        const user = defaults.user
-        if (!user) throw new AppError(500, 'Bootstrap user missing')
-        json(response, 201, { ...(await auth.issueAdminSession(user.id, adminSessionTtlMs)), teamId: defaults.team?.id ?? null }); return
-      }
+      const bearer = header?.startsWith('Bearer ') ? header.slice(7) : undefined
+      const adminToken = bearer
+      // 浏览器会话与 Bearer 凭证互不冒充：Cookie 只在同源请求携带，且不可用于升级为代理令牌。
+      const resolved = identity ? await identity.resolveSession(readCookie(request.headers.cookie, identity.cookieName)) : null
+      const loginSession = resolved && identity ? await identity.touch(resolved) : null
+      const credential: RequestCredential = { bearer, loginSession }
+      if (await handleAuthRoute({ request, response, path, method, readBody: () => body(request), auth, identity: identity ?? null, service, loginSession, bearer, registration, settings, google })) return
+      const unsafe = method !== 'GET' && method !== 'HEAD'
+      if (unsafe && loginSession) assertCookieWriteAllowed(identity ?? null, request, loginSession)
       const projectEvents = path.match(/^\/projects\/([^/]+)\/events$/)
       if (tasks && projectStreams && projectEvents && method === 'GET') {
-        const authorize = async () => tasks.authorizeProject(projectEvents[1], { actor: await auth.taskActor(adminToken), requestId: randomUUID(), teamId: url.searchParams.get('teamId') ?? undefined })
+        const authorize = async () => tasks.authorizeProject(projectEvents[1], { actor: await auth.taskActor(credential), requestId: randomUUID(), teamId: url.searchParams.get('teamId') ?? undefined })
         try { await authorize() }
         catch (error) {
           if (error instanceof TaskError || error instanceof AppError) {
@@ -94,7 +108,7 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
       if (tasks && (projectReader || /^\/projects\/[^/]+\/tasks(?:\/|$)/.test(path))) {
         const match = path.match(/^\/projects\/([^/]+)\/tasks(?:\/([^/]+)(?:\/(transition|move|activity|links|workspaces|assignment|runs|launch|sessions)(?:\/([^/]+)(?:\/(retry|cancel|review))?)?)?)?$/)
         try {
-          const actor = await auth.taskActor(adminToken)
+          const actor = await auth.taskActor(credential)
           if (!match && !projectReader) throw new TaskError('not_found', 'Route not found')
           const [, projectId, taskId, action, linkId, retry] = match ?? ['', projectReader![1]]
           const requestId = request.headers['x-request-id'] ?? randomUUID()
@@ -137,9 +151,12 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
           json(response, failure.status, { error: { code: failure.code, message: failure.message, ...(failure.details ? { details: failure.details } : {}) } }); return
         }
       }
-      await auth.authenticateAdmin(adminToken)
-      if (method === 'POST' && path === '/bootstrap') { json(response, 200, await service.bootstrap()); return }
-      if (method === 'POST' && path === '/enrollment-tokens') { json(response, 201, await service.createEnrollment(await body(request))); return }
+      await auth.authenticateAdmin(credential)
+      // 集群控制面的写操作归属真实用户：优先 Cookie 会话，其次该 PAT 的归属用户。
+      const operator = await auth.taskActor(credential)
+      // 默认环境不再由合成用户拥有：由当前管理员会话就地建立（幂等）。
+      if (method === 'POST' && path === '/bootstrap') { json(response, 200, await service.ensureDefaultEnvironment(operator)); return }
+      if (method === 'POST' && path === '/enrollment-tokens') { json(response, 201, await service.createEnrollment(await body(request), operator)); return }
       if (method === 'GET' && path === '/workers') { json(response, 200, { items: await service.listWorkers() }); return }
       if (method === 'GET' && path === '/cluster/tailnet') { json(response, 200, await readTailnetSelf()); return }
       const projectAssets = path.match(/^\/projects\/([^/]+)\/capability-assets$/)
@@ -170,7 +187,7 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
         const input = await body(request) as { requestId?: unknown; workerId?: unknown }
         if (input.requestId !== undefined && typeof input.requestId !== 'string') throw new AppError(400, 'Invalid retry requestId')
         if (input.workerId !== undefined && typeof input.workerId !== 'string') throw new AppError(400, 'Invalid workerId')
-        json(response, 200, await service.reprovisionWorkspace(reprovision[1] as WorkspaceId, input.requestId, input.workerId as WorkerId | undefined)); return
+        json(response, 200, await service.reprovisionWorkspace(reprovision[1] as WorkspaceId, input.requestId, input.workerId as WorkerId | undefined, operator)); return
       }
       const cancelQueued = path.match(/^\/sessions\/([^/]+)\/messages\/([^/]+)\/cancel$/)
       if (method === 'POST' && cancelQueued) { json(response, 202, await service.cancelQueued(cancelQueued[1] as SessionId, cancelQueued[2] as CommandId, await body(request))); return }
@@ -192,6 +209,29 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
           else { await service.getSession(id); streams.open(response, id, from) }
           return
         }
+      }
+      // 血缘与 Fork：C1 的写入口只有一条（POST session-forks），画布连线不参与领域写入。
+      const forkTarget = path.match(/^\/projects\/([^/]+)\/session-forks$/)
+      if (lineage && forkTarget && method === 'POST') {
+        json(response, 201, await lineage.fork({ operator: await auth.taskActor(credential), projectId: forkTarget[1] as ProjectId, command: await body(request) })); return
+      }
+      const sessionGraph = path.match(/^\/projects\/([^/]+)\/session-graph$/)
+      if (lineage && sessionGraph && method === 'GET') {
+        const rootSessionId = url.searchParams.get('rootSessionId'), depth = url.searchParams.get('depth'), nodeLimit = url.searchParams.get('nodeLimit')
+        json(response, 200, { graph: await lineage.getGraph({ operator: await auth.taskActor(credential), query: {
+          projectId: sessionGraph[1] as ProjectId,
+          ...(rootSessionId === null ? {} : { rootSessionId: rootSessionId as SessionId }),
+          ...(depth === null ? {} : { depth: Number(depth) }),
+          ...(nodeLimit === null ? {} : { nodeLimit: Number(nodeLimit) }),
+        } }) }); return
+      }
+      const sessionLineage = path.match(/^\/sessions\/([^/]+)\/lineage$/)
+      if (lineage && sessionLineage && method === 'GET') {
+        json(response, 200, await lineage.lineage({ operator: await auth.taskActor(credential), sessionId: sessionLineage[1] as SessionId })); return
+      }
+      const forkPoint = path.match(/^\/session-forks\/([^/]+)$/)
+      if (lineage && forkPoint && method === 'GET') {
+        json(response, 200, await lineage.getForkPoint({ operator: await auth.taskActor(credential), forkId: forkPoint[1] as SessionForkId })); return
       }
       const resource = path.match(/^\/(projects|workspaces|sessions)(?:\/([^/]+))?$/)
       if (resource) {
@@ -220,7 +260,7 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
         }
         if (!id && method === 'POST') {
           const input = await body(request)
-          json(response, 201, kind === 'projects' ? await service.createProject(input) : kind === 'workspaces' ? await service.createWorkspace(input) : await service.createSession(input)); return
+          json(response, 201, kind === 'projects' ? await service.createProject(input, operator) : kind === 'workspaces' ? await service.createWorkspace(input) : await service.createSession(input)); return
         }
         if (id && method === 'GET') { json(response, 200, kind === 'projects' ? await service.getProject(id as ProjectId) : kind === 'workspaces' ? await service.getWorkspace(id as WorkspaceId) : await service.sessionView(id as SessionId)); return }
         if (id && method === 'PATCH') { json(response, 200, await service.update(kind, id, await body(request))); return }

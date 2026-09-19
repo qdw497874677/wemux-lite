@@ -4,13 +4,14 @@ import { setImmediate } from 'node:timers/promises'
 import { Notifications, type NotificationFailure } from '../application/notifications.js'
 import { ServerService, newId } from '../application/server-service.js'
 import { SqliteServerStore } from '../storage/sqlite/store.js'
+import { seedOperator } from './fixtures/administrator.js'
 
 test('after-commit subscriber throws/rejections do not fail the API or skip later subscribers', async t => {
   const store = new SqliteServerStore(':memory:'); t.after(() => store.close())
   const failures: NotificationFailure[] = []
   const notifications = new Notifications(failure => { failures.push(failure) })
   const service = new ServerService(store, notifications)
-  const { project } = await service.bootstrap()
+  const { project } = await seedOperator(store, service)
   const worker = await service.enroll({ token: (await service.createEnrollment({})).token, name: 'notification-test' })
   const sync = new Error('sync subscriber'), asyncError = new Error('async subscriber')
   notifications.onCommands(worker.workerId, () => { throw sync })

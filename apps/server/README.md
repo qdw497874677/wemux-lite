@@ -6,14 +6,14 @@ Requires Node **22.13+** (`node:sqlite`; tested on Node 26) and npm workspace de
 
 ```sh
 npm install --workspace @wemux/server --package-lock=false
-WEMUX_BOOTSTRAP_TOKEN='replace-with-a-long-random-secret' npm run dev --workspace @wemux/server
+WEMUX_ADMIN_EMAILS='you@example.com' npm run dev --workspace @wemux/server
 npm run typecheck --workspace @wemux/server
 npm test --workspace @wemux/server
 npm run build --workspace @wemux/server
 # Production entry (after build): npm start --workspace @wemux/server
 ```
 
-Configuration: `WEMUX_BOOTSTRAP_TOKEN` (required, >=16 characters), `WEMUX_DATABASE_PATH` (default `./data/server.sqlite`, relative to workspace), `WEMUX_WORKER_PACKAGE_PATH` (default `<repo>/artifacts/wemux-lite-worker.tgz` regardless of launch directory), `HOST` (default `127.0.0.1`), `PORT` (default `3001`). Root `npm run build` creates the Worker package served at `/downloads/worker.tgz`; `/downloads/install-worker.sh` installs that package directly, while npm still downloads its third-party runtime dependencies from the target machine's configured registry. Plain HTTP/WS is supported on trusted LANs; put TLS in front of it on public or untrusted networks. Never expose bearer secrets in URLs.
+Configuration: `WEMUX_ADMIN_EMAILS` (required; comma-separated administrator emails, matched case-insensitively; the process refuses to start without it), `WEMUX_DATABASE_PATH` (default `./data/server.sqlite`, relative to workspace), `WEMUX_WORKER_PACKAGE_PATH` (default `<repo>/artifacts/wemux-lite-worker.tgz` regardless of launch directory), `HOST` (default `127.0.0.1`), `PORT` (default `3001`). Root `npm run build` creates the Worker package served at `/downloads/worker.tgz`; `/downloads/install-worker.sh` installs that package directly, while npm still downloads its third-party runtime dependencies from the target machine's configured registry. Plain HTTP/WS is supported on trusted LANs; put TLS in front of it on public or untrusted networks. Never expose bearer secrets in URLs.
 
 ## Layers
 
@@ -25,14 +25,25 @@ Configuration: `WEMUX_BOOTSTRAP_TOKEN` (required, >=16 characters), `WEMUX_DATAB
 
 ## HTTP contract
 
-Management requests use Bearer authentication. `POST /api/auth/session` accepts the bootstrap token in the Authorization header and issues an administrator session credential; this is not a general user-login or PAT-management implementation. Health, enrollment and installer downloads have separate public/enrollment boundaries; Agent capability routes use scoped capability credentials. Download artifacts are public to hosts that can reach the Server. The current administrator-oriented access flow must not be represented as fully verified multi-user authorization. See `http/handler.ts` and `application/auth.ts` for current routing and authentication; M6 covers the complete user and resource authorization lifecycle.
+Management requests authenticate with either a Bearer credential (PAT only) or a browser login-session Cookie. The two credential kinds are intentionally separate: a Cookie is only ever a login session, a Bearer header is only ever a PAT, and retired `wemux-session-*` values are rejected with `retired_credential`.
+
+First run: declare the administrator with `WEMUX_ADMIN_EMAILS` (or `createWemuxServer({ administratorEmails })`), configure email delivery (`WEMUX_SMTP_URL` or `WEMUX_MAIL_OUTBOX`, plus `WEMUX_SMTP_FROM` and `WEMUX_PUBLIC_URL`), then register and verify that mailbox through `POST /api/auth/register` + `POST /api/auth/email/verify`; without email delivery registration returns 503, so nobody could become the administrator. the declared email is exempt from invite-only/closed registration policy (audited as `declared_administrator`). There is no bootstrap token, no instance-claim record and no `POST /api/auth/setup`. The web console logs in with email-or-username + password and the browser holds an HttpOnly, SameSite=Lax, host-only Cookie; `GET /api/auth/me` issues the CSRF token and `GET /api/auth/sessions` lists device sessions. The access flow still must not be represented as fully verified multi-user authorization (no Grant enforcement yet; M6/A3 covers that).
+
+Password recovery is host-local by design: `node dist/cli.js credentials list|reset-password|revoke` runs on the Server host against the SQLite file, is not exposed over HTTP, mutates no HTTP credentials and rotates/rejects sessions and (by default) PATs. Health, enrollment and installer downloads have separate public/enrollment boundaries; Agent capability routes use scoped capability credentials. Download artifacts are public to hosts that can reach the Server. See `http/handler.ts`, `http/routes-auth.ts`, `application/auth.ts`, `application/identity-service.ts` and `application/recovery.ts` for the current contracts.
 
 | Method | Route | Body / result |
 | --- | --- | --- |
 | GET | `/health` | `{status:"ok"}` |
 | GET | `/downloads/install-worker.sh` | public POSIX installer script |
 | GET | `/downloads/worker.tgz` | public configured Worker npm package |
-| POST | `/bootstrap` | `{}` → stable default user, team, project; idempotent |
+| POST | `/auth/register` | `{email,password,displayName?}` → 202 accepted; declared administrator emails bypass invite-only/closed policy |
+| GET | `/auth/options` | `{setupRequired,registration}`; decides setup vs login form |
+| POST | `/auth/login` | `{username,password}` → `{user,teamId,csrfToken,expiresAt}` + login Cookie (429 on rate limit) |
+| POST | `/auth/logout`, `/auth/logout-all` | 204; revokes the current / every browser session |
+| GET | `/auth/me` | current account; re-issues `csrfToken` when the presented one is missing or stale |
+| GET | `/auth/sessions`, DELETE `/auth/sessions/:id` | device session list / revoke one session |
+| POST | `/auth/session` | retired pre-Ticket-04 login (`wemux-session-*`); returns `retired_credential` |
+| POST | `/bootstrap` | `{}` + admin credential → idempotent default user, team, project (instance already has its administrator from `WEMUX_ADMIN_EMAILS`) |
 | POST | `/enrollment-tokens` | `{ttlSeconds?:3600}` (1–86400) → `{token,expiresAt}` |
 | POST | `/workers/enroll` | `{token,name}` → `{workerId,worker,credential}` |
 | GET | `/workers` | `{items: Worker[]}` |
@@ -74,4 +85,4 @@ Worker writes are ownership-checked for command, session and workspace, includin
 
 ## Tests
 
-`node:test` via tsx exercises real ephemeral HTTP/WS servers and file-backed SQLite: bootstrap/auth, atomic/replayed/expired enrollment, capabilities, provisioning readiness, online enqueue/ack/idempotency, offline restart delivery, sequence gap/replay/conflict handling, SSE replay/live streaming, CRUD, migration persistence, secret hashing, transaction rollback, revoked credential rejection and cross-worker writes.
+`node:test` via tsx exercises real ephemeral HTTP/WS servers and file-backed SQLite: declared-administrator assignment and login-session lifecycle (CSRF, Origin, rate limit, idle expiry, revocation), pre-Ticket-04 upgrade migration, host-local credential recovery and secret redaction, atomic/replayed/expired enrollment, capabilities, provisioning readiness, online enqueue/ack/idempotency, offline restart delivery, sequence gap/replay/conflict handling, SSE replay/live streaming, CRUD, migration persistence, secret hashing, transaction rollback, revoked credential rejection and cross-worker writes.

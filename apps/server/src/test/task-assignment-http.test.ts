@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { administratorEmail, administratorToken, seedAdministrator } from './fixtures/administrator.js'
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
 import { WebSocket } from 'ws'
@@ -6,7 +7,9 @@ import { createWemuxServer } from '../server.js'
 import { TransportV2Peer } from './transport-v2-peer.js'
 
 test('HTTP retry requestIds matching Object prototype names create and reuse string commandIds', async () => {
- const token = 'prototype-http-test', app = createWemuxServer({ databasePath: ':memory:', bootstrapToken: token }), base = await app.listen(0)
+ const token = administratorToken, app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail] }), base = await app.listen(0)
+ // 令牌不是咒语：夹具必须把 PAT 真写进存储，否则后续断言只是在测 401。
+ await seedAdministrator(app.store)
  const call = async (path: string, method: string, body?: unknown) => {
   const response = await fetch(`${base}/api${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
   return { status: response.status, data: await response.json() }
@@ -44,7 +47,8 @@ test('HTTP retry requestIds matching Object prototype names create and reuse str
 })
 
 test('HTTP assignment rejects auth, scope, ownership and capability bypass with stable codes', async () => {
- const token = 'assignment-http-test', app = createWemuxServer({ databasePath: ':memory:', bootstrapToken: token }), base = await app.listen(0)
+ const token = administratorToken, app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail] }), base = await app.listen(0)
+ await seedAdministrator(app.store)
  let ws: WebSocket | undefined
  const call = async (path: string, method = 'GET', body?: unknown, bearer = token) => {
   const r = await fetch(`${base}/api${path}`, { method, headers: { Authorization: `Bearer ${bearer}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: r.status, data: await r.json() }

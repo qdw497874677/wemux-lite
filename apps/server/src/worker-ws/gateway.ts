@@ -50,19 +50,22 @@ export class WorkerGateway {
       if (ws.bufferedAmount > 2 * 1024 * 1024) return ws.terminate()
       ws.send(JSON.stringify(frame))
     }
-    const flush = async () => {
+    // 重新入队 deliverable 只在「新连接 / 新命令 / 状态变化」时发生。
+    // 传输确认触发的 flush 只做 outbox 重放：否则每次 ack 都会重新入队未收据的 Command，
+    // 形成 ack → 入队 → 发送 → ack 的忙循环（同一 Command 在一条连接上被无限重发）。
+    const flush = async (enqueueDeliverable: boolean) => {
       if (!hello || this.connections.get(workerId)?.epoch !== epoch || flushing || ws.readyState !== WebSocket.OPEN) return
       flushing = true
       try {
-        for (const command of await this.service.deliverable(workerId)) this.transport.enqueue(workerId, command)
+        if (enqueueDeliverable) for (const command of await this.service.deliverable(workerId)) this.transport.enqueue(workerId, command)
         for (const frame of this.transport.pending(workerId, 64)) { send(frame); this.transport.sent(workerId, frame) }
       } catch { ws.terminate() }
       finally { flushing = false }
     }
-    const unsubscribe = this.notifications.onCommands(workerId, () => this.track(flush()))
+    const unsubscribe = this.notifications.onCommands(workerId, () => this.track(flush(true)))
     const timer = setInterval(() => {
       if (Date.now() - lastSeen > (hello ? 60_000 : 10_000)) ws.terminate()
-      else if (hello) { send({ frameType: 'transport.ping', nonce: randomUUID(), sentAt: new Date().toISOString() as import('@wemux/domain').Timestamp }); this.track(flush()) }
+      else if (hello) { send({ frameType: 'transport.ping', nonce: randomUUID(), sentAt: new Date().toISOString() as import('@wemux/domain').Timestamp }); this.track(flush(false)) }
     }, 15_000)
     timer.unref()
     ws.on('error', () => ws.terminate())
@@ -83,21 +86,26 @@ export class WorkerGateway {
               this.connections.set(workerId, { epoch, socket: ws })
               if (previous && previous.epoch !== epoch) previous.socket.close(1012, 'Connection replaced')
             })
-            hello = frame; send(negotiated); await flush(); return
+            hello = frame; send(negotiated); await flush(true); return
           }
           if (frame.frameType === 'transport.hello') throw new AppError(400, 'Duplicate transport.hello')
           if (this.connections.get(workerId)?.epoch !== epoch) return
           lastSeen = Date.now()
-          if (frame.frameType === 'transport.ack') { this.transport.acknowledge(workerId, frame.deliveryEpoch, frame.ackThrough); await flush(); return }
+          if (frame.frameType === 'transport.ack') { this.transport.acknowledge(workerId, frame.deliveryEpoch, frame.ackThrough); await flush(false); return }
           if (frame.frameType === 'transport.ping') { send({ frameType: 'transport.pong', nonce: frame.nonce, sentAt: frame.sentAt }); return }
           if (frame.frameType === 'transport.pong') return
           if (frame.frameType === 'transport.error') throw new AppError(400, frame.message)
           if (frame.frameType === 'data') {
             if (frame.durability === 'volatile') { await this.service.receive(workerId, workerMessage(frame.payload)); return }
             const accepted = this.transport.accept(workerId, frame)
-            if (accepted.isNew) for (const reply of await this.service.receive(workerId, workerMessage(frame.payload))) this.transport.enqueue(workerId, reply)
+            if (accepted.isNew) {
+              // 收据是应用层完成信号：收到后该 Command 不再需要传输重投，未重发的待发行随之清掉。
+              const receipt = frame.payload.type === 'ack' ? frame.payload.receipt : null
+              if (receipt) this.transport.discardCommand(workerId, receipt.commandId)
+              for (const reply of await this.service.receive(workerId, workerMessage(frame.payload))) this.transport.enqueue(workerId, reply)
+            }
             send({ frameType: 'transport.ack', deliveryEpoch: frame.deliveryEpoch, ackThrough: accepted.ackThrough })
-            await flush()
+            await flush(true)
           }
         } catch (error) {
           const code = error instanceof AppError && error.status === 403 ? 'revoked' : error instanceof Error && error.message.includes('Unsupported transport') ? 'unsupported-transport-major' : error instanceof Error && error.message.includes('ADK') ? 'unsupported-adk-profile' : error instanceof Error && (error.message.includes('integrity') || error.message.includes('gap') || error.message.includes('epoch')) ? 'integrity-error' : 'invalid-frame'

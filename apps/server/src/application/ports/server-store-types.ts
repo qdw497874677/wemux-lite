@@ -15,17 +15,29 @@ import type {
   AuditEntry,
   CommandProjection,
   EnrollmentTokenRecord,
+  ExternalLoginIdentity,
+  InstanceAdministrator,
+  InstanceSettings,
   LocalAccountCredential,
+  LoginIdentityProvider,
+  LoginSession,
   Membership,
+  OAuthTransaction,
   PersonalAccessTokenRecord,
   Project,
   ProjectGrant,
+  RegistrationAttempt,
+  RegistrationPolicy,
   Repository,
   Session,
+  SessionForkRecord,
   Team,
   User,
+  UserEmail,
   SessionCacheState,
   SessionGrant,
+  VerificationChallenge,
+  VerificationPurpose,
   Worker,
   WorkerCredentialRecord,
   WorkerGrant,
@@ -84,6 +96,15 @@ export interface IdentityRecords {
 export interface ServerIdentityReader {
   getUser(userId: UserId): Promise<User | null>
   getUserByLogin(login: string): Promise<User | null>
+  /** 主邮箱唯一占用表的权威查询：只看规范化结果，不猜供应商别名。 */
+  getUserByEmail(emailNormalized: string): Promise<User | null>
+  getUserEmail(userId: UserId): Promise<UserEmail | null>
+  getRegistrationAttempt(id: string): Promise<RegistrationAttempt | null>
+  /** 同一邮箱最多一个待验证注册（由 partial unique index 保证）。 */
+  findPendingRegistration(emailNormalized: string): Promise<RegistrationAttempt | null>
+  findVerificationChallengeByTokenHash(tokenHash: string): Promise<VerificationChallenge | null>
+  /** 重发/限流窗口内的挑战历史；只返回挑战元数据，不返回令牌。 */
+  listVerificationChallenges(targetEmail: string, purpose: VerificationPurpose, since: Timestamp): Promise<readonly VerificationChallenge[]>
   getTeam(teamId: TeamId): Promise<Team | null>
   getLocalAccountCredential(userId: UserId): Promise<LocalAccountCredential | null>
 
@@ -96,13 +117,43 @@ export interface ServerIdentityReader {
   }): Promise<IdentityRecords>
 
   findPersonalAccessToken(tokenHash: string): Promise<PersonalAccessTokenRecord | null>
+  /** Browser login sessions are looked up by hashed token; the raw token is never stored. */
+  findLoginSessionByTokenHash(tokenHash: string): Promise<LoginSession | null>
+  getLoginSession(id: string): Promise<LoginSession | null>
+  listLoginSessions(userId: UserId): Promise<readonly LoginSession[]>
+  listPersonalAccessTokens(): Promise<readonly PersonalAccessTokenRecord[]>
+  listUsers(): Promise<readonly User[]>
+  /** 用户在哪些 Team 中有成员身份；Team 选择与登录默认 Team 由此得出。 */
+  listMemberships(userId: UserId): Promise<readonly Membership[]>
+  /** Newest-first audit entries; durable report channel for administrator assignment and upgrade decisions. */
+  listAudit(limit: number): Promise<readonly AuditEntry[]>
+  /**
+   * 实例管理员归属（部署声明的邮箱命中后落盘）。权威判定仍由 `AdministratorDirectory`
+   * 依据启动配置做出，这里只负责记住“谁在何时按哪种来源成为管理员”。
+   */
+  findInstanceAdministrator(userId: UserId): Promise<InstanceAdministrator | null>
+  listInstanceAdministrators(): Promise<readonly InstanceAdministrator[]>
+  /** 实例设置（目前只有注册策略）；null 表示尚未显式设置，调用方用默认值。 */
+  getInstanceSettings(): Promise<InstanceSettings | null>
   findWorkerCredential(credentialHash: string): Promise<WorkerCredentialRecord | null>
+  /** 外部登录身份的唯一查询入口：(provider, issuer, subject) 就是身份主键，邮箱不参与判定。 */
+  findLoginIdentity(provider: LoginIdentityProvider, issuer: string, subject: string): Promise<ExternalLoginIdentity | null>
+  listLoginIdentities(userId: UserId): Promise<readonly ExternalLoginIdentity[]>
+  findOAuthTransactionByStateHash(stateHash: string): Promise<OAuthTransaction | null>
 }
 
 export interface ServerIdentityWriter {
   saveUser(user: User): Promise<void>
+  /** 占用主邮箱；邮箱已被其他账号占用时拒绝，不静默改派。 */
+  saveUserEmail(record: UserEmail): Promise<void>
   saveTeam(team: Team): Promise<void>
   saveLocalAccountCredential(credential: LocalAccountCredential): Promise<void>
+  saveRegistrationAttempt(attempt: RegistrationAttempt): Promise<void>
+  /** 待验证注册的终态迁移（verified/expired/superseded）；未注册记录拒绝。 */
+  updateRegistrationAttempt(attempt: RegistrationAttempt): Promise<void>
+  saveVerificationChallenge(challenge: VerificationChallenge): Promise<void>
+  /** 单次消费：不存在、已消费或已过期都返回 null，绝不复用同一令牌。 */
+  consumeVerificationChallenge(input: { readonly tokenHash: string; readonly consumedAt: Timestamp }): Promise<VerificationChallenge | null>
   saveMembership(membership: Membership): Promise<void>
   removeMembership(teamId: TeamId, userId: UserId): Promise<void>
   saveWorkerGrant(grant: WorkerGrant): Promise<void>
@@ -110,6 +161,20 @@ export interface ServerIdentityWriter {
   saveSessionGrant(grant: SessionGrant): Promise<void>
   savePersonalAccessToken(record: PersonalAccessTokenRecord): Promise<void>
   revokePersonalAccessToken(id: import('@wemux/domain').CredentialId, revokedAt: Timestamp): Promise<void>
+  /** Revokes every PAT of a user (or of all users when userId is null) and reports how many changed. */
+  revokePersonalAccessTokens(userId: UserId | null, revokedAt: Timestamp): Promise<number>
+  /** 覆盖式保存实例设置（单例）；策略变更必须可审计。 */
+  saveInstanceSettings(settings: InstanceSettings): Promise<void>
+  saveLoginSession(session: LoginSession): Promise<void>
+  /** Advances activity/idle expiry only; identity and absolute expiry are immutable. */
+  touchLoginSession(input: { readonly id: string; readonly lastSeenAt: Timestamp; readonly idleExpiresAt: Timestamp }): Promise<void>
+  /** CSRF 令牌可重新签发（只存哈希）；除开机令牌前不改变会话身份与期限。 */
+  rotateLoginSessionCsrf(input: { readonly id: string; readonly csrfTokenHash: string }): Promise<void>
+  revokeLoginSession(id: string, revokedAt: Timestamp): Promise<void>
+  /** Revokes one user's active login sessions (logout-all and credential changes) and reports how many changed. */
+  revokeLoginSessions(userId: UserId, revokedAt: Timestamp): Promise<number>
+  /** 写入管理员归属；同一用户重复写入必须是拒绝而不是静默改派。 */
+  saveInstanceAdministrator(record: InstanceAdministrator): Promise<void>
   saveEnrollmentToken(record: EnrollmentTokenRecord): Promise<void>
   consumeEnrollmentToken(input: {
     readonly tokenHash: string
@@ -118,6 +183,14 @@ export interface ServerIdentityWriter {
   }): Promise<EnrollmentTokenRecord>
   saveWorkerCredential(record: WorkerCredentialRecord): Promise<void>
   revokeWorkerCredential(workerId: WorkerId, revokedAt: Timestamp): Promise<void>
+  /** 绑定外部登录身份；同一 (provider, issuer, subject) 或同一账号的重复绑定都拒绝，不静默改派。 */
+  saveLoginIdentity(identity: ExternalLoginIdentity): Promise<void>
+  /** 只推进最近登录时间；绑定关系与创建时间不可变。 */
+  touchLoginIdentity(input: { readonly id: string; readonly lastSignInAt: Timestamp }): Promise<void>
+  /** 保存登录事务并顺带清理早已过期的旧事务，避免一次性材料无限堆积。 */
+  saveOAuthTransaction(transaction: OAuthTransaction): Promise<void>
+  /** 单次消费：不存在、已消费或已过期都返回 null，重放与跨浏览器 state 绝不复用。 */
+  consumeOAuthTransaction(input: { readonly stateHash: string; readonly consumedAt: Timestamp }): Promise<OAuthTransaction | null>
 }
 
 export interface AgentInboxMessageInput {
@@ -136,6 +209,11 @@ export interface ServerResourceReader {
   getWorkspace(workspaceId: import('@wemux/domain').WorkspaceId): Promise<Workspace | null>
   getSession(sessionId: SessionId): Promise<Session | null>
   getSessionByCreateRequest(ownerId: UserId, projectId: ProjectId, requestId: string): Promise<Session | null>
+  /** Lineage edges of one Project; callers filter by Session instead of re-listing the whole store. */
+  listSessionForks(projectId: import('@wemux/domain').ProjectId): Promise<readonly SessionForkRecord[]>
+  getSessionFork(forkId: import('@wemux/domain').SessionForkId): Promise<SessionForkRecord | null>
+  /** Idempotency lookup: one Fork per (Project, requestId), independent of the caller. */
+  getSessionForkByRequest(projectId: import('@wemux/domain').ProjectId, requestId: string): Promise<SessionForkRecord | null>
   listCapabilityAssets(projectId: ProjectId): Promise<readonly CapabilityAsset[]>
   listAgentInboxMessages(sessionId: SessionId, unreadOnly?: boolean): Promise<readonly AgentInboxMessage[]>
   getAgentInboxMessage(messageId: string): Promise<AgentInboxMessage | null>
@@ -147,6 +225,8 @@ export interface ServerResourceWriter {
   saveRepository(repository: Repository): Promise<void>
   saveWorkspace(workspace: Workspace): Promise<void>
   saveSession(session: Session): Promise<void>
+  /** Fork row plus its (Project, requestId) index are written in the caller's transaction, atomically with the target Session. */
+  saveSessionFork(record: SessionForkRecord): Promise<void>
   replaceCapabilityAssets(projectId: ProjectId, assets: readonly CapabilityAsset[]): Promise<void>
   createAgentInboxMessage(input: AgentInboxMessageInput): Promise<AgentInboxMessage>
   markAgentInboxMessageRead(messageId: string, readAt: Timestamp): Promise<AgentInboxMessage | null>

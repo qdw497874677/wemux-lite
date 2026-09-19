@@ -25,6 +25,14 @@ function boolean(value: unknown): void { if (typeof value !== 'boolean') throw n
 function nullableText(value: unknown): void { if (value !== null) text(value, 'text') }
 function timestamp(value: unknown): void { if (!Number.isFinite(Date.parse(text(value, 'timestamp')))) throw new AppError(400, 'Invalid timestamp') }
 function array(value: unknown): unknown[] { if (!Array.isArray(value) || value.length > 1000) throw new AppError(400, 'Invalid array'); return value }
+function usage(value: unknown): void {
+  const u = object(value)
+  for (const key of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens'] as const) if (u[key] !== undefined) integer(u[key], key, 0)
+  if (u.costUsd !== undefined) { if (typeof u.costUsd !== 'number' || !Number.isFinite(u.costUsd) || u.costUsd < 0) throw new AppError(400, 'Invalid costUsd') }
+  if (u.modelId !== undefined) text(u.modelId, 'modelId')
+  if (u.completeness !== undefined) oneOf(u.completeness, ['complete', 'partial'])
+  if (u.scope !== undefined) oneOf(u.scope, ['message', 'operation', 'native-session'])
+}
 const states = ['idle', 'queued', 'running', 'stopping', 'unavailable', 'failed']
 export function validateEvent(value: unknown): JournalEvent {
   const e = object(value)
@@ -38,6 +46,21 @@ export function validateEvent(value: unknown): JournalEvent {
     case 'tool.started': text(p.turnId, 'turnId'); text(p.toolCallId, 'toolCallId'); text(p.toolName, 'toolName'); break
     case 'tool.output.delta': text(p.turnId, 'turnId'); text(p.toolCallId, 'toolCallId'); streamText(p.text, 'text', 200000); break
     case 'tool.finished': text(p.turnId, 'turnId'); text(p.toolCallId, 'toolCallId'); if (p.exitCode !== null) integer(p.exitCode, 'exitCode', -2147483648, 2147483647); break
+    case 'approval.requested': text(p.turnId, 'turnId'); text(p.approvalId, 'approvalId'); object(p.action); if (p.reason !== undefined) text(p.reason, 'reason'); break
+    case 'approval.resolved': text(p.turnId, 'turnId'); text(p.approvalId, 'approvalId'); oneOf(p.decision, ['approve', 'deny']); break
+    case 'usage.updated': text(p.turnId, 'turnId'); usage(p.usage); break
+    case 'compaction.started': text(p.turnId, 'turnId'); if (p.reason !== undefined) text(p.reason, 'reason'); break
+    case 'compaction.finished': text(p.turnId, 'turnId'); if (p.summary !== undefined) streamText(p.summary, 'summary', 200000); break
+    case 'runtime.notice': {
+      oneOf(p.level, ['info', 'warning']); text(p.code, 'code', 200); streamText(p.message, 'message', 4000)
+      if (p.retry !== undefined) {
+        const r = object(p.retry)
+        integer(r.attempt, 'attempt', 1)
+        if (r.maxAttempts !== null && r.maxAttempts !== undefined) integer(r.maxAttempts, 'maxAttempts', 1)
+        if (r.delayMs !== null && r.delayMs !== undefined) integer(r.delayMs, 'delayMs', 0, 86400000)
+      }
+      break
+    }
     case 'turn.finished': {
       text(p.turnId, 'turnId'); oneOf(p.outcome, ['completed', 'cancelled', 'failed'])
       if (p.failure !== null) { const f = object(p.failure); oneOf(f.code, ['interrupted', 'agent-unavailable', 'agent-error', 'internal-error']); text(f.message, 'failure') }

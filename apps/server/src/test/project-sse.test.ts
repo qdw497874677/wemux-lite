@@ -1,10 +1,11 @@
 import test from 'node:test'
+import { administratorEmail, seedAdministrator } from './fixtures/administrator.js'
 import assert from 'node:assert/strict'
 import { createWemuxServer } from '../server.js'
 
 test('project SSE authorizes before headers and emits committed flat invalidations, separate from activity', async () => {
-  const token = 'ticket07-isolated-token'
-  const server = createWemuxServer({ databasePath: ':memory:', bootstrapToken: token })
+  const server = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail] })
+  const { token } = await seedAdministrator(server.store)
   const base = await server.listen(0)
   const controller = new AbortController()
   const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }

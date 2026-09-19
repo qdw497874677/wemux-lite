@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { administratorEmail, seedAdministrator } from './fixtures/administrator.js'
 import assert from 'node:assert/strict'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -8,7 +9,6 @@ import { WebSocket } from 'ws'
 import { createWemuxServer } from '../server.js'
 import { TransportV2Peer } from './transport-v2-peer.js'
 
-const token = 'cluster-bootstrap-token-12345678'
 const capability = { agentKey: 'pi', displayName: 'Pi', version: '1', mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'test-model', displayName: 'Test', source: 'configured' }] }
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 async function eventually(check: () => Promise<boolean>) {
@@ -17,7 +17,8 @@ async function eventually(check: () => Promise<boolean>) {
 }
 async function setup() {
   const dir = await mkdtemp(join(tmpdir(), 'wemux-cluster-'))
-  const app = createWemuxServer({ databasePath: join(dir, 'server.sqlite'), bootstrapToken: token })
+  const app = createWemuxServer({ databasePath: join(dir, 'server.sqlite'), administratorEmails: [administratorEmail] })
+  const { token } = await seedAdministrator(app.store)
   const base = await app.listen(0)
   async function request(path: string, method = 'GET', body?: unknown, bearer: string | null = token) {
     const response = await fetch(`${base}${path}`, { method, headers: { ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}), 'Content-Type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })

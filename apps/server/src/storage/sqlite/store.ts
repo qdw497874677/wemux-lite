@@ -2,11 +2,14 @@ import { validReviewMetadata } from '@wemux/web-contract/task-platform'
 import { DatabaseSync } from 'node:sqlite'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { AgentInboxMessage, CapabilityAsset, EventSeq, JournalEvent, ProjectId, SessionId, Timestamp, WorkerId } from '@wemux/domain'
-import type { CommandProjection, EnrollmentTokenRecord, PersonalAccessTokenRecord, SessionCacheState, Worker, WorkerCredentialRecord, Workspace } from '@wemux/server-domain'
+import type { AuditEntry, CommandProjection, EnrollmentTokenRecord, ExternalLoginIdentity, Membership, OAuthTransaction, PersonalAccessTokenRecord, RegistrationAttempt, SessionCacheState, SessionForkRecord, User, UserEmail, VerificationChallenge, VerificationPurpose, Worker, WorkerCredentialRecord, Workspace } from '@wemux/server-domain'
 import type { ServerStore, ServerStoreTx } from '../../application/ports/server-store.js'
 import type { PendingCommand } from '../../application/ports/server-store-types.js'
 import { AppError } from '../../application/errors.js'
 import { migrate } from './migrations.js'
+
+/** One Fork per (Project, requestId): the idempotency index row points at the winning Fork. */
+const forkRequestIndexId = (projectId: ProjectId, requestId: string): string => `${projectId}:${requestId}`
 
 /** JSON holds domain records; indexed command/event columns implement ordering and uniqueness. */
 export class SqliteServerStore implements ServerStore {
@@ -46,12 +49,20 @@ export class SqliteServerStore implements ServerStore {
       },
     })
   }
-  constructor(path: string) {
+  /**
+   * `presenceReset` 只属于“拥有这些连接的进程”启动时：把持久化的在线/新鲜度状态清成离线。
+   * 默认关闭，因为任何只读入口（`credentials` 本机 CLI、验收脚本、备份）打开同一个数据库
+   * 都不能影响正在运行的 Server 的连接状态。历史上本机 CLI 会把在线 Worker 刷成离线，
+   * 而那条连接还在心跳，界面就永远停在离线。
+   */
+  constructor(path: string, options: { presenceReset?: boolean } = {}) {
     this.db = new DatabaseSync(path)
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;')
     try { migrate(this.db) } catch (error) { this.db.close(); throw error }
-    for (const worker of this.list<Worker>('worker')) this.put('worker', worker.id, { ...worker, connectionState: 'offline' })
-    for (const cache of this.list<SessionCacheState>('cache')) this.put('cache', cache.sessionId, { ...cache, status: 'offline' })
+    if (options.presenceReset) {
+      for (const worker of this.list<Worker>('worker')) this.put('worker', worker.id, { ...worker, connectionState: 'offline' })
+      for (const cache of this.list<SessionCacheState>('cache')) this.put('cache', cache.sessionId, { ...cache, status: 'offline' })
+    }
   }
   close(): void { this.db.close() }
   private get<T>(kind: string, id: string): T | null {
@@ -120,13 +131,81 @@ export class SqliteServerStore implements ServerStore {
     return { ...logical, ...(placement ? { workerId: placement.workerId, status: placement.status, failureReason: placement.failureReason, provisioning: placement.provisioning, location: placement.location } : { status: logical.deletedAt ? 'deleted' as const : 'unplaced' as const, failureReason: null, location: null }) }
   }
   private workspaces(): Workspace[] { return this.list<{ id: string }>('workspace').map(value => this.workspace(value.id)).filter((value): value is Workspace => value !== null) }
+  private readLoginSessions(where: string, ...params: string[]): import('@wemux/server-domain').LoginSession[] {
+    return this.db.prepare(`SELECT * FROM login_sessions WHERE ${where}`).all(...params).map(row => {
+      const session = JSON.parse(String(row.data)) as import('@wemux/server-domain').LoginSession & Record<string, unknown>
+      if (!session || [['id','id'], ['userId','user_id'], ['tokenHash','token_hash'], ['csrfTokenHash','csrf_token_hash'], ['revokedAt','revoked_at']].some(([key, column]) => session[key] !== row[column])) throw new AppError(409, 'Login session indexed identity is corrupt')
+      return session
+    })
+  }
+  /** 索引列与 JSON 必须一致；不一致宁可报错也不静默采用任意一份数据。 */
+  private readIndexed<T extends object>(table: string, columns: readonly (readonly [string, string])[], where: string, ...params: (string | number)[]): T[] {
+    return this.db.prepare(`SELECT * FROM ${table} WHERE ${where}`).all(...params).map(row => {
+      const record = JSON.parse(String(row.data)) as T & Record<string, unknown>
+      if (!record || columns.some(([key, column]) => record[key] !== row[column])) throw new AppError(409, `${table} indexed identity is corrupt`)
+      return record
+    })
+  }
+  private readUserEmails(where: string, ...params: string[]): UserEmail[] {
+    return this.readIndexed<UserEmail>('user_emails', [['emailNormalized','email_normalized'], ['userId','user_id'], ['emailDisplay','email_display']], where, ...params)
+  }
+  private readRegistrationAttempts(where: string, ...params: (string | number)[]): RegistrationAttempt[] {
+    return this.readIndexed<RegistrationAttempt>('registration_attempts', [['id','id'], ['emailNormalized','email_normalized'], ['status','status'], ['consumedAt','consumed_at']], where, ...params)
+  }
+  private readInstanceAdministrators(where: string, ...params: (string | number)[]): import('@wemux/server-domain').InstanceAdministrator[] {
+    return this.readIndexed<import('@wemux/server-domain').InstanceAdministrator>('instance_administrators', [['userId','user_id'], ['email','email'], ['assignedAt','assigned_at'], ['source','source']], where, ...params)
+  }
+  private readVerificationChallenges(where: string, ...params: (string | number)[]): VerificationChallenge[] {
+    return this.readIndexed<VerificationChallenge>('verification_challenges', [['id','id'], ['tokenHash','token_hash'], ['purpose','purpose'], ['targetEmail','target_email'], ['registrationId','registration_id'], ['userId','user_id'], ['consumedAt','consumed_at']], where, ...params)
+  }
+  private readLoginIdentities(where: string, ...params: string[]): ExternalLoginIdentity[] {
+    return this.readIndexed<ExternalLoginIdentity>('login_identities', [['id','id'], ['provider','provider'], ['issuer','issuer'], ['subject','subject'], ['userId','user_id'], ['lastSignInAt','last_sign_in_at']], where, ...params)
+  }
+  private readOAuthTransactions(where: string, ...params: (string | number)[]): OAuthTransaction[] {
+    return this.readIndexed<OAuthTransaction>('oauth_transactions', [['id','id'], ['stateHash','state_hash'], ['provider','provider'], ['intent','intent'], ['userId','user_id'], ['sessionId','session_id'], ['consumedAt','consumed_at']], where, ...params)
+  }
   private readonly identityReader: ServerStore['identity'] = {
     getUser: async id => this.get('user', id),
-    getUserByLogin: async login => this.list<import('@wemux/server-domain').User>('user').find(u => u.username === login || u.email === login) ?? null,
+    // 登录既接受用户名也接受邮箱：邮箱统一走规范化索引，大小写或空白差异不影响登录。
+    getUserByLogin: async login => {
+      const byName = this.list<import('@wemux/server-domain').User>('user').find(u => u.username === login)
+      if (byName) return byName
+      const owned = this.readUserEmails('email_normalized=?', login.trim().toLowerCase())[0]
+      if (owned) return this.get('user', owned.userId)
+      return this.list<import('@wemux/server-domain').User>('user').find(u => typeof u.email === 'string' && u.email.toLowerCase() === login.trim().toLowerCase()) ?? null
+    },
+    getUserByEmail: async emailNormalized => {
+      const owned = this.readUserEmails('email_normalized=?', emailNormalized)[0]
+      return owned ? this.get('user', owned.userId) : null
+    },
+    getUserEmail: async userId => this.readUserEmails('user_id=?', userId)[0] ?? null,
+    getRegistrationAttempt: async id => this.readRegistrationAttempts('id=?', id)[0] ?? null,
+    findPendingRegistration: async emailNormalized => this.readRegistrationAttempts("email_normalized=? AND status='pending' ORDER BY rowid DESC", emailNormalized)[0] ?? null,
+    findVerificationChallengeByTokenHash: async tokenHash => this.readVerificationChallenges('token_hash=?', tokenHash)[0] ?? null,
+    listVerificationChallenges: async (targetEmail: string, purpose: VerificationPurpose, since: Timestamp) => this.readVerificationChallenges('target_email=? AND purpose=? AND created_at>=? ORDER BY rowid', targetEmail, purpose, since),
     getTeam: async id => this.get('team', id),
     getLocalAccountCredential: async id => this.get('local-credential', id),
     getIdentityRecords: async i => ({ membership: this.get('membership', `${i.teamId}:${i.userId}`), workerGrant: this.get('worker-grant', `${i.workerId}:${i.userId}`), projectGrant: this.get('project-grant', `${i.projectId}:${i.userId}`), sessionGrant: this.get('session-grant', `${i.sessionId}:${i.userId}`) }),
     findPersonalAccessToken: async hash => this.list<PersonalAccessTokenRecord>('pat').find(r => r.tokenHash === hash) ?? null,
+    listPersonalAccessTokens: async () => this.list<PersonalAccessTokenRecord>('pat'),
+    listUsers: async () => this.list<User>('user'),
+    listMemberships: async userId => this.list<Membership>('membership').filter(membership => membership.userId === userId),
+    listAudit: async limit => this.list<AuditEntry>('audit').sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)).slice(0, Math.max(0, limit)),
+    findLoginSessionByTokenHash: async hash => this.readLoginSessions('token_hash=?', hash)[0] ?? null,
+    getLoginSession: async id => this.readLoginSessions('id=?', id)[0] ?? null,
+    listLoginSessions: async userId => this.readLoginSessions('user_id=? ORDER BY rowid', userId),
+    findLoginIdentity: async (provider, issuer, subject) => this.readLoginIdentities('provider=? AND issuer=? AND subject=?', provider, issuer, subject)[0] ?? null,
+    listLoginIdentities: async userId => this.readLoginIdentities('user_id=? ORDER BY rowid', userId),
+    findOAuthTransactionByStateHash: async stateHash => this.readOAuthTransactions('state_hash=?', stateHash)[0] ?? null,
+    findInstanceAdministrator: async userId => this.readInstanceAdministrators('user_id=?', userId)[0] ?? null,
+    listInstanceAdministrators: async () => this.readInstanceAdministrators('1=1'),
+    getInstanceSettings: async () => {
+      const row = this.db.prepare("SELECT registration_policy,updated_at,updated_by,data FROM instance_settings WHERE id='instance'").get()
+      if (!row) return null
+      const settings = JSON.parse(String(row.data)) as import('@wemux/server-domain').InstanceSettings
+      if (settings.id !== 'instance' || settings.registrationPolicy !== row.registration_policy || settings.updatedAt !== row.updated_at || settings.updatedBy !== row.updated_by) throw new AppError(409, 'Instance settings identity is corrupt')
+      return settings
+    },
     findWorkerCredential: async hash => this.list<WorkerCredentialRecord>('worker-credential').find(r => r.credentialHash === hash) ?? null,
   }
   readonly identity = this.committed(this.identityReader)
@@ -134,6 +213,14 @@ export class SqliteServerStore implements ServerStore {
     getWorker: async id => this.get('worker', id), getProject: async id => this.get('project', id),
     getRepository: async id => this.get('repository', id), getWorkspace: async id => this.workspace(id), getSession: async id => this.get('session', id),
     getSessionByCreateRequest: async (ownerId, projectId, requestId) => this.list<import('@wemux/server-domain').Session>('session').find(session => session.ownerId === ownerId && session.projectId === projectId && session.creation?.requestId === requestId) ?? null,
+    // Lineage: the Fork row is the authority; the (projectId, requestId) index is a record of
+    // its own so a retried command resolves the original target without scanning the project.
+    listSessionForks: async projectId => this.list<SessionForkRecord>('session-fork').filter(fork => fork.projectId === projectId),
+    getSessionFork: async forkId => this.get<SessionForkRecord>('session-fork', forkId),
+    getSessionForkByRequest: async (projectId, requestId) => {
+      const forkId = this.get<string>('session-fork-request', forkRequestIndexId(projectId, requestId))
+      return forkId ? this.get<SessionForkRecord>('session-fork', forkId) : null
+    },
     listWorkers: async () => this.list('worker'), listProjects: async () => this.list('project'),
     listWorkspaces: async () => this.workspaces(), listSessions: async () => this.list('session'),
     listCapabilityAssets: async projectId => this.get<CapabilityAsset[]>('capability-assets', projectId) ?? [],
@@ -241,7 +328,45 @@ export class SqliteServerStore implements ServerStore {
     },
     identity: {
       ...this.identityReader,
-      saveUser: async r => this.put('user', r.id, r), saveTeam: async r => this.put('team', r.id, r),
+      saveUser: async r => this.put('user', r.id, r),
+      saveUserEmail: async r => {
+        try {
+          this.db.prepare('INSERT INTO user_emails(email_normalized,user_id,email_display,created_at,data) VALUES(?,?,?,?,?)').run(r.emailNormalized, r.userId, r.emailDisplay, r.createdAt, JSON.stringify(r))
+        } catch (error) {
+          // 唯一键冲突 = 邮箱已被占用：明确 409，绝不改写既有归属。
+          if (String(error).includes('UNIQUE') || String(error).includes('PRIMARY KEY')) throw new AppError(409, '该邮箱已被占用', 'email_taken')
+          throw error
+        }
+      },
+      saveRegistrationAttempt: async r => {
+        try {
+          this.db.prepare('INSERT INTO registration_attempts(id,email_normalized,status,created_at,expires_at,consumed_at,data) VALUES(?,?,?,?,?,?,?)').run(r.id, r.emailNormalized, r.status, r.createdAt, r.expiresAt, r.consumedAt, JSON.stringify(r))
+        } catch (error) {
+          // partial unique index = 同一邮箱已有待验证注册；并发提交的失败者只能走重发路径。
+          if (String(error).includes('UNIQUE') || String(error).includes('PRIMARY KEY')) throw new AppError(409, '该邮箱已有待验证注册', 'registration_pending')
+          throw error
+        }
+      },
+      updateRegistrationAttempt: async r => {
+        const current = this.readRegistrationAttempts('id=?', r.id)[0]
+        if (!current) throw new AppError(404, 'Unknown registration attempt')
+        this.db.prepare('UPDATE registration_attempts SET status=?,consumed_at=?,data=? WHERE id=?').run(r.status, r.consumedAt, JSON.stringify(r), r.id)
+      },
+      saveVerificationChallenge: async r => {
+        try {
+          this.db.prepare('INSERT INTO verification_challenges(id,token_hash,purpose,target_email,registration_id,user_id,created_at,expires_at,consumed_at,data) VALUES(?,?,?,?,?,?,?,?,?,?)').run(r.id, r.tokenHash, r.purpose, r.targetEmail, r.registrationId, r.userId, r.createdAt, r.expiresAt, r.consumedAt, JSON.stringify(r))
+        } catch (error) {
+          if (String(error).includes('UNIQUE') || String(error).includes('PRIMARY KEY')) throw new AppError(409, 'Verification challenge already exists')
+          throw error
+        }
+      },
+      consumeVerificationChallenge: async input => {
+        // 单次消费由 `consumed_at IS NULL` 谓词原子保证：并发重放最多一个赢家。
+        const result = this.db.prepare(`UPDATE verification_challenges SET consumed_at=?, data=json_set(data,'$.consumedAt',?) WHERE token_hash=? AND consumed_at IS NULL`).run(input.consumedAt, input.consumedAt, input.tokenHash)
+        if (Number(result.changes) !== 1) return null
+        return this.readVerificationChallenges('token_hash=?', input.tokenHash)[0] ?? null
+      },
+      saveTeam: async r => this.put('team', r.id, r),
       saveLocalAccountCredential: async r => this.put('local-credential', r.userId, r),
       saveMembership: async r => this.put('membership', `${r.teamId}:${r.userId}`, r),
       removeMembership: async (team, user) => this.remove('membership', `${team}:${user}`),
@@ -250,6 +375,57 @@ export class SqliteServerStore implements ServerStore {
       saveSessionGrant: async r => this.put('session-grant', `${r.sessionId}:${r.userId}`, r),
       savePersonalAccessToken: async r => this.put('pat', r.id, r),
       revokePersonalAccessToken: async (id, revokedAt) => { const r = this.get<PersonalAccessTokenRecord>('pat', id); if (r) this.put('pat', id, { ...r, revokedAt }) },
+      revokePersonalAccessTokens: async (userId, revokedAt) => {
+        let revoked = 0
+        for (const record of this.list<PersonalAccessTokenRecord>('pat')) {
+          if ((userId === null || record.userId === userId) && record.revokedAt === null) { this.put('pat', record.id, { ...record, revokedAt }); revoked++ }
+        }
+        return revoked
+      },
+      saveLoginSession: async session => {
+        this.db.prepare('INSERT INTO login_sessions(id,user_id,token_hash,csrf_token_hash,revoked_at,data) VALUES(?,?,?,?,?,?)').run(session.id, session.userId, session.tokenHash, session.csrfTokenHash, session.revokedAt, JSON.stringify(session))
+      },
+      touchLoginSession: async input => {
+        const session = this.readLoginSessions('id=?', input.id)[0]
+        if (!session) throw new AppError(404, 'Unknown login session')
+        const next = { ...session, lastSeenAt: input.lastSeenAt, idleExpiresAt: input.idleExpiresAt }
+        this.db.prepare('UPDATE login_sessions SET data=? WHERE id=?').run(JSON.stringify(next), input.id)
+      },
+      rotateLoginSessionCsrf: async input => {
+        const session = this.readLoginSessions('id=?', input.id)[0]
+        if (!session) throw new AppError(404, 'Unknown login session')
+        const next = { ...session, csrfTokenHash: input.csrfTokenHash }
+        this.db.prepare('UPDATE login_sessions SET csrf_token_hash=?,data=? WHERE id=?').run(input.csrfTokenHash, JSON.stringify(next), input.id)
+      },
+      revokeLoginSession: async (id, revokedAt) => {
+        const session = this.readLoginSessions('id=?', id)[0]
+        if (!session || session.revokedAt !== null) return
+        this.db.prepare('UPDATE login_sessions SET revoked_at=?,data=? WHERE id=?').run(revokedAt, JSON.stringify({ ...session, revokedAt }), id)
+      },
+      revokeLoginSessions: async (userId, revokedAt) => {
+        let revoked = 0
+        for (const session of this.readLoginSessions('user_id=?', userId)) {
+          if (session.revokedAt !== null) continue
+          this.db.prepare('UPDATE login_sessions SET revoked_at=?,data=? WHERE id=?').run(revokedAt, JSON.stringify({ ...session, revokedAt }), session.id)
+          revoked++
+        }
+        return revoked
+      },
+      saveInstanceAdministrator: async record => {
+        try {
+          this.db.prepare('INSERT INTO instance_administrators(user_id,email,assigned_at,source,data) VALUES(?,?,?,?,?)')
+            .run(record.userId, record.email, record.assignedAt, record.source, JSON.stringify(record))
+        } catch (error) {
+          // 同一用户重复提升是并发登录的败方：拒绝，不静默改写归属来源。
+          if (String(error).includes('UNIQUE') || String(error).includes('PRIMARY KEY')) throw new AppError(409, 'Instance administrator is already recorded')
+          throw error
+        }
+      },
+      saveInstanceSettings: async settings => {
+        this.db.prepare(`INSERT INTO instance_settings(id,registration_policy,updated_at,updated_by,data) VALUES('instance',?,?,?,?)
+          ON CONFLICT(id) DO UPDATE SET registration_policy=excluded.registration_policy,updated_at=excluded.updated_at,updated_by=excluded.updated_by,data=excluded.data`)
+          .run(settings.registrationPolicy, settings.updatedAt, settings.updatedBy, JSON.stringify(settings))
+      },
       saveEnrollmentToken: async r => this.put('enrollment', r.tokenHash, r),
       consumeEnrollmentToken: async i => {
         const r = this.get<EnrollmentTokenRecord>('enrollment', i.tokenHash)
@@ -259,11 +435,50 @@ export class SqliteServerStore implements ServerStore {
       },
       saveWorkerCredential: async r => this.put('worker-credential', r.id, r),
       revokeWorkerCredential: async (id, revokedAt) => { for (const r of this.list<WorkerCredentialRecord>('worker-credential')) if (r.workerId === id) this.put('worker-credential', r.id, { ...r, revokedAt }) },
+      saveLoginIdentity: async identity => {
+        try {
+          this.db.prepare('INSERT INTO login_identities(id,provider,issuer,subject,user_id,last_sign_in_at,data) VALUES(?,?,?,?,?,?,?)')
+            .run(identity.id, identity.provider, identity.issuer, identity.subject, identity.userId, identity.lastSignInAt, JSON.stringify(identity))
+        } catch (error) {
+          if (String(error).includes('UNIQUE')) throw new AppError(409, '该登录身份已被占用，不能静默改派')
+          throw error
+        }
+      },
+      touchLoginIdentity: async input => {
+        const identity = this.readLoginIdentities('id=?', input.id)[0]
+        if (!identity) throw new AppError(404, 'Unknown login identity')
+        this.db.prepare('UPDATE login_identities SET last_sign_in_at=?,data=? WHERE id=?').run(input.lastSignInAt, JSON.stringify({ ...identity, lastSignInAt: input.lastSignInAt }), input.id)
+      },
+      saveOAuthTransaction: async transaction => {
+        // 一次性材料只活几分钟：保存时顺手清理早已过期的旧行，避免无上限堆积。
+        this.db.prepare("DELETE FROM oauth_transactions WHERE julianday(expires_at) < julianday(?, '-1 day')").run(transaction.createdAt)
+        try {
+          this.db.prepare('INSERT INTO oauth_transactions(id,state_hash,provider,intent,user_id,session_id,created_at,expires_at,consumed_at,data) VALUES(?,?,?,?,?,?,?,?,?,?)')
+            .run(transaction.id, transaction.stateHash, transaction.provider, transaction.intent, transaction.userId, transaction.sessionId, transaction.createdAt, transaction.expiresAt, transaction.consumedAt, JSON.stringify(transaction))
+        } catch (error) {
+          if (String(error).includes('UNIQUE')) throw new AppError(409, 'OAuth state 已发出，不能重用')
+          throw error
+        }
+      },
+      consumeOAuthTransaction: async input => {
+        const result = this.db.prepare("UPDATE oauth_transactions SET consumed_at=?,data=json_set(data,'$.consumedAt',?) WHERE state_hash=? AND consumed_at IS NULL AND julianday(expires_at) > julianday(?)")
+          .run(input.consumedAt, input.consumedAt, input.stateHash, input.consumedAt)
+        if (Number(result.changes) !== 1) return null
+        return this.readOAuthTransactions('state_hash=?', input.stateHash)[0] ?? null
+      },
     },
     resources: {
       ...this.resourceReader,
       saveWorker: async r => this.put('worker', r.id, r), saveProject: async r => this.put('project', r.id, r),
       saveRepository: async r => this.put('repository', r.id, r), saveWorkspace: async r => this.put('workspace', r.id, r), saveSession: async r => this.put('session', r.id, r),
+      saveSessionFork: async fork => {
+        const index = forkRequestIndexId(fork.projectId, fork.creation.requestId), indexed = this.get<string>('session-fork-request', index)
+        // Index and row are written together: a second Fork claiming the same requestId in one
+        // transaction is rejected here instead of silently creating an unreachable branch.
+        if (indexed && indexed !== fork.id) throw new AppError(409, 'requestId already belongs to a different Session Fork', 'request_id_conflict')
+        this.put('session-fork', fork.id, fork)
+        this.put('session-fork-request', index, fork.id)
+      },
       replaceCapabilityAssets: async (projectId: ProjectId, assets: readonly CapabilityAsset[]) => this.put('capability-assets', projectId, assets),
       createAgentInboxMessage: async input => {
         const key = `${input.message.fromSessionId}:${input.idempotencyKey}`

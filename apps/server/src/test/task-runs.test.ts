@@ -1,11 +1,13 @@
 import test from 'node:test'
+import { administratorDirectory, administratorEmail, administratorToken, instanceOperatorId, seedAdministrator, seedOperator } from './fixtures/administrator.js'
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
-import { AuthenticationService } from '../application/auth.js'
+import { AuthenticationService, hashSecret } from '../application/auth.js'
 import { httpHandler } from '../http/handler.js'
 import { SessionStreams } from '../http/sse.js'
 import { WebSocket } from 'ws'
@@ -15,17 +17,27 @@ import type { ServerStore, ServerStoreTx } from '../application/ports/server-sto
 import assert from 'node:assert/strict'
 import { projectRuns } from '../application/run-projection.js'
 import { WorkerService } from '../application/worker-service.js'
-import type { JournalEvent, SessionId, EventSeq, Timestamp, CommandId, MessageId, TurnId, UserId, AgentKey, ModelId } from '@wemux/domain'
+import type { CredentialId, JournalEvent, SessionId, EventSeq, Timestamp, CommandId, MessageId, TurnId, UserId, AgentKey, ModelId } from '@wemux/domain'
 import { SqliteServerStore } from '../storage/sqlite/store.js'
+import { migrationCount } from '../storage/sqlite/migrations.js'
 import { ServerService } from '../application/server-service.js'
 import { Notifications } from '../application/notifications.js'
 import { TaskService } from '../application/task-service.js'
 
-const context = { actor: 'bootstrap-admin' as UserId, requestId: 'runs-test' }
+const context = { actor: instanceOperatorId, requestId: 'runs-test' }
+
+/** 直接写入 PAT：任务/运行测试关注语义，不掺入凭据签发路由；ttl 为负数可造出已过期凭据。 */
+async function issuePat(store: ServerStore, userId: UserId, ttlMs: number): Promise<string> {
+  const token = `test-pat-${randomUUID()}`
+  const expiresAt = new Date(Date.now() + ttlMs).toISOString() as Timestamp
+  await store.transaction(async tx => tx.identity.savePersonalAccessToken({ id: randomUUID() as CredentialId, userId, tokenHash: hashSecret(token), expiresAt, revokedAt: null }))
+  return token
+}
+
 async function fixture(path = ':memory:') {
   const store = new SqliteServerStore(path)
   const server = new ServerService(store, new Notifications())
-  await server.bootstrap()
+  await seedOperator(store, server)
   const enrollment = await server.createEnrollment({})
   const { worker, credential } = await server.enroll({ token: enrollment.token, name: 'Run worker' })
   await store.transaction(tx => tx.resources.saveWorker({ ...worker, connectionState: 'online', capabilities: [{ agentKey: 'test' as AgentKey, displayName: 'Test', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' as ModelId, displayName: 'Model', source: 'configured' }] }] }))
@@ -210,8 +222,7 @@ test('current review isolates historical Runs and concurrent HTTP decisions surv
   const dir = await mkdtemp(join(tmpdir(), 'current-review-')), path = join(dir, 'db')
   const f = await reviewFixture(path), events: unknown[] = [], db = new DatabaseSync(path)
   const tasks = new TaskService(f.store, e => events.push(e), f.server)
-  const token = 'current-review-http'
-  const http = createServer(httpHandler(f.server, new AuthenticationService(f.store, token), new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, tasks))
+  const http = createServer(httpHandler(f.server, new AuthenticationService(f.store, administratorDirectory(f.store)), new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, tasks))
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const address = http.address(); assert.ok(address && typeof address !== 'string')
   try {
@@ -224,7 +235,7 @@ test('current review isolates historical Runs and concurrent HTTP decisions surv
     const before = snapshot(), count = events.length
     await assert.rejects(tasks.reviewAction(task.projectId, task.id, f.run.id, { version: task.version, status: 'approved' }, context), { code: 'invalid_transition' })
     assert.deepEqual(snapshot(), before); assert.equal(events.length, count)
-    const decide = (status: string) => fetch(`http://127.0.0.1:${address.port}/projects/${task.projectId}/tasks/${task.id}/runs/${run.id}/review`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ version: task.version, status }) })
+    const decide = (status: string) => fetch(`http://127.0.0.1:${address.port}/projects/${task.projectId}/tasks/${task.id}/runs/${run.id}/review`, { method: 'POST', headers: { Authorization: `Bearer ${administratorToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ version: task.version, status }) })
     const responses = await Promise.all([decide('approved'), decide('changes_requested')])
     assert.deepEqual(responses.map(r => r.status).sort(), [200, 409])
     const decided = (await f.store.tasks.review(run.id))!
@@ -241,8 +252,8 @@ for (const corruption of ['run', 'review'] as const) test(`HTTP rejects corrupt 
   const dir = await mkdtemp(join(tmpdir(), 'corrupt-review-')), path = join(dir, 'db')
   const f = await reviewFixture(path), db = new DatabaseSync(path), events: unknown[] = []
   const task = await f.tasks.patch(f.task.projectId, f.task.id, { version: f.task.version, status: 'in_review' }, context)
-  const tasks = new TaskService(f.store, e => events.push(e), f.server), token = 'corrupt-http-token'
-  const http = createServer(httpHandler(f.server, new AuthenticationService(f.store, token), new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, tasks))
+  const tasks = new TaskService(f.store, e => events.push(e), f.server), token = administratorToken
+  const http = createServer(httpHandler(f.server, new AuthenticationService(f.store, administratorDirectory(f.store)), new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, tasks))
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const address = http.address(); assert.ok(address && typeof address !== 'string')
   try {
@@ -251,7 +262,7 @@ for (const corruption of ['run', 'review'] as const) test(`HTTP rejects corrupt 
     else { db.exec('DROP TRIGGER run_invariants_update; DROP TRIGGER run_identity_immutable'); db.prepare("UPDATE task_runs SET data=json_set(data,'$.sessionId','wrong-session') WHERE id=?").run(f.run.id) }
     const snapshot = () => db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => [row.name, db.prepare(`SELECT * FROM "${row.name}" ORDER BY rowid`).all()])
     const before = snapshot()
-    const response = await fetch(`http://127.0.0.1:${address.port}/projects/${task.projectId}/tasks/${task.id}/runs/${f.run.id}/review`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ version: task.version, status: 'approved' }) })
+    const response = await fetch(`http://127.0.0.1:${address.port}/projects/${task.projectId}/tasks/${task.id}/runs/${f.run.id}/review`, { method: 'POST', headers: { Authorization: `Bearer ${administratorToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ version: task.version, status: 'approved' }) })
     assert.equal(response.status, 409); assert.deepEqual(snapshot(), before); assert.deepEqual(events, [])
   } finally { db.close(); await new Promise<void>(resolve => http.close(() => resolve())); f.store.close(); await rm(dir, { recursive: true, force: true }) }
 })
@@ -358,24 +369,24 @@ test('review persists across reopen and migration replay', async () => {
 
 test('review HTTP endpoints: malformed JSON, relationship/auth matrix, actions and project readers', async () => {
   const f = await reviewFixture()
-  const auth = new AuthenticationService(f.store, 'review-http-token')
+  const auth = new AuthenticationService(f.store, administratorDirectory(f.store))
   const streams = new SessionStreams(f.server)
   const http = createServer(httpHandler(f.server, auth, streams, undefined, undefined, undefined, undefined, undefined, f.tasks))
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const address = http.address() as import('node:net').AddressInfo
   const base = `http://127.0.0.1:${address.port}/api/projects/${f.task.projectId}`
   const endpoint = `${base}/tasks/${f.task.id}/runs/${f.run.id}/review`
-  const headers = { Authorization: 'Bearer review-http-token', 'Content-Type': 'application/json' }
+  const headers = { Authorization: `Bearer ${administratorToken}`, 'Content-Type': 'application/json' }
   try {
     const before = await f.store.tasks.projectActivity(f.task.projectId, 0)
     for (const [url, token, body, status] of [
       [endpoint, 'bad', '{}', 401],
-      [`${endpoint}?teamId=wrong`, 'review-http-token', '{}', 403],
-      [endpoint.replace(f.task.id, 'missing'), 'review-http-token', '{}', 404],
-      [endpoint.replace(f.run.id, 'missing'), 'review-http-token', '{}', 404],
-      [endpoint, 'review-http-token', '{', 400],
-      [endpoint, 'review-http-token', '{"status":"requested"}', 400],
-      [endpoint, 'review-http-token', '{"status":"requested","version":1}', 409],
+      [`${endpoint}?teamId=wrong`, administratorToken, '{}', 403],
+      [endpoint.replace(f.task.id, 'missing'), administratorToken, '{}', 404],
+      [endpoint.replace(f.run.id, 'missing'), administratorToken, '{}', 404],
+      [endpoint, administratorToken, '{', 400],
+      [endpoint, administratorToken, '{"status":"requested"}', 400],
+      [endpoint, administratorToken, '{"status":"requested","version":1}', 409],
     ] as const) {
       const response = await fetch(url, { method: 'POST', headers: { ...headers, Authorization: `Bearer ${token}` }, body })
       assert.equal(response.status, status)
@@ -827,8 +838,7 @@ for (const rollback of [false, true]) test(`paused launch public Task/Run/delive
   const f = await fixture()
   let release!: () => void, entered!: () => void, runId = ''
   const gate = new Promise<void>(resolve => { release = resolve }), paused = new Promise<void>(resolve => { entered = resolve })
-  const token = 'paused-http-reader-token'
-  const http = createServer(httpHandler(f.server, new AuthenticationService(f.store, token), new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, f.tasks))
+  const http = createServer(httpHandler(f.server, new AuthenticationService(f.store, administratorDirectory(f.store)), new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, f.tasks))
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const address = http.address(); assert.ok(address && typeof address !== 'string')
   try {
@@ -841,7 +851,7 @@ for (const rollback of [false, true]) test(`paused launch public Task/Run/delive
     const outcome = launch.then(value => value, error => error as Error)
     await paused
     let settled = 0
-    const httpRead = fetch(`http://127.0.0.1:${address.port}/projects/${f.task.projectId}/tasks/${f.task.id}/runs/${runId}`, { headers: { Authorization: `Bearer ${token}` } }).then(async response => { const data = await response.json(); settled++; return { status: response.status, data } })
+    const httpRead = fetch(`http://127.0.0.1:${address.port}/projects/${f.task.projectId}/tasks/${f.task.id}/runs/${runId}`, { headers: { Authorization: `Bearer ${administratorToken}` } }).then(async response => { const data = await response.json(); settled++; return { status: response.status, data } })
     const single = f.tasks.run(f.task.projectId, f.task.id, runId, context).then(value => { settled++; return value }, error => { settled++; return error })
     const reads = [f.tasks.get(f.task.projectId, f.task.id, context), f.tasks.list(f.task.projectId, context), f.tasks.runs(f.task.projectId, f.task.id, context), f.store.tasks.runByRequest(f.task.id, f.request.requestId), f.store.commands.listDeliverable(f.worker.id, 100)].map(p => p.then(value => { settled++; return value }))
     await new Promise<void>(resolve => setTimeout(resolve, 50))
@@ -910,7 +920,7 @@ test('real WS contradictory terminal Journal cannot regress an undeleted cancell
     await f.store.transaction(async tx => { await tx.cache.applyEvents(sessionId, events); await tx.cache.recordWorkerHead(sessionId, 3 as EventSeq); await projectRuns(tx, sessionId) })
     const terminal = (await f.store.tasks.run(run.id))!
     f.store.close()
-    app = createWemuxServer({ databasePath: path, bootstrapToken: 'ws-test-isolated-token' }); const base = await app.listen(0)
+    app = createWemuxServer({ databasePath: path, administratorEmails: [administratorEmail] }); const base = await app.listen(0)
     const db = new DatabaseSync(path)
     const counts = () => ({ activity: db.prepare('SELECT * FROM task_activity ORDER BY task_id,seq').all(), audit: db.prepare("SELECT * FROM records WHERE kind='audit' ORDER BY id").all() })
     const before = counts()
@@ -1017,7 +1027,8 @@ test('real server listen recovers contiguous disk cache with cursor behind exact
   } finally { f.store.close() }
   try {
     for (let restart = 0; restart < 2; restart++) {
-      const server = createWemuxServer({ databasePath: path, bootstrapToken: 'isolated-test-token' })
+      const server = createWemuxServer({ databasePath: path, administratorEmails: [administratorEmail] })
+      const { token } = await seedAdministrator(server.store)
       try { await server.listen(0) } finally { await server.close() }
       const db = new DatabaseSync(path)
       try {
@@ -1093,14 +1104,14 @@ test('real server listen recovers contiguous disk cache with cursor behind exact
       const store = new SqliteServerStore(path)
       try {
         const service = new ServerService(store, new Notifications())
-        await service.bootstrap(); await service.bootstrap()
+        await seedOperator(store, service); await seedOperator(store, service)
         assert.deepEqual(await store.tasks.get(f.task.id), before)
         assert.deepEqual(await store.tasks.runs(f.task.id), [])
       } finally { store.close() }
     }
     const check = new DatabaseSync(path)
     try {
-      assert.deepEqual(check.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(r => r.version), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
+      assert.deepEqual(check.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(r => r.version), Array.from({ length: migrationCount }, (_, index) => index + 1))
       assert.deepEqual(check.prepare('PRAGMA foreign_key_check').all(), [])
     } finally { check.close() }
   } finally { await rm(dir, { recursive: true, force: true }) }
@@ -1110,8 +1121,8 @@ test('real server listen recovers contiguous disk cache with cursor behind exact
   const dir = await mkdtemp(join(tmpdir(), 'ticket05-delivery-')), path = join(dir, 'server.db')
   const f = await fixture(path), { run } = await f.launch()
   f.store.close()
-  const token = 'delivery-test-isolated-token'
-  let app = createWemuxServer({ databasePath: path, bootstrapToken: token }), base = await app.listen(0)
+  let app = createWemuxServer({ databasePath: path, administratorEmails: [administratorEmail] }), base = await app.listen(0)
+  const { token } = await seedAdministrator(app.store)
   let socket: WebSocket | undefined
   const connect = async () => {
     const ws = new WebSocket(`${base.replace('http', 'ws')}/worker/ws`, { headers: { Authorization: `Bearer ${f.credential}` } })
@@ -1132,7 +1143,7 @@ test('real server listen recovers contiguous disk cache with cursor behind exact
   const disconnect = async (ws: WebSocket) => {
     const closed = once(ws, 'close'); ws.close(); await closed
     for (let i = 0; i < 100; i++) {
-      const r = await fetch(`${base}/api/workers/${f.worker.id}`, { headers: { Authorization: `Bearer ${token}` } })
+      const r = await fetch(`${base}/api/workers/${f.worker.id}`, { headers: { Authorization: `Bearer ${administratorToken}` } })
       if ((await r.json()).connectionState === 'offline') return
       await new Promise(resolve => setTimeout(resolve, 10))
     }
@@ -1147,7 +1158,7 @@ test('real server listen recovers contiguous disk cache with cursor behind exact
     await second.waitCommand(run.enqueueCommandId)
     await disconnect(second.ws) // received enqueue, no receipt: ACK lost
     await app.close()
-    app = createWemuxServer({ databasePath: path, bootstrapToken: token }); base = await app.listen(0)
+    app = createWemuxServer({ databasePath: path, administratorEmails: [administratorEmail] }); base = await app.listen(0)
     const third = await connect(); await third.waitCommand(run.enqueueCommandId)
     assert.ok(!third.received.some(m => m.type === 'command' && m.commandId === run.createCommandId))
     const db = new DatabaseSync(path)
@@ -1163,14 +1174,14 @@ test('real server listen recovers contiguous disk cache with cursor behind exact
 
 test('Run HTTP ownership/resource/raw JSON matrix has exact envelopes and zero full database or notification effects', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ticket05-http-')), dbPath = join(dir, 'server.db')
-  const f = await fixture(dbPath), token = 'run-http-complete-matrix'
-  const auth = new AuthenticationService(f.store, token)
+  const f = await fixture(dbPath), token = administratorToken
+  const auth = new AuthenticationService(f.store, administratorDirectory(f.store))
   const outsider = 'outsider' as UserId
   await f.store.transaction(async tx => {
     await tx.identity.saveUser({ id: outsider, username: 'outsider', email: null, createdAt: new Date().toISOString() as Timestamp })
     await tx.identity.saveMembership({ teamId: f.worker.teamId, userId: outsider, role: 'member', joinedAt: new Date().toISOString() as Timestamp })
   })
-  const outsiderToken = (await auth.issueAdminSession(outsider, 60000)).token
+  const outsiderToken = await issuePat(f.store, outsider, 60000)
   const project = await f.server.createProject({ name: 'Other project' })
   const other = await f.tasks.create(f.task.projectId, { title: 'Other task' }, context)
   const cross = await f.tasks.create(project.id, { title: 'Cross project' }, context)
@@ -1222,11 +1233,11 @@ test('Run HTTP ownership/resource/raw JSON matrix has exact envelopes and zero f
 
 test('real HTTP Run launch rejection envelopes leave all launch resources unchanged', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'ticket05-rejections-')), dbPath = join(dir, 'server.db')
-  const f = await fixture(dbPath), token = 'run-http-matrix-token', db = new DatabaseSync(dbPath)
+  const f = await fixture(dbPath), token = administratorToken, db = new DatabaseSync(dbPath)
   let notifications = 0
   f.server.notifications.commands = () => { notifications++ }
   const observedTasks = new TaskService(f.store, () => { notifications++ }, f.server)
-  const auth = new AuthenticationService(f.store, token)
+  const auth = new AuthenticationService(f.store, administratorDirectory(f.store))
   const http = createServer(httpHandler(f.server, auth, new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, observedTasks))
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const address = http.address(); assert.ok(address && typeof address !== 'string')
@@ -1249,8 +1260,8 @@ test('real HTTP Run launch rejection envelopes leave all launch resources unchan
   }
   try {
     await check('unauthorized', 401, f.request, path + '/launch', null)
-    const expired = await auth.issueAdminSession(context.actor, -1000)
-    await check('unauthorized', 401, f.request, path + '/launch', expired.token)
+    const expired = await issuePat(f.store, context.actor, -1000)
+    await check('unauthorized', 401, f.request, path + '/launch', expired)
     await check('forbidden', 403, f.request, path + '/launch?teamId=wrong')
     await check('not_found', 404, f.request, '/projects/default-project/tasks/missing/launch')
     await check('invalid_request', 400, {})
@@ -1274,13 +1285,13 @@ test('real HTTP Run launch rejection envelopes leave all launch resources unchan
 
 
 for (const phase of ['pending', 'running'] as const) for (const outcome of ['completed', 'cancelled'] as const) test(`HTTP ${phase}/${outcome} management protects Run snapshot and Session; terminal releases Task restrictions`, async () => {
-  const f = await fixture(), token = 'run-management-http-token'
-  const http = createServer(httpHandler(f.server, new AuthenticationService(f.store, token), new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, f.tasks))
+  const f = await fixture(), token = administratorToken
+  const http = createServer(httpHandler(f.server, new AuthenticationService(f.store, administratorDirectory(f.store)), new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, f.tasks))
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const address = http.address(); assert.ok(address && typeof address !== 'string')
   const path = `/projects/${f.task.projectId}/tasks/${f.task.id}`
   const call = async (suffix: string, method: string, body?: unknown) => {
-    const response = await fetch(`http://127.0.0.1:${address.port}${suffix}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
+    const response = await fetch(`http://127.0.0.1:${address.port}${suffix}`, { method, headers: { Authorization: `Bearer ${administratorToken}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
     return { status: response.status, data: await response.json() }
   }
   try {
@@ -1387,11 +1398,10 @@ for (const corrupt of ['metadata', 'restore', 'snapshot'] as const) test(`corrup
 
 test('capability HTTP readers equal service values and transition rejection has no activity', async () => {
   const f = await fixture()
-  const token = 'capability-http-token'
-  const http = createServer(httpHandler(f.server, new AuthenticationService(f.store, token), new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, f.tasks))
+  const http = createServer(httpHandler(f.server, new AuthenticationService(f.store, administratorDirectory(f.store)), new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, f.tasks))
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const address = http.address(); assert.ok(address && typeof address !== 'string')
-  const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
+  const headers = { Authorization: `Bearer ${administratorToken}`, 'Content-Type': 'application/json' }
   const base = `http://127.0.0.1:${address.port}`
   try {
     const { run } = await f.launch()

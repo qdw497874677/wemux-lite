@@ -11,12 +11,13 @@ import { WorkerService } from '../application/worker-service.js'
 import { newId } from '../application/server-service.js'
 import type { CommandId, Timestamp } from '@wemux/domain'
 import { TaskService } from '../application/task-service.js'
+import { seedOperator, instanceOperatorId } from './fixtures/administrator.js'
 
-const context = { actor: 'bootstrap-admin' as UserId, requestId: 'workspace-test' }
+const context = { actor: instanceOperatorId, requestId: 'workspace-test' }
 async function fixture(path = ':memory:') {
   const store = new SqliteServerStore(path)
   const server = new ServerService(store, new Notifications())
-  await server.bootstrap()
+  await seedOperator(store, server)
   const enrollment = await server.createEnrollment({})
   const { worker } = await server.enroll({ token: enrollment.token, name: 'Offline worker' })
   await store.transaction(tx => tx.resources.saveWorker({ ...worker, capabilities: [{ agentKey: 'test' as AgentKey, displayName: 'Test', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' as ModelId, displayName: 'Model', source: 'configured' }] }] }))

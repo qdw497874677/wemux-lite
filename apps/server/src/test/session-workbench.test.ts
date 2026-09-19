@@ -11,11 +11,12 @@ import { Notifications } from '../application/notifications.js'
 import { AuthenticationService } from '../application/auth.js'
 import { httpHandler } from '../http/handler.js'
 import { SessionStreams } from '../http/sse.js'
+import { seedOperator, administratorDirectory } from './fixtures/administrator.js'
 
 async function fixture(path = ':memory:') {
   const store = new SqliteServerStore(path)
   const service = new ServerService(store, new Notifications())
-  const { project } = await service.bootstrap()
+  const { project, token } = await seedOperator(store, service)
   const { worker } = await service.enroll({ token: (await service.createEnrollment({})).token, name: 'test' })
   await store.transaction(tx => tx.resources.saveWorker({ ...worker, capabilities: [{ agentKey: 'pi' as AgentKey, displayName: 'Pi', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'test' as ModelId, displayName: 'Test', source: 'detected' }] }] }))
   const { workspace } = await service.createWorkspace({ projectId: project!.id, workerId: worker.id, name: 'test' })
@@ -25,8 +26,7 @@ async function fixture(path = ':memory:') {
   let seq = 0
   const append = (...payloads: SessionEventPayload[]) => store.transaction(tx => tx.cache.applyEvents(session.id, payloads.map(payload => ({ sessionId: session.id, seq: ++seq as EventSeq, occurredAt: now(), payload }))))
   const streams = new SessionStreams(service)
-  const token = 'session-workbench-bootstrap-token'
-  const server = createServer(httpHandler(service, new AuthenticationService(store, token), streams))
+  const server = createServer(httpHandler(service, new AuthenticationService(store, administratorDirectory(store)), streams))
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
   assert.ok(address && typeof address !== 'string')

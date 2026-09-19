@@ -5,6 +5,7 @@ import { SqliteServerStore } from '../storage/sqlite/store.js'
 import { ServerService, newId, now } from '../application/server-service.js'
 import { WorkerService } from '../application/worker-service.js'
 import { Notifications } from '../application/notifications.js'
+import { seedOperator } from './fixtures/administrator.js'
 
 const gate = () => {
   let resolve!: () => void
@@ -16,7 +17,7 @@ for (const rollback of [true, false]) test(`public reads and delivery wait for $
   const store = new SqliteServerStore(':memory:'); t.after(() => store.close())
   const notifications = new Notifications(), service = new ServerService(store, notifications)
   const workers = new WorkerService(store, notifications)
-  const { project } = await service.bootstrap()
+  const { project } = await seedOperator(store, service)
   const worker = await service.enroll({ token: (await service.createEnrollment({})).token, name: 'reader-test' })
   const paused = gate(), release = gate()
   const id = newId<'ProjectId'>()

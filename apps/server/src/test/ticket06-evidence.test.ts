@@ -16,12 +16,13 @@ import { Notifications } from '../application/notifications.js'
 import { AuthenticationService } from '../application/auth.js'
 import { httpHandler } from '../http/handler.js'
 import { SessionStreams } from '../http/sse.js'
+import { administratorDirectory, administratorToken, instanceOperatorId, seedOperator } from './fixtures/administrator.js'
 
-const context = { actor: 'bootstrap-admin' as UserId, requestId: 'ticket06-evidence' }
+const context = { actor: instanceOperatorId, requestId: 'ticket06-evidence' }
 async function fixture(path: string, cancel = true) {
   const store = new SqliteServerStore(path), signals = new Notifications()
   const server = new ServerService(store, signals)
-  await server.bootstrap()
+  await seedOperator(store, server)
   const { worker } = await server.enroll({ token: (await server.createEnrollment({})).token, name: 'Evidence worker' })
   await store.transaction(tx => tx.resources.saveWorker({ ...worker, connectionState: 'online', capabilities: [{ agentKey: 'test' as AgentKey, displayName: 'Test', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' as ModelId, displayName: 'Model', source: 'configured' }] }] }))
   const tasks = new TaskService(store, event => signals.project(event), server)
@@ -353,7 +354,7 @@ test('Ticket06 exact notification recipient/type/count matrix with durable resta
     assert.deepEqual(await store.tasks.run(f.run.id), beforeRestart)
     assert.deepEqual(await store.tasks.activity(f.task.id, 0), finished)
     // All HTTP negatives snapshot every durable table, and observe every channel.
-    http = createServer(httpHandler(server, new AuthenticationService(store, 'ticket06-evidence-token'), new SessionStreams(server), undefined, undefined, undefined, undefined, undefined, tasks))
+    http = createServer(httpHandler(server, new AuthenticationService(store, administratorDirectory(store)), new SessionStreams(server), undefined, undefined, undefined, undefined, undefined, tasks))
     http.listen(0, '127.0.0.1'); await once(http, 'listening')
     const address = http.address(); assert.ok(address && typeof address !== 'string'); assert.notEqual(address.port, 8004)
     const route = `/api/projects/${f.task.projectId}/tasks/${f.task.id}/runs/${f.run.id}/cancel`
@@ -370,7 +371,7 @@ test('Ticket06 exact notification recipient/type/count matrix with durable resta
       ] as const) {
         const before = snapshot(observer)
         await check('HTTP ' + name, async () => {
-          const response = await fetch(`http://127.0.0.1:${address.port}${url}`, { method: 'POST', headers: { authorization: 'Bearer ticket06-evidence-token', 'content-type': 'application/json' }, body })
+          const response = await fetch(`http://127.0.0.1:${address.port}${url}`, { method: 'POST', headers: { authorization: `Bearer ${administratorToken}`, 'content-type': 'application/json' }, body })
           assert.equal(response.status, status)
           if (name.startsWith('NUL')) assert.deepEqual(await response.json(), { error: { code: 'invalid_request', message: name === 'NUL cancel' ? 'Cancel requires matching runId/sessionId and requestId' : 'Invalid launch request' } })
         }, [])

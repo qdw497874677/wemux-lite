@@ -9,8 +9,9 @@ import { SqliteServerStore } from '../storage/sqlite/store.js'
 import { ServerService } from '../application/server-service.js'
 import { TaskService, TaskError } from '../application/task-service.js'
 import { Notifications } from '../application/notifications.js'
+import { seedOperator, instanceOperatorId } from './fixtures/administrator.js'
 
-const context = { actor: 'bootstrap-admin' as UserId, requestId: 'reuse-matrix' }
+const context = { actor: instanceOperatorId, requestId: 'reuse-matrix' }
 const mismatch = 'Session ownership or binding mismatch; explicitly confirm a new Session'
 const stale = 'Session Journal is not fresh; wait for synchronization; explicitly confirm a new Session'
 const busy = 'Session has queued messages or a running Turn; explicitly confirm a new Session'
@@ -45,7 +46,7 @@ for (const [name, code, message] of cases) test(`public reuse rejection matrix: 
   const store = new SqliteServerStore(path), signals = new Notifications(), server = new ServerService(store, signals)
   const tasks = new TaskService(store, event => signals.project(event), server), db = new DatabaseSync(path)
   try {
-    await server.bootstrap()
+    await seedOperator(store, server)
     const { worker } = await server.enroll({ token: (await server.createEnrollment({})).token, name: 'Reuse worker' })
     await store.transaction(tx => tx.resources.saveWorker({ ...worker, connectionState: 'online', capabilities: [{ agentKey: 'test' as AgentKey, displayName: 'Test', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' as ModelId, displayName: 'Model', source: 'configured' }] }] }))
     const task = await tasks.create('default-project', { title: 'Reuse matrix' }, context)

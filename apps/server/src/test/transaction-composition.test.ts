@@ -11,6 +11,7 @@ import { ServerService, now } from '../application/server-service.js'
 import { Notifications } from '../application/notifications.js'
 import { CapabilityService } from '../application/capability-service.js'
 import { CapabilityTokenService } from '../application/capability-token-service.js'
+import { seedOperator } from './fixtures/administrator.js'
 
 // Real SQLite with a transaction-boundary probe, not a mocked service.
 test('creation primitives compose in one transaction; every failure rolls back without wakeups', { timeout: 5000 }, async t => {
@@ -39,7 +40,7 @@ test('creation primitives compose in one transaction; every failure rolls back w
   }
   const notifications = new Notifications()
   const service = new ServerService(store, notifications, new CapabilityService(store, now, new CapabilityTokenService('test-secret'.repeat(4), now)))
-  const { project } = await service.bootstrap()
+  const { project } = await seedOperator(store, service)
   const enrolled = await service.enroll({ token: (await service.createEnrollment({})).token, name: 'test' })
   await store.transaction(tx => tx.resources.saveWorker({ ...enrolled.worker, capabilities: [{ agentKey: 'pi' as AgentKey, displayName: 'Pi', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'test' as ModelId, displayName: 'Test', source: 'detected' }] }] }))
   notifications.onCommands(enrolled.workerId, () => { assert.equal(active, false); wakeups++ })

@@ -1,18 +1,19 @@
 import test from 'node:test'
+import { administratorEmail, administratorToken, instanceOperatorId, seedAdministrator, seedOperator } from './fixtures/administrator.js'
 import assert from 'node:assert/strict'
 import { DatabaseSync } from 'node:sqlite'
 import { transitionTask, taskTargets, type UserId } from '@wemux/domain'
 import { SqliteServerStore } from '../storage/sqlite/store.js'
-import { migrate } from '../storage/sqlite/migrations.js'
+import { migrate, migrationCount } from '../storage/sqlite/migrations.js'
 import { ServerService } from '../application/server-service.js'
 import { Notifications } from '../application/notifications.js'
 import { TaskService } from '../application/task-service.js'
 import { createWemuxServer } from '../server.js'
-const context = { actor: 'bootstrap-admin' as UserId, teamId: 'default-team', requestId: 'test-request' }
+const context = { actor: instanceOperatorId, teamId: 'default-team', requestId: 'test-request' }
 test('Task transitions: review decision, block/cancel restoration, CAS-independent no-op, active guard', async () => {
   const store = new SqliteServerStore(':memory:')
   try {
-    await new ServerService(store, new Notifications()).bootstrap()
+    await seedOperator(store, new ServerService(store, new Notifications()))
     const tasks = new TaskService(store)
     let task = await tasks.create('default-project', { title: 'Task' }, context)
     assert.throws(() => transitionTask(task, 'done'), /invalid_transition/)
@@ -31,14 +32,14 @@ test('migration replay preserves legacy rows and task project index', () => {
   const db = new DatabaseSync(':memory:')
   try { migrate(db); db.prepare('INSERT INTO records VALUES(?,?,?)').run('legacy', '1', '{}'); migrate(db)
     assert.equal(db.prepare('SELECT COUNT(*) AS n FROM records').get()!.n, 1)
-    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get()!.n, 14)
+    assert.equal(db.prepare('SELECT COUNT(*) AS n FROM schema_migrations').get()!.n, migrationCount)
     assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE name='tasks_project'").get())
   } finally { db.close() }
 })
 test('task + activity rollback, post-commit publication and concurrent CAS', async () => {
   const store = new SqliteServerStore(':memory:')
   try {
-    await new ServerService(store, new Notifications()).bootstrap()
+    await seedOperator(store, new ServerService(store, new Notifications()))
     const events: unknown[] = [], service = new TaskService(store, event => events.push(event))
     const task = await service.create('default-project', { title: 'Atomic' }, context)
     assert.equal(events.length, 1)
@@ -54,7 +55,8 @@ test('task + activity rollback, post-commit publication and concurrent CAS', asy
   } finally { store.close() }
 })
 test('HTTP task CRUD without delete, validation, ownership, invalid transition and stale CAS', async () => {
-  const token = 'ticket-03-test-token', server = createWemuxServer({ databasePath: ':memory:', bootstrapToken: token })
+  const token = administratorToken, server = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail] })
+  await seedAdministrator(server.store)
   const base = await server.listen(0)
   const call = async (path: string, method = 'GET', body?: unknown, auth = token) => {
     const response = await fetch(`${base}/api${path}`, { method, headers: { Authorization: `Bearer ${auth}`, 'Content-Type': 'application/json', 'X-Request-ID': 'http-test' }, body: body === undefined ? undefined : JSON.stringify(body) })
@@ -95,10 +97,11 @@ test('HTTP task CRUD without delete, validation, ownership, invalid transition a
 })
 
 for (const first of ['blocked', 'cancelled'] as const) test(`restoration survives repeated ${first} round trips through domain and HTTP/SQLite`, async () => {
-  const server = createWemuxServer({ databasePath: ':memory:', bootstrapToken: 'restore-test-token' })
+  const server = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail] })
+  const { token } = await seedAdministrator(server.store)
   const base = await server.listen(0)
   const call = async (path: string, method = 'GET', body?: unknown) => {
-    const response = await fetch(`${base}/api${path}`, { method, headers: { Authorization: 'Bearer restore-test-token', 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
+    const response = await fetch(`${base}/api${path}`, { method, headers: { Authorization: `Bearer ${administratorToken}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
     assert.ok(response.ok); return response.json()
   }
   try {
@@ -121,9 +124,10 @@ for (const first of ['blocked', 'cancelled'] as const) test(`restoration survive
   } finally { await server.close() }
 })
 test('HTTP create and PATCH reject every non-string priority with stable invalid_request', async () => {
-  const server = createWemuxServer({ databasePath: ':memory:', bootstrapToken: 'priority-test-token' })
+  const server = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail] })
+  const { token } = await seedAdministrator(server.store)
   const base = await server.listen(0)
-  const call = (path: string, method: string, body: unknown) => fetch(`${base}/api${path}`, { method, headers: { Authorization: 'Bearer priority-test-token', 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  const call = (path: string, method: string, body: unknown) => fetch(`${base}/api${path}`, { method, headers: { Authorization: `Bearer ${administratorToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
   try {
     await call('/bootstrap', 'POST', {})
     const path = '/projects/default-project/tasks'
