@@ -3,15 +3,13 @@ import { MarkdownMessage } from '../../components/markdown-message.ts'
 import { SubmissionController } from './submission'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, Check, ChevronDown, ChevronRight, CircleCheck, CircleX, FolderGit2, LoaderCircle, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, RefreshCw, Search, Send, Server, ServerCog, Settings2, Wrench, WifiOff } from 'lucide-react'
-import { ApiError, createApi, type ConnectionConfig } from '../../api/client'
-import { clearConnectionConfig, readConnectionConfig, saveConnectionConfig } from '../../lib/connection-storage'
 import type { ProjectDTO, SendMessageDTO, SessionDTO, WorkerDTO, WorkspaceDTO } from '../../api/dto'
 import { useSession } from '../../api/use-session'
 import type { ChatMessage, ChatTimelineItem, TimelineTool } from '../../api/journal'
 import { Button } from '../../components/ui/button'
 import { Badge } from '../../components/ui/badge'
 import { Input } from '../../components/ui/input'
-import { Textarea } from '../../components/ui/textarea'
+import { AiPromptInput } from '../../components/ui/ai-prompt-input.tsx'
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from '../../components/ui/sheet'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '../../components/ui/dropdown-menu'
 import { ConnectionDialog } from '../../components/connection-dialog'
@@ -65,11 +63,22 @@ export function Composer({ controller, session, canSend, blockedReason, confirme
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot)
   useEffect(() => { controller.confirm(confirmedIds) }, [controller, confirmedIds.join(',')])
   canSend = canSend && session.sendCapability?.allowed === true
-  blockedReason = session.sendCapability?.allowed === false ? session.sendCapability.reason : !session.sendCapability ? 'Authoritative capability data unavailable' : blockedReason
-  const submit = () => { if (canSend) void controller.send() }
-  return <div className="conversation-composer shrink-0 px-4 py-4 sm:px-8 sm:py-5"><div className="conversation-content mx-auto max-w-4xl"><div className="surface-glass rounded-3xl p-1 shadow-lg transition-all duration-300 focus-within:shadow-xl focus-within:ring-2 focus-within:ring-primary/30"><Textarea className="min-h-24 max-h-[32dvh] resize-y rounded-2xl border-0 bg-transparent px-5 py-4 text-base shadow-none focus-visible:ring-0 sm:text-sm" rows={4} aria-label="消息内容" value={state.draft} onChange={event => controller.edit(event.target.value)} onKeyDown={event => {
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && (event.ctrlKey || event.metaKey || window.matchMedia('(pointer: fine)').matches)) { event.preventDefault(); submit() }
-  }} placeholder={canSend ? '输入消息…' : `${blockedReason}；仍可先编辑草稿`} /><div className="flex items-center gap-3 border-t border-white/5 px-5 py-3"><span role={state.error ? 'alert' : 'status'} className="min-w-0 flex-1 break-words text-xs text-muted-foreground">{state.error || (state.pending ? '正在发送…' : state.receipt ? '已送达，等待回复' : canSend ? '点击发送；电脑 Enter 发送，Shift+Enter 换行' : blockedReason)}</span><Button disabled={!canSend || state.pending || !state.draft.trim()} onClick={submit} className="h-10 rounded-2xl px-6 font-medium shadow-md transition-all hover:shadow-lg active:scale-95">{state.pending ? '发送中' : state.attempt?.content === state.draft.trim() ? '重试' : session.runtimeState === 'running' ? '继续发送' : '发送'}</Button></div></div></div></div>
+  blockedReason = session.sendCapability?.allowed === false ? session.sendCapability.reason : !session.sendCapability ? '暂时无法确认发送权限' : blockedReason
+  const retry = state.attempt?.content === state.draft.trim()
+  const hint = state.pending ? '正在发送…' : state.receipt ? '消息已送达，等待 Agent 回复' : canSend ? session.runtimeState === 'running' ? 'Agent 正在运行，新消息将进入队列' : 'Enter 发送，Shift+Enter 换行' : `${blockedReason}，草稿仍会保留`
+  return <div className="conversation-composer shrink-0 px-3 py-3 sm:px-6 sm:py-4"><div className="conversation-content mx-auto max-w-4xl"><AiPromptInput
+    value={state.draft}
+    onChange={controller.edit}
+    onSubmit={() => { if (canSend) void controller.send() }}
+    modelLabel={session.modelId || 'Agent 默认模型'}
+    agentLabel={session.agentKey}
+    status={state.pending ? 'loading' : 'idle'}
+    submitDisabled={!canSend || state.pending}
+    retry={retry}
+    placeholder={canSend ? '给 Agent 发送消息…' : `${blockedReason}，可以先编辑草稿`}
+    hint={hint}
+    error={state.error}
+  /></div></div>
 }
 
 export function OptimisticMessages({ controller, confirmedIds }: { controller: SubmissionController; confirmedIds: string[] }) {

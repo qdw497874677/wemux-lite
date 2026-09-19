@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import { appendPage, projectJournal } from '../src/api/journal.ts'
-import { createApi } from '../src/api/client.ts'
+import { anonymousSession, createApi } from '../src/api/client.ts'
 
 // 用例大量替换 globalThis.fetch / window；进程内后续测试文件（如 proxy.test.mjs 的真实 Vite 代理链路）依赖原生物，必须恢复现场。
 const realFetch = globalThis.fetch
@@ -96,9 +96,12 @@ test('API adapts current server lists, pagination, auth and fetch-stream SSE lif
         : { items: [{ id: 'w1', capabilities: [] }] }
     return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
   }
-  const api = createApi({ token: 'secret', teamId: 'team' })
+  const api = createApi({ teamId: 'team', csrfToken: 'csrf-secret', username: 'owner', email: null })
   assert.deepEqual(await api.workers(), [{ id: 'w1', capabilities: [{ agentKey: 'test' }] }])
-  assert.equal(calls[0].options.headers.Authorization, 'Bearer secret')
+  // 凭据只在 HttpOnly Cookie 里：请求既不携带 Bearer 头，也绝不把令牌放进查询串。
+  assert.equal(calls[0].options.headers.Authorization, undefined)
+  assert.equal(calls[0].options.credentials, 'same-origin')
+  assert.equal(calls[0].options.headers['X-CSRF-Token'], undefined)
   assert.equal(calls[0].url.searchParams.get('token'), null)
   assert.equal(calls[1].url.pathname, '/api/workers/w1/capabilities')
   const page = await api.events('s1', 0)
@@ -106,31 +109,52 @@ test('API adapts current server lists, pagination, auth and fetch-stream SSE lif
   assert.equal(page.hasMore, false)
   assert.equal(page.freshness.status, 'offline')
   assert.equal(calls[2].url.searchParams.get('fromSeq'), '1')
+  // 写操作额外携带内存中的 CSRF 令牌，服务端据此拒绝跨站请求。
+  await api.revokeWorker('w1')
+  const write = calls.at(-1)
+  assert.equal(write.options.method, 'POST')
+  assert.equal(write.options.headers['X-CSRF-Token'], 'csrf-secret')
   let changes = 0
   const close = api.watch('s1', 1, () => changes++, () => {})
   await new Promise(resolve => setTimeout(resolve, 20))
   const streamCall = calls.find(call => call.url.pathname.endsWith('/stream'))
   assert.equal(streamCall.url.searchParams.get('fromSeq'), '2')
   assert.equal(streamCall.url.searchParams.get('token'), null)
-  assert.equal(streamCall.options.headers.Authorization, 'Bearer secret')
+  assert.equal(streamCall.options.headers.Authorization, undefined)
+  assert.equal(streamCall.options.credentials, 'same-origin')
   assert.equal(changes >= 1, true)
   assert.equal(streamRequests, 1)
   close()
   await new Promise(resolve => setTimeout(resolve, 0))
   assert.equal(streamRequests, 1)
 })
-test('bootstrap secret is exchanged for an expiring admin session', async () => {
+test('注册与登录都不需要引导令牌：凭据只走请求体与 Cookie', async () => {
   globalThis.window = { location: { origin: 'https://wemux.example.com' } }
-  let captured
+  const calls = []
+  const account = { user: { id: 'user-1', username: 'owner', email: 'owner@example.com', createdAt: '2030-01-01T00:00:00.000Z' }, teamId: 'default-team', session: { id: 'session-1', client: 'web', createdAt: '2030-01-01T00:00:00.000Z', lastSeenAt: '2030-01-01T00:00:00.000Z', idleExpiresAt: '2030-01-01T01:00:00.000Z', absoluteExpiresAt: '2030-01-08T00:00:00.000Z', current: true }, expiresAt: '2030-01-08T00:00:00.000Z' }
   globalThis.fetch = async (url, options) => {
-    captured = { url, options }
-    return new Response(JSON.stringify({ token: 'wemux-session-secret', expiresAt: '2030-01-01T00:00:00.000Z', teamId: 'default-team' }), { status: 201, headers: { 'content-type': 'application/json' } })
+    calls.push({ url, options })
+    const body = url.pathname.endsWith('/auth/register')
+      ? { status: 'accepted', email: 'o***@example.com' }
+      : { ...account, csrfToken: `csrf-${calls.length}` }
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
   }
-  const result = await createApi({ token: 'bootstrap-secret', teamId: '' }).createAdminSession()
-  assert.equal(captured.url.pathname, '/api/auth/session')
-  assert.equal(captured.options.headers.Authorization, 'Bearer bootstrap-secret')
-  assert.equal(result.token, 'wemux-session-secret')
-  assert.equal(result.teamId, 'default-team')
+  const api = createApi(anonymousSession())
+  const accepted = await api.register({ email: 'owner@example.com', displayName: 'Owner', password: 'correct horse battery staple' })
+  assert.equal(calls[0].url.pathname, '/api/auth/register')
+  // 部署声明（WEMUX_ADMIN_EMAILS）替代了引导令牌：注册请求里既没有 Authorization，也没有任何令牌字段。
+  assert.equal(calls[0].options.headers.Authorization, undefined)
+  assert.deepEqual(Object.keys(JSON.parse(calls[0].options.body)).sort(), ['displayName', 'email', 'password'])
+  assert.equal(accepted.status, 'accepted')
+  assert.equal(accepted.email, 'o***@example.com')
+  const signedIn = await api.login('owner', 'correct horse battery staple')
+  assert.equal(calls[1].url.pathname, '/api/auth/login')
+  assert.equal(calls[1].options.headers.Authorization, undefined, 'Cookie 会话不带 Bearer')
+  assert.equal(JSON.parse(calls[1].options.body).login, 'owner')
+  assert.equal(signedIn.csrfToken, 'csrf-2')
+  await api.logout()
+  assert.equal(calls[2].url.pathname, '/api/auth/logout')
+  assert.equal(calls[2].options.headers['X-CSRF-Token'], 'csrf-2')
 })
 
 test('creates empty and Git workspaces with explicit source payloads', async () => {
@@ -140,7 +164,7 @@ test('creates empty and Git workspaces with explicit source payloads', async () 
     bodies.push(JSON.parse(options.body))
     return new Response(JSON.stringify({ workspace: { id: `workspace-${bodies.length}`, projectId: 'project-1', workerId: 'worker-1', name: 'Workspace', status: 'pending', failureReason: null, location: null } }), { status: 201, headers: { 'content-type': 'application/json' } })
   }
-  const api = createApi({ token: 'secret', teamId: 'team-1' })
+  const api = createApi({ teamId: 'team-1', csrfToken: 'csrf-1', username: 'owner', email: null })
   await api.createWorkspace('project-1', { name: 'Blank', workerId: 'worker-1', source: 'empty' })
   await api.createWorkspace('project-1', { name: 'Repo', workerId: 'worker-1', source: 'git', repository: { name: 'Repo', gitUrl: 'https://example.com/repo.git', revision: 'main' } })
   assert.deepEqual(bodies[0], { projectId: 'project-1', name: 'Blank', workerId: 'worker-1', source: 'empty' })
@@ -148,17 +172,19 @@ test('creates empty and Git workspaces with explicit source payloads', async () 
   assert.equal(bodies[1].repository.gitUrl, 'https://example.com/repo.git')
 })
 
-test('creates enrollment tokens with admin auth and bounded TTL', async () => {
+test('creates enrollment tokens with the CSRF token of the cookie session and bounded TTL', async () => {
   globalThis.window = { location: { origin: 'https://wemux.example.com' } }
   let captured
   globalThis.fetch = async (url, options) => {
     captured = { url, options }
     return new Response(JSON.stringify({ token: 'one-time-secret', expiresAt: '2030-01-01T00:00:00.000Z' }), { status: 201, headers: { 'content-type': 'application/json' } })
   }
-  const result = await createApi({ token: 'admin-secret', teamId: 'default-team' }).createEnrollmentToken({ ttlSeconds: 900 })
+  const result = await createApi({ teamId: 'default-team', csrfToken: 'csrf-1', username: 'owner', email: null }).createEnrollmentToken({ ttlSeconds: 900 })
   assert.equal(captured.url.pathname, '/api/enrollment-tokens')
   assert.equal(captured.options.method, 'POST')
-  assert.equal(captured.options.headers.Authorization, 'Bearer admin-secret')
+  assert.equal(captured.options.headers.Authorization, undefined)
+  assert.equal(captured.options.credentials, 'same-origin')
+  assert.equal(captured.options.headers['X-CSRF-Token'], 'csrf-1')
   assert.deepEqual(JSON.parse(captured.options.body), { ttlSeconds: 900 })
   assert.equal(result.token, 'one-time-secret')
 })
@@ -172,24 +198,24 @@ test('message submission times out at the enqueue acknowledgement boundary', asy
     return new Response(JSON.stringify({ commandId: 'command-1', messageId: 'message-1', status: 'pending' }), { status: 202, headers: { 'content-type': 'application/json' } })
   }
   try {
-    const result = await createApi({ token: 'secret', teamId: 'team' }).send('session-1', { commandId: 'command-1', messageId: 'message-1', content: 'hello' })
+    const result = await createApi({ teamId: 'team', csrfToken: 'csrf-1', username: 'owner', email: null }).send('session-1', { commandId: 'command-1', messageId: 'message-1', content: 'hello' })
     assert.equal(timeoutMs, 15000)
     assert.equal(result.status, 'pending')
   } finally { AbortSignal.timeout = originalTimeout }
 })
 
 test('unavailable backend and non-JSON responses never fall back to fake data', async () => {
-  const api = createApi({ token: '', teamId: '' })
+  const api = createApi(anonymousSession())
   globalThis.fetch = async () => { throw new TypeError('offline') }
   await assert.rejects(api.workers(), /连接失败/)
   globalThis.fetch = async () => new Response('<html/>', { headers: { 'content-type': 'text/html' } })
   await assert.rejects(api.projects(), /响应格式异常/)
   globalThis.fetch = async () => new Response('', { status: 401 })
-  await assert.rejects(api.projects(), /管理员令牌无效/)
+  await assert.rejects(api.projects(), /登录会话已失效|连接已中断/)
 })
 
 test('DELETE accepts a successful 204 response without requiring JSON', async () => {
   globalThis.window = { location: { origin: 'https://wemux.example.com' } }
   globalThis.fetch = async () => new Response(null, { status: 204 })
-  await assert.doesNotReject(createApi({ token: 'secret', teamId: 'team' }).deleteSession('session-1'))
+  await assert.doesNotReject(createApi({ teamId: 'team', csrfToken: 'csrf-1', username: 'owner', email: null }).deleteSession('session-1'))
 })

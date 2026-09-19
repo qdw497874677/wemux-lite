@@ -22,7 +22,7 @@ export function RunReview({ api, task, run, refresh }: { api: Api; task: TaskDet
     catch (cause) { setError(cause instanceof Error ? cause.message : '审查失败'); refresh() }
     finally { setPending(false) }
   }
-  return <section aria-label="Run 审查" className="space-y-3 border-t py-3"><h4>人工审查</h4>
+  return <section aria-label="Run 审查" className="space-y-3 border-t border-border py-3"><h4>人工审查</h4>
     {run.status === 'succeeded' && <p>Run 已成功，建议核对结果后请求审查；不会自动完成 Task。</p>}
     {review.isPending && <p role="status">正在读取审查…</p>}{review.error && <p role="alert">{review.error.message}</p>}
     {review.data && <p>{review.data.review ? `${review.data.review.status} · ${review.data.review.reviewer ?? review.data.review.actor}` : '尚未请求审查。'}</p>}

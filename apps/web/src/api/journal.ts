@@ -182,6 +182,15 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
       case 'compaction.finished':
         timeline.push({ kind: 'notice', id: `compaction:${payload.turnId}:${event.seq}`, text: `上下文压缩完成${payload.summary ? `：${payload.summary}` : ''}`, tone: 'info' })
         break
+      case 'runtime.notice': {
+        const retry = payload.retry
+        const attempt = retry ? (retry.maxAttempts ? `第 ${retry.attempt}/${retry.maxAttempts} 次重试` : `第 ${retry.attempt} 次重试`) : ''
+        const delay = retry?.delayMs ? `，约 ${Math.max(1, Math.round(retry.delayMs / 1000))} 秒后重试` : ''
+        const detail = attempt ? `${attempt}${delay}` : ''
+        timeline.push({ kind: 'notice', id: `runtime-notice:${event.seq}`, text: detail ? `${payload.message}（${detail}）` : payload.message, tone: payload.level === 'warning' ? 'error' : 'info' })
+        notices.push(payload.message)
+        break
+      }
     }
   }
   return { messages, timeline, notices, runtimeState, activeTurnId, queuedItems: [...queued.values()].sort((a, b) => a.position - b.position), pendingApprovals: [...approvals.values()] }

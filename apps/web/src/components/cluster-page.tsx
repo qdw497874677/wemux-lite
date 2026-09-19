@@ -171,7 +171,7 @@ export function ClusterPage({ api, connected, onAddWorker, onRefresh }: { api: A
         </div>
       </section>
 
-      <Tabs defaultValue="commands" className="space-y-3">
+      <Tabs defaultValue="commands" variant="plain" className="space-y-3">
         <TabsList className="w-full justify-start overflow-x-auto">
           <TabsTrigger value="commands">命令交付（{commands.length}）</TabsTrigger>
           <TabsTrigger value="workspaces">工作区初始化（{workspaces.length}）</TabsTrigger>

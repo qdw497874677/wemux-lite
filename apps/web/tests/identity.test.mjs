@@ -8,7 +8,7 @@ test('401 disposes identity once and prevents new requests with stale credential
  globalThis.window = { location: { origin: 'http://localhost' } }
  globalThis.fetch = async () => { requests++; return new Response('{}', { status: 401, headers: { 'Content-Type': 'application/json' } }) }
  try {
-  const api = createApi({ token: 'expired', teamId: '' }, () => { unauthorized++ })
+  const api = createApi({ teamId: 'team-1', csrfToken: 'stale', username: 'owner', email: null }, () => { unauthorized++ })
   await assert.rejects(api.projects()); await assert.rejects(api.projects())
   assert.equal(unauthorized, 1); assert.equal(requests, 1)
  } finally { globalThis.fetch = originalFetch; globalThis.window = originalWindow }

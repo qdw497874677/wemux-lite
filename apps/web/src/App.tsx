@@ -8,7 +8,8 @@ import { LayerStatus, RunLayerContext, type RunLayers } from './app/layers'
 import { ProjectActivity, ProjectOverview } from './features/tasks/project-pages'
 import { TaskBoard } from './features/tasks/board'
 import { isExecutable, capabilityLabel } from './lib/capability'
-import { createContext, useContext } from 'react'
+import { Component, createContext, lazy, Suspense, useContext } from 'react'
+import type { ReactNode } from 'react'
 import { Outlet } from '@tanstack/react-router'
 import { SubmissionController } from './features/sessions/submission'
 import { AppShell, GlobalRail, ProjectNavigation, MainCanvas, InspectorHost } from './app/shell'
@@ -22,8 +23,8 @@ import { SessionInfoPanel } from './features/sessions/session-info-panel.tsx'
 import { Sidebar, ContextPanel } from './features/sessions/navigation'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, ChevronDown, ChevronRight, CircleCheck, CircleX, FolderGit2, Layers, LoaderCircle, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, RefreshCw, Search, Send, Server, ServerCog, Settings2, Wrench, WifiOff } from 'lucide-react'
-import { ApiError, createApi, type ConnectionConfig } from './api/client'
-import { clearConnectionConfig, readConnectionConfig, saveConnectionConfig } from './lib/connection-storage'
+import { ApiError, anonymousSession, createApi, isSignedIn, type AccountSession } from './api/client'
+import { retireLegacyCredentials } from './lib/device-scope'
 import type { ProjectDTO, SendMessageDTO, SessionDTO, WorkerDTO, WorkspaceDTO } from './api/dto'
 import { useSession } from './api/use-session'
 import type { ChatMessage, ChatTimelineItem, TimelineTool } from './api/journal'
@@ -35,13 +36,33 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from './components/ui/sh
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from './components/ui/dropdown-menu'
 import { ConnectionDialog } from './components/connection-dialog'
 import { LandingScreen } from './components/landing'
+import { AuthLinkScreen, readLinkToken } from './components/auth-link'
+import { AccountPage } from './components/account-page'
+import { toAccountSession } from './components/auth-form'
+import type { AccountPayloadDTO } from './api/dto'
 import { CreateDialog, type CreateKind } from './components/create-dialog'
 import { WorkerEnrollmentDialog } from './components/worker-enrollment-dialog'
 import { ClusterPage } from './components/cluster-page'
+// 组件展示页（含 21st.dev 导入的 framer-motion 组件、整套 ui 演示）不进首屏包：
+// 只有访问 /components 时才拉对应 chunk。
 import { cn } from './lib/utils'
 import { formatChineseTime, runtimeStateLabel, workerStateLabel, workspaceStateLabel } from './lib/display'
 
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : '请求失败'
+const ComponentLibrary = lazy(() => import('./components/component-library.tsx').then(module => ({ default: module.ComponentLibrary })))
+// 懒加载 chunk 可能在旧页面里过期（重新部署后 hash 变了），此时给一个可恢复的提示，
+// 而不是让路由报错页把用户送回去。
+class LazyBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false }
+  static getDerivedStateFromError() { return { failed: true } }
+  render() {
+    if (!this.state.failed) return this.props.children
+    return <div role="alert" className="grid gap-2 p-6 text-sm"><p>组件展示页加载失败，可能是版本已更新。</p><button type="button" className="w-fit underline" onClick={() => window.location.reload()}>重新加载</button></div>
+  }
+}
+function ComponentLibraryRoute() {
+  return <LazyBoundary><Suspense fallback={<p role="status" className="p-6 text-sm text-muted-foreground">正在加载组件展示…</p>}><ComponentLibrary /></Suspense></LazyBoundary>
+}
 const freshnessLabels = { unknown: '历史完整性尚未确认', syncing: '正在补传历史', synced: '历史已同步', gap: '历史存在事件缺口', offline: '工作节点离线，仅展示缓存', orphaned: '工作节点已丢失，仅可读取缓存' }
 type View = 'workbench' | 'cluster'
 type ConnectionState = 'connecting' | 'connected' | 'unauthorized' | 'unreachable' | 'offline'
@@ -52,33 +73,87 @@ export function App() {
   return <RouterApp />
 }
 function RouterApp() {
-  const [router] = useState(() => makeRouter(ConnectionScope, RoutedWorkbench))
+  const [router] = useState(() => makeRouter(AuthScope, RoutedWorkbench))
   return <RouterProvider router={router} />
 }
-const ConnectionContext = createContext<{ config: ConnectionConfig; onSettings: () => void; onUnauthorized: () => void } | null>(null)
+type BootState = 'checking' | 'ready' | 'signed-out' | 'unreachable'
+const ConnectionContext = createContext<{ config: AccountSession; onSettings: () => void; onUnauthorized: () => void; onSignOut: () => void } | null>(null)
 function RoutedWorkbench() {
   const connection = useContext(ConnectionContext)
+  const location = useRouterState({ select: state => state.location })
+  if (location.pathname === '/components') return <ComponentLibraryRoute />
   return connection ? <Workbench {...connection} /> : null
 }
-function ConnectionScope() {
-  const [config, setConfig] = useState<ConnectionConfig>(readConnectionConfig)
+/**
+ * 认证作用域：浏览器的登录凭据只存在于 HttpOnly Cookie，页面内存只保存账号展示信息与 CSRF 令牌。
+ * 刷新页面后通过 `GET /api/auth/me` 重建会话；首屏与登录过程见 `components/landing.tsx`。
+ */
+function AuthScope() {
+  const [config, setConfig] = useState<AccountSession>(anonymousSession)
+  const [boot, setBoot] = useState<BootState>('checking')
+  const [notice, setNotice] = useState('')
   const [generation, setGeneration] = useState(0)
   const [settings, setSettings] = useState(false)
-  const [authReason, setAuthReason] = useState('')
+  const [expired, setExpired] = useState(false)
   const [client, setClient] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 2000 } } }))
-  const unauthorized = useCallback(() => {
-    setAuthReason('认证已过期或令牌无效，请重新连接。'); clearConnectionConfig(); void client.cancelQueries(); client.clear()
-    setConfig({ token: '', teamId: '' }); setGeneration(value => value + 1); setSettings(true)
-  }, [client])
-  const applyConnection = (next: ConnectionConfig) => {
-    void client.cancelQueries(); client.clear(); saveConnectionConfig(next); setConfig(next)
+  useEffect(() => {
+    // 旧版本把令牌存在 localStorage；Ticket 04 起改为 Cookie 会话，启动时明确退役并提示重新登录。
+    const retired = retireLegacyCredentials()
+    const api = createApi(anonymousSession())
+    let active = true
+    void (async () => {
+      try {
+        const account = await api.currentAccount()
+        if (!active) return
+        setConfig(toAccountSession(account)); setBoot('ready')
+        if (retired) setNotice('已清除旧版本保存在本机的访问令牌，当前会话改由 HttpOnly Cookie 维护。')
+      } catch (cause) {
+        if (!active) return
+        const unauthorized = cause instanceof ApiError && cause.status === 401
+        setBoot(unauthorized ? 'signed-out' : 'unreachable')
+        if (retired) setNotice('已清除旧版本保存在本机的访问令牌，请使用账号密码重新登录。')
+        else if (!unauthorized) setNotice(cause instanceof Error ? cause.message : '无法连接服务端')
+      } finally { api.dispose() }
+    })()
+    return () => { active = false; api.dispose() }
+  }, [])
+  const resetCaches = useCallback(() => {
+    void client.cancelQueries(); client.clear()
     setClient(new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 2000 } } }))
-    setGeneration(value => value + 1); setSettings(false); setAuthReason('')
+    setGeneration(value => value + 1)
+  }, [client])
+  const applyAccount = (account: AccountPayloadDTO) => {
+    resetCaches(); setConfig(toAccountSession(account)); setBoot('ready')
+    setSettings(false); setExpired(false); setNotice('您已登录。')
   }
-  return <QueryClientProvider client={client}>{authReason && <p role="alert">{authReason}</p>}{config.token ? <ConnectionContext.Provider key={generation} value={{ config, onUnauthorized: unauthorized, onSettings: () => setSettings(true) }}><Outlet /></ConnectionContext.Provider> : <LandingScreen config={config} onSave={applyConnection} />}{settings && <ConnectionDialog config={config} onClose={() => setSettings(false)} onSave={applyConnection} />}</QueryClientProvider>
+  const signOut = useCallback(() => {
+    resetCaches(); setConfig(anonymousSession()); setBoot('signed-out')
+    setSettings(false); setExpired(false); setNotice('已退出登录。')
+  }, [resetCaches])
+  const unauthorized = useCallback(() => {
+    // 会话失效不清空页面：保留当前上下文，用弹窗重新登录后整体重挂。
+    resetCaches(); setExpired(true); setSettings(true); setNotice('登录会话已失效，请重新登录。')
+  }, [resetCaches])
+  const publicComponents = window.location.pathname === '/components'
+  const signedIn = boot === 'ready' && isSignedIn(config)
+  // 邮箱验证与重置链接必须能在未登录状态打开；未登录时它们优先于落地页。
+  const linkKind = window.location.pathname === '/auth/verify-email' ? 'verify' as const : window.location.pathname === '/auth/password/reset' ? 'reset' as const : null
+  const goHome = useCallback((message?: string) => {
+    window.history.replaceState(null, '', '/')
+    if (message) setNotice(message)
+    setBoot('signed-out')
+  }, [])
+  return <QueryClientProvider client={client}>
+    {publicComponents ? <Outlet />
+      : boot === 'checking' ? <main className="landing-root grain-overlay"><p role="status" className="text-sm text-muted-foreground">正在连接服务端…</p></main>
+        : linkKind && !signedIn ? <AuthLinkScreen kind={linkKind} token={readLinkToken(window.location.search)} onAuthenticated={applyAccount} onGoLogin={() => goHome()} />
+          : signedIn ? <ConnectionContext.Provider key={generation} value={{ config, onUnauthorized: unauthorized, onSettings: () => setSettings(true), onSignOut: signOut }}><Outlet /></ConnectionContext.Provider>
+            : <LandingScreen notice={notice} onAuthenticated={applyAccount} />}
+    {signedIn && settings && <ConnectionDialog session={config} expired={expired} onClose={() => setSettings(false)} onSignedIn={applyAccount} onSignOut={signOut} />}
+  </QueryClientProvider>
 }
 
-function Workbench({ config, onSettings, onUnauthorized }: { config: ConnectionConfig; onSettings: () => void; onUnauthorized: () => void }) {
+function Workbench({ config, onSettings, onUnauthorized, onSignOut }: { config: AccountSession; onSettings: () => void; onUnauthorized: () => void; onSignOut: () => void }) {
   const api = useMemo(() => createApi(config, onUnauthorized), [config, onUnauthorized])
   useEffect(() => () => api.dispose(), [api])
   const location = useRouterState({ select: state => state.location })
@@ -109,7 +184,6 @@ function Workbench({ config, onSettings, onUnauthorized }: { config: ConnectionC
   const error = cause ? errorText(cause) : ''
   const projectError = projectData.workspaces.error?.message || projectData.sessions.error?.message || error
   const connected = !loading && !error
-  useEffect(() => { if (cause instanceof ApiError && cause.status === 401) clearConnectionConfig() }, [cause])
   const [query, setQuery] = useState('')
   const [revision, setRevision] = useState(0)
   const refreshWorkers = useCallback(() => { void client.invalidateQueries({ queryKey: ['workers'] }) }, [client])
@@ -164,7 +238,7 @@ function Workbench({ config, onSettings, onUnauthorized }: { config: ConnectionC
   const projectNavigation = <ProjectNavigation>{[['sessions', '新对话 / 会话'], ['overview', '概览'], ['board', '任务看板'], ['workspaces', '工作区'], ['activity', '活动'], ['settings', '项目设置']].map(([path, label]) => <a key={path} href={`${projectBase}/${path}`} aria-current={section === path ? 'page' : undefined} onClick={event => { event.preventDefault(); go(`${projectBase}/${path}`) }} className="rounded px-3 py-2 text-sm hover:bg-accent">{label}</a>)}</ProjectNavigation>
   const resourceList = <div className="space-y-4">{workspaces.filter(ws => !workspaceId || ws.id === workspaceId).map(ws => <section key={ws.id} className="rounded-xl border border-white/10 bg-card p-4"><div className="flex items-start justify-between gap-3"><div className="min-w-0"><a className="font-medium text-foreground hover:underline" href={`${projectBase}/workspaces/${encodeURIComponent(ws.id)}`} onClick={event => { event.preventDefault(); go(`${projectBase}/workspaces/${encodeURIComponent(ws.id)}`) }}>{ws.name}</a><p className="mt-1 text-sm text-muted-foreground">{workspaceStateLabel[ws.status]} · {workers.find(item => item.id === ws.workerId)?.name ?? ws.workerId}</p>{ws.location?.rootPath && <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{ws.location.rootPath}</p>}</div><Button variant="outline" size="sm" disabled={!connected || ws.status !== 'ready'} onClick={() => openResource('session', ws.id)}>新建会话</Button></div><p className="mt-2 text-xs text-muted-foreground">{sessions.filter(item => item.workspaceId === ws.id).length} 个会话</p>{workspaceId && sessions.filter(item => item.workspaceId === ws.id).map(item => <a className="mt-2 block rounded-lg bg-muted/50 px-3 py-2 text-sm text-foreground hover:bg-muted" key={item.id} href={`${projectBase}/sessions/${encodeURIComponent(item.id)}`} onClick={event => { event.preventDefault(); go(`${projectBase}/sessions/${encodeURIComponent(item.id)}`) }}>{item.title}</a>)}</section>)}{!workspaces.length && <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-white/15 bg-card/50 px-6 py-12 text-center"><div className="mx-auto mb-4 flex size-12 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500/20 to-fuchsia-500/20"><Layers className="size-6 text-violet-400" /></div><p className="text-sm font-medium text-foreground">暂无工作区</p><p className="mt-1 text-xs text-muted-foreground">创建工作区后，即可在对应节点上启动会话。</p><Button className="mt-4" disabled={!connected} onClick={() => openResource('workspace')}>新建工作区</Button></div>}</div>
   const page = <section className={cn('min-h-0 flex-1 overflow-auto', section === 'sessions' ? 'flex px-3 py-6 sm:px-6' : 'space-y-5 p-4 sm:p-6')}>
-    {selection.error ? <p role="alert">{selection.error}</p> : (loading || projectLoading) && !projectError ? <p role="status">正在加载资源…</p> : parts[0] === 'settings' ? <><h1>全局设置</h1><Button onClick={onSettings}>连接设置</Button></> : ['runtime', 'runtimes'].includes(parts[0]) ? <><h1>运行时</h1>{workers.map(item => <section key={item.id} className="border-b border-border py-4"><h2>{item.name} · {workerStateLabel[item.connectionState]}</h2>{item.capabilities.map(agent => <div key={agent.agentKey} className="py-3"><strong>{agent.displayName}</strong><p>{capabilityLabel(agent)} · {agent.availability.reason}</p>{agent.models.map(model => <p key={model.modelId}>{model.displayName} · {model.modelId}</p>)}</div>)}</section>)}</> : !projectId ? <><h1>项目</h1><p>选择项目，查看工作区与对话。</p>{!loading && !error && !projects.length && <p>暂无项目，请创建第一个项目。</p>}{projects.map(item => <a key={item.id} className="block border-b border-border py-4" href={`/projects/${encodeURIComponent(item.id)}/sessions`} onClick={event => { event.preventDefault(); go(`/projects/${encodeURIComponent(item.id)}/sessions`) }}>{item.name}</a>)}<Button disabled={!connected} onClick={() => openResource('project')}>新建项目</Button></> : section === 'board' || section === 'tasks' ? <TaskBoard key={projectId} api={api} projectId={projectId} taskId={section === 'tasks' ? parts[3] ?? new URLSearchParams(location.searchStr).get('task') ?? '' : ''} search={location.searchStr} go={go} /> : section === 'activity' ? <ProjectActivity projectId={projectId} data={projectData} /> : section === 'settings' ? <><h1>项目设置</h1><p>名称：{project?.name}</p><p className="break-all">项目 ID：{projectId}</p><p>项目编辑尚未提供 API。</p></> : section === 'sessions' ? <div className="m-auto w-full">{quickEntry}</div> : <><h1>{section === 'overview' ? '概览' : workspaceId ? workspaces.find(item => item.id === workspaceId)?.name : '工作区'}</h1><p>{workspaces.length} 个工作区 · {sessions.length} 个会话 · {new Set(workspaces.map(item => item.workerId)).size} 个工作节点</p><Button disabled={!connected} onClick={() => openResource('workspace')}>新建工作区</Button>{section === 'overview' ? <><ProjectResources base={projectBase} workspaces={workspaces} sessions={sessions} workers={workers} go={go} /><ProjectOverview projectId={projectId} data={projectData} /></> : resourceList}</>}
+    {selection.error ? <p role="alert">{selection.error}</p> : (loading || projectLoading) && !projectError ? <p role="status">正在加载资源…</p> : parts[0] === 'components' ? <ComponentLibraryRoute /> : parts[0] === 'settings' ? <><h1>全局设置</h1><AccountPage api={api} session={config} onSignOut={onSignOut} onOpenConnection={onSettings} /></> : ['runtime', 'runtimes'].includes(parts[0]) ? <><h1>运行时</h1>{workers.map(item => <section key={item.id} className="border-b border-border py-4"><h2>{item.name} · {workerStateLabel[item.connectionState]}</h2>{item.capabilities.map(agent => <div key={agent.agentKey} className="py-3"><strong>{agent.displayName}</strong><p>{capabilityLabel(agent)} · {agent.availability.reason}</p>{agent.models.map(model => <p key={model.modelId}>{model.displayName} · {model.modelId}</p>)}</div>)}</section>)}</> : !projectId ? <><h1>项目</h1><p>选择项目，查看工作区与对话。</p>{!loading && !error && !projects.length && <p>暂无项目，请创建第一个项目。</p>}{projects.map(item => <a key={item.id} className="block border-b border-border py-4" href={`/projects/${encodeURIComponent(item.id)}/sessions`} onClick={event => { event.preventDefault(); go(`/projects/${encodeURIComponent(item.id)}/sessions`) }}>{item.name}</a>)}<Button disabled={!connected} onClick={() => openResource('project')}>新建项目</Button></> : section === 'board' || section === 'tasks' ? <TaskBoard key={projectId} api={api} projectId={projectId} taskId={section === 'tasks' ? parts[3] ?? new URLSearchParams(location.searchStr).get('task') ?? '' : ''} search={location.searchStr} go={go} /> : section === 'activity' ? <ProjectActivity projectId={projectId} data={projectData} /> : section === 'settings' ? <><h1>项目设置</h1><p>名称：{project?.name}</p><p className="break-all">项目 ID：{projectId}</p><p>项目编辑尚未提供 API。</p></> : section === 'sessions' ? <div className="m-auto w-full">{quickEntry}</div> : <><h1>{section === 'overview' ? '概览' : workspaceId ? workspaces.find(item => item.id === workspaceId)?.name : '工作区'}</h1><p>{workspaces.length} 个工作区 · {sessions.length} 个会话 · {new Set(workspaces.map(item => item.workerId)).size} 个工作节点</p><Button disabled={!connected} onClick={() => openResource('workspace')}>新建工作区</Button>{section === 'overview' ? <><ProjectResources base={projectBase} workspaces={workspaces} sessions={sessions} workers={workers} go={go} /><ProjectOverview projectId={projectId} data={projectData} /></> : resourceList}</>}
   </section>
   const canSend = Boolean(connected && browserOnline && selected?.sendCapability?.allowed)
   const confirmed = history.messages.map(item => item.id)
@@ -224,7 +298,7 @@ function Workbench({ config, onSettings, onUnauthorized }: { config: ConnectionC
     return <div className="grid min-h-full place-content-center justify-items-center gap-3 px-6 text-center"><Bot className="size-11 text-violet-300" /><h2 className="text-base font-semibold">{connected ? '开始一次智能体会话' : '连接 Wemux Lite 服务端'}</h2><p className="max-w-md text-sm leading-6 text-muted-foreground">{connected ? !projects.length ? '先创建项目，用来组织工作区和会话。' : !workspaces.length ? '为当前项目创建工作区，工作节点会准备仓库和执行目录。' : '工作区准备好后，选择智能体与模型创建会话。' : '输入部署服务端时设置的管理员令牌，连接后即可管理工作节点、项目与会话。'}</p><Button onClick={action.run}>{action.label}</Button></div>
   }
 
-  const globalRail = <GlobalRail><a href="/projects" onClick={event => { event.preventDefault(); go('/projects') }}>项目</a><a href="/runtime" onClick={event => { event.preventDefault(); go('/runtime') }}>运行时</a><a href="/cluster" onClick={event => { event.preventDefault(); go('/cluster') }}>集群</a><a href="/settings" onClick={event => { event.preventDefault(); go('/settings') }}>设置</a></GlobalRail>
+  const globalRail = <GlobalRail><a href="/projects" onClick={event => { event.preventDefault(); go('/projects') }}>项目</a><a href="/runtime" onClick={event => { event.preventDefault(); go('/runtime') }}>运行时</a><a href="/cluster" onClick={event => { event.preventDefault(); go('/cluster') }}>集群</a><a href="/components" onClick={event => { event.preventDefault(); go('/components') }}>组件</a><a href="/settings" onClick={event => { event.preventDefault(); go('/settings') }}>设置</a></GlobalRail>
   return <RunLayerContext.Provider value={setRunLayers}><AppShell>
     <header className="flex min-h-14 shrink-0 items-center gap-2 border-b border-border px-2 sm:gap-3 sm:px-4">
       <Button variant="ghost" size="icon" className="xl:hidden" aria-label="打开项目导航" onClick={() => setNavigation(true)}><Menu className="size-5" /></Button>
@@ -235,7 +309,7 @@ function Workbench({ config, onSettings, onUnauthorized }: { config: ConnectionC
       </div>
 
       <div className="flex-1" />
-      <label className="relative hidden w-56 md:block"><Search className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input aria-label="搜索会话" className="pl-9" placeholder="搜索会话…" value={query} onFocus={() => { if (window.matchMedia('(min-width: 1280px)').matches) setConversationFocus(false); else setNavigation(true) }} onChange={event => setQuery(event.target.value)} /></label>
+      <label className="relative hidden w-56 md:block"><Search className="absolute left-3 top-3 size-4 text-muted-foreground" /><Input aria-label="搜索会话" className="w-full pl-9" placeholder="搜索会话…" value={query} onFocus={() => { if (window.matchMedia('(min-width: 1280px)').matches) setConversationFocus(false); else setNavigation(true) }} onChange={event => setQuery(event.target.value)} /></label>
       <Button variant="outline" size="sm" className="hidden lg:inline-flex" disabled={!connected} onClick={() => setAddingWorker(true)}><ServerCog className="size-4" />添加工作节点</Button>
       <div className="hidden items-center gap-1 sm:flex"><Button variant="ghost" size="icon" aria-label="刷新当前数据" onClick={refresh}><RefreshCw className="size-4" /></Button><Button variant="ghost" size="icon" aria-label="连接设置" onClick={onSettings}><Settings2 className="size-4" /></Button></div>
       <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="sm:hidden" aria-label="更多操作"><MoreHorizontal className="size-5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem disabled={!connected} onSelect={() => setAddingWorker(true)}><ServerCog className="size-4" />添加工作节点</DropdownMenuItem><DropdownMenuItem onSelect={refresh}><RefreshCw className="size-4" />刷新当前数据</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={onSettings}><Settings2 className="size-4" />连接设置</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
@@ -259,7 +333,7 @@ function Workbench({ config, onSettings, onUnauthorized }: { config: ConnectionC
       </>}</MainCanvas>
       <InspectorHost open={validSelection && Boolean(projectId) && contextOpen && !['board', 'tasks'].includes(section)} onOpenChange={open => { setContextOpen(open); if (!open && workspaceId) go(`${projectBase}/workspaces`) }}>{!workspace && project && <section className="space-y-3 pb-5"><h2>{project.name}</h2><p className="break-all">项目 ID：{project.id}</p><p>{workspaces.length} 个工作区 · {sessions.length} 个会话</p></section>}{workspace && <section className="space-y-3 pb-5"><h2>{workspace.name}</h2><p>{workspaceStateLabel[workspace.status]}</p><code className="block whitespace-pre-wrap break-all">{workspace.location?.rootPath ?? '等待报告路径'}</code>{workspace.failureReason && <p role="alert">{workspace.failureReason}</p>}<Button disabled={!connected || workspace.status !== 'ready'} onClick={() => openResource('session', workspace.id)}>新建会话</Button></section>}<ContextPanel selected={selected} workspace={workspace} workers={validSelection ? workers.filter(item => item.id === workspace?.workerId) : []} connected={connected} onAddWorker={() => setAddingWorker(true)} /></InspectorHost>
     </div>}
-    <Sheet open={navigation} onOpenChange={setNavigation}><SheetContent side="left" className="navigation-sheet p-0"><SheetHeader><SheetTitle>工作台导航</SheetTitle></SheetHeader><div className="border-b border-border p-3 xl:hidden"><label className="relative block"><Search className="absolute left-3 top-3.5 size-4 text-muted-foreground" /><Input aria-label="搜索会话" className="pl-9" placeholder="搜索会话…" value={query} onChange={event => setQuery(event.target.value)} /></label></div><div className="min-h-0 flex-1 overflow-auto">{globalRail}{projectId && projectNavigation}{sidebar}</div></SheetContent></Sheet>
+    <Sheet open={navigation} onOpenChange={setNavigation}><SheetContent side="left" className="navigation-sheet p-0"><SheetHeader><SheetTitle>工作台导航</SheetTitle></SheetHeader><div className="border-b border-border p-3 xl:hidden"><label className="relative block"><Search className="absolute left-3 top-3.5 size-4 text-muted-foreground" /><Input aria-label="搜索会话" className="w-full pl-9" placeholder="搜索会话…" value={query} onChange={event => setQuery(event.target.value)} /></label></div><div className="min-h-0 flex-1 overflow-auto">{globalRail}{projectId && projectNavigation}{sidebar}</div></SheetContent></Sheet>
 
     {addingWorker && <WorkerEnrollmentDialog api={api} workers={workers} onRefreshWorkers={refreshWorkers} onClose={() => { setAddingWorker(false); if (quickSetup) openResource('workspace') }} />}
     {createKind && <CreateDialog key={`${createKind}:${projectId}:${createWorkspaceId}`} kind={createKind} api={api} teamId={config.teamId} projectId={projectId} defaultWorkspaceId={createWorkspaceId} workers={workers} workspaces={workspaces} onClose={() => { setQuickSetup(false); closeCreate() }} onCreated={(kind, id, session) => { closeCreate(); refresh(); if (kind === 'project') go(`/projects/${encodeURIComponent(id)}/sessions`); else if (kind === 'workspace') { if (quickSetup) { setQuickSetup(false); void api.workspaces(projectId).then(items => { const ws = items.find(item => item.id === id); if (ws) quickController().configure(fillQuickChoices({ workspaceId: ws.id, workerId: '', agentKey: '', modelId: '' }, projectId, items, workers)) }).catch(() => { /* Keep the draft; workspace selection remains explicit after refresh. */ }); go(`${projectBase}/sessions`) } else go(`/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(id)}`); } else if (session) go(`/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(id)}`) }} />}

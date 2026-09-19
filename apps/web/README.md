@@ -27,7 +27,7 @@ Workspace 是逻辑环境；路径与物化状态属于具体 Placement。不同
 
 ## 连接与数据
 
-首屏使用内联连接表单，应用内重连使用连接对话框。管理员 bootstrap 接入与管理会话凭证不等于完整的多用户授权。连接保存策略见 `src/lib/connection-storage.ts`，不能宣称所有凭证仅保存在页内内存；Agent 和 Git 凭据不应传到 Web。
+首屏使用内联表单：选择「登录」或「注册」，登录用账号或邮箱 + 密码，注册用邮箱 + 显示名称 + 密码（邮件验证后才创建账号）；实例管理员由部署声明（`WEMUX_ADMIN_EMAILS`），声明的邮箱注册后自动获得管理权限，没有引导令牌与首次认领表单。应用内重连与退出用连接对话框（ConnectionDialog）。登录态是 HttpOnly Cookie，前端不保存任何令牌，只持有 `GET /auth/me` 返回的 CSRF 令牌；这不等于完整的多用户授权。连接保存策略见 `src/lib/connection-storage.ts`，不能宣称所有凭证仅保存在页内内存；Agent 和 Git 凭据不应传到 Web。
 
 - `src/api/client.ts`：HTTP 路由、鉴权、错误与 fetch SSE；不依赖原生 EventSource 查询参数传递长期 Token。
 - `src/api/dto.ts`：Web 资源契约与展示适配。

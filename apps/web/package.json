@@ -7,9 +7,14 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
-    "test": "node --experimental-strip-types --test tests/*.test.mjs"
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "tailgrids:prepare": "node scripts/tailgrids-fidelity/prepare.mjs",
+    "tailgrids:playground": "npm --prefix scripts/tailgrids-fidelity/playground run dev",
+    "tailgrids:domdiff": "node scripts/tailgrids-fidelity/domdiff.mjs",
+    "tailgrids:compare": "node scripts/tailgrids-fidelity/compare.mjs"
   },
   "dependencies": {
+    "@fontsource-variable/dm-sans": "^5.3.0",
     "@radix-ui/react-dialog": "latest",
     "@radix-ui/react-dropdown-menu": "latest",
     "@radix-ui/react-select": "latest",
@@ -20,6 +25,7 @@
     "@wemux/web-contract": "0.1.0",
     "class-variance-authority": "latest",
     "clsx": "latest",
+    "framer-motion": "^13.4.0",
     "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",

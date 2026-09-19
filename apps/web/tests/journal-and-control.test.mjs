@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { initialQuickConfig, fillQuickChoices, quickConfigReason, QuickStartController } from '../features/sessions/quick-start.ts'
-import { projectJournal } from './journal.ts'
-import { createApi } from './client.ts'
+import { initialQuickConfig, fillQuickChoices, quickConfigReason, QuickStartController } from '../src/features/sessions/quick-start.ts'
+import { projectJournal } from '../src/api/journal.ts'
+import { createApi } from '../src/api/client.ts'
 
 const agent = { agentKey: 'pi', mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' }] }
 const workers = ['a', 'b'].map(id => ({ id, connectionState: 'online', capabilities: [agent] }))
@@ -16,7 +16,7 @@ test('multi-placement default is explicit, secondary readiness overrides legacy 
   assert.deepEqual(fillQuickChoices({ ...config, agentKey: '', modelId: '' }, 'p', [workspace], workers), config)
   const stale = { ...config, workerId: 'gone' }
   assert.deepEqual(initialQuickConfig('p', [workspace], workers, stale), stale)
-  assert.match(quickConfigReason(stale, 'p', [workspace], workers), /落点已不存在/)
+  assert.match(quickConfigReason(stale, 'p', [workspace], workers), /不在该工作区中/)
   assert.equal(quickConfigReason(config, 'p', [{ ...workspace, placements: [{ ...placement('b'), status: 'failed', failureReason: '磁盘不足' }] }], workers), '磁盘不足')
   assert.equal(quickConfigReason(config, 'p', [workspace], workers.map(w => ({ ...w, capabilities: [{ ...agent, availability: { status: 'unavailable', reason: '请登录' } }] }))), '请登录')
   assert.deepEqual(initialQuickConfig('p', [{ ...workspace, placements: [placement('b')] }], workers, null), config)
@@ -81,4 +81,20 @@ test('cluster request methods encode identities and preserve control payloads', 
     assert.deepEqual(calls[2].body, { commandId: 'c', operationId: 'op', name: 'compact' })
     assert.deepEqual(calls[3].body, { commandId: 'c', decision: 'deny' })
   } finally { api.dispose(); globalThis.fetch = previousFetch; globalThis.window = previousWindow }
+})
+
+test('journal renders runtime notices with retry budget so a silent agent is visible', () => {
+  const projected = projectJournal(events([
+    { kind: 'message.queued', commandId: 'c1', messageId: 'm1', content: '你好', position: 0 },
+    { kind: 'turn.started', turnId: 't', messageId: 'm1' },
+    { kind: 'runtime.notice', level: 'warning', code: 'agent.auto-retry', message: '运行时错误，正在自动重试：429', retry: { attempt: 2, maxAttempts: 10, delayMs: 3000 } },
+    { kind: 'runtime.notice', level: 'info', code: 'agent.retry-recovered', message: '自动重试成功，继续执行', retry: { attempt: 2, maxAttempts: null, delayMs: null } },
+  ]))
+  const notices = projected.timeline.filter(item => item.kind === 'notice')
+  assert.equal(notices.length, 2)
+  assert.equal(notices[0].tone, 'error')
+  assert.match(notices[0].text, /正在自动重试：429（第 2\/10 次重试，约 3 秒后重试）/)
+  assert.equal(notices[1].tone, 'info')
+  assert.equal(notices[1].text, '自动重试成功，继续执行（第 2 次重试）')
+  assert.deepEqual(projected.notices, ['运行时错误，正在自动重试：429', '自动重试成功，继续执行'])
 })

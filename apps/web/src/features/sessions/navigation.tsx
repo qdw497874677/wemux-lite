@@ -1,8 +1,6 @@
 import { isExecutable, capabilityLabel } from '../../lib/capability'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, ChevronDown, ChevronRight, CircleCheck, CircleX, FolderGit2, LoaderCircle, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, RefreshCw, Search, Send, Server, ServerCog, Settings2, Wrench, WifiOff } from 'lucide-react'
-import { ApiError, createApi, type ConnectionConfig } from '../../api/client'
-import { clearConnectionConfig, readConnectionConfig, saveConnectionConfig } from '../../lib/connection-storage'
 import type { ProjectDTO, SendMessageDTO, SessionDTO, WorkerDTO, WorkspaceDTO } from '../../api/dto'
 import { useSession } from '../../api/use-session'
 import type { ChatMessage, ChatTimelineItem, TimelineTool } from '../../api/journal'
