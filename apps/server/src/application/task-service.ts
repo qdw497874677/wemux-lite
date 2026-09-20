@@ -41,19 +41,25 @@ export interface TaskContext { actor: UserId; teamId?: string; requestId: string
 /** One transaction is the authorization and write boundary. No Assignment or Run creation here. */
 export class TaskService {
   constructor(private readonly store: ServerStore, private readonly publish: (event: ProjectEvent) => void = () => {}, private readonly server?: ServerService) {}
-  private async project(tx: ServerStoreTx, projectId: string, context: TaskContext) {
+  private async project(tx: ServerStoreTx, projectId: string, context: TaskContext, write = false) {
     const project = await tx.resources.getProject(projectId as ProjectId)
     if (!project || project.deletedAt) throw new TaskError('not_found', 'Project not found')
-    const { membership } = await tx.identity.getIdentityRecords({ userId: context.actor, teamId: project.teamId, projectId: project.id })
-    if ((context.teamId && context.teamId !== project.teamId) || !membership || project.ownerId !== context.actor) throw new TaskError('forbidden', 'Project ownership required')
+    if (context.teamId && context.teamId !== project.teamId) throw new TaskError('forbidden', 'Project ownership required')
+    if (project.ownerId === context.actor) return
+    const { membership, projectGrant } = await tx.identity.getIdentityRecords({ userId: context.actor, teamId: project.teamId, projectId: project.id })
+    if (!membership || (!projectGrant && project.shareScope !== 'team')) throw new TaskError('forbidden', 'Project ownership required')
+    if (write && !projectGrant) throw new TaskError('forbidden', 'Project contributor permission required')
+    const role = projectGrant?.role ?? 'viewer'
+    if (write && role === 'viewer') throw new TaskError('forbidden', 'Project contributor permission required')
   }
-  private async task(tx: ServerStoreTx, projectId: string, id: string, context: TaskContext) {
-    await this.project(tx, projectId, context)
+  private async task(tx: ServerStoreTx, projectId: string, id: string, context: TaskContext, write = false) {
+    await this.project(tx, projectId, context, write)
     const task = await tx.tasks.get(id)
     if (!task || task.projectId !== projectId) throw new TaskError('not_found', 'Task not found in this project')
     return task
   }
   authorizeProject(projectId: string, context: TaskContext) { return this.store.transaction(tx => this.project(tx, projectId, context)) }
+  private writeTask(tx: ServerStoreTx, projectId: string, id: string, context: TaskContext) { return this.task(tx, projectId, id, context, true) }
   private enforce(capability: ActionCapability, details?: Record<string, unknown>) {
     if (!capability.allowed) throw new TaskError(capability.reasonCode === 'invalid_metadata' ? 'invalid_transition' : capability.reasonCode === 'allowed' ? 'invalid_transition' : capability.reasonCode, capability.reason, details)
   }
@@ -107,7 +113,7 @@ export class TaskService {
   /** Human action only. Every request, including no-ops, observes Task CAS. */
   async reviewAction(projectId: string, id: string, runId: string, input: unknown, context: TaskContext) {
     const result = await this.store.transaction(async tx => {
-      const task = await this.task(tx, projectId, id, context)
+      const task = await this.writeTask(tx, projectId, id, context)
       const run = await tx.tasks.run(runId)
       if (!run || run.taskId !== id || run.projectId !== projectId) throw new TaskError('not_found', 'Run not found in this Task')
       const b = object(input)
@@ -137,7 +143,7 @@ export class TaskService {
     if (!this.server) throw new Error('Session composition unavailable')
     const server = this.server
     const result = await this.store.transaction(async tx => {
-      const task = await this.task(tx, projectId, id, context)
+      const task = await this.writeTask(tx, projectId, id, context)
       const b = object(input)
       if (Object.keys(b).some(key => key !== 'title') || typeof b.title !== 'string' || !b.title.trim() || b.title.length > 200) invalid('Session title required; unknown fields are not allowed')
       if (!task.assignee) throw new TaskError('assignment_changed', 'Task assignment required')
@@ -155,7 +161,7 @@ export class TaskService {
   }
   async cancelRun(projectId: string, id: string, runId: string, input: unknown, context: TaskContext) {
     const result = await this.store.transaction(async tx => {
-      const task = await this.task(tx, projectId, id, context)
+      const task = await this.writeTask(tx, projectId, id, context)
       const run = await tx.tasks.run(runId)
       if (!run || run.taskId !== id || run.projectId !== projectId) throw new TaskError('not_found', 'Run not found in this Task')
       const b = object(input)
@@ -192,7 +198,7 @@ export class TaskService {
     const server = this.server
     if (!server) throw new Error('Run composition unavailable')
     const result = await this.store.transaction(async tx => {
-      const task = await this.task(tx, projectId, id, context)
+      const task = await this.writeTask(tx, projectId, id, context)
       const b = object(input), a = object(b.assignment)
       if (Object.keys(b).some(key => !['requestId', 'mode', 'prompt', 'reuseSessionId', 'assignment'].includes(key)) || typeof b.requestId !== 'string' || !b.requestId.trim() || b.requestId.length > 200 || b.requestId.includes('\0') || typeof b.prompt !== 'string' || !b.prompt.trim() || b.prompt.length > 100000 || b.prompt.includes('\0') || Buffer.byteLength(JSON.stringify(b.prompt)) > 200000) invalid('Invalid launch request')
       if ((b.mode !== 'new' && b.mode !== 'reuse') || (b.mode === 'new' ? b.reuseSessionId !== null : typeof b.reuseSessionId !== 'string' || !b.reuseSessionId)) invalid('Invalid launch mode/session')
@@ -276,7 +282,7 @@ export class TaskService {
     if (Object.keys(b).some(key => !['version', ...(clear ? [] : ['assignee'])].includes(key))) invalid('Unknown assignment fields')
     let changed = false, bound: string | undefined
     const task = await this.store.transaction(async tx => {
-      const task = await this.task(tx, projectId, id, context)
+      const task = await this.writeTask(tx, projectId, id, context)
       this.cas(task, b.version)
       const next = await this.assignInTx(tx, task, clear ? null : b.assignee, context)
       changed = next.version !== task.version
@@ -289,7 +295,7 @@ export class TaskService {
   async bind(projectId: string, id: string, workspaceId: string, context: TaskContext) {
     let changed = false
     const task = await this.store.transaction(async tx => {
-      const current = await this.task(tx, projectId, id, context)
+      const current = await this.writeTask(tx, projectId, id, context)
       changed = !await tx.tasks.binding(workspaceId)
       return this.bindInTx(tx, current, workspaceId, context)
     })
@@ -300,7 +306,7 @@ export class TaskService {
     if (Object.keys(b).some(key => key !== 'version')) invalid('Unknown unbind fields')
     let changed = false, assignmentChanged = false
     const task = await this.store.transaction(async tx => {
-      let task = await this.task(tx, projectId, id, context)
+      let task = await this.writeTask(tx, projectId, id, context)
       await this.workspace(tx, task, workspaceId)
       if (await tx.tasks.activeRunUsesWorkspace(workspaceId)) throw new TaskError('active_run', 'Workspace is used by an active Run')
       if (task.assignee?.workspaceId === workspaceId) { this.cas(task, b.version); task = await this.assignInTx(tx, task, null, context); assignmentChanged = true }
@@ -320,7 +326,7 @@ export class TaskService {
     const server = this.server
     if (!server) throw new Error('Workspace composition unavailable')
     const result = await this.store.transaction(async tx => {
-      let task = await this.task(tx, projectId, id, context)
+      let task = await this.writeTask(tx, projectId, id, context)
       await this.workspace(tx, task, workspaceId)
       if ((await tx.tasks.binding(workspaceId))?.taskId !== id) throw new TaskError('not_found', 'Workspace not bound to Task')
       const requestedWorkerId = b.workerId === undefined ? undefined : typeof b.workerId === 'string' ? b.workerId as WorkerId : invalid('Invalid workerId')
@@ -343,7 +349,7 @@ export class TaskService {
     const server = this.server
     if (!server) throw new Error('Workspace composition unavailable')
     const result = await this.store.transaction(async tx => {
-      let task = await this.task(tx, projectId, id, context)
+      let task = await this.writeTask(tx, projectId, id, context)
       if ('assignment' in b) this.cas(task, b.version)
       const created = await server.createWorkspaceInTx(tx, { ...b, projectId })
       task = await this.bindInTx(tx, task, created.workspace.id, context)
@@ -365,7 +371,7 @@ export class TaskService {
     if (!('title' in b)) invalid('Title required')
     const fields = content(b)
     const task = await this.store.transaction(async tx => {
-      await this.project(tx, projectId, context)
+      await this.project(tx, projectId, context, true)
       const at = new Date().toISOString()
       const task: TaskDetail = { id: randomUUID(), projectId, title: '', description: '', acceptanceCriteria: null, priority: 'none', status: 'backlog', version: 1, assignee: null, origin: 'manual', activeRun: null, currentReviewId: null, linkCount: 0, createdAt: at, updatedAt: at, lastActivityAt: at, blockedFrom: null, cancelledFrom: null, workspaces: [], links: [], metadataJson: { schemaVersion: 1, values: {} }, ...fields }
       await this.record(tx, task, 'task.created', { title: task.title }, context)
@@ -384,7 +390,7 @@ export class TaskService {
     if ('version' in b && !('status' in b)) invalid('Version is only used with status')
     let event: TaskActivity['type'] | undefined
     const result = await this.store.transaction(async tx => {
-      const current = await this.task(tx, projectId, id, context)
+      const current = await this.writeTask(tx, projectId, id, context)
       const facts = 'status' in b ? await taskFacts(tx, current, context.actor) : null
       const runs = facts?.runs as Run[] | undefined
       const latest = runs?.reduce<Run | undefined>((last, run) => !last || run.attempt > last.attempt ? run : last, undefined)
@@ -429,7 +435,7 @@ export class TaskService {
     }
     let changed = false
     const task = await this.store.transaction(async tx => {
-      const current = await this.task(tx, projectId, id, context)
+      const current = await this.writeTask(tx, projectId, id, context)
       let links = [...current.links]
       if (removeId) { if (!links.some(link => link.id === removeId)) throw new TaskError('not_found', 'Link not found'); links = links.filter(link => link.id !== removeId) }
       else {

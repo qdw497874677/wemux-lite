@@ -104,7 +104,7 @@ Worker 可独立安装，不注册 Server 也可通过自身鉴权的 Web/API �
 - `packages/domain/src/workspace.ts` 与 `packages/server-domain/src/resources.ts` 已包含逻辑 Workspace 与 placements；旧单 Placement 投影仍存在，端到端契约尚需逐项核验。
 - `apps/worker/src/agents/` 已有 Pi 与 Claude Code 执行适配相关代码；P1 将优先补 OpenCode，并以 Pi + OpenCode 的同一合同测试和真实运行作为多 Agent 基线。其他 Agent 的可执行程度以运行时上报和真实验收为准，不从目录名或检测结果推断。
 - 已有任务、会话、命令、日志投影与部分管理入口；入口存在不代表所有异常路径已闭环。
-- 账号入口已按 Ticket 04/05/07 换成独立登录会话与自助身份：实例管理员由部署声明 `WEMUX_ADMIN_EMAILS` 决定（命中即管理员，声明邮箱不受邀请制/关闭限制），`POST /auth/login` 建 Cookie 会话、`GET /auth/me` 与 `GET /auth/sessions` 管账号，邮箱自助注册/验证/找回记在 Ticket 05，Google OIDC 注册与登录记在 Ticket 07；引导令牌与首次认领（`POST /auth/setup`）已移除，旧 `POST /auth/session` 已退役（410）。但集群控制面仍只对实例管理员开放（非管理员请求返回 403 `admin_required`），不能因此宣称多用户、完整资源授权或 PAT 管理已完成。
+- 账号入口已按 Ticket 04/05/07/06/08 换成独立登录会话与完整自助身份：实例管理员由部署声明 `WEMUX_ADMIN_EMAILS` 决定（命中即管理员，声明邮箱不受邀请制/关闭限制），`POST /auth/login` 建 Cookie 会话、`GET /auth/me` 与 `GET /auth/sessions` 管账号；邮箱注册/验证/找回与密码、邮箱安全管理已交付，Google OIDC 注册/登录及已有账号显式绑定/解绑已交付，并保护最后一种登录方式。引导令牌与首次认领（`POST /auth/setup`）已移除，旧 `POST /auth/session` 已退役（410）。但集群控制面仍只对实例管理员开放（非管理员请求返回 403 `admin_required`），不能因此宣称团队邀请、完整资源授权或 PAT 管理已完成。
 
 根据用户反馈，现有基本流程可跑通，当前优先补功能与交互。[里程碑计划](roadmap.md) M1 梳理页面/功能缺口并设计主路径，测试证据随功能切片积累，不以全面基线核验阻挡开发。历史回复、旧票据勾选和旧测试数字不直接作为新增能力已交付依据。
 

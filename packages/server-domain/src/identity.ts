@@ -90,6 +90,8 @@ export interface RegistrationAttempt {
   readonly emailDisplay: string
   readonly username: string
   readonly passwordHash: string
+  /** 团队邀请注册的令牌哈希；旧记录没有该字段，读取时等同 null。 */
+  readonly invitationTokenHash?: string | null
   readonly status: RegistrationStatus
   readonly createdAt: Timestamp
   readonly expiresAt: Timestamp
@@ -178,4 +180,24 @@ export interface Membership {
   readonly userId: UserId
   readonly role: TeamRole
   readonly joinedAt: Timestamp
+}
+
+export type TeamInvitationStatus = 'pending' | 'accepted' | 'revoked' | 'expired'
+
+/**
+ * Team invitation is email-directed and single-use. Only the token hash is durable;
+ * the plaintext token exists solely in the creation response and delivery channel.
+ */
+export interface TeamInvitation {
+  readonly id: string
+  readonly teamId: TeamId
+  readonly emailNormalized: string
+  readonly emailDisplay: string
+  readonly role: Exclude<TeamRole, 'owner'>
+  readonly tokenHash: string
+  readonly invitedBy: UserId
+  readonly createdAt: Timestamp
+  readonly expiresAt: Timestamp
+  readonly consumedAt: Timestamp | null
+  readonly revokedAt: Timestamp | null
 }

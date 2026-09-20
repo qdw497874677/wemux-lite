@@ -1,8 +1,8 @@
 import { validReviewMetadata } from '@wemux/web-contract/task-platform'
 import { DatabaseSync } from 'node:sqlite'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import type { AgentInboxMessage, CapabilityAsset, EventSeq, JournalEvent, ProjectId, SessionId, Timestamp, WorkerId } from '@wemux/domain'
-import type { AuditEntry, CommandProjection, EnrollmentTokenRecord, ExternalLoginIdentity, Membership, OAuthTransaction, PersonalAccessTokenRecord, RegistrationAttempt, SessionCacheState, SessionForkRecord, User, UserEmail, VerificationChallenge, VerificationPurpose, Worker, WorkerCredentialRecord, Workspace } from '@wemux/server-domain'
+import type { AgentInboxMessage, CapabilityAsset, EventSeq, JournalEvent, ProjectId, SessionId, TeamId, Timestamp, WorkerId } from '@wemux/domain'
+import type { AuditEntry, CommandProjection, EnrollmentTokenRecord, ExternalLoginIdentity, Membership, OAuthTransaction, PersonalAccessTokenRecord, RegistrationAttempt, SessionCacheState, SessionForkRecord, TeamInvitation, User, UserEmail, VerificationChallenge, VerificationPurpose, Worker, WorkerCredentialRecord, Workspace } from '@wemux/server-domain'
 import type { ServerStore, ServerStoreTx } from '../../application/ports/server-store.js'
 import type { PendingCommand } from '../../application/ports/server-store-types.js'
 import { AppError } from '../../application/errors.js'
@@ -184,12 +184,16 @@ export class SqliteServerStore implements ServerStore {
     findVerificationChallengeByTokenHash: async tokenHash => this.readVerificationChallenges('token_hash=?', tokenHash)[0] ?? null,
     listVerificationChallenges: async (targetEmail: string, purpose: VerificationPurpose, since: Timestamp) => this.readVerificationChallenges('target_email=? AND purpose=? AND created_at>=? ORDER BY rowid', targetEmail, purpose, since),
     getTeam: async id => this.get('team', id),
+    findTeamInvitationByTokenHash: async tokenHash => this.list<TeamInvitation>('team-invitation').find(invitation => invitation.tokenHash === tokenHash) ?? null,
+    listTeamInvitations: async teamId => this.list<TeamInvitation>('team-invitation').filter(invitation => invitation.teamId === teamId),
     getLocalAccountCredential: async id => this.get('local-credential', id),
     getIdentityRecords: async i => ({ membership: this.get('membership', `${i.teamId}:${i.userId}`), workerGrant: this.get('worker-grant', `${i.workerId}:${i.userId}`), projectGrant: this.get('project-grant', `${i.projectId}:${i.userId}`), sessionGrant: this.get('session-grant', `${i.sessionId}:${i.userId}`) }),
     findPersonalAccessToken: async hash => this.list<PersonalAccessTokenRecord>('pat').find(r => r.tokenHash === hash) ?? null,
     listPersonalAccessTokens: async () => this.list<PersonalAccessTokenRecord>('pat'),
     listUsers: async () => this.list<User>('user'),
     listMemberships: async userId => this.list<Membership>('membership').filter(membership => membership.userId === userId),
+    listTeamMemberships: async teamId => this.list<Membership>('membership').filter(membership => membership.teamId === teamId),
+    listProjectGrants: async projectId => this.list<import('@wemux/server-domain').ProjectGrant>('project-grant').filter(grant => grant.projectId === projectId),
     listAudit: async limit => this.list<AuditEntry>('audit').sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)).slice(0, Math.max(0, limit)),
     findLoginSessionByTokenHash: async hash => this.readLoginSessions('token_hash=?', hash)[0] ?? null,
     getLoginSession: async id => this.readLoginSessions('id=?', id)[0] ?? null,
@@ -374,8 +378,28 @@ export class SqliteServerStore implements ServerStore {
       deleteLocalAccountCredential: async userId => this.remove('local-credential', userId),
       saveMembership: async r => this.put('membership', `${r.teamId}:${r.userId}`, r),
       removeMembership: async (team, user) => this.remove('membership', `${team}:${user}`),
+      saveTeamInvitation: async r => {
+        const duplicate = this.list<TeamInvitation>('team-invitation').find(invitation => invitation.tokenHash === r.tokenHash)
+        if (duplicate) throw new AppError(409, 'Team invitation already exists')
+        this.put('team-invitation', r.id, r)
+      },
+      consumeTeamInvitation: async input => {
+        const invitation = this.list<TeamInvitation>('team-invitation').find(value => value.tokenHash === input.tokenHash)
+        if (!invitation || invitation.consumedAt !== null || invitation.revokedAt !== null) return null
+        const consumed = { ...invitation, consumedAt: input.consumedAt }
+        this.put('team-invitation', invitation.id, consumed)
+        return consumed
+      },
+      revokeTeamInvitation: async (id, revokedAt) => {
+        const invitation = this.get<TeamInvitation>('team-invitation', id)
+        if (!invitation || invitation.consumedAt !== null || invitation.revokedAt !== null) return null
+        const revoked = { ...invitation, revokedAt }
+        this.put('team-invitation', id, revoked)
+        return revoked
+      },
       saveWorkerGrant: async r => this.put('worker-grant', `${r.workerId}:${r.userId}`, r),
       saveProjectGrant: async r => this.put('project-grant', `${r.projectId}:${r.userId}`, r),
+      removeProjectGrant: async (projectId, userId) => { this.db.prepare("DELETE FROM records WHERE kind='project-grant' AND id=?").run(`${projectId}:${userId}`) },
       saveSessionGrant: async r => this.put('session-grant', `${r.sessionId}:${r.userId}`, r),
       savePersonalAccessToken: async r => this.put('pat', r.id, r),
       revokePersonalAccessToken: async (id, revokedAt) => { const r = this.get<PersonalAccessTokenRecord>('pat', id); if (r) this.put('pat', id, { ...r, revokedAt }) },

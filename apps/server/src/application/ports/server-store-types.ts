@@ -32,6 +32,7 @@ import type {
   Session,
   SessionForkRecord,
   Team,
+  TeamInvitation,
   User,
   UserEmail,
   SessionCacheState,
@@ -106,6 +107,8 @@ export interface ServerIdentityReader {
   /** 重发/限流窗口内的挑战历史；只返回挑战元数据，不返回令牌。 */
   listVerificationChallenges(targetEmail: string, purpose: VerificationPurpose, since: Timestamp): Promise<readonly VerificationChallenge[]>
   getTeam(teamId: TeamId): Promise<Team | null>
+  findTeamInvitationByTokenHash(tokenHash: string): Promise<TeamInvitation | null>
+  listTeamInvitations(teamId: TeamId): Promise<readonly TeamInvitation[]>
   getLocalAccountCredential(userId: UserId): Promise<LocalAccountCredential | null>
 
   getIdentityRecords(input: {
@@ -125,6 +128,10 @@ export interface ServerIdentityReader {
   listUsers(): Promise<readonly User[]>
   /** 用户在哪些 Team 中有成员身份；Team 选择与登录默认 Team 由此得出。 */
   listMemberships(userId: UserId): Promise<readonly Membership[]>
+  /** 一个 Team 的完整成员集合；成员列表与权限管理不能通过扫描用户侧关系拼装。 */
+  listTeamMemberships(teamId: TeamId): Promise<readonly Membership[]>
+  /** Project Grant directory; authorization must not discover grants by scanning unrelated records. */
+  listProjectGrants(projectId: import('@wemux/domain').ProjectId): Promise<readonly ProjectGrant[]>
   /** Newest-first audit entries; durable report channel for administrator assignment and upgrade decisions. */
   listAudit(limit: number): Promise<readonly AuditEntry[]>
   /**
@@ -160,8 +167,12 @@ export interface ServerIdentityWriter {
   consumeVerificationChallenge(input: { readonly tokenHash: string; readonly consumedAt: Timestamp }): Promise<VerificationChallenge | null>
   saveMembership(membership: Membership): Promise<void>
   removeMembership(teamId: TeamId, userId: UserId): Promise<void>
+  saveTeamInvitation(invitation: TeamInvitation): Promise<void>
+  consumeTeamInvitation(input: { readonly tokenHash: string; readonly consumedAt: Timestamp }): Promise<TeamInvitation | null>
+  revokeTeamInvitation(id: string, revokedAt: Timestamp): Promise<TeamInvitation | null>
   saveWorkerGrant(grant: WorkerGrant): Promise<void>
   saveProjectGrant(grant: ProjectGrant): Promise<void>
+  removeProjectGrant(projectId: import('@wemux/domain').ProjectId, userId: UserId): Promise<void>
   saveSessionGrant(grant: SessionGrant): Promise<void>
   savePersonalAccessToken(record: PersonalAccessTokenRecord): Promise<void>
   revokePersonalAccessToken(id: import('@wemux/domain').CredentialId, revokedAt: Timestamp): Promise<void>

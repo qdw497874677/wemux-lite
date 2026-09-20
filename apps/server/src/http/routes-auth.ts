@@ -8,6 +8,7 @@ import type { EmailRegistrationService } from '../application/email-registration
 import type { GoogleAuthenticationService } from '../application/google-authentication.js'
 import type { AccountSecurityService } from '../application/account-security-service.js'
 import type { InstanceSettingsService } from '../application/instance-settings.js'
+import type { TeamService } from '../application/team-service.js'
 import { AppError } from '../application/errors.js'
 import { clearedSessionCookie, isSecureRequest, readCookie, sessionCookie } from './cookies.js'
 
@@ -36,6 +37,7 @@ export interface AuthRouteContext {
   readonly settings?: InstanceSettingsService | null
   readonly google?: GoogleAuthenticationService | null
   readonly security?: AccountSecurityService | null
+  readonly teams?: TeamService | null
 }
 
 /** 一次性 state 的 Cookie 名：与发起浏览器绑定，回调后立即清除。 */
@@ -241,8 +243,8 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<boolea
   }
   if (method === 'POST' && path === '/auth/register') {
     const registration = requireRegistration(context.registration)
-    const input = await context.readBody() as { email?: unknown; displayName?: unknown; password?: unknown }
-    const outcome = await registration.register({ email: input.email, displayName: input.displayName, password: input.password, throttleKeys: throttleKeys(context, input.email) })
+    const input = await context.readBody() as { email?: unknown; displayName?: unknown; password?: unknown; invitationToken?: unknown }
+    const outcome = await registration.register({ email: input.email, displayName: input.displayName, password: input.password, invitationToken: input.invitationToken, throttleKeys: throttleKeys(context, input.email) })
     return respond(202, outcome)
   }
   if (method === 'POST' && path === '/auth/register/resend') {

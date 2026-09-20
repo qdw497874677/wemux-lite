@@ -9,6 +9,7 @@ import { PasswordPolicyError, assertPasswordPolicy, hashPassword, passwordPolicy
 import { verificationLink, passwordResetLink, type MailSettings, type OutgoingMail } from './mail/email-delivery.js'
 import { systemClock, type Clock, type IdentityService, type IssuedLoginSession } from './identity-service.js'
 import type { InstanceSettingsService } from './instance-settings.js'
+import type { TeamService } from './team-service.js'
 
 /**
  * 邮箱注册、验证与找回（Ticket 05）。
@@ -129,6 +130,7 @@ export interface EmailRegistrationServiceInput {
   readonly clock?: Clock
   readonly policy?: EmailVerificationPolicy
   readonly throttles?: Readonly<{ register: FlowThrottle; resend: FlowThrottle; forgot: FlowThrottle }>
+  readonly teams?: TeamService | null
 }
 
 const defaultThrottles = (clock: Clock): Readonly<{ register: FlowThrottle; resend: FlowThrottle; forgot: FlowThrottle }> => ({
@@ -184,9 +186,11 @@ export class EmailRegistrationService {
    * 提交注册：创建待验证注册并发送验证邮件。
    * 账号已存在时改发“账号已存在”通知，响应与新建注册完全一致。
    */
-  async register(request: { readonly email: unknown; readonly displayName: unknown; readonly password: unknown; readonly throttleKeys: readonly string[] }): Promise<AcceptedOutcome> {
+  async register(request: { readonly email: unknown; readonly displayName: unknown; readonly password: unknown; readonly invitationToken?: unknown; readonly throttleKeys: readonly string[] }): Promise<AcceptedOutcome> {
     const email = this.normalize(request.email)
-    await this.assertFlowAllowed(email.normalized)
+    const invitationToken = typeof request.invitationToken === 'string' ? request.invitationToken : undefined
+    if (invitationToken) await this.requireTeams().assertInvitableRegistration(invitationToken, email.normalized)
+    else await this.assertFlowAllowed(email.normalized)
     const mail = this.requireMail()
     const displayName = typeof request.displayName === 'string' ? request.displayName.trim() : ''
     if (displayName.length === 0) throw new AppError(400, '请提供显示名称', 'invalid_display_name')
@@ -209,6 +213,7 @@ export class EmailRegistrationService {
       emailDisplay: email.display,
       username: deriveUsername(displayName, name => taken.has(name)),
       passwordHash,
+      invitationTokenHash: invitationToken ? this.requireTeams().tokenHash(invitationToken) : null,
       status: 'pending',
       createdAt: timestamp(now),
       expiresAt,
@@ -309,6 +314,7 @@ export class EmailRegistrationService {
         await tx.identity.saveUserEmail(email)
         await tx.identity.updateRegistrationAttempt({ ...attempt, status: 'verified', consumedAt: at, userId: created.id })
         await tx.identity.consumeVerificationChallenge({ tokenHash: challenge.tokenHash, consumedAt: at })
+        if (attempt.invitationTokenHash) await this.requireTeams().acceptByHashWithin(tx, created.id, attempt.invitationTokenHash, attempt.emailNormalized)
         await tx.audit.append({
           id: randomUUID() as AuditEntryId, actorId: created.id, action: 'identity.registered',
           resource: { kind: 'user', id: created.id }, result: 'succeeded', occurredAt: at,
@@ -384,6 +390,11 @@ export class EmailRegistrationService {
       })
     })
     return { status: 'reset', revokedSessions, revokedTokens }
+  }
+
+  private requireTeams(): TeamService {
+    if (!this.input.teams) throw new AppError(503, '团队邀请功能未启用', 'team_invitations_unavailable')
+    return this.input.teams
   }
 
   private async assertFlowAllowed(email?: string | null): Promise<void> {

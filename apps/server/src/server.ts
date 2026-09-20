@@ -17,6 +17,8 @@ import { now } from './application/server-service.js'
 import { Notifications } from './application/notifications.js'
 import { ServerService } from './application/server-service.js'
 import { SessionLineageService } from './application/session-lineage-service.js'
+import { TeamService } from './application/team-service.js'
+import { ProjectAccessService } from './application/project-access-service.js'
 import { WorkerService } from './application/worker-service.js'
 import { httpHandler } from './http/handler.js'
 import { SessionStreams } from './http/sse.js'
@@ -80,7 +82,9 @@ export function createWemuxServer(options: WemuxServerOptions) {
     WEMUX_PUBLIC_URL: process.env.WEMUX_PUBLIC_URL,
     WEMUX_MAIL_OUTBOX: process.env.WEMUX_MAIL_OUTBOX,
   })
-  const registration = new EmailRegistrationService({ store, identity, settings, mail: mail.settings, mailReason: mail.reason })
+  const teams = new TeamService(store)
+  const projects = new ProjectAccessService(store)
+  const registration = new EmailRegistrationService({ store, identity, settings, mail: mail.settings, mailReason: mail.reason, teams })
   // Google 的半配置会抛错：设计上宁可部署启动失败，也不要等用户点击后才发现回调地址不存在。
   const googleSettings = resolveGoogleSettings(options.google ?? {
     WEMUX_GOOGLE_CLIENT_ID: process.env.WEMUX_GOOGLE_CLIENT_ID,
@@ -99,7 +103,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const lineage = new SessionLineageService(store, service, administrators, undefined, notifications)
   const projectStreams = new ProjectStreams(notifications)
   let gateway: WorkerGateway | undefined
-  const server = createServer(httpHandler(service, auth, streams, capabilities, options.workerPackagePath ? { tarballPath: options.workerPackagePath } : undefined, { disconnectWorker: id => gateway?.disconnect(id) }, options.webStaticPath ? { root: options.webStaticPath } : undefined, options.adminSessionTtlMs, new TaskService(store, event => notifications.project(event), service), projectStreams, identity, registration, settings, google, lineage, security))
+  const server = createServer(httpHandler(service, auth, streams, capabilities, options.workerPackagePath ? { tarballPath: options.workerPackagePath } : undefined, { disconnectWorker: id => gateway?.disconnect(id) }, options.webStaticPath ? { root: options.webStaticPath } : undefined, options.adminSessionTtlMs, new TaskService(store, event => notifications.project(event), service), projectStreams, identity, registration, settings, google, lineage, security, teams, mail.settings, projects))
   const workers = new WorkerService(store, notifications)
   gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))
   let closed = false

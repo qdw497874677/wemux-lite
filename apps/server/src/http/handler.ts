@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { TaskError, type TaskService } from '../application/task-service.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { CapabilityToolName } from '@wemux/domain'
-import type { ApprovalId, CommandId, ProjectId, SessionForkId, SessionId, WorkerId, WorkspaceId } from '@wemux/domain'
+import type { ApprovalId, CommandId, ProjectId, SessionForkId, SessionId, TeamId, WorkerId, WorkspaceId } from '@wemux/domain'
 import { AuthenticationService } from '../application/auth.js'
 import { CapabilityError, CapabilityService } from '../application/capability-service.js'
 import { CapabilityTokenError } from '../application/capability-token-service.js'
@@ -22,6 +22,10 @@ import type { GoogleAuthenticationService } from '../application/google-authenti
 import type { AccountSecurityService } from '../application/account-security-service.js'
 import type { InstanceSettingsService } from '../application/instance-settings.js'
 import type { SessionLineageService } from '../application/session-lineage-service.js'
+import type { TeamService } from '../application/team-service.js'
+import type { ProjectAccessService } from '../application/project-access-service.js'
+import { sendTeamInvitationMail } from '../application/team-invitation-mail.js'
+import type { MailSettings } from '../application/mail/email-delivery.js'
 import { readCookie } from './cookies.js'
 import type { RequestCredential } from '../application/auth.js'
 
@@ -43,7 +47,7 @@ function json(response: ServerResponse, status: number, data: unknown): void {
 
 export interface WorkerControl { disconnectWorker(workerId: import('@wemux/domain').WorkerId): void }
 
-export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, _adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams, identity?: IdentityService | null, registration?: EmailRegistrationService | null, settings?: InstanceSettingsService | null, google?: GoogleAuthenticationService | null, lineage?: SessionLineageService | null, security?: AccountSecurityService | null) {
+export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, _adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams, identity?: IdentityService | null, registration?: EmailRegistrationService | null, settings?: InstanceSettingsService | null, google?: GoogleAuthenticationService | null, lineage?: SessionLineageService | null, security?: AccountSecurityService | null, teams?: TeamService | null, mail?: MailSettings | null, projects?: ProjectAccessService | null) {
   return (request: IncomingMessage, response: ServerResponse): void => {
     void (async () => {
       const url = new URL(request.url ?? '/', 'http://localhost'), rawPath = url.pathname === '/' ? '/' : url.pathname.replace(/\/$/, '')
@@ -93,6 +97,33 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
       if (await handleAuthRoute({ request, response, path, method, readBody: () => body(request), auth, identity: identity ?? null, service, loginSession, bearer, registration, settings, google, security })) return
       const unsafe = method !== 'GET' && method !== 'HEAD'
       if (unsafe && loginSession) assertCookieWriteAllowed(identity ?? null, request, loginSession)
+      if (teams && path === '/teams' && (method === 'GET' || method === 'POST')) {
+        const actor = await auth.taskActor(credential)
+        if (method === 'GET') json(response, 200, { items: await teams.list(actor) })
+        else json(response, 201, await teams.create(actor, await body(request)))
+        return
+      }
+      const invitationToken = path.match(/^\/team-invitations\/([^/]+)(?:\/(accept))?$/)
+      if (teams && invitationToken) {
+        if (method === 'GET' && !invitationToken[2]) { json(response, 200, await teams.preview(invitationToken[1])); return }
+        if (method === 'POST' && invitationToken[2] === 'accept') { json(response, 200, await teams.accept(await auth.taskActor(credential), invitationToken[1])); return }
+      }
+      const teamResource = path.match(/^\/teams\/([^/]+)\/(members|invitations)(?:\/([^/]+))?$/)
+      if (teams && teamResource) {
+        const actor = await auth.taskActor(credential), teamId = teamResource[1] as TeamId, childId = teamResource[3]
+        if (method === 'GET' && teamResource[2] === 'members' && !childId) { json(response, 200, { items: await teams.members(actor, teamId) }); return }
+        if (method === 'GET' && teamResource[2] === 'invitations' && !childId) { json(response, 200, { items: await teams.invitations(actor, teamId) }); return }
+        if (method === 'POST' && teamResource[2] === 'invitations' && !childId) {
+          const invitation = await teams.invite(actor, teamId, await body(request))
+          const team = (await teams.list(actor)).find(value => value.id === teamId)
+          if (mail && team) await sendTeamInvitationMail(mail, { teamName: team.name, email: invitation.email, invitedBy: '团队管理员', token: invitation.token, existingAccount: invitation.existingAccount }).catch(async error => {
+            await teams.revoke(actor, teamId, invitation.id)
+            throw error
+          })
+          json(response, 201, invitation); return
+        }
+        if (method === 'DELETE' && teamResource[2] === 'invitations' && childId) { json(response, 200, await teams.revoke(actor, teamId, childId)); return }
+      }
       const projectEvents = path.match(/^\/projects\/([^/]+)\/events$/)
       if (tasks && projectStreams && projectEvents && method === 'GET') {
         const authorize = async () => tasks.authorizeProject(projectEvents[1], { actor: await auth.taskActor(credential), requestId: randomUUID(), teamId: url.searchParams.get('teamId') ?? undefined })
@@ -151,6 +182,34 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
           if (!failure) throw error
           json(response, failure.status, { error: { code: failure.code, message: failure.message, ...(failure.details ? { details: failure.details } : {}) } }); return
         }
+      }
+      // 账号协作资源先按其自身授权判定；不能先套实例管理员门槛，否则 Team 成员永远无法访问获权 Project。
+      const projectAccess = path.match(/^\/projects\/([^/]+)\/(access|grants)(?:\/([^/]+))?$/)
+      if (projects && projectAccess) {
+        const actor = await auth.taskActor(credential), projectId = projectAccess[1] as ProjectId, childId = projectAccess[3]
+        if (projectAccess[2] === 'access' && method === 'PATCH') { json(response, 200, await projects.updateShareScope(actor, projectId, await body(request))); return }
+        if (projectAccess[2] === 'grants' && method === 'GET' && !childId) { json(response, 200, { items: await projects.grants(actor, projectId) }); return }
+        if (projectAccess[2] === 'grants' && method === 'POST' && !childId) { json(response, 201, await projects.grant(actor, projectId, await body(request))); return }
+        if (projectAccess[2] === 'grants' && method === 'DELETE' && childId) { await projects.revoke(actor, projectId, childId as never); response.writeHead(204).end(); return }
+      }
+      const projectResource = path.match(/^\/projects(?:\/([^/]+))?$/)
+      if (projects && projectResource && method === 'GET') {
+        const actor = await auth.taskActor(credential)
+        if (!projectResource[1]) { json(response, 200, { items: await projects.list(actor, url.searchParams.get('teamId') ?? undefined) }); return }
+        json(response, 200, await projects.require(actor, projectResource[1] as ProjectId)); return
+      }
+      const authorizedProjectResources = path.match(/^\/(workspaces|sessions)(?:\/([^/]+))?$/)
+      if (projects && authorizedProjectResources && method === 'GET') {
+        const actor = await auth.taskActor(credential), kind = authorizedProjectResources[1], id = authorizedProjectResources[2]
+        if (!id) {
+          const authorized = await projects.list(actor, url.searchParams.get('teamId') ?? undefined)
+          const allowed = new Set(authorized.map(project => project.id))
+          if (kind === 'workspaces') { const items = (await service.listWorkspaces()).filter(item => allowed.has(item.projectId)); json(response, 200, { items: url.searchParams.get('projectId') ? items.filter(item => item.projectId === url.searchParams.get('projectId')) : items }); return }
+          const items = await Promise.all((await service.listSessions({ archived: url.searchParams.get('archived') === null ? undefined : url.searchParams.get('archived') === 'true' })).filter(item => allowed.has(item.projectId)).map(item => service.sessionView(item.id)))
+          json(response, 200, { items }); return
+        }
+        if (kind === 'workspaces') { const workspace = await service.getWorkspace(id as WorkspaceId); await projects.require(actor, workspace.projectId); json(response, 200, workspace); return }
+        const session = await service.getSession(id as SessionId); await projects.require(actor, session.projectId); json(response, 200, await service.sessionView(session.id)); return
       }
       await auth.authenticateAdmin(credential)
       // 集群控制面的写操作归属真实用户：优先 Cookie 会话，其次该 PAT 的归属用户。

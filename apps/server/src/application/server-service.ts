@@ -258,10 +258,15 @@ export class ServerService {
     if (s.deletedAt) throw new AppError(404, 'Session deleted')
     return s
   }
-  async createProject(input: unknown, actor?: UserId) {
+  async createProject(input: unknown, actor?: UserId, requireExplicitTeam = false) {
     const b = object(input)
-    requireValue(await this.store.identity.getTeam(teamId), 'Bootstrap required')
-    const project: Project = { id: newId(), teamId, ownerId: actor ?? await this.operator(), name: text(b.name, 'name', 200), shareScope: 'owner-only', deletedAt: null }
+    if (requireExplicitTeam && b.teamId === undefined) throw new AppError(400, 'teamId is required', 'invalid_request')
+    const requestedTeamId = (b.teamId === undefined ? teamId : text(b.teamId, 'teamId')) as TeamId
+    requireValue(await this.store.identity.getTeam(requestedTeamId), 'Team required')
+    if (requireExplicitTeam && actor && !(await this.store.identity.listMemberships(actor)).some(membership => membership.teamId === requestedTeamId)) throw new AppError(403, 'Team membership required', 'team_membership_required')
+    const shareScope = b.shareScope === undefined ? 'owner-only' : text(b.shareScope, 'shareScope')
+    if (shareScope !== 'owner-only' && shareScope !== 'selected-members' && shareScope !== 'team') throw new AppError(400, 'Invalid shareScope')
+    const project: Project = { id: newId(), teamId: requestedTeamId, ownerId: actor ?? await this.operator(), name: text(b.name, 'name', 200), shareScope, deletedAt: null }
     await this.store.transaction(async tx => { await tx.resources.saveProject(project); await this.audit(tx, 'project.create', { kind: 'project', id: project.id }, actor) })
     return project
   }

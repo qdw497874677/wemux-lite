@@ -18,7 +18,7 @@ export interface WorkerDTO {
 }
 export interface CreateEnrollmentTokenDTO { ttlSeconds: number }
 export interface EnrollmentTokenDTO { token: string; expiresAt: string }
-export interface ProjectDTO { id: string; name: string }
+export interface ProjectDTO { id: string; teamId: string; ownerId: string; name: string; shareScope: 'owner-only' | 'selected-members' | 'team'; accessRole: 'owner' | 'viewer' | 'contributor' | 'manager' }
 export interface WorkspacePlacementDTO {
   workerId: string
   status: 'pending' | 'provisioning' | 'ready' | 'failed' | 'deleting' | 'deleted'
@@ -145,7 +145,7 @@ export interface SessionResourceDTO {
   binding: { agent: { workerId: string; agentKey: string }; modelId: string | null }
 }
 export interface ServerEventsPageDTO { events: JournalEventDTO[]; nextSeq: number | null; freshness: FreshnessDTO }
-export interface CreateProjectDTO { teamId: string; name: string; shareScope: 'owner-only' }
+export interface CreateProjectDTO { teamId: string; name: string; shareScope: 'owner-only' | 'selected-members' | 'team' }
 export type CreateWorkspaceDTO =
   | { workerId: string; name: string; source: 'empty' }
   | { workerId: string; name: string; source: 'git'; repository: { name: string; gitUrl: string; revision: string } }

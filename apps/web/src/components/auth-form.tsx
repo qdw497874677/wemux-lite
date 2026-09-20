@@ -33,7 +33,7 @@ const minutesOf = (ms: number): string => `${Math.max(1, Math.round(ms / (60 * 1
  * 授权根是部署声明的管理员邮箱，实例从第一次启动起就可以直接登录或注册。
  * 表单不持有任何长期状态：成功后由调用方把会话写入内存并重挂工作台。
  */
-export function AuthForm({ mode, minimumLength = 15, capabilities, google, submitLabel, onAuthenticated, onSwitchMode }: {
+export function AuthForm({ mode, minimumLength = 15, capabilities, google, submitLabel, onAuthenticated, onSwitchMode, invitation }: {
   mode: AuthMode
   /** 默认值与服务端 `passwordPolicy.minimumLength` 一致，能以 `/auth/options` 为准时就传入真实值。 */
   minimumLength?: number
@@ -44,8 +44,10 @@ export function AuthForm({ mode, minimumLength = 15, capabilities, google, submi
   submitLabel: string
   onAuthenticated: (account: AccountPayloadDTO) => void
   onSwitchMode?: (mode: AuthMode) => void
+  /** 团队邀请注册锁定邮箱，并把一次性邀请绑定到待验证注册记录。 */
+  invitation?: { email: string; token: string }
 }) {
-  const [email, setEmail] = useState('')
+  const [email, setEmail] = useState(invitation?.email ?? '')
   const [displayName, setDisplayName] = useState('')
   const [login, setLogin] = useState('')
   const [password, setPassword] = useState('')
@@ -90,7 +92,7 @@ export function AuthForm({ mode, minimumLength = 15, capabilities, google, submi
     setBusy(mode); setError('')
     try {
       if (mode === 'register') {
-        const accepted = await api.register({ email: email.trim(), displayName: displayName.trim(), password })
+        const accepted = await api.register({ email: email.trim(), displayName: displayName.trim(), password, invitationToken: invitation?.token })
         if (attempt.current.generation !== generation) return
         setPassword(''); setConfirm('')
         setSent({ kind: 'register', email: accepted.email })
@@ -180,7 +182,7 @@ export function AuthForm({ mode, minimumLength = 15, capabilities, google, submi
     {error && <p role="alert" className="rounded-lg border border-red-500/25 bg-red-500/10 p-3 text-sm text-red-200">{error}</p>}
     {mode === 'register' ? <>
       <label htmlFor="auth-email" className="flex items-center gap-2 text-sm font-medium"><Mail aria-hidden className="size-4 text-muted-foreground" />邮箱</label>
-      <Input id="auth-email" type="email" value={email} placeholder="you@example.com" autoComplete="email"
+      <Input id="auth-email" type="email" value={email} placeholder="you@example.com" autoComplete="email" readOnly={Boolean(invitation)}
         onChange={event => { setEmail(event.target.value); setError('') }} />
       <label htmlFor="auth-display" className="flex items-center gap-2 text-sm font-medium"><UserRound aria-hidden className="size-4 text-muted-foreground" />显示名称</label>
       <Input id="auth-display" value={displayName} placeholder="在团队里显示的名字" autoComplete="nickname"
