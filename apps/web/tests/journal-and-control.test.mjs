@@ -57,6 +57,35 @@ test('journal exposes queue identities, active turn, approvals and terminal clea
   assert.equal(terminal.messages.find(m => m.id === 'm1').status, 'cancelled')
 })
 
+test('session sharing API preserves scopes, grants and operator access in summaries', async () => {
+  const previousFetch = globalThis.fetch, previousWindow = globalThis.window
+  const calls = []
+  globalThis.window = { location: { origin: 'http://localhost' } }
+  globalThis.fetch = async (url, options) => {
+    calls.push({ path: url.pathname, method: options.method, body: options.body ? JSON.parse(options.body) : undefined })
+    if (options.method === 'DELETE') return new Response(null, { status: 204 })
+    if (url.pathname.endsWith('/grants') && options.method === 'GET') return Response.json({ items: [{ sessionId: 's', userId: 'u' }] })
+    if (url.pathname.endsWith('/grants')) return Response.json({ sessionId: 's', userId: 'u' }, { status: 201 })
+    return Response.json({ id: 's', projectId: 'p', ownerId: 'owner', workspaceId: 'w', title: '共享会话', runtimeState: 'idle', archivedAt: null, shareScope: 'selected-members', access: { canRead: true, canWrite: true, canControl: true, projectRole: 'manager' }, binding: { agent: { workerId: 'worker', agentKey: 'pi' }, modelId: 'model' }, sendCapability: { allowed: true } })
+  }
+  const api = createApi({ token: 'token', teamId: '' })
+  try {
+    const updated = await api.updateSessionAccess('s/x', 'selected-members')
+    assert.equal(updated.ownerId, 'owner')
+    assert.equal(updated.shareScope, 'selected-members')
+    assert.equal(updated.canManage, true)
+    assert.deepEqual(await api.sessionGrants('s/x'), [{ sessionId: 's', userId: 'u' }])
+    await api.grantSession('s/x', 'u/x')
+    await api.revokeSessionGrant('s/x', 'u/x')
+    assert.deepEqual(calls.map(call => [call.path, call.method]), [
+      ['/api/sessions/s%2Fx/access', 'PATCH'], ['/api/sessions/s%2Fx/grants', 'GET'],
+      ['/api/sessions/s%2Fx/grants', 'POST'], ['/api/sessions/s%2Fx/grants/u%2Fx', 'DELETE'],
+    ])
+    assert.deepEqual(calls[0].body, { shareScope: 'selected-members' })
+    assert.deepEqual(calls[2].body, { userId: 'u/x' })
+  } finally { api.dispose(); globalThis.fetch = previousFetch; globalThis.window = previousWindow }
+})
+
 test('cluster request methods encode identities and preserve control payloads', async () => {
   const previousFetch = globalThis.fetch, previousWindow = globalThis.window
   const calls = []

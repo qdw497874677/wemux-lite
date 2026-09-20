@@ -20,6 +20,7 @@ import { SessionLineageService } from './application/session-lineage-service.js'
 import { TeamService } from './application/team-service.js'
 import { ProjectAccessService } from './application/project-access-service.js'
 import { WorkerAccessService } from './application/worker-access-service.js'
+import { SessionAccessService } from './application/session-access-service.js'
 import { WorkerService } from './application/worker-service.js'
 import { httpHandler } from './http/handler.js'
 import { SessionStreams } from './http/sse.js'
@@ -86,6 +87,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const teams = new TeamService(store)
   const projects = new ProjectAccessService(store)
   const workerAccess = new WorkerAccessService(store)
+  const sessionAccess = new SessionAccessService(store, projects)
   const registration = new EmailRegistrationService({ store, identity, settings, mail: mail.settings, mailReason: mail.reason, teams })
   // Google 的半配置会抛错：设计上宁可部署启动失败，也不要等用户点击后才发现回调地址不存在。
   const googleSettings = resolveGoogleSettings(options.google ?? {
@@ -99,13 +101,13 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const notifications = new Notifications()
   const capabilitySecret = options.capabilitySecret ?? process.env.WEMUX_CAPABILITY_SECRET ?? randomCapabilitySecret()
   const capabilities = new CapabilityService(store, now, new CapabilityTokenService(capabilitySecret, now))
-  const service = new ServerService(store, notifications, capabilities, workerAccess, projects)
+  const service = new ServerService(store, notifications, capabilities, workerAccess, projects, sessionAccess)
   const streams = new SessionStreams(service)
   // 血缘服务与画布渲染无关：它只读写领域事实，查询端点不在 handler 里拼装边。
   const lineage = new SessionLineageService(store, service, administrators, undefined, notifications)
   const projectStreams = new ProjectStreams(notifications)
   let gateway: WorkerGateway | undefined
-  const server = createServer(httpHandler(service, auth, streams, capabilities, options.workerPackagePath ? { tarballPath: options.workerPackagePath } : undefined, { disconnectWorker: id => gateway?.disconnect(id) }, options.webStaticPath ? { root: options.webStaticPath } : undefined, options.adminSessionTtlMs, new TaskService(store, event => notifications.project(event), service), projectStreams, identity, registration, settings, google, lineage, security, teams, mail.settings, projects, workerAccess))
+  const server = createServer(httpHandler(service, auth, streams, capabilities, options.workerPackagePath ? { tarballPath: options.workerPackagePath } : undefined, { disconnectWorker: id => gateway?.disconnect(id) }, options.webStaticPath ? { root: options.webStaticPath } : undefined, options.adminSessionTtlMs, new TaskService(store, event => notifications.project(event), service), projectStreams, identity, registration, settings, google, lineage, security, teams, mail.settings, projects, workerAccess, sessionAccess))
   const workers = new WorkerService(store, notifications)
   gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))
   let closed = false

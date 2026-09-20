@@ -195,6 +195,7 @@ export class SqliteServerStore implements ServerStore {
     listTeamMemberships: async teamId => this.list<Membership>('membership').filter(membership => membership.teamId === teamId),
     listWorkerGrants: async workerId => this.list<import('@wemux/server-domain').WorkerGrant>('worker-grant').filter(grant => grant.workerId === workerId),
     listProjectGrants: async projectId => this.list<import('@wemux/server-domain').ProjectGrant>('project-grant').filter(grant => grant.projectId === projectId),
+    listSessionGrants: async sessionId => this.list<import('@wemux/server-domain').SessionGrant>('session-grant').filter(grant => grant.sessionId === sessionId),
     listAudit: async limit => this.list<AuditEntry>('audit').sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)).slice(0, Math.max(0, limit)),
     findLoginSessionByTokenHash: async hash => this.readLoginSessions('token_hash=?', hash)[0] ?? null,
     getLoginSession: async id => this.readLoginSessions('id=?', id)[0] ?? null,
@@ -403,6 +404,7 @@ export class SqliteServerStore implements ServerStore {
       saveProjectGrant: async r => this.put('project-grant', `${r.projectId}:${r.userId}`, r),
       removeProjectGrant: async (projectId, userId) => { this.db.prepare("DELETE FROM records WHERE kind='project-grant' AND id=?").run(`${projectId}:${userId}`) },
       saveSessionGrant: async r => this.put('session-grant', `${r.sessionId}:${r.userId}`, r),
+      removeSessionGrant: async (sessionId, userId) => { this.db.prepare("DELETE FROM records WHERE kind='session-grant' AND id=?").run(`${sessionId}:${userId}`) },
       savePersonalAccessToken: async r => this.put('pat', r.id, r),
       revokePersonalAccessToken: async (id, revokedAt) => { const r = this.get<PersonalAccessTokenRecord>('pat', id); if (r) this.put('pat', id, { ...r, revokedAt }) },
       revokePersonalAccessTokens: async (userId, revokedAt) => {

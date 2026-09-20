@@ -149,7 +149,7 @@ export class TaskService {
       if (!task.assignee) throw new TaskError('assignment_changed', 'Task assignment required')
       const workspace = await this.workspace(tx, task, task.assignee.workspaceId)
       if ((await tx.tasks.binding(workspace.id))?.taskId !== id || !workspace.placements.some(placement => placement.workerId === task.assignee!.workerId && placement.status === 'ready')) throw new TaskError('assignment_changed', 'Assignment workspace placement changed')
-      const created = await server.createSessionInTx(tx, { ...task.assignee, title: b.title }, { taskId: id, runId: null, ownerId: context.actor })
+      const created = await server.createSessionInTx(tx, { ...task.assignee, title: b.title }, { taskId: id, runId: null, ownerId: context.actor, shareScope: 'project' })
       const session = created.session
       const at = new Date().toISOString()
       await this.record(tx, { ...task, lastActivityAt: at }, 'task.updated', { action: 'session.created', sessionId: session.id }, context)
@@ -216,11 +216,13 @@ export class TaskService {
       this.enforce(launchCapability, launchCapability.reasonCode === 'assignment_changed' ? { assignment: task.assignee } : launchCapability.reasonCode === 'active_run' ? { runId: task.activeRun?.id } : undefined)
       const reused = request.mode === 'reuse' ? await tx.resources.getSession(request.reuseSessionId as SessionId) : null
       if (request.mode === 'reuse') this.enforce(evaluateCapability('launch_reuse', await reuseFacts(tx, facts, request.reuseSessionId)))
-      if (reused && server) await server.requireWorkerUseInTx(tx, context.actor, reused.binding.agent.workerId)
       const runId = randomUUID()
-      if (reused && reused.ownerId !== context.actor) throw new TaskError('forbidden', 'Session use permission required')
-      const created = reused ? { session: reused, commandId: null } : await server.createSessionInTx(tx, { ...request.assignment, title: task.title }, { taskId: id, runId, ownerId: context.actor })
-      const queued = await server.enqueueInTx(tx, created.session.id, { content: request.prompt })
+      if (reused) {
+        await server.requireSessionAccessInTx(tx, context.actor, reused.id, 'write')
+        await server.requireWorkerUseInTx(tx, context.actor, reused.binding.agent.workerId)
+      }
+      const created = reused ? { session: reused, commandId: null } : await server.createSessionInTx(tx, { ...request.assignment, title: task.title }, { taskId: id, runId, ownerId: context.actor, shareScope: 'project' })
+      const queued = await server.enqueueInTx(tx, created.session.id, { content: request.prompt }, context.actor)
       if (created.commandId) await tx.commands.depend(queued.commandId, created.commandId)
       const binding = created.session.binding
       const run: Run = { id: runId, taskId: id, projectId, requestId: request.requestId, request, fingerprint, attempt: Math.max(0, ...(await tx.tasks.runs(id)).map(run => run.attempt)) + 1, sessionId: created.session.id, snapshot: { workspaceId: binding.workspaceId, workerId: binding.agent.workerId, agentKey: binding.agent.agentKey, modelId: binding.modelId }, status: 'pending', resultSummary: null, failure: null, createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, cancelRequestedAt: null, createCommandId: created.commandId, enqueueCommandId: queued.commandId, messageId: null, turnId: null, cancelCommandIds: [], lastProjectedSeq: 0 }

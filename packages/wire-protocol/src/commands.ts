@@ -6,6 +6,7 @@ import type {
   SessionId,
   TurnId,
   UserMessageInput,
+  UserId,
   WorkspaceId,
   WorkspaceProvisionSpec,
 } from '@wemux/domain'
@@ -56,6 +57,8 @@ export type WorkerCommand =
       readonly sessionId: SessionId
       readonly approvalId: ApprovalId
       readonly decision: 'approve' | 'deny'
+      /** Cluster account that made the approval decision; absent for Worker-local operation. */
+      readonly decidedByAccountId?: UserId
     }
 
 export interface CommandError {

@@ -62,8 +62,8 @@ function TypingDots() {
 export function Composer({ controller, session, canSend, blockedReason, confirmedIds }: { controller: SubmissionController; session: SessionDTO; canSend: boolean; blockedReason: string; confirmedIds: string[] }) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot)
   useEffect(() => { controller.confirm(confirmedIds) }, [controller, confirmedIds.join(',')])
-  canSend = canSend && session.sendCapability?.allowed === true
-  blockedReason = session.sendCapability?.allowed === false ? session.sendCapability.reason : !session.sendCapability ? '暂时无法确认发送权限' : blockedReason
+  canSend = canSend && session.access?.canWrite !== false && session.sendCapability?.allowed === true
+  blockedReason = session.access?.canWrite === false ? '当前账号只有查看权限' : session.sendCapability?.allowed === false ? session.sendCapability.reason : !session.sendCapability ? '暂时无法确认发送权限' : blockedReason
   const retry = state.attempt?.content === state.draft.trim()
   const hint = state.pending ? '正在发送…' : state.receipt ? '消息已送达，等待 Agent 回复' : canSend ? session.runtimeState === 'running' ? 'Agent 正在运行，新消息将进入队列' : 'Enter 发送，Shift+Enter 换行' : `${blockedReason}，草稿仍会保留`
   return <div className="conversation-composer shrink-0 px-3 py-3 sm:px-6 sm:py-4"><div className="conversation-content mx-auto max-w-4xl"><AiPromptInput

@@ -1,11 +1,11 @@
 import type { ServerResponse } from 'node:http'
-import type { SessionId } from '@wemux/domain'
+import type { SessionId, UserId } from '@wemux/domain'
 import { ServerService } from '../application/server-service.js'
 
 export class SessionStreams {
   private readonly clients = new Set<ServerResponse>()
   constructor(private readonly service: ServerService) {}
-  open(response: ServerResponse, sessionId: SessionId, fromSeq: number): void {
+  open(response: ServerResponse, sessionId: SessionId, fromSeq: number, actor?: UserId): void {
     let cursor = fromSeq, pumping = false, dirty = true, closed = false
     this.clients.add(response)
     const write = (data: string): boolean => {
@@ -22,7 +22,7 @@ export class SessionStreams {
           dirty = false
           let page
           do {
-            page = await this.service.events(sessionId, cursor, 500)
+            page = await this.service.events(sessionId, cursor, 500, actor)
             for (const event of page.events) {
               if (!write(`id: ${event.seq}\nevent: session.event\ndata: ${JSON.stringify(event)}\n\n`)) return
               cursor = event.seq + 1

@@ -3,6 +3,7 @@ import type {
   MessageId,
   SessionId,
   TurnId,
+  UserId,
   WorkspaceId,
 } from './ids.js'
 import type { AgentRef } from './agent.js'
@@ -36,6 +37,8 @@ export interface SessionExecutionSpec {
 export interface UserMessageInput {
   readonly messageId: MessageId
   readonly content: string
+  /** Cluster account that submitted this message; absent for Worker-local Sessions and legacy records. */
+  readonly sentByAccountId?: UserId
 }
 
 export interface QueuedMessage {

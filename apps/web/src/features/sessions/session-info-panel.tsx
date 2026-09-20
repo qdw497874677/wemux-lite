@@ -3,6 +3,8 @@ import { cn } from '../../lib/utils.ts'
 import { Button } from '../../components/ui/button.tsx'
 import { runtimeStateLabel } from '../../lib/display.ts'
 import type { ProjectDTO, RuntimeState, SessionDTO, WorkerDTO, WorkspaceDTO } from '../../api/dto.ts'
+import type { ReturnTypeOfCreateApi } from '../../api/team-types.ts'
+import { SessionAccessPanel } from '../../components/session-access.tsx'
 
 const freshnessLabels: Record<string, string> = {
   unknown: '历史完整性尚未确认',
@@ -23,10 +25,12 @@ const runtimeStateDot: Record<RuntimeState, string> = {
 }
 
 interface SessionInfoPanelProps {
+  api: ReturnTypeOfCreateApi
   session: SessionDTO
   workspace?: WorkspaceDTO
   worker?: WorkerDTO
   project?: ProjectDTO
+  onChanged: () => void
   onClose: () => void
 }
 
@@ -51,7 +55,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-export function SessionInfoPanel({ session, workspace, worker, project, onClose }: SessionInfoPanelProps) {
+export function SessionInfoPanel({ api, session, workspace, worker, project, onChanged, onClose }: SessionInfoPanelProps) {
   const freshness = session.freshness?.status ?? 'unknown'
 
   return (
@@ -123,6 +127,8 @@ export function SessionInfoPanel({ session, workspace, worker, project, onClose 
             <Row icon={FolderGit2} label="名称">{project.name}</Row>
           </Section>
         )}
+
+        {project && <Section title="共享与权限"><SessionAccessPanel api={api} session={session} project={project} onChanged={onChanged} /></Section>}
 
         {/* IDs */}
         <Section title="标识">

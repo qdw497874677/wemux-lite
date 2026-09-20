@@ -134,7 +134,7 @@ export class WorkerRuntime {
           case 'turn.stop': await tx.sessions.requestStop(command.sessionId, command.turnId); break
           case 'runtime.approval.resolve':
             if (!approvalTurnId) throw new Error('Agent invocation is not active')
-            await tx.appendJournal(command.sessionId, [{ occurredAt: now(), payload: { kind: 'approval.resolved', turnId: approvalTurnId, approvalId: command.approvalId, decision: command.decision } }])
+            await tx.appendJournal(command.sessionId, [{ occurredAt: now(), payload: { kind: 'approval.resolved', turnId: approvalTurnId, approvalId: command.approvalId, decision: command.decision, ...(command.decidedByAccountId ? { decidedByAccountId: command.decidedByAccountId } : {}) } }])
             break
         }
         if (command.kind !== 'workspace.provision') await tx.commands.setExecutionState({ commandId, state: 'completed', result: null, updatedAt: now() })

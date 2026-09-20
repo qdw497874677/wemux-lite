@@ -57,7 +57,7 @@ for (const [name, code, message] of cases) test(`public reuse rejection matrix: 
     const { session: eligible } = await tasks.createSession(task.projectId, task.id, { title: 'Eligible Task Session' }, context)
     // Immutable bindings/provenance cannot be corrupted by UPDATE. Construct each
     // candidate from the same eligible Session before its first persisted insert.
-    const candidate = structuredClone({ ...eligible, id: 'candidate' as SessionId, binding: { ...eligible.binding, agent: { ...eligible.binding.agent } } })
+    const candidate = structuredClone({ ...eligible, id: 'candidate' as SessionId, ownerId: context.actor, shareScope: 'owner-only' as const, binding: { ...eligible.binding, agent: { ...eligible.binding.agent } } })
     if (name === 'wrong owner') candidate.ownerId = 'another-owner' as UserId
     if (name === 'wrong task provenance' || name === 'wrong project') {
       let projectId = task.projectId

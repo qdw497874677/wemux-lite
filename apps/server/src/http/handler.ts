@@ -25,6 +25,7 @@ import type { SessionLineageService } from '../application/session-lineage-servi
 import type { TeamService } from '../application/team-service.js'
 import type { ProjectAccessService } from '../application/project-access-service.js'
 import type { WorkerAccessService } from '../application/worker-access-service.js'
+import type { SessionAccessService } from '../application/session-access-service.js'
 import { sendTeamInvitationMail } from '../application/team-invitation-mail.js'
 import type { MailSettings } from '../application/mail/email-delivery.js'
 import { readCookie } from './cookies.js'
@@ -48,7 +49,7 @@ function json(response: ServerResponse, status: number, data: unknown): void {
 
 export interface WorkerControl { disconnectWorker(workerId: import('@wemux/domain').WorkerId): void }
 
-export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, _adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams, identity?: IdentityService | null, registration?: EmailRegistrationService | null, settings?: InstanceSettingsService | null, google?: GoogleAuthenticationService | null, lineage?: SessionLineageService | null, security?: AccountSecurityService | null, teams?: TeamService | null, mail?: MailSettings | null, projects?: ProjectAccessService | null, workerAccess?: WorkerAccessService | null) {
+export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, _adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams, identity?: IdentityService | null, registration?: EmailRegistrationService | null, settings?: InstanceSettingsService | null, google?: GoogleAuthenticationService | null, lineage?: SessionLineageService | null, security?: AccountSecurityService | null, teams?: TeamService | null, mail?: MailSettings | null, projects?: ProjectAccessService | null, workerAccess?: WorkerAccessService | null, sessionAccess?: SessionAccessService | null) {
   return (request: IncomingMessage, response: ServerResponse): void => {
     void (async () => {
       const url = new URL(request.url ?? '/', 'http://localhost'), rawPath = url.pathname === '/' ? '/' : url.pathname.replace(/\/$/, '')
@@ -206,11 +207,16 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
           const authorized = await projects.list(actor, url.searchParams.get('teamId') ?? undefined)
           const allowed = new Set(authorized.map(project => project.id))
           if (kind === 'workspaces') { const items = (await service.listWorkspaces()).filter(item => allowed.has(item.projectId)); json(response, 200, { items: url.searchParams.get('projectId') ? items.filter(item => item.projectId === url.searchParams.get('projectId')) : items }); return }
-          const items = await Promise.all((await service.listSessions({ archived: url.searchParams.get('archived') === null ? undefined : url.searchParams.get('archived') === 'true' })).filter(item => allowed.has(item.projectId)).map(item => service.sessionView(item.id)))
-          json(response, 200, { items }); return
+          if (!sessionAccess) throw new AppError(503, 'Session access is disabled')
+          const archived = url.searchParams.get('archived')
+          if (archived !== null && archived !== 'true' && archived !== 'false') throw new AppError(400, 'archived must be true or false')
+          const items = (await sessionAccess.list(actor)).filter(item => allowed.has(item.projectId) && (archived === null || Boolean(item.archivedAt) === (archived === 'true')))
+          json(response, 200, { items: await Promise.all(items.map(item => service.sessionView(item.id, actor))) }); return
         }
         if (kind === 'workspaces') { const workspace = await service.getWorkspace(id as WorkspaceId); await projects.require(actor, workspace.projectId); json(response, 200, workspace); return }
-        const session = await service.getSession(id as SessionId); await projects.require(actor, session.projectId); json(response, 200, await service.sessionView(session.id)); return
+        if (!sessionAccess) throw new AppError(503, 'Session access is disabled')
+        await sessionAccess.require(actor, id as SessionId)
+        json(response, 200, await service.sessionView(id as SessionId, actor)); return
       }
       if (workerAccess && method === 'GET' && path === '/workers') { json(response, 200, { items: await workerAccess.list(await auth.taskActor(credential)) }); return }
       const workerAccessRoute = path.match(/^\/workers\/([^/]+)(?:\/(access|grants|capabilities|revoke)(?:\/([^/]+))?)?$/)
@@ -227,6 +233,33 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
       if (projects && workerAccess && method === 'POST' && (path === '/workspaces' || path === '/sessions')) {
         const actor = await auth.taskActor(credential), input = await body(request)
         json(response, 201, path === '/workspaces' ? await service.createWorkspace(input, actor) : await service.createSession(input, actor)); return
+      }
+      const sessionAccessRoute = path.match(/^\/sessions\/([^/]+)\/(access|grants)(?:\/([^/]+))?$/)
+      if (sessionAccess && sessionAccessRoute) {
+        const actor = await auth.taskActor(credential), sessionId = sessionAccessRoute[1] as SessionId, resource = sessionAccessRoute[2], childId = sessionAccessRoute[3]
+        if (resource === 'access' && method === 'PATCH') { json(response, 200, await sessionAccess.updateShareScope(actor, sessionId, await body(request))); return }
+        if (resource === 'grants' && method === 'GET' && !childId) { json(response, 200, { items: await sessionAccess.grants(actor, sessionId) }); return }
+        if (resource === 'grants' && method === 'POST' && !childId) { json(response, 201, await sessionAccess.grant(actor, sessionId, await body(request))); return }
+        if (resource === 'grants' && method === 'DELETE' && childId) { await sessionAccess.revoke(actor, sessionId, childId as never); response.writeHead(204).end(); return }
+      }
+      const sessionOperation = path.match(/^\/sessions\/([^/]+)\/(?:messages(?:\/([^/]+)\/cancel)?|turn\/stop|runtime\/commands|runtime\/approvals\/([^/]+)|events|stream)$/)
+      if (sessionAccess && sessionOperation) {
+        const actor = await auth.taskActor(credential), id = sessionOperation[1] as SessionId
+        const cancelCommandId = sessionOperation[2] as CommandId | undefined, approvalId = sessionOperation[3] as ApprovalId | undefined
+        if (method === 'POST' && path.endsWith('/messages')) { json(response, 202, await service.enqueue(id, await body(request), actor)); return }
+        if (method === 'POST' && cancelCommandId) { json(response, 202, await service.cancelQueued(id, cancelCommandId, await body(request), actor)); return }
+        if (method === 'POST' && path.endsWith('/turn/stop')) { json(response, 202, await service.stopTurn(id, await body(request), actor)); return }
+        if (method === 'POST' && path.endsWith('/runtime/commands')) { json(response, 202, await service.invokeRuntimeCommand(id, await body(request), actor)); return }
+        if (method === 'POST' && approvalId) { json(response, 202, await service.resolveRuntimeApproval(id, approvalId, await body(request), actor)); return }
+        if (method === 'GET' && (path.endsWith('/events') || path.endsWith('/stream'))) {
+          await sessionAccess.require(actor, id)
+          const lastId = request.headers['last-event-id']
+          if (lastId !== undefined && (typeof lastId !== 'string' || !/^\d+$/.test(lastId))) throw new AppError(400, 'Invalid Last-Event-ID')
+          const from = integer(Number(url.searchParams.get('fromSeq') ?? (lastId === undefined ? 1 : Number(lastId) + 1)), 'fromSeq', 1)
+          if (path.endsWith('/events')) json(response, 200, await service.events(id, from, Number(url.searchParams.get('limit') ?? 100), actor))
+          else streams.open(response, id, from, actor)
+          return
+        }
       }
       await auth.authenticateAdmin(credential)
       // 集群控制面的写操作归属真实用户：优先 Cookie 会话，其次该 PAT 的归属用户。

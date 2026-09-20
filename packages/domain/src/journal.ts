@@ -1,4 +1,4 @@
-import type { CommandId, MessageId, SessionId, ToolCallId, TurnId } from './ids.js'
+import type { CommandId, MessageId, SessionId, ToolCallId, TurnId, UserId } from './ids.js'
 import type { ApprovalId, RuntimeUsage } from './agent-profile.js'
 import type { SessionRuntimeState, TurnFailure } from './session.js'
 import type { EventSeq, Timestamp } from './values.js'
@@ -10,6 +10,8 @@ export type SessionEventPayload =
       readonly messageId: MessageId
       readonly content: string
       readonly position: number
+      /** Actual cluster account that submitted the message; absent for local/legacy history. */
+      readonly sentByAccountId?: UserId
     }
   | {
       readonly kind: 'message.cancelled'
@@ -57,6 +59,8 @@ export type SessionEventPayload =
       readonly turnId: TurnId
       readonly approvalId: ApprovalId
       readonly decision: 'approve' | 'deny'
+      /** Actual cluster account that resolved the approval; absent for local/legacy history. */
+      readonly decidedByAccountId?: UserId
     }
   | {
       readonly kind: 'usage.updated'

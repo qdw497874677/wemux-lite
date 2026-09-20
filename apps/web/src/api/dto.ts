@@ -59,8 +59,11 @@ export interface FreshnessDTO {
 }
 export interface SessionDTO {
   sendCapability?: import('@wemux/web-contract/task-platform').ActionCapability
+  access?: { canRead: boolean; canWrite: boolean; canControl: boolean; projectRole: 'owner' | 'manager' | 'contributor' | 'viewer' | null }
+  shareScope?: 'owner-only' | 'selected-members' | 'project'
   id: string
   projectId?: string
+  ownerId?: string
   title: string
   workspaceId: string
   workerId: string
@@ -145,7 +148,9 @@ export interface AccountPayloadDTO { user: AccountUserDTO; teamId: string | null
 export interface AccountViewDTO { user: AccountUserDTO; teamId: string | null; session: LoginSessionDTO; csrfToken?: string; csrfTokenRotated?: boolean; instanceAdministrator: boolean }
 export interface SessionResourceDTO {
   sendCapability?: import('@wemux/web-contract/task-platform').ActionCapability
-  id: string; projectId: string; workspaceId: string; title: string; runtimeState: RuntimeState; archivedAt?: string | null
+  access?: { canRead: boolean; canWrite: boolean; canControl: boolean; projectRole: 'owner' | 'manager' | 'contributor' | 'viewer' | null }
+  shareScope?: 'owner-only' | 'selected-members' | 'project'
+  id: string; projectId: string; ownerId: string; workspaceId: string; title: string; runtimeState: RuntimeState; archivedAt?: string | null
   binding: { agent: { workerId: string; agentKey: string }; modelId: string | null }
 }
 export interface ServerEventsPageDTO { events: JournalEventDTO[]; nextSeq: number | null; freshness: FreshnessDTO }

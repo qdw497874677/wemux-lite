@@ -134,6 +134,8 @@ export interface ServerIdentityReader {
   listWorkerGrants(workerId: WorkerId): Promise<readonly WorkerGrant[]>
   /** Project Grant directory; authorization must not discover grants by scanning unrelated records. */
   listProjectGrants(projectId: import('@wemux/domain').ProjectId): Promise<readonly ProjectGrant[]>
+  /** Session Grant directory; used only after Project access has already been proven. */
+  listSessionGrants(sessionId: SessionId): Promise<readonly SessionGrant[]>
   /** Newest-first audit entries; durable report channel for administrator assignment and upgrade decisions. */
   listAudit(limit: number): Promise<readonly AuditEntry[]>
   /**
@@ -177,6 +179,7 @@ export interface ServerIdentityWriter {
   saveProjectGrant(grant: ProjectGrant): Promise<void>
   removeProjectGrant(projectId: import('@wemux/domain').ProjectId, userId: UserId): Promise<void>
   saveSessionGrant(grant: SessionGrant): Promise<void>
+  removeSessionGrant(sessionId: SessionId, userId: UserId): Promise<void>
   savePersonalAccessToken(record: PersonalAccessTokenRecord): Promise<void>
   revokePersonalAccessToken(id: import('@wemux/domain').CredentialId, revokedAt: Timestamp): Promise<void>
   /** Revokes every PAT of a user (or of all users when userId is null) and reports how many changed. */

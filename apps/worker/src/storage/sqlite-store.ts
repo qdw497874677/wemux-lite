@@ -213,7 +213,7 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore 
         if (items.some(q => q.message.messageId === input.message.messageId)) throw new Error('Message already submitted')
         const item: QueuedMessage = { sessionId: input.sessionId, submissionCommandId: input.submissionCommandId, message: input.message, queuedAt: input.queuedAt, capabilitySnapshot: input.capabilities?.snapshot ?? null, capabilityToken: input.capabilities?.token ?? null, capabilityTurnId: input.capabilities?.grant.turnId ?? null, position: Math.max(0, ...items.map(q => q.position)) + 1, state: 'queued' }
         this.put('queue', input.submissionCommandId, item)
-        this.append(input.sessionId, [{ occurredAt: now(), payload: { kind: 'message.queued', commandId: input.submissionCommandId, messageId: input.message.messageId, content: input.message.content, position: item.position } }])
+        this.append(input.sessionId, [{ occurredAt: now(), payload: { kind: 'message.queued', commandId: input.submissionCommandId, messageId: input.message.messageId, content: input.message.content, position: item.position, ...(input.message.sentByAccountId ? { sentByAccountId: input.message.sentByAccountId } : {}) } }])
         if (!session.activeTurnId) this.state(input.sessionId, 'queued')
         return item
       },

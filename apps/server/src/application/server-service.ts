@@ -12,6 +12,7 @@ import { Notifications } from './notifications.js'
 import { integer, object, text } from './validation.js'
 import type { WorkerAccessService } from './worker-access-service.js'
 import type { ProjectAccessService } from './project-access-service.js'
+import type { SessionAccessService } from './session-access-service.js'
 
 export const newId = <N extends string>(): Id<N> => randomUUID() as Id<N>
 export const now = (): Timestamp => new Date().toISOString() as Timestamp
@@ -24,6 +25,8 @@ export interface SessionProvenance {
   readonly runId?: string | null
   /** Operator the Session belongs to; defaults to the instance administrator. */
   readonly ownerId?: UserId
+  /** Task-owned Session defaults may be broader than the direct-chat owner-only default. */
+  readonly shareScope?: import('@wemux/server-domain').SessionShareScope
 }
 
 /** Inputs the Session Lineage module may set on a Fork target; binding validation stays here. */
@@ -40,7 +43,7 @@ export interface ForkTargetSessionInput {
 }
 
 export class ServerService {
-  constructor(private readonly store: ServerStore, readonly notifications: Notifications, private readonly capabilities?: CapabilityService, private readonly workerAccess?: WorkerAccessService, private readonly projectAccess?: ProjectAccessService) {}
+  constructor(private readonly store: ServerStore, readonly notifications: Notifications, private readonly capabilities?: CapabilityService, private readonly workerAccess?: WorkerAccessService, private readonly projectAccess?: ProjectAccessService, private readonly sessionAccess?: SessionAccessService) {}
   async requireWorkerUseInTx(tx: ServerStoreTx, actor: UserId, workerId: WorkerId) {
     return this.workerAccess ? this.workerAccess.requireInTx(tx, actor, workerId) : requireValue(await tx.resources.getWorker(workerId))
   }
@@ -223,30 +226,32 @@ export class ServerService {
     if (w.deletedAt) throw new AppError(404, 'Workspace deleted')
     return w
   }
-  sessionView(id: SessionId) {
+  sessionView(id: SessionId, actor?: UserId) {
     return this.store.transaction(async tx => {
-      const session = await this.getSession(id, tx.resources)
+      const session = actor && this.sessionAccess ? await this.sessionAccess.requireInTx(tx, actor, id) : await this.getSession(id, tx.resources)
       return { ...session, archivedAt: session.archivedAt ?? null, ...await this.executionState(tx, id), sendCapability: await sendCapability(tx, session) }
     })
   }
   private async executionState(tx: ServerStoreTx, id: SessionId) {
-    const queued = new Map<MessageId, { commandId: CommandId; messageId: MessageId; content: string; position: number | null }>()
+    const queued = new Map<MessageId, { commandId: CommandId; messageId: MessageId; content: string; position: number | null; sentByAccountId?: UserId }>()
+    const messageActors = new Map<MessageId, UserId>()
     const observed = new Set<CommandId>(), settled = new Set<MessageId>()
-    let activeTurnId: TurnId | null = null
+    let activeTurnId: TurnId | null = null, activeTurnOwnerId: UserId | null = null
     let from = 1 as EventSeq
     for (;;) {
       const page = await tx.cache.readEvents(id, from, 500)
       for (const { payload: p } of page.events) {
         if (p.kind === 'message.queued') {
           observed.add(p.commandId)
-          queued.set(p.messageId, { commandId: p.commandId, messageId: p.messageId, content: p.content, position: p.position })
+          queued.set(p.messageId, { commandId: p.commandId, messageId: p.messageId, content: p.content, position: p.position, ...(p.sentByAccountId ? { sentByAccountId: p.sentByAccountId } : {}) })
+          if (p.sentByAccountId) messageActors.set(p.messageId, p.sentByAccountId)
         }
         if (p.kind === 'message.cancelled' || p.kind === 'turn.started') {
           queued.delete(p.messageId)
           settled.add(p.messageId)
         }
-        if (p.kind === 'turn.started') activeTurnId = p.turnId
-        if (p.kind === 'turn.finished' && activeTurnId === p.turnId) activeTurnId = null
+        if (p.kind === 'turn.started') { activeTurnId = p.turnId; activeTurnOwnerId = messageActors.get(p.messageId) ?? null }
+        if (p.kind === 'turn.finished' && activeTurnId === p.turnId) { activeTurnId = null; activeTurnOwnerId = null }
       }
       if (!page.nextSeq) break
       from = page.nextSeq
@@ -257,7 +262,7 @@ export class ServerService {
         queued.set(command.message.messageId, { commandId: pending.commandId, ...command.message, position: null })
       }
     }
-    return { activeTurnId, queuedMessages: [...queued.values()], freshness: await tx.cache.getFreshness(id) }
+    return { activeTurnId, activeTurnOwnerId, queuedMessages: [...queued.values()], freshness: await tx.cache.getFreshness(id) }
   }
   async getSession(id: SessionId, resources = this.store.resources): Promise<Session> {
     const s = requireValue(await resources.getSession(id)); await this.getProject(s.projectId, resources)
@@ -367,7 +372,8 @@ export class ServerService {
     if (requestedModelId !== null && !agent.models?.some(model => model?.modelId === requestedModelId)) throw new AppError(409, 'Model unavailable')
     const modelId = requestedModelId ?? agent.models?.map(model => model?.modelId).find(id => !!id) ?? null
     if (modelId === null) throw new AppError(409, 'Agent exposes no models')
-    const fingerprint = createHash('sha256').update(canonicalCommand({ workspaceId: workspace.id, workerId: worker.id, agentKey, modelId, title, shareScope: 'owner-only' })).digest('hex')
+    const shareScope = provenance?.shareScope ?? 'owner-only'
+    const fingerprint = createHash('sha256').update(canonicalCommand({ workspaceId: workspace.id, workerId: worker.id, agentKey, modelId, title, shareScope })).digest('hex')
     const ownerId = provenance?.ownerId ?? await this.operator(undefined, tx)
     if (requestId) {
       const previous = await tx.resources.getSessionByCreateRequest(ownerId, workspace.projectId, requestId)
@@ -377,20 +383,20 @@ export class ServerService {
       }
     }
     const sessionId = newId<'SessionId'>(), commandId = newId<'CommandId'>()
-    const session: Session = { id: sessionId, projectId: workspace.projectId, ownerId, workspaceId: workspace.id, title, shareScope: 'owner-only', binding: { workspaceId: workspace.id, agent: { workerId: worker.id, agentKey }, modelId }, runtimeState: 'idle', archivedAt: null, deletedAt: null, ...(requestId ? { creation: { requestId, fingerprint, commandId } } : {}), ...source }
+    const session: Session = { id: sessionId, projectId: workspace.projectId, ownerId, workspaceId: workspace.id, title, shareScope, binding: { workspaceId: workspace.id, agent: { workerId: worker.id, agentKey }, modelId }, runtimeState: 'idle', archivedAt: null, deletedAt: null, ...(requestId ? { creation: { requestId, fingerprint, commandId } } : {}), ...source }
     await tx.resources.saveSession(session)
     await this.command(tx, worker.id, { kind: 'session.create', session: { sessionId: session.id, binding: session.binding } }, commandId)
     await this.audit(tx, 'session.create', { kind: 'session', id: session.id })
     return { session, commandId, created: true }
   }
-  async enqueue(id: SessionId, input: unknown) {
-    const { workerId, ...result } = await this.store.transaction(tx => this.enqueueInTx(tx, id, input))
+  async enqueue(id: SessionId, input: unknown, actor?: UserId) {
+    const { workerId, ...result } = await this.store.transaction(tx => this.enqueueInTx(tx, id, input, actor))
     this.notifications.commands(workerId)
     return { ...result, status: (await this.store.commands.get(result.commandId))!.status }
   }
   /** Internal composition seam; capability preparation is local and read-only. */
-  async enqueueInTx(tx: ServerStoreTx, id: SessionId, input: unknown) {
-    const b = object(input), session = await this.getSession(id, tx.resources)
+  async enqueueInTx(tx: ServerStoreTx, id: SessionId, input: unknown, actor?: UserId) {
+    const b = object(input), session = actor && this.sessionAccess ? await this.sessionAccess.requireInTx(tx, actor, id, 'write') : await this.getSession(id, tx.resources)
     await this.getWorkspace(session.workspaceId, tx.resources)
     const capability = await sendCapability(tx, session)
     if (!capability.allowed) throw new AppError(409, capability.reason, capability.reasonCode)
@@ -401,48 +407,51 @@ export class ServerService {
     if (content.includes('\0')) throw new AppError(400, 'Message contains an unsupported NUL character')
     if (Buffer.byteLength(JSON.stringify(content)) > 200000) throw new AppError(400, 'Message exceeds the protocol byte limit')
     const prepared = this.capabilities ? await this.capabilities.prepareTurn({ sessionId: id, turnId: newId<'TurnId'>() }, tx.resources) : null
-    const command: WorkerCommand = { kind: 'session.enqueue', sessionId: id, message: { messageId, content }, ...(prepared ? { capabilities: prepared.runtime } : {}) }
+    const command: WorkerCommand = { kind: 'session.enqueue', sessionId: id, message: { messageId, content, ...(actor ? { sentByAccountId: actor } : {}) }, ...(prepared ? { capabilities: prepared.runtime } : {}) }
     if (new TextEncoder().encode(JSON.stringify({ type: 'command', commandId, command })).byteLength > 900 * 1024) throw new AppError(413, 'Message and capability assets exceed the worker transport limit')
     await this.command(tx, session.binding.agent.workerId, command, commandId)
-    await this.audit(tx, 'session.enqueue', { kind: 'session', id })
+    await this.audit(tx, 'session.enqueue', { kind: 'session', id }, actor)
     return { commandId, messageId, workerId: session.binding.agent.workerId }
   }
-  async cancelQueued(id: SessionId, submissionCommandId: CommandId, input: unknown) {
+  async cancelQueued(id: SessionId, submissionCommandId: CommandId, input: unknown, actor?: UserId) {
     const b = object(input)
     const commandId = b.commandId === undefined ? newId<'CommandId'>() : text(b.commandId, 'commandId', 200) as CommandId
-    return this.sessionControl(id, commandId, async tx => {
+    return this.sessionControl(id, commandId, actor, async tx => {
       const submission = await tx.commands.getPendingCommand(submissionCommandId)
       if (!submission || submission.command.kind !== 'session.enqueue' || submission.command.sessionId !== id) throw new AppError(404, 'Queued submission not found in Session')
+      if (actor && submission.command.message.sentByAccountId !== actor) await this.sessionAccess?.requireInTx(tx, actor, id, 'control')
       return { kind: 'session.cancel-queued', sessionId: id, submissionCommandId }
     })
   }
-  async stopTurn(id: SessionId, input: unknown) {
+  async stopTurn(id: SessionId, input: unknown, actor?: UserId) {
     const b = object(input)
     const commandId = b.commandId === undefined ? newId<'CommandId'>() : text(b.commandId, 'commandId', 200) as CommandId
-    return this.sessionControl(id, commandId, async tx => {
+    return this.sessionControl(id, commandId, actor, async tx => {
       // A retry must retain its original target, even after another Turn starts.
       const previous = await tx.commands.getPendingCommand(commandId)
+      const state = await this.executionState(tx, id)
       const turnId = b.turnId === undefined
-        ? previous?.command.kind === 'turn.stop' && previous.command.sessionId === id ? previous.command.turnId : (await this.executionState(tx, id)).activeTurnId
+        ? previous?.command.kind === 'turn.stop' && previous.command.sessionId === id ? previous.command.turnId : state.activeTurnId
         : text(b.turnId, 'turnId', 200) as TurnId
       if (!turnId) throw new AppError(409, 'Session has no observed active Turn')
-      if (!previous && turnId !== (await this.executionState(tx, id)).activeTurnId) throw new AppError(409, 'Turn is not active in Session')
+      if (!previous && turnId !== state.activeTurnId) throw new AppError(409, 'Turn is not active in Session')
+      if (actor && state.activeTurnOwnerId !== actor) await this.sessionAccess?.requireInTx(tx, actor, id, 'control')
       return { kind: 'turn.stop', sessionId: id, turnId }
     })
   }
-  private async sessionControl(id: SessionId, commandId: CommandId, build: (tx: ServerStoreTx) => Promise<WorkerCommand>) {
+  private async sessionControl(id: SessionId, commandId: CommandId, actor: UserId | undefined, build: (tx: ServerStoreTx) => Promise<WorkerCommand>) {
     const workerId = await this.store.transaction(async tx => {
-      const session = await this.getSession(id, tx.resources)
+      const session = actor && this.sessionAccess ? await this.sessionAccess.requireInTx(tx, actor, id, 'write') : await this.getSession(id, tx.resources)
       const command = await build(tx)
       const existing = await tx.commands.get(commandId)
       await this.command(tx, session.binding.agent.workerId, command, commandId)
-      if (!existing) await this.audit(tx, command.kind, { kind: 'session', id })
+      if (!existing) await this.audit(tx, command.kind, { kind: 'session', id }, actor)
       return session.binding.agent.workerId
     })
     this.notifications.commands(workerId)
     return { commandId }
   }
-  async invokeRuntimeCommand(id: SessionId, input: unknown) {
+  async invokeRuntimeCommand(id: SessionId, input: unknown, actor?: UserId) {
     const b = object(input)
     const commandId = b.commandId === undefined ? newId<'CommandId'>() : text(b.commandId, 'commandId', 200) as CommandId
     const operationId = (b.operationId === undefined ? commandId : text(b.operationId, 'operationId', 200)) as RuntimeOperationId
@@ -450,42 +459,47 @@ export class ServerService {
     if (name !== 'compact' && name !== 'set_model' && name !== 'set_thinking_level') throw new AppError(400, 'Unsupported runtime command')
     const args = b.arguments === undefined ? {} : object(b.arguments)
     const runtimeName = name as Extract<WorkerCommand, { kind: 'runtime.command' }>['name']
-    return this.sessionControl(id, commandId, async () => ({ kind: 'runtime.command', sessionId: id, operationId, name: runtimeName, arguments: args }))
+    return this.sessionControl(id, commandId, actor, async () => ({ kind: 'runtime.command', sessionId: id, operationId, name: runtimeName, arguments: args }))
   }
-  async resolveRuntimeApproval(id: SessionId, approvalId: ApprovalId, input: unknown) {
+  async resolveRuntimeApproval(id: SessionId, approvalId: ApprovalId, input: unknown, actor?: UserId) {
     const b = object(input), decision = text(b.decision, 'decision')
     if (decision !== 'approve' && decision !== 'deny') throw new AppError(400, 'decision must be approve or deny')
     const commandId = b.commandId === undefined ? newId<'CommandId'>() : text(b.commandId, 'commandId', 200) as CommandId
-    return this.sessionControl(id, commandId, async () => ({ kind: 'runtime.approval.resolve', sessionId: id, approvalId, decision }))
+    return this.sessionControl(id, commandId, actor, async () => ({ kind: 'runtime.approval.resolve', sessionId: id, approvalId, decision, ...(actor ? { decidedByAccountId: actor } : {}) }))
   }
-  async events(id: SessionId, from: number, limit: number) {
-    await this.getSession(id)
+  async requireSessionAccessInTx(tx: ServerStoreTx, actor: UserId, id: SessionId, capability: import('./session-access-service.js').SessionAccessCapability = 'read') {
+    if (!this.sessionAccess) return this.getSession(id, tx.resources)
+    return this.sessionAccess.requireInTx(tx, actor, id, capability)
+  }
+  async events(id: SessionId, from: number, limit: number, actor?: UserId) {
+    if (actor && this.sessionAccess) await this.sessionAccess.require(actor, id)
+    else await this.getSession(id)
     return { ...await this.store.cache.readEvents(id, integer(from, 'fromSeq', 1) as EventSeq, integer(limit, 'limit', 1, 1000)), freshness: await this.store.cache.getFreshness(id) }
   }
-  async update(kind: 'projects' | 'workspaces' | 'sessions', id: string, input: unknown) {
+  async update(kind: 'projects' | 'workspaces' | 'sessions', id: string, input: unknown, actor?: UserId) {
     const b = object(input)
     return this.store.transaction(async tx => {
-      await this.audit(tx, `${kind}.update`, kind === 'projects' ? { kind: 'project', id: id as ProjectId } : kind === 'workspaces' ? { kind: 'workspace', id: id as WorkspaceId } : { kind: 'session', id: id as SessionId })
+      await this.audit(tx, `${kind}.update`, kind === 'projects' ? { kind: 'project', id: id as ProjectId } : kind === 'workspaces' ? { kind: 'workspace', id: id as WorkspaceId } : { kind: 'session', id: id as SessionId }, actor)
       if (kind === 'projects') { const p = { ...await this.getProject(id as ProjectId, tx.resources), name: text(b.name, 'name', 200) }; await tx.resources.saveProject(p); return p }
       if (kind === 'workspaces') { const w = { ...await this.getWorkspace(id as WorkspaceId, tx.resources), name: text(b.name, 'name', 200) }; await tx.resources.saveWorkspace(w); return w }
       if (Object.keys(b).some(key => !['title', 'archived'].includes(key)) || (b.title === undefined && b.archived === undefined)) throw new AppError(400, 'Expected title or archived')
       if (b.archived !== undefined && typeof b.archived !== 'boolean') throw new AppError(400, 'archived must be boolean')
-      const session = await this.getSession(id as SessionId, tx.resources)
+      const session = actor && this.sessionAccess ? await this.sessionAccess.requireInTx(tx, actor, id as SessionId, 'control') : await this.getSession(id as SessionId, tx.resources)
       const s = { ...session, title: b.title === undefined ? session.title : text(b.title, 'title', 200), archivedAt: b.archived === undefined ? session.archivedAt ?? null : b.archived ? session.archivedAt ?? now() : null }
       await tx.resources.saveSession(s)
       return s
     })
   }
-  async delete(kind: 'projects' | 'workspaces' | 'sessions', id: string) {
+  async delete(kind: 'projects' | 'workspaces' | 'sessions', id: string, actor?: UserId) {
     if (kind === 'projects') {
       const project = await this.getProject(id as ProjectId)
       if ((await this.store.resources.listWorkspaces()).some(workspace => workspace.projectId === project.id && !workspace.deletedAt)) throw new AppError(409, 'Delete workspaces first')
     }
     await this.store.transaction(async tx => {
-      await this.audit(tx, `${kind}.delete`, kind === 'projects' ? { kind: 'project', id: id as ProjectId } : kind === 'workspaces' ? { kind: 'workspace', id: id as WorkspaceId } : { kind: 'session', id: id as SessionId })
+      await this.audit(tx, `${kind}.delete`, kind === 'projects' ? { kind: 'project', id: id as ProjectId } : kind === 'workspaces' ? { kind: 'workspace', id: id as WorkspaceId } : { kind: 'session', id: id as SessionId }, actor)
       if (kind === 'projects') await tx.resources.saveProject({ ...await this.getProject(id as ProjectId, tx.resources), deletedAt: now() })
       else if (kind === 'sessions') {
-        const session = await this.getSession(id as SessionId, tx.resources)
+        const session = actor && this.sessionAccess ? await this.sessionAccess.requireInTx(tx, actor, id as SessionId, 'control') : await this.getSession(id as SessionId, tx.resources)
         for (const task of await tx.tasks.list(session.projectId)) {
           if ((await tx.tasks.runs(task.id)).some(run => run.sessionId === session.id && ['pending', 'running', 'cancelling'].includes(run.status))) throw new AppError(409, 'Session has an active Run', 'run_session_protected')
         }

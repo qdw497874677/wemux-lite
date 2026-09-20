@@ -62,6 +62,9 @@ export const routes = {
   sessions: '/api/sessions',
   createSession: '/api/sessions',
   session: (sessionId: string) => `/api/sessions/${id(sessionId)}`,
+  sessionAccess: (sessionId: string) => `/api/sessions/${id(sessionId)}/access`,
+  sessionGrants: (sessionId: string) => `/api/sessions/${id(sessionId)}/grants`,
+  sessionGrant: (sessionId: string, userId: string) => `/api/sessions/${id(sessionId)}/grants/${id(userId)}`,
   deleteSession: (sessionId: string) => `/api/sessions/${id(sessionId)}`,
   messages: (sessionId: string) => `/api/sessions/${id(sessionId)}/messages`,
   stopTurn: (sessionId: string) => `/api/sessions/${id(sessionId)}/turn/stop`,
@@ -250,6 +253,10 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     patchSession: async (sessionId: string, body: PatchSessionDTO) => toSummary(await request<SessionResourceDTO>(routes.session(sessionId), body, undefined, 'PATCH')),
     renameSession: async (sessionId: string, title: string) => toSummary(await request<SessionResourceDTO>(routes.session(sessionId), { title }, undefined, 'PATCH')),
     deleteSession: (sessionId: string) => request<unknown>(routes.deleteSession(sessionId), undefined, undefined, 'DELETE'),
+    sessionGrants: (sessionId: string, signal?: AbortSignal) => list<{ sessionId: string; userId: string }>(routes.sessionGrants(sessionId), signal),
+    updateSessionAccess: async (sessionId: string, shareScope: NonNullable<SessionDTO['shareScope']>) => toSummary(await request<SessionResourceDTO>(routes.sessionAccess(sessionId), { shareScope }, undefined, 'PATCH')),
+    grantSession: (sessionId: string, userId: string) => request<{ sessionId: string; userId: string }>(routes.sessionGrants(sessionId), { userId }),
+    revokeSessionGrant: (sessionId: string, userId: string) => request<void>(routes.sessionGrant(sessionId, userId), undefined, undefined, 'DELETE'),
     workerGrants: (workerId: string, signal?: AbortSignal) => list<{ workerId: string; userId: string; role: 'use' | 'manage' }>(routes.workerGrants(workerId), signal),
     updateWorkerAccess: (workerId: string, shareScope: WorkerDTO['shareScope']) => request<WorkerDTO>(routes.workerAccess(workerId), { shareScope }, undefined, 'PATCH'),
     grantWorker: (workerId: string, userId: string, role: 'use' | 'manage') => request<{ workerId: string; userId: string; role: 'use' | 'manage' }>(routes.workerGrants(workerId), { userId, role }),
@@ -362,10 +369,13 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
 // The current backend is explicitly a single-admin MVP. No implicit multi-user ACL fallback.
 // When summary/ACL views ship, replace this resource adapter rather than changing UI components.
 function toSummary(resource: SessionResourceDTO): SessionDTO {
-  return { id: resource.id, projectId: resource.projectId, title: resource.title, workspaceId: resource.workspaceId,
+  return { id: resource.id, projectId: resource.projectId, ownerId: resource.ownerId, title: resource.title, workspaceId: resource.workspaceId,
     workerId: resource.binding.agent.workerId, agentKey: resource.binding.agent.agentKey,
     modelId: resource.binding.modelId, runtimeState: resource.runtimeState, archivedAt: resource.archivedAt ?? null, activeTurnId: null,
     queuedMessageCount: null, freshness: { status: 'unknown' }, updatedAt: '',
-    canRead: true, sendCapability: resource.sendCapability, canSend: resource.sendCapability?.allowed === true, canManage: true }
+    access: resource.access, shareScope: resource.shareScope,
+    canRead: resource.access?.canRead ?? true, sendCapability: resource.sendCapability,
+    canSend: resource.access?.canWrite === false ? false : resource.sendCapability?.allowed === true,
+    canManage: resource.access?.canControl ?? true }
 }
 export type Api = ReturnType<typeof createApi>
