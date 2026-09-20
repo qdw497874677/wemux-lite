@@ -149,7 +149,7 @@ export class TaskService {
       if (!task.assignee) throw new TaskError('assignment_changed', 'Task assignment required')
       const workspace = await this.workspace(tx, task, task.assignee.workspaceId)
       if ((await tx.tasks.binding(workspace.id))?.taskId !== id || !workspace.placements.some(placement => placement.workerId === task.assignee!.workerId && placement.status === 'ready')) throw new TaskError('assignment_changed', 'Assignment workspace placement changed')
-      const created = await server.createSessionInTx(tx, { ...task.assignee, title: b.title }, { taskId: id, runId: null })
+      const created = await server.createSessionInTx(tx, { ...task.assignee, title: b.title }, { taskId: id, runId: null, ownerId: context.actor })
       const session = created.session
       const at = new Date().toISOString()
       await this.record(tx, { ...task, lastActivityAt: at }, 'task.updated', { action: 'session.created', sessionId: session.id }, context)
@@ -203,6 +203,7 @@ export class TaskService {
       if (Object.keys(b).some(key => !['requestId', 'mode', 'prompt', 'reuseSessionId', 'assignment'].includes(key)) || typeof b.requestId !== 'string' || !b.requestId.trim() || b.requestId.length > 200 || b.requestId.includes('\0') || typeof b.prompt !== 'string' || !b.prompt.trim() || b.prompt.length > 100000 || b.prompt.includes('\0') || Buffer.byteLength(JSON.stringify(b.prompt)) > 200000) invalid('Invalid launch request')
       if ((b.mode !== 'new' && b.mode !== 'reuse') || (b.mode === 'new' ? b.reuseSessionId !== null : typeof b.reuseSessionId !== 'string' || !b.reuseSessionId)) invalid('Invalid launch mode/session')
       if (Object.keys(a).some(key => !['workspaceId', 'workerId', 'agentKey', 'modelId'].includes(key)) || ['workspaceId', 'workerId', 'agentKey', 'modelId'].some(key => typeof a[key] !== 'string' || !(a[key] as string).trim() || (a[key] as string).length > 200)) invalid('Complete assignment required')
+      await server.requireWorkerUseInTx(tx, context.actor, a.workerId as WorkerId)
       const request = structuredClone(b) as LaunchRequest
       const fingerprint = createHash('sha256').update(JSON.stringify(launchFingerprintInput(request))).digest('hex')
       const previous = await tx.tasks.runByRequest(id, request.requestId)
@@ -215,8 +216,10 @@ export class TaskService {
       this.enforce(launchCapability, launchCapability.reasonCode === 'assignment_changed' ? { assignment: task.assignee } : launchCapability.reasonCode === 'active_run' ? { runId: task.activeRun?.id } : undefined)
       const reused = request.mode === 'reuse' ? await tx.resources.getSession(request.reuseSessionId as SessionId) : null
       if (request.mode === 'reuse') this.enforce(evaluateCapability('launch_reuse', await reuseFacts(tx, facts, request.reuseSessionId)))
+      if (reused && server) await server.requireWorkerUseInTx(tx, context.actor, reused.binding.agent.workerId)
       const runId = randomUUID()
-      const created = reused ? { session: reused, commandId: null } : await server.createSessionInTx(tx, { ...request.assignment, title: task.title }, { taskId: id, runId })
+      if (reused && reused.ownerId !== context.actor) throw new TaskError('forbidden', 'Session use permission required')
+      const created = reused ? { session: reused, commandId: null } : await server.createSessionInTx(tx, { ...request.assignment, title: task.title }, { taskId: id, runId, ownerId: context.actor })
       const queued = await server.enqueueInTx(tx, created.session.id, { content: request.prompt })
       if (created.commandId) await tx.commands.depend(queued.commandId, created.commandId)
       const binding = created.session.binding
@@ -264,11 +267,11 @@ export class TaskService {
       if (Object.keys(a).some(key => !['workspaceId', 'workerId', 'agentKey', 'modelId'].includes(key)) || ['workspaceId', 'workerId', 'agentKey', 'modelId'].some(key => typeof a[key] !== 'string' || !a[key])) invalid('Complete assignment required')
       const workspace = await this.workspace(tx, task, a.workspaceId)
       if (!workspace.placements.some(placement => placement.workerId === a.workerId)) throw new TaskError('runtime_unavailable', 'Workspace is unavailable on selected Worker')
-      const worker = await tx.resources.getWorker(a.workerId as WorkerId)
+      const authorizedWorker = this.server ? await this.server.requireWorkerUseInTx(tx, context.actor, a.workerId as WorkerId) : await tx.resources.getWorker(a.workerId as WorkerId)
       const project = await tx.resources.getProject(task.projectId as ProjectId)
-      const agent = worker?.capabilities.find(value => value.agentKey === a.agentKey)
-      if (!worker || worker.teamId !== project?.teamId || worker.connectionState === 'revoked' || !agent || agent.mode !== 'execution' || agent.availability.status !== 'available' || !agent.models.some(model => model.modelId === a.modelId)) throw new TaskError('runtime_unavailable', 'Selected Agent or Model is unavailable')
-      assignment = { workspaceId: workspace.id, workerId: worker.id, agentKey: a.agentKey as string, modelId: a.modelId as string }
+      const agent = authorizedWorker?.capabilities.find(value => value.agentKey === a.agentKey)
+      if (!authorizedWorker || authorizedWorker.teamId !== project?.teamId || authorizedWorker.connectionState === 'revoked' || !agent || agent.mode !== 'execution' || agent.availability.status !== 'available' || !agent.models.some(model => model.modelId === a.modelId)) throw new TaskError('runtime_unavailable', 'Selected Agent or Model is unavailable')
+      assignment = { workspaceId: workspace.id, workerId: authorizedWorker.id, agentKey: a.agentKey as string, modelId: a.modelId as string }
       task = await this.bindInTx(tx, task, workspace.id, context)
     }
     const current = task.assignee
@@ -330,7 +333,7 @@ export class TaskService {
       await this.workspace(tx, task, workspaceId)
       if ((await tx.tasks.binding(workspaceId))?.taskId !== id) throw new TaskError('not_found', 'Workspace not bound to Task')
       const requestedWorkerId = b.workerId === undefined ? undefined : typeof b.workerId === 'string' ? b.workerId as WorkerId : invalid('Invalid workerId')
-      const result = await server.reprovisionWorkspaceInTx(tx, workspaceId as WorkspaceId, b.requestId as string, requestedWorkerId)
+      const result = await server.reprovisionWorkspaceInTx(tx, workspaceId as WorkspaceId, b.requestId as string, requestedWorkerId, context.actor)
       if (result.created) {
         const at = new Date().toISOString(); task = { ...task, updatedAt: at, lastActivityAt: at }
         await this.record(tx, task, 'workspace.retried', { workspaceId, commandId: result.commandId }, context)
@@ -351,7 +354,7 @@ export class TaskService {
     const result = await this.store.transaction(async tx => {
       let task = await this.writeTask(tx, projectId, id, context)
       if ('assignment' in b) this.cas(task, b.version)
-      const created = await server.createWorkspaceInTx(tx, { ...b, projectId })
+      const created = await server.createWorkspaceInTx(tx, { ...b, projectId }, context.actor)
       task = await this.bindInTx(tx, task, created.workspace.id, context)
       if ('assignment' in b) {
         if (!created.workerId) throw new TaskError('runtime_unavailable', 'Creating an assigned Workspace requires a Worker placement')

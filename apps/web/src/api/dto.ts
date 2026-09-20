@@ -9,7 +9,11 @@ export interface AgentDTO {
 }
 export interface WorkerDTO {
   id: string
+  teamId: string
+  ownerId: string
   name: string
+  shareScope: 'owner-only' | 'selected-members' | 'team'
+  accessRole: 'owner' | 'use' | 'manage'
   connectionState: 'online' | 'offline' | 'revoked'
   version: string | null
   platform: string | null

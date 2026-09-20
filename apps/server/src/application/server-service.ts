@@ -10,6 +10,8 @@ import { sendCapability } from './action-capabilities.js'
 import type { CapabilityService } from './capability-service.js'
 import { Notifications } from './notifications.js'
 import { integer, object, text } from './validation.js'
+import type { WorkerAccessService } from './worker-access-service.js'
+import type { ProjectAccessService } from './project-access-service.js'
 
 export const newId = <N extends string>(): Id<N> => randomUUID() as Id<N>
 export const now = (): Timestamp => new Date().toISOString() as Timestamp
@@ -38,7 +40,10 @@ export interface ForkTargetSessionInput {
 }
 
 export class ServerService {
-  constructor(private readonly store: ServerStore, readonly notifications: Notifications, private readonly capabilities?: CapabilityService) {}
+  constructor(private readonly store: ServerStore, readonly notifications: Notifications, private readonly capabilities?: CapabilityService, private readonly workerAccess?: WorkerAccessService, private readonly projectAccess?: ProjectAccessService) {}
+  async requireWorkerUseInTx(tx: ServerStoreTx, actor: UserId, workerId: WorkerId) {
+    return this.workerAccess ? this.workerAccess.requireInTx(tx, actor, workerId) : requireValue(await tx.resources.getWorker(workerId))
+  }
   async listWorkers() { return this.store.resources.listWorkers() }
   async getWorker(id: WorkerId) { return requireValue(await this.store.resources.getWorker(id)) }
   async getCommand(id: CommandId) { return requireValue(await this.store.commands.get(id)) }
@@ -65,19 +70,19 @@ export class ServerService {
     this.notifications.commands(command.workerId)
     return await this.getCommand(id)
   }
-  async revokeWorker(id: WorkerId, disconnect: (workerId: WorkerId) => void) {
-    return this.revokeWorkerAs(id, disconnect, 'worker.revoke')
+  async revokeWorker(id: WorkerId, disconnect: (workerId: WorkerId) => void, actor?: UserId) {
+    return this.revokeWorkerAs(id, disconnect, 'worker.revoke', actor)
   }
   async leaveWorker(id: WorkerId, disconnect: (workerId: WorkerId) => void) {
     return this.revokeWorkerAs(id, disconnect, 'worker.leave')
   }
-  private async revokeWorkerAs(id: WorkerId, disconnect: (workerId: WorkerId) => void, action: 'worker.revoke' | 'worker.leave') {
+  private async revokeWorkerAs(id: WorkerId, disconnect: (workerId: WorkerId) => void, action: 'worker.revoke' | 'worker.leave', actor?: UserId) {
     const worker = await this.getWorker(id)
     if (worker.connectionState === 'revoked') return worker
     await this.store.transaction(async tx => {
       await tx.resources.saveWorker({ ...worker, connectionState: 'revoked', lastSeenAt: now() })
       await tx.identity.revokeWorkerCredential(id, now())
-      await this.audit(tx, action, { kind: 'worker', id })
+      await this.audit(tx, action, { kind: 'worker', id }, actor)
     })
     disconnect(id)
     for (const session of await this.store.resources.listSessions()) if (session.binding.agent.workerId === id) this.notifications.session(session.id)
@@ -85,7 +90,7 @@ export class ServerService {
   }
   async reprovisionWorkspace(id: WorkspaceId, requestId: string = randomUUID(), workerId?: WorkerId, actor?: UserId) {
     const result = await this.store.transaction(async tx => {
-      const result = await this.reprovisionWorkspaceInTx(tx, id, requestId, workerId)
+      const result = await this.reprovisionWorkspaceInTx(tx, id, requestId, workerId, actor)
       const binding = await tx.tasks.binding(id)
       if (result.created && binding) {
         const task = requireValue(await tx.tasks.get(binding.taskId)), at = now()
@@ -100,13 +105,14 @@ export class ServerService {
     }
     return result
   }
-  async reprovisionWorkspaceInTx(tx: ServerStoreTx, id: WorkspaceId, requestId: string, requestedWorkerId?: WorkerId) {
+  async reprovisionWorkspaceInTx(tx: ServerStoreTx, id: WorkspaceId, requestId: string, requestedWorkerId?: WorkerId, actor?: UserId) {
     if (typeof requestId !== 'string' || !requestId.trim() || requestId.length > 200) throw new AppError(400, 'Invalid retry requestId')
     const workspace = await this.getWorkspace(id, tx.resources)
     const legacyWorkerId = (workspace as Workspace & { workerId?: WorkerId }).workerId
     const workerId = requestedWorkerId ?? workspace.placements.find(placement => placement.status === 'failed' || placement.status === 'pending')?.workerId ?? legacyWorkerId
     if (!workerId) throw new AppError(400, 'workerId is required when Workspace has no retryable placement')
-    const worker = requireValue(await tx.resources.getWorker(workerId))
+    const worker = actor && this.workerAccess ? await this.workerAccess.requireInTx(tx, actor, workerId) : requireValue(await tx.resources.getWorker(workerId))
+    if (actor && this.projectAccess) await this.projectAccess.requireInTx(tx, actor, workspace.projectId, 'contributor')
     if (worker.teamId !== (await this.getProject(workspace.projectId, tx.resources)).teamId || worker.connectionState === 'revoked') throw new AppError(403, 'Worker not usable')
     const placement = workspace.placements.find(value => value.workerId === worker.id)
     const previous = placement?.provisioning
@@ -280,17 +286,18 @@ export class ServerService {
     await tx.commands.insertPending({ commandId: id, workerId, command, payloadFingerprint: fingerprint, createdAt: now() })
     return id
   }
-  async createWorkspace(input: unknown): Promise<{ workspace: Workspace; workerId: WorkerId; commandId: CommandId } | { workspace: Workspace; workerId: undefined; commandId: undefined }> {
-    const result = await this.store.transaction(tx => this.createWorkspaceInTx(tx, input))
+  async createWorkspace(input: unknown, actor?: UserId): Promise<{ workspace: Workspace; workerId: WorkerId; commandId: CommandId } | { workspace: Workspace; workerId: undefined; commandId: undefined }> {
+    const result = await this.store.transaction(tx => this.createWorkspaceInTx(tx, input, actor))
     if (result.workerId) this.notifications.commands(result.workerId)
     this.notifications.project({ id: randomUUID(), projectId: result.workspace.projectId, workspaceId: result.workspace.id, type: 'workspace.provisioning' })
     return result
   }
   /** Internal composition seam: caller owns the transaction and post-commit notification. */
-  async createWorkspaceInTx(tx: ServerStoreTx, input: unknown): Promise<{ workspace: Workspace; workerId: WorkerId; commandId: CommandId } | { workspace: Workspace; workerId: undefined; commandId: undefined }> {
-    const b = object(input), p = await this.getProject(text(b.projectId, 'projectId') as ProjectId, tx.resources)
+  async createWorkspaceInTx(tx: ServerStoreTx, input: unknown, actor?: UserId): Promise<{ workspace: Workspace; workerId: WorkerId; commandId: CommandId } | { workspace: Workspace; workerId: undefined; commandId: undefined }> {
+    const b = object(input), projectId = text(b.projectId, 'projectId') as ProjectId
+    const p = actor && this.projectAccess ? await this.projectAccess.requireInTx(tx, actor, projectId, 'contributor') : await this.getProject(projectId, tx.resources)
     const requestedWorkerId = b.workerId === undefined ? undefined : text(b.workerId, 'workerId') as WorkerId
-    const worker = requestedWorkerId ? requireValue(await tx.resources.getWorker(requestedWorkerId)) : null
+    const worker = requestedWorkerId ? actor && this.workerAccess ? await this.workerAccess.requireInTx(tx, actor, requestedWorkerId) : requireValue(await tx.resources.getWorker(requestedWorkerId)) : null
     if (worker && (worker.teamId !== p.teamId || worker.connectionState === 'revoked')) throw new AppError(403, 'Worker not usable')
     const source = b.source === undefined ? (b.repository === undefined ? 'empty' : 'git') : text(b.source, 'source')
     if (source !== 'empty' && source !== 'git') throw new AppError(400, 'source must be empty or git')
@@ -313,8 +320,8 @@ export class ServerService {
     await this.audit(tx, 'workspace.create', { kind: 'workspace', id: workspace.id })
     return { workspace: { ...pending, workerId: worker.id, status: 'pending' as const, failureReason: null, provisioning: pending.placements[0].provisioning, location: null }, workerId: worker.id, commandId }
   }
-  async createSession(input: unknown) {
-    const result = await this.store.transaction(tx => this.createSessionInTx(tx, input))
+  async createSession(input: unknown, actor?: UserId) {
+    const result = await this.store.transaction(tx => this.createSessionInTx(tx, input, actor ? { ownerId: actor } : undefined))
     if (result.created) this.notifications.commands(result.session.binding.agent.workerId)
     return result
   }
@@ -337,12 +344,14 @@ export class ServerService {
   /** Internal composition seam; never opens a transaction or notifies. */
   async createSessionInTx(tx: ServerStoreTx, input: unknown, provenance?: SessionProvenance) {
     const b = object(input), workspace = await this.getWorkspace(text(b.workspaceId, 'workspaceId') as WorkspaceId, tx.resources)
+    if (provenance?.ownerId && this.projectAccess) await this.projectAccess.requireInTx(tx, provenance.ownerId, workspace.projectId, 'contributor')
     const source = provenance === undefined || (provenance.taskId === undefined && provenance.runId === undefined) ? undefined : { taskId: provenance.taskId ?? null, runId: provenance.runId ?? null }
     const requestedWorkerId = b.workerId === undefined ? undefined : text(b.workerId, 'workerId') as WorkerId
+    const authorizedRequestedWorker = requestedWorkerId && provenance?.ownerId && this.workerAccess ? await this.workerAccess.requireInTx(tx, provenance.ownerId, requestedWorkerId) : null
     const readyPlacements = workspace.placements.filter(placement => placement.status === 'ready')
     const selected = requestedWorkerId ? readyPlacements.find(placement => placement.workerId === requestedWorkerId) : readyPlacements.length === 1 ? readyPlacements[0] : undefined
     if (!selected) throw new AppError(409, requestedWorkerId ? 'Workspace is not ready on selected Worker' : readyPlacements.length ? 'workerId is required when Workspace is ready on multiple Workers' : 'Workspace has no ready placement')
-    const worker = requireValue(await tx.resources.getWorker(selected.workerId))
+    const worker = authorizedRequestedWorker ?? (provenance?.ownerId && this.workerAccess ? await this.workerAccess.requireInTx(tx, provenance.ownerId, selected.workerId) : requireValue(await tx.resources.getWorker(selected.workerId)))
     const agentKey = text(b.agentKey, 'agentKey') as AgentKey
     // modelId is optional at the HTTP boundary: when omitted we resolve the Agent's
     // first advertised model, because the send capability and the worker protocol

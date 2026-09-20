@@ -1,6 +1,6 @@
 import type { ProjectId, SessionId, UserId, WorkerId } from '@wemux/domain'
 
-export type WorkerGrantRole = 'user' | 'manager'
+export type WorkerGrantRole = 'use' | 'manage'
 export type ProjectGrantRole = 'viewer' | 'contributor' | 'manager'
 export type ResourceShareScope = 'owner-only' | 'selected-members' | 'team'
 export type SessionShareScope = 'owner-only' | 'selected-members' | 'project'

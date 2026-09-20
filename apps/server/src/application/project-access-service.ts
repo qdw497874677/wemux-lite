@@ -20,9 +20,17 @@ export class ProjectAccessService {
   }
 
   async require(actor: UserId, projectId: ProjectId, minimum: ProjectAccessRole = 'viewer'): Promise<Project & { accessRole: ProjectAccessRole }> {
-    const project = await this.store.resources.getProject(projectId)
+    return this.requireFrom(this.store, actor, projectId, minimum)
+  }
+
+  async requireInTx(tx: ServerStoreTx, actor: UserId, projectId: ProjectId, minimum: ProjectAccessRole = 'viewer'): Promise<Project & { accessRole: ProjectAccessRole }> {
+    return this.requireFrom(tx, actor, projectId, minimum)
+  }
+
+  private async requireFrom(readers: Pick<ServerStore, 'identity' | 'resources'> | ServerStoreTx, actor: UserId, projectId: ProjectId, minimum: ProjectAccessRole) {
+    const project = await readers.resources.getProject(projectId)
     if (!project || project.deletedAt) throw new AppError(404, 'Project not found', 'project_not_found')
-    const role = await this.role(actor, project)
+    const role = await this.roleFrom(readers.identity, actor, project)
     if (!role || rank[role] < rank[minimum]) throw new AppError(404, 'Project not found', 'project_not_found')
     return { ...project, accessRole: role }
   }
@@ -73,8 +81,12 @@ export class ProjectAccessService {
   }
 
   async role(actor: UserId, project: Project): Promise<ProjectAccessRole | null> {
+    return this.roleFrom(this.store.identity, actor, project)
+  }
+
+  private async roleFrom(identity: ServerStore['identity'] | ServerStoreTx['identity'], actor: UserId, project: Project): Promise<ProjectAccessRole | null> {
     if (project.ownerId === actor) return 'owner'
-    const records = await this.store.identity.getIdentityRecords({ userId: actor, teamId: project.teamId, projectId: project.id })
+    const records = await identity.getIdentityRecords({ userId: actor, teamId: project.teamId, projectId: project.id })
     if (!records.membership) return null
     if (records.projectGrant) return records.projectGrant.role
     return project.shareScope === 'team' ? 'viewer' : null

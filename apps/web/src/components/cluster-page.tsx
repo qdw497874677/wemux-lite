@@ -13,6 +13,7 @@ import { commandStateLabel, formatChineseTime, runtimeStateLabel, workerStateLab
 import { Button } from './ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 import { cn } from '../lib/utils'
+import { WorkerAccessPanel } from './worker-access.tsx'
 
 const heartbeatFreshMs = 120_000
 
@@ -66,14 +67,14 @@ function StageTable({ headers, rows, empty }: { headers: string[]; rows: React.R
   </div>
 }
 
-export function ClusterPage({ api, connected, onAddWorker, onRefresh }: { api: Api; connected: boolean; onAddWorker: () => void; onRefresh: () => void }) {
+export function ClusterPage({ api, connected, canEnrollWorkers, onAddWorker, onRefresh }: { api: Api; connected: boolean; canEnrollWorkers: boolean; onAddWorker: () => void; onRefresh: () => void }) {
   const resources = useResources(api, true)
   const client = useQueryClient()
   const workers = resources.workers.data ?? []
   const projects = resources.projects.data ?? []
   const workspaces = resources.workspaces.data ?? []
   const sessions = resources.sessions.data ?? []
-  const commandQuery = useQuery({ queryKey: ['commands'], queryFn: ({ signal }) => api.commands(signal), refetchInterval: 5000, enabled: connected })
+  const commandQuery = useQuery({ queryKey: ['commands'], queryFn: ({ signal }) => api.commands(signal), refetchInterval: 5000, enabled: connected && canEnrollWorkers })
   const commands = commandQuery.data ?? []
   const [actionError, setError] = useState('')
   const error = actionError || (commandQuery.error ? `命令数据可能过期：${errorText(commandQuery.error)}` : '')
@@ -123,7 +124,7 @@ export function ClusterPage({ api, connected, onAddWorker, onRefresh }: { api: A
         </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={() => { onRefresh() }}><RefreshCw className="size-4" />刷新</Button>
-          <Button variant="outline" size="sm" disabled={!connected} onClick={onAddWorker}><ServerCog className="size-4" />添加工作节点</Button>
+          {canEnrollWorkers && <Button variant="outline" size="sm" disabled={!connected} onClick={onAddWorker}><ServerCog className="size-4" />添加工作节点</Button>}
         </div>
       </header>
 
@@ -139,7 +140,7 @@ export function ClusterPage({ api, connected, onAddWorker, onRefresh }: { api: A
 
       <section className="space-y-3">
         <h2 className="text-sm font-semibold">工作节点</h2>
-        {!workers.length && <p className="rounded-xl border border-border bg-card p-6 text-center text-xs text-muted-foreground">尚未注册任何工作节点。点击「添加工作节点」生成注册命令。</p>}
+        {!workers.length && <p className="rounded-xl border border-border bg-card p-6 text-center text-xs text-muted-foreground">{canEnrollWorkers ? '尚未注册任何工作节点。点击「添加工作节点」生成注册命令。' : '当前账号没有可使用的工作节点。请联系节点 owner 或 manager 授予 use 权限。'}</p>}
         <div className="grid gap-3 md:grid-cols-2">
           {workers.map(worker => {
             const heartbeatAge = formatAge(worker.lastSeenAt)
@@ -157,7 +158,7 @@ export function ClusterPage({ api, connected, onAddWorker, onRefresh }: { api: A
                     <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{shortId(worker.id)}</p>
                   </div>
                 </div>
-                {worker.connectionState !== 'revoked' && <Button variant="ghost" size="sm" className="h-7 text-[11px] text-red-400 hover:text-red-300" disabled={Boolean(busy)} onClick={() => { if (window.confirm(`撤销 Worker「${worker.name}」？撤销后将断开连接，无法再用当前凭据接入。`)) void act(`revoke:${worker.id}`, () => api.revokeWorker(worker.id)) }}><Ban className="size-3.5" />撤销</Button>}
+                {(worker.accessRole === 'owner' || worker.accessRole === 'manage') && worker.connectionState !== 'revoked' && <Button variant="ghost" size="sm" className="h-7 text-[11px] text-red-400 hover:text-red-300" disabled={Boolean(busy)} onClick={() => { if (window.confirm(`撤销 Worker「${worker.name}」？撤销后将断开连接，无法再用当前凭据接入。`)) void act(`revoke:${worker.id}`, () => api.revokeWorker(worker.id)) }}><Ban className="size-3.5" />撤销</Button>}
               </div>
               <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] sm:grid-cols-4">
                 <div className="rounded-md bg-muted/40 px-2.5 py-1.5"><p className="text-muted-foreground">心跳</p><p className={cn('mt-0.5 font-medium', fresh ? 'text-emerald-400' : 'text-amber-300')}>{worker.connectionState === 'online' ? heartbeatAge ?? '未知' : '离线'}</p></div>
@@ -165,20 +166,21 @@ export function ClusterPage({ api, connected, onAddWorker, onRefresh }: { api: A
                 <div className="rounded-md bg-muted/40 px-2.5 py-1.5"><p className="text-muted-foreground">会话</p><p className="mt-0.5 font-medium">{sessionCountByWorker.get(worker.id) ?? 0}</p></div>
                 <div className="rounded-md bg-muted/40 px-2.5 py-1.5"><p className="text-muted-foreground">工作区</p><p className="mt-0.5 font-medium">{workspaceCountByWorker.get(worker.id) ?? 0}</p></div>
               </div>
-              <p className="mt-2 truncate text-[10px] text-muted-foreground"><Clock className="mr-1 inline size-3" />{worker.version ? `v${worker.version}` : '版本未知'}{worker.platform ? ` · ${worker.platform}` : ''} · 最后在线 {worker.lastSeenAt ? formatChineseTime(worker.lastSeenAt) : '从未'}</p>
+              <p className="mt-2 truncate text-[10px] text-muted-foreground"><Clock className="mr-1 inline size-3" />{worker.version ? `v${worker.version}` : '版本未知'}{worker.platform ? ` · ${worker.platform}` : ''} · 最后在线 {worker.lastSeenAt ? formatChineseTime(worker.lastSeenAt) : '从未'} · 权限 {worker.accessRole}</p>
+              <WorkerAccessPanel api={api} worker={worker} onChanged={() => void client.invalidateQueries({ queryKey: ['workers'] })} />
             </article>
           })}
         </div>
       </section>
 
-      <Tabs defaultValue="commands" variant="plain" className="space-y-3">
+      <Tabs defaultValue={canEnrollWorkers ? 'commands' : 'workspaces'} variant="plain" className="space-y-3">
         <TabsList className="w-full justify-start overflow-x-auto">
-          <TabsTrigger value="commands">命令交付（{commands.length}）</TabsTrigger>
+          {canEnrollWorkers && <TabsTrigger value="commands">命令交付（{commands.length}）</TabsTrigger>}
           <TabsTrigger value="workspaces">工作区初始化（{workspaces.length}）</TabsTrigger>
           <TabsTrigger value="sessions">会话运行（{sessions.length}）</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="commands" className="rounded-xl border border-border bg-card">
+        {canEnrollWorkers && <TabsContent value="commands" className="rounded-xl border border-border bg-card">
           <StageTable
             headers={['命令', '工作节点', '状态', '创建于', '操作']}
             empty="命令列表为空。发送消息、创建工作区或会话后，命令先进入 pending，经工作节点确认后推进。"
@@ -192,7 +194,7 @@ export function ClusterPage({ api, connected, onAddWorker, onRefresh }: { api: A
                 : <span key="none" className="text-muted-foreground">—</span>,
             ])}
           />
-        </TabsContent>
+        </TabsContent>}
 
         <TabsContent value="workspaces" className="rounded-xl border border-border bg-card">
           <StageTable

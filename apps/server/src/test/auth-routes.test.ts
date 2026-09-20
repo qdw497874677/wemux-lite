@@ -125,8 +125,9 @@ test('声明命中的账号登录即成为实例管理员并补齐默认环境�
   const member = await signIn(base, 'member')
   assert.equal(member.account.instanceAdministrator, false)
   assert.equal(member.account.teamId, null)
-  assert.equal((await member.client.call('/workers')).status, 403)
-  assert.equal(errorCode((await member.client.call('/workers')).data), 'admin_required')
+  const memberWorkers = await member.client.call('/workers')
+  assert.equal(memberWorkers.status, 200)
+  assert.deepEqual(memberWorkers.data, { items: [] }, '普通账号只能看到显式获权的 Worker，不因登录或实例存在节点而自动获得权限')
   assert.equal((await app.store.identity.listInstanceAdministrators()).length, 1, '普通成员不写管理员归属')
 
   // 退役入口：没有引导令牌，也没有首次认领表单；旧代理令牌入口仍是 410。

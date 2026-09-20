@@ -24,6 +24,7 @@ import type { InstanceSettingsService } from '../application/instance-settings.j
 import type { SessionLineageService } from '../application/session-lineage-service.js'
 import type { TeamService } from '../application/team-service.js'
 import type { ProjectAccessService } from '../application/project-access-service.js'
+import type { WorkerAccessService } from '../application/worker-access-service.js'
 import { sendTeamInvitationMail } from '../application/team-invitation-mail.js'
 import type { MailSettings } from '../application/mail/email-delivery.js'
 import { readCookie } from './cookies.js'
@@ -47,7 +48,7 @@ function json(response: ServerResponse, status: number, data: unknown): void {
 
 export interface WorkerControl { disconnectWorker(workerId: import('@wemux/domain').WorkerId): void }
 
-export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, _adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams, identity?: IdentityService | null, registration?: EmailRegistrationService | null, settings?: InstanceSettingsService | null, google?: GoogleAuthenticationService | null, lineage?: SessionLineageService | null, security?: AccountSecurityService | null, teams?: TeamService | null, mail?: MailSettings | null, projects?: ProjectAccessService | null) {
+export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, _adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams, identity?: IdentityService | null, registration?: EmailRegistrationService | null, settings?: InstanceSettingsService | null, google?: GoogleAuthenticationService | null, lineage?: SessionLineageService | null, security?: AccountSecurityService | null, teams?: TeamService | null, mail?: MailSettings | null, projects?: ProjectAccessService | null, workerAccess?: WorkerAccessService | null) {
   return (request: IncomingMessage, response: ServerResponse): void => {
     void (async () => {
       const url = new URL(request.url ?? '/', 'http://localhost'), rawPath = url.pathname === '/' ? '/' : url.pathname.replace(/\/$/, '')
@@ -211,13 +212,28 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
         if (kind === 'workspaces') { const workspace = await service.getWorkspace(id as WorkspaceId); await projects.require(actor, workspace.projectId); json(response, 200, workspace); return }
         const session = await service.getSession(id as SessionId); await projects.require(actor, session.projectId); json(response, 200, await service.sessionView(session.id)); return
       }
+      if (workerAccess && method === 'GET' && path === '/workers') { json(response, 200, { items: await workerAccess.list(await auth.taskActor(credential)) }); return }
+      const workerAccessRoute = path.match(/^\/workers\/([^/]+)(?:\/(access|grants|capabilities|revoke)(?:\/([^/]+))?)?$/)
+      if (workerAccess && workerAccessRoute) {
+        const actor = await auth.taskActor(credential), workerId = workerAccessRoute[1] as WorkerId, resource = workerAccessRoute[2], childId = workerAccessRoute[3]
+        if (method === 'GET' && !resource) { json(response, 200, await workerAccess.require(actor, workerId)); return }
+        if (method === 'GET' && resource === 'capabilities') { const worker = await workerAccess.require(actor, workerId); json(response, 200, { workerId, capabilities: worker.capabilities }); return }
+        if (method === 'GET' && resource === 'grants' && !childId) { json(response, 200, { items: await workerAccess.grants(actor, workerId) }); return }
+        if (method === 'POST' && resource === 'grants' && !childId) { json(response, 201, await workerAccess.grant(actor, workerId, await body(request))); return }
+        if (method === 'DELETE' && resource === 'grants' && childId) { await workerAccess.revoke(actor, workerId, childId as never); response.writeHead(204).end(); return }
+        if (method === 'PATCH' && resource === 'access') { json(response, 200, await workerAccess.updateShareScope(actor, workerId, await body(request))); return }
+        if (method === 'POST' && resource === 'revoke') { await workerAccess.require(actor, workerId, 'manage'); json(response, 200, await service.revokeWorker(workerId, id => control?.disconnectWorker(id), actor)); return }
+      }
+      if (projects && workerAccess && method === 'POST' && (path === '/workspaces' || path === '/sessions')) {
+        const actor = await auth.taskActor(credential), input = await body(request)
+        json(response, 201, path === '/workspaces' ? await service.createWorkspace(input, actor) : await service.createSession(input, actor)); return
+      }
       await auth.authenticateAdmin(credential)
       // 集群控制面的写操作归属真实用户：优先 Cookie 会话，其次该 PAT 的归属用户。
       const operator = await auth.taskActor(credential)
       // 默认环境不再由合成用户拥有：由当前管理员会话就地建立（幂等）。
       if (method === 'POST' && path === '/bootstrap') { json(response, 200, await service.ensureDefaultEnvironment(operator)); return }
       if (method === 'POST' && path === '/enrollment-tokens') { json(response, 201, await service.createEnrollment(await body(request), operator)); return }
-      if (method === 'GET' && path === '/workers') { json(response, 200, { items: await service.listWorkers() }); return }
       if (method === 'GET' && path === '/cluster/tailnet') { json(response, 200, await readTailnetSelf()); return }
       const projectAssets = path.match(/^\/projects\/([^/]+)\/capability-assets$/)
       if (projectAssets && capabilities) {
@@ -229,19 +245,12 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
           json(response, 200, { items: await capabilities.replaceProjectAssets(projectId, input.items as any[]) }); return
         }
       }
-      const worker = path.match(/^\/workers\/([^/]+)(\/capabilities)?$/)
-      if (method === 'GET' && worker) {
-        const value = await service.getWorker(worker[1] as WorkerId)
-        json(response, 200, worker[2] ? { workerId: value.id, capabilities: value.capabilities } : value); return
-      }
       const command = path.match(/^\/commands\/([^/]+)$/)
       if (method === 'GET' && command) { json(response, 200, await service.getCommand(command[1] as CommandId)); return }
       if (method === 'DELETE' && command) { json(response, 200, await service.cancelCommand(command[1] as CommandId)); return }
       if (method === 'GET' && path === '/commands') {
         json(response, 200, { items: await service.listCommands({ workerId: url.searchParams.get('workerId') ?? undefined, status: url.searchParams.get('status') ?? undefined, limit: Number(url.searchParams.get('limit') ?? 100) }) }); return
       }
-      const revoke = path.match(/^\/workers\/([^/]+)\/revoke$/)
-      if (method === 'POST' && revoke) { json(response, 200, await service.revokeWorker(revoke[1] as WorkerId, id => control?.disconnectWorker(id))); return }
       const reprovision = path.match(/^\/workspaces\/([^/]+)\/reprovision$/)
       if (method === 'POST' && reprovision) {
         const input = await body(request) as { requestId?: unknown; workerId?: unknown }
@@ -320,7 +329,7 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
         }
         if (!id && method === 'POST') {
           const input = await body(request)
-          json(response, 201, kind === 'projects' ? await service.createProject(input, operator) : kind === 'workspaces' ? await service.createWorkspace(input) : await service.createSession(input)); return
+          json(response, 201, kind === 'projects' ? await service.createProject(input, operator) : kind === 'workspaces' ? await service.createWorkspace(input, operator) : await service.createSession(input, operator)); return
         }
         if (id && method === 'GET') { json(response, 200, kind === 'projects' ? await service.getProject(id as ProjectId) : kind === 'workspaces' ? await service.getWorkspace(id as WorkspaceId) : await service.sessionView(id as SessionId)); return }
         if (id && method === 'PATCH') { json(response, 200, await service.update(kind, id, await body(request))); return }

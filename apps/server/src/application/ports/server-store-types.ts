@@ -130,6 +130,8 @@ export interface ServerIdentityReader {
   listMemberships(userId: UserId): Promise<readonly Membership[]>
   /** 一个 Team 的完整成员集合；成员列表与权限管理不能通过扫描用户侧关系拼装。 */
   listTeamMemberships(teamId: TeamId): Promise<readonly Membership[]>
+  /** Worker Grant directory; authorization must not discover grants by scanning unrelated records. */
+  listWorkerGrants(workerId: WorkerId): Promise<readonly WorkerGrant[]>
   /** Project Grant directory; authorization must not discover grants by scanning unrelated records. */
   listProjectGrants(projectId: import('@wemux/domain').ProjectId): Promise<readonly ProjectGrant[]>
   /** Newest-first audit entries; durable report channel for administrator assignment and upgrade decisions. */
@@ -171,6 +173,7 @@ export interface ServerIdentityWriter {
   consumeTeamInvitation(input: { readonly tokenHash: string; readonly consumedAt: Timestamp }): Promise<TeamInvitation | null>
   revokeTeamInvitation(id: string, revokedAt: Timestamp): Promise<TeamInvitation | null>
   saveWorkerGrant(grant: WorkerGrant): Promise<void>
+  removeWorkerGrant(workerId: WorkerId, userId: UserId): Promise<void>
   saveProjectGrant(grant: ProjectGrant): Promise<void>
   removeProjectGrant(projectId: import('@wemux/domain').ProjectId, userId: UserId): Promise<void>
   saveSessionGrant(grant: SessionGrant): Promise<void>
