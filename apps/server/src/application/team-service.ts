@@ -1,10 +1,11 @@
-import { randomBytes, randomUUID } from 'node:crypto'
-import type { AuditEntryId, TeamId, Timestamp, UserId } from '@wemux/domain'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import type { AuditEntryId, CommandId, EventSeq, MessageId, SessionId, TeamId, Timestamp, TurnId, UserId, WorkerId } from '@wemux/domain'
 import type { Membership, Team, TeamInvitation, TeamInvitationStatus, TeamRole, User } from '@wemux/server-domain'
 import { hashSecret } from './auth.js'
 import { normalizeEmail } from './email-address.js'
 import { AppError } from './errors.js'
 import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
+import type { Notifications } from './notifications.js'
 
 const now = (): Timestamp => new Date().toISOString() as Timestamp
 const invitationLifetimeMs = 7 * 24 * 60 * 60 * 1000
@@ -28,7 +29,7 @@ export interface TeamInvitationView {
 }
 
 export class TeamService {
-  constructor(private readonly store: ServerStore) {}
+  constructor(private readonly store: ServerStore, private readonly notifications?: Notifications) {}
 
   async create(actorId: UserId, input: unknown): Promise<TeamSummary> {
     const name = teamName(input)
@@ -60,6 +61,114 @@ export class TeamService {
       if (!user) throw new AppError(409, 'Team membership points to a missing User', 'team_membership_corrupt')
       return { user, role: membership.role, joinedAt: membership.joinedAt }
     }))
+  }
+
+  async updateMemberRole(actorId: UserId, teamId: TeamId, userId: UserId, input: unknown): Promise<{ user: User; role: TeamRole; joinedAt: Timestamp }> {
+    const role = memberRole(input)
+    const updated = await this.store.transaction(async tx => {
+      const memberships = await tx.identity.listTeamMemberships(teamId)
+      const actor = memberships.find(value => value.userId === actorId)
+      if (actor?.role !== 'owner') throw new AppError(403, '只有 Team owner 可以调整治理角色', 'team_owner_required')
+      const target = memberships.find(value => value.userId === userId)
+      if (!target) throw new AppError(404, '目标成员不存在', 'team_member_not_found')
+      if (target.role === 'owner') throw new AppError(409, 'Team owner 必须通过显式所有权转移变更', 'ownership_transfer_required')
+      if (role === 'member') await assertInstanceAdministratorPreserved(tx, userId)
+      const user = await tx.identity.getUser(userId)
+      if (!user) throw new AppError(409, 'Team membership points to a missing User', 'team_membership_corrupt')
+      const membership = { ...target, role }
+      await tx.identity.saveMembership(membership)
+      await audit(tx, actorId, 'team.member.role.update', teamId, now(), { userId, previousRole: target.role, role })
+      return { user, role: membership.role, joinedAt: membership.joinedAt }
+    })
+    this.notifications?.authorization(userId)
+    return updated
+  }
+
+  async removeMember(actorId: UserId, teamId: TeamId, userId: UserId): Promise<void> {
+    const cancellationWorkers = await this.store.transaction(async tx => {
+      const memberships = await tx.identity.listTeamMemberships(teamId)
+      const actor = memberships.find(value => value.userId === actorId)
+      if (!actor || (actor.role !== 'owner' && actor.role !== 'admin')) throw new AppError(403, '需要团队管理员权限', 'team_admin_required')
+      const target = memberships.find(value => value.userId === userId)
+      if (!target) throw new AppError(404, '目标成员不存在', 'team_member_not_found')
+      if (target.role === 'owner') throw new AppError(409, 'Team owner 必须先显式转移所有权', 'ownership_transfer_required')
+      if (actor.role === 'admin' && target.role !== 'member') throw new AppError(403, 'Team admin 只能移除普通成员', 'team_owner_required')
+      await assertInstanceAdministratorPreserved(tx, userId)
+
+      const projects = (await tx.resources.listProjects()).filter(project => project.teamId === teamId && !project.deletedAt)
+      const workers = (await tx.resources.listWorkers()).filter(worker => worker.teamId === teamId)
+      const projectIds = new Set(projects.map(project => project.id))
+      const sessions = (await tx.resources.listSessions()).filter(session => projectIds.has(session.projectId) && !session.deletedAt)
+      const owned = [
+        ...projects.filter(project => project.ownerId === userId).map(project => `project:${project.id}`),
+        ...workers.filter(worker => worker.ownerId === userId).map(worker => `worker:${worker.id}`),
+        ...sessions.filter(session => session.ownerId === userId).map(session => `session:${session.id}`),
+      ]
+      if (owned.length > 0) throw new AppError(409, '该成员仍拥有团队资源，请先转移所有权', 'member_owns_resources')
+
+      const cancellationWorkers = new Set<WorkerId>()
+      let stopCommands = 0
+      for (const session of sessions) {
+        const execution = await activeExecutionOwnedBy(tx, session.id, userId)
+        if (!execution) continue
+        const commandId = `membership-revocation:${teamId}:${userId}:${session.id}:${execution.turnId}` as CommandId
+        const command = { kind: 'turn.stop' as const, sessionId: session.id, turnId: execution.turnId }
+        const existing = await tx.commands.get(commandId)
+        if (existing) {
+          if (existing.workerId !== session.binding.agent.workerId || existing.payloadFingerprint !== commandFingerprint(command)) throw new AppError(409, '撤权停止命令冲突', 'revocation_command_conflict')
+        } else {
+          await tx.commands.insertPending({ commandId, workerId: session.binding.agent.workerId, command, payloadFingerprint: commandFingerprint(command), createdAt: now() })
+          stopCommands++
+        }
+        cancellationWorkers.add(session.binding.agent.workerId)
+      }
+
+      let projectGrants = 0, workerGrants = 0, sessionGrants = 0
+      for (const project of projects) {
+        if ((await tx.identity.listProjectGrants(project.id)).some(grant => grant.userId === userId)) projectGrants++
+        await tx.identity.removeProjectGrant(project.id, userId)
+      }
+      for (const worker of workers) {
+        if ((await tx.identity.listWorkerGrants(worker.id)).some(grant => grant.userId === userId)) workerGrants++
+        await tx.identity.removeWorkerGrant(worker.id, userId)
+      }
+      for (const session of sessions) {
+        if ((await tx.identity.listSessionGrants(session.id)).some(grant => grant.userId === userId)) sessionGrants++
+        await tx.identity.removeSessionGrant(session.id, userId)
+      }
+      await tx.identity.removeMembership(teamId, userId)
+      await audit(tx, actorId, 'team.member.remove', teamId, now(), {
+        userId,
+        previousRole: target.role,
+        projectGrants: String(projectGrants),
+        workerGrants: String(workerGrants),
+        sessionGrants: String(sessionGrants),
+        stopCommands: String(stopCommands),
+      })
+      return [...cancellationWorkers]
+    })
+    this.notifications?.authorization(userId)
+    for (const workerId of cancellationWorkers) this.notifications?.commands(workerId)
+  }
+
+  async transferOwnership(actorId: UserId, teamId: TeamId, input: unknown): Promise<{ teamId: TeamId; ownerId: UserId; previousOwnerId: UserId }> {
+    const { userId, confirmation } = ownershipTransfer(input)
+    return this.store.transaction(async tx => {
+      const team = await tx.identity.getTeam(teamId)
+      if (!team) throw new AppError(404, '团队不存在', 'team_not_found')
+      if (confirmation !== team.name) throw new AppError(400, '请输入完整团队名称确认转移', 'ownership_confirmation_mismatch')
+      const memberships = await tx.identity.listTeamMemberships(teamId)
+      const currentOwner = memberships.find(value => value.userId === actorId)
+      if (currentOwner?.role !== 'owner') throw new AppError(403, '只有 Team owner 可以转移所有权', 'team_owner_required')
+      if (userId === actorId) throw new AppError(409, '目标成员已经是 Team owner', 'ownership_target_is_owner')
+      const successor = memberships.find(value => value.userId === userId)
+      if (!successor) throw new AppError(404, '目标成员不存在', 'team_member_not_found')
+      const transferredAt = now()
+      await tx.identity.saveMembership({ ...currentOwner, role: 'admin' })
+      await tx.identity.saveMembership({ ...successor, role: 'owner' })
+      await audit(tx, actorId, 'team.ownership.transfer', teamId, transferredAt, { ownerId: userId, previousOwnerId: actorId })
+      return { teamId, ownerId: userId, previousOwnerId: actorId }
+    })
   }
 
   async invite(actorId: UserId, teamId: TeamId, input: unknown): Promise<TeamInvitationView & { token: string; existingAccount: boolean }> {
@@ -198,6 +307,43 @@ function teamName(input: unknown): string {
   if (!name) throw new AppError(400, '请输入团队名称', 'invalid_team_name')
   if (name.length > 80) throw new AppError(400, '团队名称不能超过 80 个字符', 'invalid_team_name')
   return name
+}
+async function activeExecutionOwnedBy(tx: ServerStoreTx, sessionId: SessionId, userId: UserId): Promise<{ turnId: TurnId } | null> {
+  const messageActors = new Map<MessageId, UserId>()
+  let active: { turnId: TurnId; ownerId: UserId | null } | null = null
+  let from = 1 as EventSeq
+  for (;;) {
+    const page = await tx.cache.readEvents(sessionId, from, 500)
+    for (const { payload } of page.events) {
+      if (payload.kind === 'message.queued' && payload.sentByAccountId) messageActors.set(payload.messageId, payload.sentByAccountId)
+      if (payload.kind === 'turn.started') active = { turnId: payload.turnId, ownerId: messageActors.get(payload.messageId) ?? null }
+      if (payload.kind === 'turn.finished' && active?.turnId === payload.turnId) active = null
+    }
+    if (!page.nextSeq) break
+    from = page.nextSeq
+  }
+  return active?.ownerId === userId ? { turnId: active.turnId } : null
+}
+function commandFingerprint(command: { kind: 'turn.stop'; sessionId: SessionId; turnId: TurnId }): string {
+  return createHash('sha256').update(JSON.stringify(command)).digest('hex')
+}
+async function assertInstanceAdministratorPreserved(tx: ServerStoreTx, userId: UserId): Promise<void> {
+  if (!(await tx.identity.findInstanceAdministrator(userId))) return
+  const administrators = await tx.identity.listInstanceAdministrators()
+  if (administrators.length <= 1) throw new AppError(409, '必须保留至少一个实例恢复管理员', 'last_instance_administrator')
+}
+function memberRole(input: unknown): Exclude<TeamRole, 'owner'> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new AppError(400, '成员角色参数不合法', 'invalid_request')
+  const record = input as Record<string, unknown>
+  if (Object.keys(record).some(key => key !== 'role') || (record.role !== 'admin' && record.role !== 'member')) throw new AppError(400, '角色只能是 admin 或 member', 'invalid_team_role')
+  return record.role
+}
+function ownershipTransfer(input: unknown): { userId: UserId; confirmation: string } {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new AppError(400, '所有权转移参数不合法', 'invalid_request')
+  const record = input as Record<string, unknown>
+  if (Object.keys(record).some(key => key !== 'userId' && key !== 'confirmation')) throw new AppError(400, '所有权转移参数不合法', 'invalid_request')
+  if (typeof record.userId !== 'string' || !record.userId || typeof record.confirmation !== 'string') throw new AppError(400, '所有权转移参数不合法', 'invalid_request')
+  return { userId: record.userId as UserId, confirmation: record.confirmation }
 }
 function invitationEmail(input: unknown): { normalized: string; display: string } {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new AppError(400, '请输入邀请邮箱', 'invalid_email')

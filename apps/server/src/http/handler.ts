@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { TaskError, type TaskService } from '../application/task-service.js'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { CapabilityToolName } from '@wemux/domain'
-import type { ApprovalId, CommandId, ProjectId, SessionForkId, SessionId, TeamId, WorkerId, WorkspaceId } from '@wemux/domain'
+import type { ApprovalId, CommandId, ProjectId, SessionForkId, SessionId, TeamId, UserId, WorkerId, WorkspaceId } from '@wemux/domain'
 import { AuthenticationService } from '../application/auth.js'
 import { CapabilityError, CapabilityService } from '../application/capability-service.js'
 import { CapabilityTokenError } from '../application/capability-token-service.js'
@@ -110,10 +110,16 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
         if (method === 'GET' && !invitationToken[2]) { json(response, 200, await teams.preview(invitationToken[1])); return }
         if (method === 'POST' && invitationToken[2] === 'accept') { json(response, 200, await teams.accept(await auth.taskActor(credential), invitationToken[1])); return }
       }
+      const ownershipTransfer = path.match(/^\/teams\/([^/]+)\/ownership-transfer$/)
+      if (teams && ownershipTransfer && method === 'POST') {
+        json(response, 200, await teams.transferOwnership(await auth.taskActor(credential), ownershipTransfer[1] as TeamId, await body(request))); return
+      }
       const teamResource = path.match(/^\/teams\/([^/]+)\/(members|invitations)(?:\/([^/]+))?$/)
       if (teams && teamResource) {
         const actor = await auth.taskActor(credential), teamId = teamResource[1] as TeamId, childId = teamResource[3]
         if (method === 'GET' && teamResource[2] === 'members' && !childId) { json(response, 200, { items: await teams.members(actor, teamId) }); return }
+        if (method === 'PATCH' && teamResource[2] === 'members' && childId) { json(response, 200, await teams.updateMemberRole(actor, teamId, childId as UserId, await body(request))); return }
+        if (method === 'DELETE' && teamResource[2] === 'members' && childId) { await teams.removeMember(actor, teamId, childId as UserId); response.writeHead(204).end(); return }
         if (method === 'GET' && teamResource[2] === 'invitations' && !childId) { json(response, 200, { items: await teams.invitations(actor, teamId) }); return }
         if (method === 'POST' && teamResource[2] === 'invitations' && !childId) {
           const invitation = await teams.invite(actor, teamId, await body(request))
@@ -128,7 +134,8 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
       }
       const projectEvents = path.match(/^\/projects\/([^/]+)\/events$/)
       if (tasks && projectStreams && projectEvents && method === 'GET') {
-        const authorize = async () => tasks.authorizeProject(projectEvents[1], { actor: await auth.taskActor(credential), requestId: randomUUID(), teamId: url.searchParams.get('teamId') ?? undefined })
+        const actor = await auth.taskActor(credential)
+        const authorize = async () => tasks.authorizeProject(projectEvents[1], { actor, requestId: randomUUID(), teamId: url.searchParams.get('teamId') ?? undefined })
         try { await authorize() }
         catch (error) {
           if (error instanceof TaskError || error instanceof AppError) {
@@ -136,7 +143,7 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
           }
           throw error
         }
-        projectStreams.open(response, projectEvents[1], authorize); return
+        projectStreams.open(response, projectEvents[1], actor, authorize); return
       }
       const projectReader = path.match(/^\/projects\/([^/]+)\/(activity|reviews)$/)
       if (tasks && (projectReader || /^\/projects\/[^/]+\/tasks(?:\/|$)/.test(path))) {

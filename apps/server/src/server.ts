@@ -84,10 +84,11 @@ export function createWemuxServer(options: WemuxServerOptions) {
     WEMUX_PUBLIC_URL: process.env.WEMUX_PUBLIC_URL,
     WEMUX_MAIL_OUTBOX: process.env.WEMUX_MAIL_OUTBOX,
   })
-  const teams = new TeamService(store)
-  const projects = new ProjectAccessService(store)
-  const workerAccess = new WorkerAccessService(store)
-  const sessionAccess = new SessionAccessService(store, projects)
+  const notifications = new Notifications()
+  const teams = new TeamService(store, notifications)
+  const projects = new ProjectAccessService(store, notifications)
+  const workerAccess = new WorkerAccessService(store, notifications)
+  const sessionAccess = new SessionAccessService(store, projects, notifications)
   const registration = new EmailRegistrationService({ store, identity, settings, mail: mail.settings, mailReason: mail.reason, teams })
   // Google 的半配置会抛错：设计上宁可部署启动失败，也不要等用户点击后才发现回调地址不存在。
   const googleSettings = resolveGoogleSettings(options.google ?? {
@@ -98,7 +99,6 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const google = new GoogleAuthenticationService({ store, identity, settings, google: googleSettings.settings, reason: googleSettings.reason, verifier: options.googleVerifier })
   // 账号安全（Ticket 06/08）与会话策略共用同一套参数：强认证窗口与撤销规则不允许有两份实现。
   const security = new AccountSecurityService({ store, identity, mail: mail.settings, mailReason: mail.reason, sessionPolicy })
-  const notifications = new Notifications()
   const capabilitySecret = options.capabilitySecret ?? process.env.WEMUX_CAPABILITY_SECRET ?? randomCapabilitySecret()
   const capabilities = new CapabilityService(store, now, new CapabilityTokenService(capabilitySecret, now))
   const service = new ServerService(store, notifications, capabilities, workerAccess, projects, sessionAccess)

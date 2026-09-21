@@ -1,7 +1,31 @@
 import test from 'node:test'
-import { administratorEmail, seedAdministrator } from './fixtures/administrator.js'
+import { administratorEmail, seedAdministrator, seedLocalAccount } from './fixtures/administrator.js'
 import assert from 'node:assert/strict'
 import { createWemuxServer } from '../server.js'
+
+const password = 'correct horse battery staple'
+
+function browser(base: string) {
+  let cookie = '', csrf = ''
+  return {
+    async call(path: string, init: { method?: string; body?: unknown } = {}) {
+      const headers: Record<string, string> = { Accept: 'application/json', Origin: base, 'Content-Type': 'application/json' }
+      if (cookie) headers.Cookie = cookie
+      if (csrf) headers['X-CSRF-Token'] = csrf
+      const response = await fetch(`${base}${path}`, { method: init.method ?? (init.body === undefined ? 'GET' : 'POST'), headers, ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }) })
+      const setCookie = response.headers.getSetCookie().find(value => value.startsWith('wemux_login_session='))
+      if (setCookie) cookie = setCookie.split(';')[0]!
+      const data = response.status === 204 ? null : await response.json() as any
+      if (typeof data?.csrfToken === 'string') csrf = data.csrfToken
+      return { status: response.status, data }
+    },
+    async raw(path: string) {
+      const headers: Record<string, string> = { Accept: 'text/event-stream', Origin: base }
+      if (cookie) headers.Cookie = cookie
+      return fetch(`${base}${path}`, { headers })
+    },
+  }
+}
 
 test('project SSE authorizes before headers and emits committed flat invalidations, separate from activity', async () => {
   const server = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail] })
@@ -39,4 +63,29 @@ test('project SSE authorizes before headers and emits committed flat invalidatio
     controller.abort()
     await reader.cancel().catch(() => {})
   } finally { controller.abort(); await server.close() }
+})
+
+test('Project Grant 撤销提交后立即关闭已打开的 Project SSE', async t => {
+  const server = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail] })
+  await seedLocalAccount(server.store, { username: 'owner', email: administratorEmail, password })
+  const viewer = await seedLocalAccount(server.store, { username: 'viewer', email: 'viewer@example.com', password })
+  const base = await server.listen(0)
+  t.after(() => server.close())
+  const owner = browser(base), member = browser(base)
+  assert.equal((await owner.call('/auth/login', { body: { login: 'owner', password } })).status, 200)
+  assert.equal((await member.call('/auth/login', { body: { login: 'viewer', password } })).status, 200)
+  const team = await owner.call('/teams', { body: { name: 'Realtime project' } })
+  await server.store.transaction(async tx => tx.identity.saveMembership({ teamId: team.data.id, userId: viewer.id, role: 'member', joinedAt: new Date().toISOString() as never }))
+  const project = await owner.call('/projects', { body: { teamId: team.data.id, name: 'Private project', shareScope: 'selected-members' } })
+  assert.equal(project.status, 201, JSON.stringify(project.data))
+  assert.equal((await owner.call(`/projects/${project.data.id}/grants`, { body: { userId: viewer.id, role: 'viewer' } })).status, 201)
+
+  const response = await member.raw(`/projects/${project.data.id}/events`)
+  assert.equal(response.status, 200)
+  const reader = response.body!.getReader()
+  assert.match(new TextDecoder().decode((await reader.read()).value), /revalidate/)
+
+  assert.equal((await owner.call(`/projects/${project.data.id}/grants/${viewer.id}`, { method: 'DELETE' })).status, 204)
+  assert.equal(await Promise.race([reader.closed.then(() => true, () => true), new Promise<false>(resolve => setTimeout(() => resolve(false), 1_000))]), true)
+  assert.equal((await member.call(`/projects/${project.data.id}`)).status, 404)
 })

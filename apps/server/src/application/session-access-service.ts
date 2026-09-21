@@ -5,6 +5,7 @@ import type { Session, SessionGrant, SessionShareScope } from '@wemux/server-dom
 import { AppError } from './errors.js'
 import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
 import type { ProjectAccessService } from './project-access-service.js'
+import type { Notifications } from './notifications.js'
 
 export type SessionAccessCapability = 'read' | 'write' | 'control'
 export interface SessionAccessView {
@@ -17,7 +18,7 @@ export interface SessionAccessView {
 const projectRank: Record<ProjectAccessRole, number> = { viewer: 1, contributor: 2, manager: 3, owner: 4 }
 
 export class SessionAccessService {
-  constructor(private readonly store: ServerStore, private readonly projects: ProjectAccessService) {}
+  constructor(private readonly store: ServerStore, private readonly projects: ProjectAccessService, private readonly notifications?: Notifications) {}
 
   async list(actor: UserId): Promise<readonly (Session & { access: SessionAccessView })[]> {
     const visible = await Promise.all((await this.store.resources.listSessions()).filter(session => !session.deletedAt).map(async session => {
@@ -72,13 +73,18 @@ export class SessionAccessService {
   async updateShareScope(actor: UserId, sessionId: SessionId, input: unknown) {
     const session = await this.require(actor, sessionId, 'control')
     const shareScope = parseScope(input)
-    return this.store.transaction(async tx => {
+    const project = await this.store.resources.getProject(session.projectId)
+    const affected = new Set(project ? (await this.store.identity.listTeamMemberships(project.teamId)).map(value => value.userId) : [])
+    for (const grant of await this.store.identity.listSessionGrants(sessionId)) affected.add(grant.userId)
+    const updated = await this.store.transaction(async tx => {
       const current = await this.requireInTx(tx, actor, sessionId, 'control')
-      const updated: Session = { ...current, shareScope }
-      await tx.resources.saveSession(updated)
+      const changed: Session = { ...current, shareScope }
+      await tx.resources.saveSession(changed)
       await this.audit(tx, actor, 'session.access.update', sessionId, { shareScope })
-      return { ...updated, access: await this.accessFrom(tx, actor, updated) }
+      return { ...changed, access: await this.accessFrom(tx, actor, changed) }
     })
+    for (const userId of affected) this.notifications?.authorization(userId)
+    return updated
   }
 
   async grants(actor: UserId, sessionId: SessionId): Promise<readonly SessionGrant[]> {
@@ -107,6 +113,7 @@ export class SessionAccessService {
       await tx.identity.removeSessionGrant(sessionId, userId)
       await this.audit(tx, actor, 'session.grant.revoke', sessionId, { userId })
     })
+    this.notifications?.authorization(userId)
   }
 
   private async audit(tx: ServerStoreTx, actorId: UserId, action: string, sessionId: SessionId, metadata: Record<string, string>): Promise<void> {

@@ -3,12 +3,13 @@ import type { ProjectId, UserId } from '@wemux/domain'
 import type { Project, ProjectGrant, ProjectGrantRole, ResourceShareScope } from '@wemux/server-domain'
 import { AppError } from './errors.js'
 import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
+import type { Notifications } from './notifications.js'
 
 export type ProjectAccessRole = 'owner' | ProjectGrantRole
 const rank: Record<ProjectAccessRole, number> = { viewer: 1, contributor: 2, manager: 3, owner: 4 }
 
 export class ProjectAccessService {
-  constructor(private readonly store: ServerStore) {}
+  constructor(private readonly store: ServerStore, private readonly notifications?: Notifications) {}
 
   async list(actor: UserId, teamId?: string): Promise<readonly (Project & { accessRole: ProjectAccessRole })[]> {
     const projects = (await this.store.resources.listProjects()).filter(project => !project.deletedAt && (!teamId || project.teamId === teamId))
@@ -38,11 +39,15 @@ export class ProjectAccessService {
   async updateShareScope(actor: UserId, projectId: ProjectId, input: unknown) {
     const project = await this.requireManager(actor, projectId)
     const shareScope = parseScope(input)
-    return this.store.transaction(async tx => {
+    const affected = new Set((await this.store.identity.listTeamMemberships(project.teamId)).map(value => value.userId))
+    for (const grant of await this.store.identity.listProjectGrants(projectId)) affected.add(grant.userId)
+    const updated = await this.store.transaction(async tx => {
       await tx.resources.saveProject({ ...project, shareScope })
       await this.audit(tx, actor, 'project.access.update', project, { shareScope })
       return { ...project, shareScope }
     })
+    for (const userId of affected) this.notifications?.authorization(userId)
+    return updated
   }
 
   async grants(actor: UserId, projectId: ProjectId): Promise<readonly ProjectGrant[]> {
@@ -69,6 +74,7 @@ export class ProjectAccessService {
       await tx.identity.removeProjectGrant(projectId, userId)
       await this.audit(tx, actor, 'project.grant.revoke', project, { userId })
     })
+    this.notifications?.authorization(userId)
   }
 
   private async requireManager(actor: UserId, projectId: ProjectId): Promise<Project & { accessRole: ProjectAccessRole }> {

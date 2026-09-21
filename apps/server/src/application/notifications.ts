@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import type { SessionId, WorkerId } from '@wemux/domain'
+import type { SessionId, UserId, WorkerId } from '@wemux/domain'
 
 export interface NotificationFailure { readonly key: string; readonly error: unknown }
 type Listener = () => void | Promise<void>
@@ -20,8 +20,10 @@ export class Notifications {
   }
   commands(workerId: WorkerId): void { this.emitter.emit(`commands:${workerId}`) }
   session(sessionId: SessionId): void { this.emitter.emit(`session:${sessionId}`) }
+  authorization(userId: UserId): void { this.emitter.emit(`authorization:${userId}`) }
   onCommands(workerId: WorkerId, listener: Listener): () => void { return this.subscribe(`commands:${workerId}`, listener) }
   onSession(sessionId: SessionId, listener: Listener): () => void { return this.subscribe(`session:${sessionId}`, listener) }
+  onAuthorization(userId: UserId, listener: Listener): () => void { return this.subscribe(`authorization:${userId}`, listener) }
   private failure(key: string, error: unknown): void {
     // A broken diagnostics sink must not affect an already committed API either.
     try { void Promise.resolve(this.reportError({ key, error })).catch(() => undefined) } catch { /* isolated reporter */ }

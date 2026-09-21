@@ -3,12 +3,13 @@ import type { UserId, WorkerId } from '@wemux/domain'
 import type { ResourceShareScope, Worker, WorkerGrant, WorkerGrantRole } from '@wemux/server-domain'
 import { AppError } from './errors.js'
 import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
+import type { Notifications } from './notifications.js'
 
 export type WorkerAccessRole = 'owner' | WorkerGrantRole
 const rank: Record<WorkerAccessRole, number> = { use: 1, manage: 2, owner: 3 }
 
 export class WorkerAccessService {
-  constructor(private readonly store: ServerStore) {}
+  constructor(private readonly store: ServerStore, private readonly notifications?: Notifications) {}
 
   async list(actor: UserId): Promise<readonly (Worker & { accessRole: WorkerAccessRole })[]> {
     const visible = await Promise.all((await this.store.resources.listWorkers()).map(async worker => {
@@ -38,11 +39,15 @@ export class WorkerAccessService {
   async updateShareScope(actor: UserId, workerId: WorkerId, input: unknown) {
     const worker = await this.require(actor, workerId, 'manage')
     const shareScope = parseScope(input)
-    return this.store.transaction(async tx => {
+    const affected = new Set((await this.store.identity.listTeamMemberships(worker.teamId)).map(value => value.userId))
+    for (const grant of await this.store.identity.listWorkerGrants(workerId)) affected.add(grant.userId)
+    const updated = await this.store.transaction(async tx => {
       await tx.resources.saveWorker({ ...worker, shareScope })
       await this.audit(tx, actor, 'worker.access.update', worker, { shareScope })
       return { ...worker, shareScope }
     })
+    for (const userId of affected) this.notifications?.authorization(userId)
+    return updated
   }
 
   async grants(actor: UserId, workerId: WorkerId): Promise<readonly WorkerGrant[]> {
@@ -69,6 +74,7 @@ export class WorkerAccessService {
       await tx.identity.removeWorkerGrant(workerId, userId)
       await this.audit(tx, actor, 'worker.grant.revoke', worker, { userId })
     })
+    this.notifications?.authorization(userId)
   }
 
   async role(actor: UserId, worker: Worker): Promise<WorkerAccessRole | null> {

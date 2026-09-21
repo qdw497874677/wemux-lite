@@ -35,11 +35,12 @@ export class SessionStreams {
     }
     // Subscribe before reading history so no live event is lost during replay.
     const unsubscribe = this.service.notifications.onSession(sessionId, () => { void pump() })
+    const unsubscribeAuthorization = actor === undefined ? () => undefined : this.service.notifications.onAuthorization(actor, () => { void pump() })
     response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' })
     response.flushHeaders()
     const timer = setInterval(() => { write(': heartbeat\n\n') }, 15000)
     timer.unref()
-    response.on('close', () => { closed = true; clearInterval(timer); unsubscribe(); this.clients.delete(response) })
+    response.on('close', () => { closed = true; clearInterval(timer); unsubscribe(); unsubscribeAuthorization(); this.clients.delete(response) })
     void pump()
   }
   close(): void { for (const client of this.clients) client.destroy() }
