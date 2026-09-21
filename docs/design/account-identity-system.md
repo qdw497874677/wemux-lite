@@ -1,6 +1,6 @@
 # 账号、注册与 Google 登录设计
 
-状态：持续交付中的设计基线。A0 账号/注册/Google/安全管理、A1 Team 创建/邀请/成员治理、A2 PAT 与设备会话（Ticket 14），以及 A3 的 Project、Worker、Session 授权与实时撤权闭环（Ticket 10–13）已实现并验收；A2 的可筛选审计检索仍未完成。对应路线图 A0–A3 / M6，不以登录成功宣称全部团队权限已完成。
+状态：持续交付中的设计基线。A0 账号/注册/Google/安全管理与账号生命周期、A1 Team 创建/邀请/成员治理、A2 PAT/设备会话/可筛选审计（Ticket 14–15），以及 A3 的 Project、Worker、Session 授权与实时撤权闭环（Ticket 10–13）已实现并验收。对应路线图 A0–A3 / M6；新增搜索、最近工作、下载入口仍须随功能接入同一授权边界。
 
 依据：[产品方向](../product-direction.md)、[领域术语](../../CONTEXT.md)、[路线图](../roadmap.md)。
 
@@ -60,7 +60,7 @@
 - 解绑、增加/删除密码、修改邮箱、签发 PAT、销号均要求近期重新认证；不以普通 Cookie 活跃时间冒充重新认证。Google-only 用户需新的交互认证并验证满足新鲜度，不能仅凭普通静默授权标为强认证。
 - 禁止移除最后一种可用登录方式；Provider 被实例禁用时提示受影响用户先配置替代登录。实例管理员至少保留经验证的本机恢复路径。
 - User 状态为 `active | disabled | deletion_pending | deleted`；待验证注册独立存放。停用立即阻止登录、撤销会话/PAT并触发流连接撤权。
-- 销号前转移 Team/Project/Worker 等所有权，保护最后一个 Team owner 与最后一个实例管理员；处理进行中执行并显式确认，不自动删除团队聊天或 Worker 文件。保留必要审计归属，按保留策略去标识个人资料；Google subject 的防复用占位与保留期限需记录在隐私规则中。
+- 销号前转移 Team/Project/Worker/Session 所有权，保护最后一个 Team owner 与最后一个实例管理员；处理进行中执行并显式确认，不自动删除团队聊天、Task/Run/Journal 或 Worker 文件。User 公开资料立即去标识，必要审计保留不可变 actorId；Google issuer+subject 绑定行作为不可登录墓碑保留，避免新账号接管历史归属。
 
 ### 2.6 团队入口
 
@@ -174,14 +174,14 @@ Server → 签发本站 HttpOnly Cookie → 团队选择 / 原授权页面
 - PAT 路由：`GET|POST /auth/personal-access-tokens`、`DELETE /auth/personal-access-tokens/:id`、`POST /auth/personal-access-tokens/:id/rotate`。创建/轮换明文只显示一次；列表只返回名称、scope、创建/到期/最近使用/撤销时间。
 - scope：`read | write | execute | admin` 是请求能力上限，路由仍把 UserId 交给 Project/Worker/Session Application Service 做资源授权；scope 绝不生成 Grant。旧无 scope PAT 返回 401，不按历史管理员身份猜测补权。
 - 长连接：当前用户授权长连接为 Project/Session SSE；心跳周期重新验证 PAT，撤销或到期后断开。Worker WebSocket 使用独立 Worker Credential，不接受 PAT。
-- 审计：`pat.created`、`pat.used`、`pat.revoked`、`pat.rotated`、`pat.authentication_failed` 只记录 token id、scope、时间与结果，绝不记录明文；通用检索与导出留给 Ticket 15。
+- 审计：`pat.created`、`pat.used`、`pat.revoked`、`pat.rotated`、`pat.authentication_failed` 只记录 token id、scope、时间与结果，绝不记录明文；Ticket 15 已提供操作者/动作/资源/结果/时间筛选、稳定 cursor 分页与同权限 NDJSON 导出。
 - Web：`apps/web/src/components/account-page.tsx` 提供创建、一次性复制/手动选择降级、轮换、撤销与设备列表。真实浏览器证据见 `.scratch/product-convergence/evidence/ticket-14-pat-and-device-sessions.md`。
 
 ## 6. API 与交互切片
 
 以下全部为设计目标，统一挂 `/api`，不暗示已存在这些接口。鉴权写操作遵循幂等、CAS 和专用一次性令牌语义，不能缓存含秘密响应。
 
-已完成（对照下表）：登录/会话、注册/验证/找回、Google、账号安全、Team 主路径与 PAT/设备会话接口已按 §5.1–§5.6 的实际形态存在；客户端组只剩通用审计检索未开始。
+已完成（对照下表）：登录/会话、注册/验证/找回、Google、账号安全、Team 主路径、PAT/设备会话，以及账号停用/恢复/销号与通用安全审计均已有实际接口和 Web 入口。
 
 | 分组 | 拟议入口 |
 | --- | --- |
@@ -192,7 +192,7 @@ Server → 签发本站 HttpOnly Cookie → 团队选择 / 原授权页面
 | Google | `POST /auth/oauth/google/start`、`GET /auth/oauth/google/callback` |
 | 账号安全 | `POST /account/reauthenticate`、`GET /account/identities`、`POST /account/identities/google/link`、`DELETE /account/identities/:id`、`PUT /account/password`、邮箱变更发起/确认、停用/销号 |
 | 团队 | Team 创建/选择、成员管理、邀请创建/撤销/接受、所有权转移 |
-| 客户端 | PAT 创建/列表/撤销/轮换（已实现），审计检索（待 Ticket 15） |
+| 客户端 | PAT 创建/列表/撤销/轮换、账号生命周期、筛选/分页/导出安全审计（已实现） |
 
 交互：落地页内联登录/注册，邮箱待验证页、忘记/重置密码页、Google 失败页、首次团队选择/空态、账号资料与安全页、团队成员与邀请页、实例登录策略设置。所有入口有加载/失败/重试/过期状态、桌面/手机与键盘路径；原应用内连接弹窗仅承担重连，不替代账号落地页。
 
@@ -204,7 +204,7 @@ Server → 签发本站 HttpOnly Cookie → 团队选择 / 原授权页面
 2. **A0.2 本地注册与恢复**：邮箱密码注册、邮件验证、找回、登录/退出与安全页；SMTP 生命周期。
 3. **A0.3 Google OIDC**：新账号注册、已有账号登录、显式绑定/解绑、异常与部署配置；真实 Google 浏览器验收。
 4. **A1 团队加入**：Team 创建、邀请与成员生命周期；与 A3 同时定义授权契约。
-5. **A2 凭证管理**：Ticket 14 已交付 PAT 与设备管理、凭据生命周期审计；Ticket 15 补可筛选审计检索，不延后 A0 的 CSRF、限流与秘密保护。
+5. **A2 凭证与生命周期管理**：Ticket 14 已交付 PAT 与设备管理；Ticket 15 已交付认证版本、停用/恢复、销号去标识、身份墓碑与可筛选/导出安全审计。CSRF、限流与秘密保护继续作为同一边界。
 6. **A3 全路径授权**：Ticket 10–13 已交付 Project、Worker、Session 的查询/写入/实时订阅/执行权限、真实操作者、成员治理与实时撤权；成员移除后现有 Grant 经有效 membership 重新求值，已打开实时流断开重鉴权，受影响 Run 写入可恢复停止命令。P2 委派不得绕过此门槛。
 
 至少覆盖以下可重复场景，实际执行才创建 acceptance 报告：

@@ -36,7 +36,7 @@ export class AuthenticationService {
     const record = await this.store.identity.findPersonalAccessToken(hashSecret(token))
     if (!record || record.revokedAt || record.expiresAt === null || Date.parse(record.expiresAt) <= Date.now() || !record.scopes?.length) throw new AppError(401, 'Unauthorized')
     const user = await this.store.identity.getUser(record.userId)
-    if (!user) throw new AppError(401, 'Unauthorized')
+    if (!user || (user.status ?? 'active') !== 'active' || (user.authVersion !== undefined && (record.authVersion ?? 0) !== user.authVersion)) throw new AppError(401, 'Unauthorized')
     return record
   }
   private assertScope(scopes: readonly PersonalAccessTokenScope[], required: RequestAccess): void {
@@ -47,7 +47,11 @@ export class AuthenticationService {
     if (!allowed) throw new AppError(403, `访问令牌缺少 ${required} 范围`, 'pat_scope_required')
   }
   async actor(credential: RequestCredential, required: RequestAccess = 'read'): Promise<AuthenticatedActor> {
-    if (credential.loginSession) return { userId: credential.loginSession.userId, kind: 'session', scopes: ['read', 'write', 'execute', 'admin'] }
+    if (credential.loginSession) {
+      const user = await this.store.identity.getUser(credential.loginSession.userId)
+      if (!user || (user.status ?? 'active') !== 'active' || (user.authVersion !== undefined && (credential.loginSession.authVersion ?? 0) !== user.authVersion)) throw new AppError(401, 'Unauthorized')
+      return { userId: credential.loginSession.userId, kind: 'session', scopes: ['read', 'write', 'execute', 'admin'] }
+    }
     if (!credential.bearer) throw new AppError(401, 'Unauthorized')
     const record = await this.bearerRecord(credential.bearer)
     this.assertScope(record.scopes!, required)

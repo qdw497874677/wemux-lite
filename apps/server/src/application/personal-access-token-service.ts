@@ -56,8 +56,10 @@ export class PersonalAccessTokenService {
     const now = this.clock.now(), expiry = new Date(input.expiresAt)
     if (expiry.getTime() <= now.getTime() || expiry.getTime() - now.getTime() > maximumLifetimeMs) throw new AppError(400, '到期时间必须在未来 365 天内', 'invalid_request')
     const token = `wmx_pat_${randomBytes(32).toString('base64url')}`
+    const user = await this.store.identity.getUser(userId)
+    if (!user || (user.status ?? 'active') !== 'active') throw new AppError(401, 'Unauthorized')
     const record: PersonalAccessTokenRecord = {
-      id: randomUUID() as CredentialId, userId, name, scopes: scopes as PersonalAccessTokenScope[], tokenHash: hashSecret(token),
+      id: randomUUID() as CredentialId, userId, name, scopes: scopes as PersonalAccessTokenScope[], tokenHash: hashSecret(token), authVersion: user.authVersion ?? 0,
       createdAt: timestamp(now), expiresAt: timestamp(expiry), lastUsedAt: null, revokedAt: null,
     }
     await this.store.transaction(async tx => {
@@ -88,8 +90,10 @@ export class PersonalAccessTokenService {
     const now = this.clock.now(), expiry = new Date(targetExpiry)
     if (expiry.getTime() <= now.getTime() || expiry.getTime() - now.getTime() > maximumLifetimeMs) throw new AppError(400, '到期时间必须在未来 365 天内', 'invalid_request')
     const token = `wmx_pat_${randomBytes(32).toString('base64url')}`
+    const user = await this.store.identity.getUser(userId)
+    if (!user || (user.status ?? 'active') !== 'active') throw new AppError(401, 'Unauthorized')
     const replacement: PersonalAccessTokenRecord = {
-      id: randomUUID() as CredentialId, userId, name, scopes, tokenHash: hashSecret(token), createdAt: timestamp(now),
+      id: randomUUID() as CredentialId, userId, name, scopes, tokenHash: hashSecret(token), authVersion: user.authVersion ?? 0, createdAt: timestamp(now),
       expiresAt: timestamp(expiry), lastUsedAt: null, revokedAt: null,
     }
     await this.store.transaction(async tx => {

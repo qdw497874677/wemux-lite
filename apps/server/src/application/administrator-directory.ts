@@ -63,9 +63,10 @@ export class AdministratorDirectory {
 
   /** 记录过的归属优先，其次看当前邮箱是否命中声明；两者都不命中才是普通成员。 */
   async isAdministrator(port: AdministratorReader, userId: UserId): Promise<boolean> {
-    if (await port.findInstanceAdministrator(userId)) return true
     const user = await port.getUser(userId)
-    return this.declares(user?.email)
+    if (!user || (user.status ?? 'active') !== 'active') return false
+    if (await port.findInstanceAdministrator(userId)) return true
+    return this.declares(user.email)
   }
 
   /** 已落盘的管理员归属，按用户 id 索引；用于诊断、恢复与后续团队级授权。 */
@@ -101,7 +102,8 @@ export class AdministratorDirectory {
    */
   async active(): Promise<boolean> {
     for (const administrator of await this.store.listInstanceAdministrators()) {
-      if (await this.store.getUser(administrator.userId)) return true
+      const user = await this.store.getUser(administrator.userId)
+      if (user && (user.status ?? 'active') === 'active') return true
     }
     for (const email of this.declared) if (await this.accountExists(email)) return true
     return false

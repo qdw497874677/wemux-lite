@@ -10,6 +10,7 @@ import type { AccountSecurityService } from '../application/account-security-ser
 import type { InstanceSettingsService } from '../application/instance-settings.js'
 import type { TeamService } from '../application/team-service.js'
 import type { PersonalAccessTokenService } from '../application/personal-access-token-service.js'
+import type { AccountLifecycleService } from '../application/account-lifecycle-service.js'
 import { AppError } from '../application/errors.js'
 import { clearedSessionCookie, isSecureRequest, readCookie, sessionCookie } from './cookies.js'
 
@@ -40,6 +41,7 @@ export interface AuthRouteContext {
   readonly security?: AccountSecurityService | null
   readonly teams?: TeamService | null
   readonly personalAccessTokens?: PersonalAccessTokenService | null
+  readonly lifecycle?: AccountLifecycleService | null
 }
 
 /** 一次性 state 的 Cookie 名：与发起浏览器绑定，回调后立即清除。 */
@@ -117,6 +119,10 @@ const requireGoogle = (google: GoogleAuthenticationService | null | undefined): 
 const requireSecurity = (security: AccountSecurityService | null | undefined): AccountSecurityService => {
   if (!security) throw new AppError(503, '账号安全功能未启用', 'security_disabled')
   return security
+}
+const requireLifecycle = (lifecycle: AccountLifecycleService | null | undefined): AccountLifecycleService => {
+  if (!lifecycle) throw new AppError(503, '账号生命周期功能未启用', 'lifecycle_disabled')
+  return lifecycle
 }
 
 /**
@@ -365,6 +371,54 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<boolea
   // Ticket 06：账号安全概览。解绑、改密码、改邮箱都要先知道当前绑了哪些登录方式。
   if (method === 'GET' && path === '/auth/account/security') {
     return respond(200, await requireSecurity(security).view(await identity.user(session.userId), session))
+  }
+  if (path === '/auth/account/lifecycle') {
+    const lifecycle = requireLifecycle(context.lifecycle)
+    if (method === 'GET') return respond(200, await lifecycle.view(session.userId))
+    assertCookieWriteAllowed(identity, request, session)
+    const input = await context.readBody() as { action?: unknown; confirmation?: unknown }
+    if (input.action === 'confirm-deletion' && input.confirmation === '删除我的账号') {
+      await lifecycle.confirmDeletion(session.userId)
+      response.setHeader('Set-Cookie', [clearedSessionCookie({ name: identity.cookieName, secure: isSecureRequest(request) })])
+      return respond(200, { status: 'deleted' })
+    }
+    throw new AppError(400, '账号操作参数不合法', 'invalid_request')
+  }
+  if (method === 'GET' && (path === '/auth/account/audit' || path === '/auth/account/audit/export')) {
+    const url = new URL(request.url ?? '/', 'http://localhost')
+    const limit = Number(url.searchParams.get('limit') ?? 50)
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new AppError(400, '审计分页大小需为 1–200', 'invalid_request')
+    const timestamp = (key: string) => { const value = url.searchParams.get(key); if (!value) return undefined; if (!Number.isFinite(Date.parse(value))) throw new AppError(400, `${key} 时间不合法`, 'invalid_request'); return value as import('@wemux/domain').Timestamp }
+    const query = {
+      actorId: url.searchParams.get('actorId') as import('@wemux/domain').UserId | null ?? undefined,
+      action: url.searchParams.get('action') ?? undefined,
+      resourceKind: url.searchParams.get('resourceKind') as import('@wemux/server-domain').AuditResource['kind'] | null ?? undefined,
+      resourceId: url.searchParams.get('resourceId') ?? undefined,
+      result: url.searchParams.get('result') as import('@wemux/server-domain').AuditEntry['result'] | null ?? undefined,
+      from: timestamp('from'), to: timestamp('to'), cursor: url.searchParams.get('cursor') ?? undefined, limit,
+    }
+    if (path.endsWith('/export')) {
+      const items = await requireLifecycle(context.lifecycle).exportAudit(session.userId, query)
+      response.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Content-Disposition': 'attachment; filename="wemux-audit.ndjson"', 'Cache-Control': 'no-store' })
+      response.end(items.map(entry => JSON.stringify(entry)).join('\n') + (items.length ? '\n' : ''))
+      return true
+    }
+    return respond(200, await requireLifecycle(context.lifecycle).audit(session.userId, query))
+  }
+  if (path === '/auth/account/users') {
+    const lifecycle = requireLifecycle(context.lifecycle)
+    if (method === 'GET') return respond(200, { items: await lifecycle.users(session.userId) })
+    throw new AppError(404, 'Route not found')
+  }
+  const lifecycleTarget = path.match(/^\/auth\/account\/users\/([^/]+)\/(disable|restore|request-deletion|confirm-deletion)$/)
+  if (method === 'POST' && lifecycleTarget) {
+    assertCookieWriteAllowed(identity, request, session)
+    const lifecycle = requireLifecycle(context.lifecycle), targetId = decodeURIComponent(lifecycleTarget[1]!) as import('@wemux/domain').UserId
+    if (lifecycleTarget[2] === 'disable') await lifecycle.disable(session.userId, targetId)
+    else if (lifecycleTarget[2] === 'restore') await lifecycle.restore(session.userId, targetId)
+    else if (lifecycleTarget[2] === 'request-deletion') await lifecycle.requestDeletion(session.userId, targetId)
+    else await lifecycle.confirmDeletion(session.userId, targetId)
+    return respond(200, { status: 'ok' })
   }
   // Ticket 06：改密码需旧密码（或近期 Google 强认证）；改完撤销本人其它会话与 PAT，当前会话保留。
   if (method === 'POST' && path === '/auth/password/change') {

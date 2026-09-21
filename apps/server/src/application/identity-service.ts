@@ -169,6 +169,7 @@ export class IdentityService {
       tokenHash: hashSecret(token),
       csrfTokenHash: hashSecret(csrfToken),
       authenticationMethod: input.method,
+      authVersion: input.user.authVersion ?? 0,
       authenticatedAt: input.authenticatedAt,
       createdAt: timestamp(new Date(createdAtMs)),
       lastSeenAt: timestamp(new Date(createdAtMs)),
@@ -204,6 +205,8 @@ export class IdentityService {
     if (!token || token.length > 200) return null
     const session = await this.store.identity.findLoginSessionByTokenHash(hashSecret(token))
     if (!session || session.revokedAt !== null) return null
+    const user = await this.store.identity.getUser(session.userId)
+    if (!user || (user.status ?? 'active') !== 'active' || (user.authVersion !== undefined && (session.authVersion ?? 0) !== user.authVersion)) return null
     const now = this.clock.now().getTime()
     if (now >= Date.parse(session.absoluteExpiresAt) || now >= Date.parse(session.idleExpiresAt)) return null
     return session
@@ -254,7 +257,7 @@ export class IdentityService {
     }
     // 未知账号也支付一次等价校验代价，避免以响应时间枚举账号。
     const verified = credential ? await verifyPassword(input.password, credential.passwordHash) : { ok: await verifyPassword(input.password, await this.dummyHash).then(result => result.ok), needsRehash: false }
-    if (!user || !credential || !verified.ok) {
+    if (!user || !credential || !verified.ok || (user.status ?? 'active') !== 'active') {
       this.throttle.recordFailure(input.throttleKey)
       throw new AppError(401, '账号或密码不正确', 'invalid_credentials')
     }
@@ -281,7 +284,7 @@ export class IdentityService {
   /** 会话归属用户：账号被删除时按未授权处理，不泄露原因。 */
   async user(userId: UserId): Promise<User> {
     const user = await this.store.identity.getUser(userId)
-    if (!user) throw new AppError(401, 'Unauthorized')
+    if (!user || (user.status ?? 'active') !== 'active') throw new AppError(401, 'Unauthorized')
     return user
   }
 

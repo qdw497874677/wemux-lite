@@ -13,6 +13,8 @@ import type {
 } from '@wemux/domain'
 import type {
   AuditEntry,
+  AuditPage,
+  AuditQuery,
   CommandProjection,
   EnrollmentTokenRecord,
   ExternalLoginIdentity,
@@ -138,6 +140,8 @@ export interface ServerIdentityReader {
   listSessionGrants(sessionId: SessionId): Promise<readonly SessionGrant[]>
   /** Newest-first audit entries; durable report channel for administrator assignment and upgrade decisions. */
   listAudit(limit: number): Promise<readonly AuditEntry[]>
+  /** 权威筛选/游标分页；HTTP 与导出都必须穿过同一个查询 seam。 */
+  queryAudit(input: AuditQuery): Promise<AuditPage>
   /**
    * 实例管理员归属（部署声明的邮箱命中后落盘）。权威判定仍由 `AdministratorDirectory`
    * 依据启动配置做出，这里只负责记住“谁在何时按哪种来源成为管理员”。
@@ -155,6 +159,8 @@ export interface ServerIdentityReader {
 
 export interface ServerIdentityWriter {
   saveUser(user: User): Promise<void>
+  /** 销号完成后释放公开邮箱占用；历史审计仍保留 actorId。 */
+  deleteUserEmailByUserId(userId: UserId): Promise<void>
   /** 占用主邮箱；邮箱已被其他账号占用时拒绝，不静默改派。 */
   saveUserEmail(record: UserEmail): Promise<void>
   /** 释放主邮箱占用（邮箱变更后清理旧行）；不存在也视为成功。 */

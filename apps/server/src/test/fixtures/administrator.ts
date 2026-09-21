@@ -47,7 +47,7 @@ export async function seedAdministrator(store: ServerStore, overrides: SeedAdmin
   const email = overrides.email ?? administratorEmail
   const token = overrides.token ?? administratorToken
   const assignedAt = overrides.assignedAt ?? new Date().toISOString() as Timestamp
-  const user: User = { id: userId, username: overrides.username ?? 'deployer', email, createdAt: assignedAt }
+  const user: User = { id: userId, username: overrides.username ?? 'deployer', email, createdAt: assignedAt, status: 'active', authVersion: 0, statusChangedAt: assignedAt, deletedAt: null }
   const record: InstanceAdministrator = { userId, email, assignedAt, source: 'declared' }
   await store.transaction(async tx => {
     await tx.identity.saveUser(user)
@@ -56,7 +56,7 @@ export async function seedAdministrator(store: ServerStore, overrides: SeedAdmin
     if (email && !await tx.identity.getUserEmail(userId)) {
       await tx.identity.saveUserEmail({ emailNormalized: normalizeEmail(email)!.normalized, userId, emailDisplay: email, createdAt: assignedAt })
     }
-    await tx.identity.savePersonalAccessToken({ id: randomUUID() as CredentialId, userId, name: '测试管理员', scopes: ['read', 'write', 'execute', 'admin'], tokenHash: hashSecret(token), createdAt: assignedAt, expiresAt: overrides.expiresAt ?? farFuture, lastUsedAt: null, revokedAt: null })
+    await tx.identity.savePersonalAccessToken({ id: randomUUID() as CredentialId, userId, name: '测试管理员', scopes: ['read', 'write', 'execute', 'admin'], tokenHash: hashSecret(token), authVersion: user.authVersion ?? 0, createdAt: assignedAt, expiresAt: overrides.expiresAt ?? farFuture, lastUsedAt: null, revokedAt: null })
     // 幂等：同一用户重复播种（多个夹具共用同一个 store）不写第二条归属，也不触发唯一约束。
     if (!await tx.identity.findInstanceAdministrator(userId)) await tx.identity.saveInstanceAdministrator(record)
   })
@@ -79,7 +79,7 @@ export interface LocalAccountOptions {
 export async function seedLocalAccount(store: ServerStore, options: LocalAccountOptions): Promise<User> {
   const userId = options.userId ?? randomUUID() as UserId
   const at = new Date().toISOString() as Timestamp
-  const user: User = { id: userId, username: options.username, email: options.email, createdAt: at }
+  const user: User = { id: userId, username: options.username, email: options.email, createdAt: at, status: 'active', authVersion: 0, statusChangedAt: at, deletedAt: null }
   const passwordHash = await hashPassword(options.password)
   await store.transaction(async tx => {
     await tx.identity.saveUser(user)

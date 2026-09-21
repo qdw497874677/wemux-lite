@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Copy, KeyRound, Link2, LogOut, Mail, MonitorSmartphone, RefreshCw, RotateCw, ShieldCheck, Trash2, UserRound } from 'lucide-react'
+import { Check, Copy, Download, FileClock, KeyRound, Link2, LogOut, Mail, MonitorSmartphone, RefreshCw, RotateCw, ShieldAlert, ShieldCheck, Trash2, UserRound } from 'lucide-react'
 import type { Api, AccountSession } from '../api/client'
 import type { AccountSecurityViewDTO, PersonalAccessTokenScopeDTO, RegistrationPolicyDTO } from '../api/dto'
 import { formatChineseTime } from '../lib/display'
@@ -67,11 +67,19 @@ export function AccountPage({ api, session, onSignOut, onOpenConnection, linkNot
   const [issuedPat, setIssuedPat] = useState<{ token: string; name: string } | null>(null)
   const [copiedPat, setCopiedPat] = useState(false)
   const [issuedPatElement, setIssuedPatElement] = useState<HTMLElement | null>(null)
+  const [deletionConfirmation, setDeletionConfirmation] = useState('')
+  const [auditAction, setAuditAction] = useState('')
+  const [auditResult, setAuditResult] = useState<'' | 'succeeded' | 'failed'>('')
+  const [auditAfter, setAuditAfter] = useState('')
+  const [auditBefore, setAuditBefore] = useState('')
   const sessions = useQuery({ queryKey: ['login-sessions'], queryFn: ({ signal }) => api.loginSessions(signal) })
   const personalAccessTokens = useQuery({ queryKey: ['personal-access-tokens'], queryFn: ({ signal }) => api.personalAccessTokens(signal) })
   const policy = useQuery({ queryKey: ['registration-policy'], queryFn: ({ signal }) => api.registrationPolicy(signal), enabled: session.instanceAdministrator })
   const capabilities = useQuery({ queryKey: ['auth-options'], queryFn: ({ signal }) => api.authOptions(signal) })
   const security = useQuery({ queryKey: ['account-security'], queryFn: ({ signal }) => api.accountSecurity(signal) })
+  const lifecycle = useQuery({ queryKey: ['account-lifecycle'], queryFn: ({ signal }) => api.accountLifecycle(signal) })
+  const audit = useQuery({ queryKey: ['account-audit', auditAction, auditResult, auditAfter, auditBefore], queryFn: ({ signal }) => api.audit({ action: auditAction || undefined, result: auditResult || undefined, from: auditAfter ? new Date(auditAfter).toISOString() : undefined, to: auditBefore ? new Date(auditBefore).toISOString() : undefined, limit: 50 }, signal) })
+  const managedAccounts = useQuery({ queryKey: ['managed-accounts'], queryFn: ({ signal }) => api.managedAccounts(signal), enabled: session.instanceAdministrator })
 
   const view: AccountSecurityViewDTO | undefined = security.data
   const minimum = capabilities.data?.registration?.passwordMinimumLength ?? 15
@@ -290,6 +298,26 @@ export function AccountPage({ api, session, onSignOut, onOpenConnection, linkNot
               <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><strong className="truncate">{token.name}</strong>{token.revokedAt && <Badge variant="outline">已撤销</Badge>}</div><div className="mt-1 flex flex-wrap gap-1">{token.scopes.map(scope => <Badge key={scope} variant="secondary">{scopeLabels[scope]}</Badge>)}</div><p className="mt-1 text-xs text-muted-foreground">创建 {formatChineseTime(token.createdAt)} · 到期 {formatChineseTime(token.expiresAt)}{token.lastUsedAt ? ` · 最近使用 ${formatChineseTime(token.lastUsedAt)}` : ''}</p></div>
               {!token.revokedAt && <div className="flex items-center gap-1 sm:justify-end"><Button size="sm" variant="ghost" disabled={busy !== ''} onClick={() => void act(`pat:rotate:${token.id}`, async () => { const rotated = await api.rotatePersonalAccessToken(token.id, token.expiresAt); setIssuedPat({ token: rotated.token, name: rotated.name }); setCopiedPat(false); await client.invalidateQueries({ queryKey: ['personal-access-tokens'] }) })}><RotateCw className="size-4" />轮换</Button><Button size="sm" variant="ghost" disabled={busy !== ''} onClick={() => void act(`pat:revoke:${token.id}`, () => api.revokePersonalAccessToken(token.id), () => client.invalidateQueries({ queryKey: ['personal-access-tokens'] }))}><Trash2 className="size-4" />撤销</Button></div>}
             </li>)}</ul>}
+    </section>
+
+    <section className="grid gap-3 rounded-xl border border-border bg-card p-4">
+      <div className="flex flex-wrap items-center gap-2"><h2 className="flex items-center gap-2 text-sm font-semibold"><FileClock aria-hidden className="size-4 text-muted-foreground" />安全审计</h2><a className="ml-auto inline-flex h-8 items-center gap-1 rounded-md border border-border px-3 text-xs hover:bg-accent" href={api.auditExportUrl({ action: auditAction || undefined, result: auditResult || undefined, from: auditAfter ? new Date(auditAfter).toISOString() : undefined, to: auditBefore ? new Date(auditBefore).toISOString() : undefined })} download><Download className="size-3.5" />导出 NDJSON</a><Button size="sm" variant="ghost" disabled={audit.isFetching} onClick={() => void audit.refetch()}><RefreshCw className={audit.isFetching ? 'size-4 animate-spin' : 'size-4'} />刷新</Button></div>
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><label className="grid gap-1 text-sm font-medium">动作<input className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={auditAction} placeholder="例如 pat.created" onChange={event => setAuditAction(event.target.value.trim())} /></label><label className="grid gap-1 text-sm font-medium">结果<select className="h-10 rounded-md border border-input bg-background px-3 text-sm" value={auditResult} onChange={event => setAuditResult(event.target.value as typeof auditResult)}><option value="">全部</option><option value="succeeded">成功</option><option value="failed">失败</option></select></label><label className="grid gap-1 text-sm font-medium">开始时间<Input type="datetime-local" value={auditAfter} onChange={event => setAuditAfter(event.target.value)} /></label><label className="grid gap-1 text-sm font-medium">结束时间<Input type="datetime-local" value={auditBefore} onChange={event => setAuditBefore(event.target.value)} /></label></div>
+      {audit.isPending ? <p role="status" className="text-sm text-muted-foreground">正在读取审计…</p> : audit.error ? <p role="alert" className="text-sm text-red-300">{errorText(audit.error)}</p> : <ul className="grid gap-2">{(audit.data?.items ?? []).map(entry => <li key={entry.id} className="grid gap-1 rounded-lg border border-border px-3 py-2 text-sm"><div className="flex flex-wrap items-center gap-2"><Badge variant={entry.result === 'succeeded' ? 'secondary' : 'outline'}>{entry.result === 'succeeded' ? '成功' : '失败'}</Badge><strong>{entry.action}</strong><span className="ml-auto text-xs text-muted-foreground">{formatChineseTime(entry.occurredAt)}</span></div><p className="break-all text-xs text-muted-foreground">{entry.resource.kind}:{entry.resource.id}{session.instanceAdministrator && entry.actorId ? ` · 操作者 ${entry.actorId}` : ''}</p></li>)}</ul>}
+      {!audit.isPending && (audit.data?.items.length ?? 0) === 0 && <p className="text-sm text-muted-foreground">没有符合条件的安全审计。</p>}
+    </section>
+
+    {session.instanceAdministrator && <section className="grid gap-3 rounded-xl border border-border bg-card p-4">
+      <h2 className="flex items-center gap-2 text-sm font-semibold"><ShieldAlert aria-hidden className="size-4 text-muted-foreground" />账号治理</h2>
+      <p className="text-sm leading-6 text-muted-foreground">停用会立即撤销会话、PAT 与实时订阅；销号必须先转移 Team、Project、Worker、Session 所有权。</p>
+      {managedAccounts.isPending ? <p role="status" className="text-sm text-muted-foreground">正在读取账号…</p> : managedAccounts.error ? <p role="alert" className="text-sm text-red-300">{errorText(managedAccounts.error)}</p> : <ul className="grid gap-2">{(managedAccounts.data ?? []).map(account => <li key={account.id} className="flex flex-wrap items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm"><span className="min-w-0 flex-1"><strong>{account.username}</strong><span className="ml-2 text-xs text-muted-foreground">{account.email ?? '已去标识'} · {account.status}</span></span>{account.status === 'active' && account.email !== session.email && <Button size="sm" variant="ghost" disabled={busy !== ''} onClick={() => void act(`disable:${account.id}`, () => api.manageAccount(account.id, 'disable'), () => client.invalidateQueries({ queryKey: ['managed-accounts'] }))}>停用</Button>}{account.status === 'disabled' && <Button size="sm" variant="outline" disabled={busy !== ''} onClick={() => void act(`restore:${account.id}`, () => api.manageAccount(account.id, 'restore'), () => client.invalidateQueries({ queryKey: ['managed-accounts'] }))}>恢复</Button>}</li>)}</ul>}
+    </section>}
+
+    <section className="grid gap-3 rounded-xl border border-red-500/25 bg-red-500/5 p-4">
+      <h2 className="flex items-center gap-2 text-sm font-semibold text-red-100"><Trash2 aria-hidden className="size-4" />账号销号</h2>
+      <p className="text-sm leading-6 text-muted-foreground">销号不会删除团队聊天、任务历史或 Worker 文件。系统保留不可变审计操作者 ID，但会去标识用户名与邮箱。邮箱之后可注册新账号，Google subject 以脱敏墓碑防止历史归属被接管。</p>
+      {(lifecycle.data?.blockers.length ?? 0) > 0 && <div className="rounded-lg border border-amber-500/25 bg-amber-500/10 p-3 text-sm text-amber-100">请先处理：{lifecycle.data!.blockers.join('、')}</div>}
+      <div className="grid gap-2"><label className="grid gap-1 text-sm font-medium">输入“删除我的账号”确认<Input value={deletionConfirmation} onChange={event => setDeletionConfirmation(event.target.value)} /></label><Button variant="destructive" className="justify-self-start" disabled={busy !== '' || lifecycle.isPending || (lifecycle.data?.blockers.length ?? 0) > 0 || deletionConfirmation !== '删除我的账号'} onClick={() => void act('confirm-deletion', () => api.confirmAccountDeletion(deletionConfirmation), onSignOut)}>永久去标识账号</Button></div>
     </section>
 
     {session.instanceAdministrator && <section className="grid gap-3 rounded-xl border border-border bg-card p-4">

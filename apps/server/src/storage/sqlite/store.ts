@@ -2,7 +2,7 @@ import { validReviewMetadata } from '@wemux/web-contract/task-platform'
 import { DatabaseSync } from 'node:sqlite'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { AgentInboxMessage, CapabilityAsset, EventSeq, JournalEvent, ProjectId, SessionId, TeamId, Timestamp, WorkerId } from '@wemux/domain'
-import type { AuditEntry, CommandProjection, EnrollmentTokenRecord, ExternalLoginIdentity, Membership, OAuthTransaction, PersonalAccessTokenRecord, RegistrationAttempt, SessionCacheState, SessionForkRecord, TeamInvitation, User, UserEmail, VerificationChallenge, VerificationPurpose, Worker, WorkerCredentialRecord, Workspace } from '@wemux/server-domain'
+import type { AuditEntry, AuditPage, AuditQuery, CommandProjection, EnrollmentTokenRecord, ExternalLoginIdentity, Membership, OAuthTransaction, PersonalAccessTokenRecord, RegistrationAttempt, SessionCacheState, SessionForkRecord, TeamInvitation, User, UserEmail, VerificationChallenge, VerificationPurpose, Worker, WorkerCredentialRecord, Workspace } from '@wemux/server-domain'
 import type { ServerStore, ServerStoreTx } from '../../application/ports/server-store.js'
 import type { PendingCommand } from '../../application/ports/server-store-types.js'
 import { AppError } from '../../application/errors.js'
@@ -138,6 +138,23 @@ export class SqliteServerStore implements ServerStore {
       return session
     })
   }
+  private queryAudit(input: AuditQuery): AuditPage {
+    const limit = Math.min(200, Math.max(1, input.limit))
+    const entries = this.list<AuditEntry>('audit').filter(entry => {
+      if (input.subjectUserId && entry.actorId !== input.subjectUserId && !(entry.resource.kind === 'user' && entry.resource.id === input.subjectUserId) && entry.metadata.userId !== input.subjectUserId) return false
+      if (input.actorId && entry.actorId !== input.actorId) return false
+      if (input.action && entry.action !== input.action) return false
+      if (input.resourceKind && entry.resource.kind !== input.resourceKind) return false
+      if (input.resourceId && entry.resource.id !== input.resourceId) return false
+      if (input.result && entry.result !== input.result) return false
+      if (input.from && entry.occurredAt < input.from) return false
+      if (input.to && entry.occurredAt > input.to) return false
+      return !input.cursor || `${entry.occurredAt}\u0000${entry.id}` < input.cursor
+    }).sort((left, right) => right.occurredAt.localeCompare(left.occurredAt) || String(right.id).localeCompare(String(left.id)))
+    const items = entries.slice(0, limit)
+    const last = items.at(-1)
+    return { items, nextCursor: entries.length > limit && last ? `${last.occurredAt}\u0000${last.id}` : null }
+  }
   /** 索引列与 JSON 必须一致；不一致宁可报错也不静默采用任意一份数据。 */
   private readIndexed<T extends object>(table: string, columns: readonly (readonly [string, string])[], where: string, ...params: (string | number)[]): T[] {
     return this.db.prepare(`SELECT * FROM ${table} WHERE ${where}`).all(...params).map(row => {
@@ -197,6 +214,7 @@ export class SqliteServerStore implements ServerStore {
     listProjectGrants: async projectId => this.list<import('@wemux/server-domain').ProjectGrant>('project-grant').filter(grant => grant.projectId === projectId),
     listSessionGrants: async sessionId => this.list<import('@wemux/server-domain').SessionGrant>('session-grant').filter(grant => grant.sessionId === sessionId),
     listAudit: async limit => this.list<AuditEntry>('audit').sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)).slice(0, Math.max(0, limit)),
+    queryAudit: async input => this.queryAudit(input),
     findLoginSessionByTokenHash: async hash => this.readLoginSessions('token_hash=?', hash)[0] ?? null,
     getLoginSession: async id => this.readLoginSessions('id=?', id)[0] ?? null,
     listLoginSessions: async userId => this.readLoginSessions('user_id=? ORDER BY rowid', userId),
@@ -335,6 +353,7 @@ export class SqliteServerStore implements ServerStore {
     identity: {
       ...this.identityReader,
       saveUser: async r => this.put('user', r.id, r),
+      deleteUserEmailByUserId: async userId => { this.db.prepare('DELETE FROM user_emails WHERE user_id=?').run(userId) },
       saveUserEmail: async r => {
         try {
           this.db.prepare('INSERT INTO user_emails(email_normalized,user_id,email_display,created_at,data) VALUES(?,?,?,?,?)').run(r.emailNormalized, r.userId, r.emailDisplay, r.createdAt, JSON.stringify(r))

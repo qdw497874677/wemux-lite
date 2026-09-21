@@ -1,12 +1,19 @@
 import type { TeamId, Timestamp, UserId } from '@wemux/domain'
 
 export type TeamRole = 'owner' | 'admin' | 'member'
+export type UserStatus = 'active' | 'disabled' | 'deletion_pending' | 'deleted'
 
 export interface User {
   readonly id: UserId
   readonly username: string
   readonly email: string | null
   readonly createdAt: Timestamp
+  /** 旧记录缺失时按 active 读取；删除只去标识，不改写历史 actorId。 */
+  readonly status?: UserStatus
+  /** 每次停用、恢复或进入销号流程递增；会话与 PAT 必须匹配当前版本。 */
+  readonly authVersion?: number
+  readonly statusChangedAt?: Timestamp | null
+  readonly deletedAt?: Timestamp | null
 }
 
 /** Password hashes are stored separately from the public User record. */
@@ -29,6 +36,8 @@ export interface LoginSession {
   readonly tokenHash: string
   readonly csrfTokenHash: string
   readonly authenticationMethod: LoginSessionAuthenticationMethod
+  /** 签发时的账号认证版本；旧会话按 0，账号版本变化后立即失效。 */
+  readonly authVersion?: number
   /** 设备列表展示用的客户端标签（User-Agent 截断），不含任何秘密。 */
   readonly client: string | null
   readonly authenticatedAt: Timestamp

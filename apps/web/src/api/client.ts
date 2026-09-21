@@ -5,7 +5,7 @@ import type {
   ApprovalDecisionDTO, RuntimeCommandDTO, PatchSessionDTO, CommandResultDTO,
   AccountPayloadDTO, AccountViewDTO, AcceptedEmailDTO, AccountSecurityViewDTO, AuthOptionsDTO, CommandDTO, CreateEnrollmentTokenDTO, CreateProjectDTO,
   CreateSessionDTO, CreateWorkspaceDTO, EmailChangeAcceptedDTO, EmailChangeConfirmedDTO, EnrollmentTokenDTO, EventsPageDTO, GoogleLinkStartDTO, IssuedPersonalAccessTokenDTO, LoginMethodUnboundDTO, LoginSessionDTO, PasswordChangeDTO, PasswordResetDTO, PersonalAccessTokenDTO, PersonalAccessTokenScopeDTO, ProjectDTO,
-  RegistrationPolicyDTO, RegistrationPolicyViewDTO, SendMessageDTO, SendResultDTO, SessionDTO, SessionResourceDTO, ServerEventsPageDTO, TailnetInfoDTO, VerifiedEmailDTO, WorkerDTO, WorkspaceDTO,
+  AccountLifecycleDTO, AuditPageDTO, AuditQueryDTO, ManagedAccountDTO, RegistrationPolicyDTO, RegistrationPolicyViewDTO, SendMessageDTO, SendResultDTO, SessionDTO, SessionResourceDTO, ServerEventsPageDTO, TailnetInfoDTO, VerifiedEmailDTO, WorkerDTO, WorkspaceDTO,
 } from './dto'
 
 /**
@@ -35,6 +35,11 @@ export const routes = {
   authGoogleLinkStart: '/api/auth/identities/google/start',
   authIdentity: (methodId: string) => `/api/auth/identities/${id(methodId)}`,
   accountSecurity: '/api/auth/account/security',
+  accountLifecycle: '/api/auth/account/lifecycle',
+  accountAudit: '/api/auth/account/audit',
+  accountAuditExport: '/api/auth/account/audit/export',
+  managedAccounts: '/api/auth/account/users',
+  managedAccountAction: (userId: string, action: 'disable' | 'restore' | 'request-deletion' | 'confirm-deletion') => `/api/auth/account/users/${id(userId)}/${action}`,
   registrationPolicy: '/api/settings/registration-policy',
   loginSessions: '/api/auth/sessions',
   loginSession: (sessionId: string) => `/api/auth/sessions/${id(sessionId)}`,
@@ -228,6 +233,12 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     resetPassword: (token: string, password: string) => request<PasswordResetDTO>(routes.authResetPassword, { token, password }),
     // 账号安全（Ticket 06/08）。改密码、改邮箱与解绑都要求旧密码或近期强认证，服务端把关，前端只负责不隐藏入口。
     accountSecurity: (signal?: AbortSignal) => request<AccountSecurityViewDTO>(routes.accountSecurity, undefined, signal),
+    accountLifecycle: (signal?: AbortSignal) => request<AccountLifecycleDTO>(routes.accountLifecycle, undefined, signal),
+    confirmAccountDeletion: (confirmation: string) => request<{ status: 'deleted' }>(routes.accountLifecycle, { action: 'confirm-deletion', confirmation }),
+    audit: (query: AuditQueryDTO = {}, signal?: AbortSignal) => { const search = new URLSearchParams(); for (const [key, value] of Object.entries(query)) if (value !== undefined) search.set(key, String(value)); const suffix = search.size ? `?${search}` : ''; return request<AuditPageDTO>(`${routes.accountAudit}${suffix}`, undefined, signal) },
+    auditExportUrl: (query: AuditQueryDTO = {}) => { const search = new URLSearchParams(); for (const [key, value] of Object.entries(query)) if (value !== undefined && key !== 'cursor' && key !== 'limit') search.set(key, String(value)); return `${routes.accountAuditExport}${search.size ? `?${search}` : ''}` },
+    managedAccounts: (signal?: AbortSignal) => list<ManagedAccountDTO>(routes.managedAccounts, signal),
+    manageAccount: (userId: string, action: 'disable' | 'restore' | 'request-deletion' | 'confirm-deletion') => request<{ status: 'ok' }>(routes.managedAccountAction(userId, action), {}),
     changePassword: (body: { currentPassword?: string; newPassword: string }) => request<PasswordChangeDTO>(routes.authPasswordChange, body),
     requestEmailChange: (body: { newEmail: string; currentPassword?: string }) => request<EmailChangeAcceptedDTO>(routes.authEmailChange, body),
     // 确认链接在未登录的浏览器里也可能被打开：这是公开路由，成功即已换好邮箱，不再签发新会话。

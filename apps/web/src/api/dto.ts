@@ -116,7 +116,8 @@ export interface EventsPageDTO { events: JournalEventDTO[]; throughSeq: number; 
 /**
  * 浏览器账号契约（Ticket 04）。登录会话只经 HttpOnly Cookie 承载，任何响应都不返回可当 Bearer 使用的令牌。
  */
-export interface AccountUserDTO { id: string; username: string; email: string | null; createdAt: string }
+export type AccountStatusDTO = 'active' | 'disabled' | 'deletion_pending' | 'deleted'
+export interface AccountUserDTO { id: string; username: string; email: string | null; createdAt: string; status?: AccountStatusDTO; authVersion?: number; statusChangedAt?: string | null; deletedAt?: string | null }
 export interface LoginSessionDTO {
   id: string; current: boolean; authenticationMethod: string; client: string | null
   authenticatedAt: string; createdAt: string; lastSeenAt: string
@@ -202,3 +203,12 @@ export interface EmailChangeAcceptedDTO { status: 'accepted'; email: string; exp
 export interface EmailChangeConfirmedDTO { status: 'changed'; email: string; previousEmail: string | null }
 export interface GoogleLinkStartDTO { authorizeUrl: string; expiresAt: string }
 export interface LoginMethodUnboundDTO { status: 'unbound'; kind: LoginMethodDTO['kind']; methods: LoginMethodDTO[] }
+export interface AccountLifecycleDTO { status: AccountStatusDTO; statusChangedAt: string | null; blockers: string[] }
+export interface ManagedAccountDTO { id: string; username: string; email: string | null; status: AccountStatusDTO; statusChangedAt: string | null }
+export interface AuditEntryDTO {
+  id: string; actorId: string | null; action: string; result: 'succeeded' | 'failed'; occurredAt: string
+  resource: { kind: 'team' | 'worker' | 'project' | 'workspace' | 'session' | 'user'; id: string }
+  metadata: Record<string, string | number | boolean | null>
+}
+export interface AuditPageDTO { items: AuditEntryDTO[]; nextCursor: string | null }
+export interface AuditQueryDTO { actorId?: string; action?: string; resourceKind?: AuditEntryDTO['resource']['kind']; resourceId?: string; result?: AuditEntryDTO['result']; from?: string; to?: string; cursor?: string; limit?: number }

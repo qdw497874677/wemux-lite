@@ -195,8 +195,8 @@ test('installer downloads, installs, registers and starts with stubbed tools', {
 })
 
 test('管理员登录会话持久化在服务端，并随空闲过期失效', async () => {
-  // 用真实时钟而不用日期桩：会话过期要真走完空闲窗口，桩只能让断言跟着桩走，测不出真实行为。
-  const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail], adminSessionTtlMs: 60 })
+  // 用真实时钟而不用日期桩：窗口留出 CI 调度余量，过期后再真等待，避免登录后的默认环境初始化耗掉整个 TTL。
+  const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail], adminSessionTtlMs: 250 })
   const password = 'correct horse battery staple'
   await seedLocalAccount(app.store, { username: 'owner', email: administratorEmail, password, administrator: true })
   const base = await app.listen(0)
@@ -211,7 +211,7 @@ test('管理员登录会话持久化在服务端，并随空闲过期失效', as
     assert.equal(typeof account.teamId, 'string')
     assert.equal(typeof account.expiresAt, 'string')
     assert.equal((await fetch(`${base}/workers`, { headers: { cookie } })).status, 200)
-    await delay(90)
+    await delay(320)
     assert.equal((await fetch(`${base}/workers`, { headers: { cookie } })).status, 401, '空闲过期后会话立即失效')
     assert.equal((await fetch(`${base}/auth/me`, { headers: { cookie } })).status, 401)
   } finally { await app.close() }

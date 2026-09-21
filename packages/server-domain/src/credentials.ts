@@ -10,6 +10,8 @@ export interface PersonalAccessTokenRecord {
   /** 旧无 scope 记录必须按无效处理，绝不能推断成管理员令牌。 */
   readonly scopes?: readonly PersonalAccessTokenScope[]
   readonly tokenHash: string
+  /** 签发时的账号认证版本；旧记录按 0，账号版本变化后立即失效。 */
+  readonly authVersion?: number
   readonly createdAt?: Timestamp
   readonly expiresAt: Timestamp | null
   readonly lastUsedAt?: Timestamp | null

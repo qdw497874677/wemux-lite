@@ -27,6 +27,7 @@ import type { ProjectAccessService } from '../application/project-access-service
 import type { WorkerAccessService } from '../application/worker-access-service.js'
 import type { SessionAccessService } from '../application/session-access-service.js'
 import type { PersonalAccessTokenService } from '../application/personal-access-token-service.js'
+import type { AccountLifecycleService } from '../application/account-lifecycle-service.js'
 import { sendTeamInvitationMail } from '../application/team-invitation-mail.js'
 import type { MailSettings } from '../application/mail/email-delivery.js'
 import { readCookie } from './cookies.js'
@@ -63,7 +64,7 @@ function requiredPatAccess(path: string, method: string | undefined): import('..
   return 'write'
 }
 
-export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, _adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams, identity?: IdentityService | null, registration?: EmailRegistrationService | null, settings?: InstanceSettingsService | null, google?: GoogleAuthenticationService | null, lineage?: SessionLineageService | null, security?: AccountSecurityService | null, teams?: TeamService | null, mail?: MailSettings | null, projects?: ProjectAccessService | null, workerAccess?: WorkerAccessService | null, sessionAccess?: SessionAccessService | null, personalAccessTokens?: PersonalAccessTokenService | null) {
+export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, _adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams, identity?: IdentityService | null, registration?: EmailRegistrationService | null, settings?: InstanceSettingsService | null, google?: GoogleAuthenticationService | null, lineage?: SessionLineageService | null, security?: AccountSecurityService | null, teams?: TeamService | null, mail?: MailSettings | null, projects?: ProjectAccessService | null, workerAccess?: WorkerAccessService | null, sessionAccess?: SessionAccessService | null, personalAccessTokens?: PersonalAccessTokenService | null, lifecycle?: AccountLifecycleService | null) {
   return (request: IncomingMessage, response: ServerResponse): void => {
     void (async () => {
       const url = new URL(request.url ?? '/', 'http://localhost'), rawPath = url.pathname === '/' ? '/' : url.pathname.replace(/\/$/, '')
@@ -110,7 +111,7 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
       const resolved = identity ? await identity.resolveSession(readCookie(request.headers.cookie, identity.cookieName)) : null
       const loginSession = resolved && identity ? await identity.touch(resolved) : null
       const credential: RequestCredential = { bearer, loginSession }
-      if (await handleAuthRoute({ request, response, path, method, readBody: () => body(request), auth, identity: identity ?? null, service, loginSession, bearer, registration, settings, google, security, personalAccessTokens })) return
+      if (await handleAuthRoute({ request, response, path, method, readBody: () => body(request), auth, identity: identity ?? null, service, loginSession, bearer, registration, settings, google, security, personalAccessTokens, lifecycle })) return
       const unsafe = method !== 'GET' && method !== 'HEAD'
       if (unsafe && loginSession) assertCookieWriteAllowed(identity ?? null, request, loginSession)
       const taskRoute = Boolean(tasks && (path.match(/^\/projects\/([^/]+)\/(activity|reviews)$/) || /^\/projects\/[^/]+\/tasks(?:\/|$)/.test(path)))

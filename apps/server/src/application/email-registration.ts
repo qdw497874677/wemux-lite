@@ -306,7 +306,7 @@ export class EmailRegistrationService {
     try {
       await this.input.store.transaction(async tx => {
         const taken = new Set((await tx.identity.listUsers()).map(candidate => candidate.username))
-        const created: User = { id: randomUUID() as UserId, username: deriveUsername(attempt.username, name => taken.has(name)), email: attempt.emailDisplay, createdAt: at }
+        const created: User = { id: randomUUID() as UserId, username: deriveUsername(attempt.username, name => taken.has(name)), email: attempt.emailDisplay, createdAt: at, status: 'active', authVersion: 0, statusChangedAt: at, deletedAt: null }
         const credential: LocalAccountCredential = { userId: created.id, passwordHash: attempt.passwordHash, updatedAt: at }
         const email: UserEmail = { emailNormalized: attempt.emailNormalized, userId: created.id, emailDisplay: attempt.emailDisplay, createdAt: at }
         await tx.identity.saveUser(created)

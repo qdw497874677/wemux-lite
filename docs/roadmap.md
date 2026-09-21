@@ -25,7 +25,7 @@
 | M3 项目与工作环境 | 统一组织项目、会话与多 Worker 环境 | M1 环境设计、已有 Placement 能力 | 未开始 |
 | M4 集群与能力管理 | 完善 Worker、Agent、模型的管理与诊断体验 | M1 集群设计；与 M2/M3 共用选择契约 | 未开始 |
 | M5 任务协作与交付 | 完善目标、指派、运行、审查与成果追踪 | M2/M3，复用现有执行能力 | 未开始 |
-| M6 账号、团队授权与开放客户端 | 本地注册、Google 登录、多用户共享、资源权限、PAT 与审计 | 账号线 A0–A3；安全设计提前贯穿 | 部分交付：A0、A1 已完成；A2 已交付 PAT 与设备会话管理（Ticket 14）；A3 已交付 Project、Worker、Session 授权与实时撤权（Ticket 10–13）。Wave A/B/C 跨票据验收通过；审计检索仍待实施 |
+| M6 账号、团队授权与开放客户端 | 本地注册、Google 登录、多用户共享、资源权限、PAT 与审计 | 账号线 A0–A3；安全设计提前贯穿 | 账号线 A0–A3 已交付：Ticket 15 完成停用、销号、认证版本与可筛选/导出安全审计；新增搜索/最近工作/下载入口授权仍需随各功能实施 |
 | M7 运维与正式发布 | 升级、备份、恢复、容量与发布验收 | M1–M6 交付及跨阶段回归 | 未开始 |
 | M8 受控自动化 | 能力推荐、批量分派和多 Agent 协作 | M7，另行确认投入 | 后续增强 |
 
@@ -67,7 +67,8 @@ C0/C1 可在账号线继续推进时独立实施；C2 依赖 C1 稳定图契约�
 - 已交付（A3 第三纵向切片，Ticket 12）：Session 的 `owner-only | selected-members | project` 共享范围、Session Grant、read/write/control 分离、Workspace/Task 默认范围、消息/Turn/Approval 真实操作者，以及列表/详情/Journal/SSE/执行控制的统一授权。验收摘要：`.scratch/product-convergence/evidence/ticket-12-shared-session-operator-permissions.md`。
 - 已交付（A1/A3 治理收口，Ticket 13）：Team 角色调整、成员移除、显式所有权转移与最后 Owner 保护；Team/Project/Session 授权变更会使活跃 SSE 重授权，成员移除为受影响未完成 Run 写入幂等 `run.stop`，离线 Worker 保留待送达命令，后续投递重新检查 Project×Worker×Session 权限交集。验收摘要：`.scratch/product-convergence/evidence/ticket-13-member-governance.md`。
 - 已交付（A2 第一纵向切片，Ticket 14）：设备会话列表/单个撤销/退出其它设备；PAT 名称、`read | write | execute | admin` scope、到期、一次性明文、列表、撤销、原子轮换、脱敏审计和 SSE 周期重鉴权。验收摘要：`.scratch/product-convergence/evidence/ticket-14-pat-and-device-sessions.md`。
-- 仍未实现：可筛选审计检索（Ticket 15），以及新增搜索/最近工作/下载入口授权。
+- 已交付（A2/A0 生命周期收口，Ticket 15）：账号停用/恢复、销号前所有权门、去标识与外部身份墓碑、认证版本即时失效、可筛选 cursor 审计与同权限 NDJSON 导出。验收摘要：`.scratch/product-convergence/evidence/ticket-15-account-lifecycle-and-audit.md`。
+- 仍未实现：新增搜索/最近工作/下载入口授权（随对应功能切片实施）。
 - 类型与存储入口成套：`packages/server-domain/src/identity.ts`（`User`/`Team`/`Membership`/`LocalAccountCredential`/`TeamRole`）、`access.ts`（`WorkerGrant`/`ProjectGrant`/`SessionGrant`、`ResourceShareScope`/`SessionShareScope`）、`credentials.ts`（`PersonalAccessTokenRecord`/`EnrollmentTokenRecord`/`WorkerCredentialRecord`）、`audit.ts`（`AuditEntry`）；`ServerIdentityReader`/`ServerIdentityWriter` 读写方法齐备。
 - 身份实体可复用通用 `records(kind,id,data)` KV 表，但邮箱/外部身份唯一约束、记录版本和旧会话/PAT 退役仍需升级设计与恢复演练，不能据此承诺无迁移。Ticket 04 的升级路径已用 `apps/server/src/test/account-upgrade.test.ts` 锁定：旧实例管理员归属保留，歧义时报告 `ambiguous_administrator` 而不是自动接管。
 - Worker 宿主已有可用本地账号实现（`apps/worker/src/application/local-installation.ts`，scrypt + 盐 + `timingSafeEqual`），且不读 Server 账号库（回归：`apps/worker/test/host-isolation.test.ts`）。
@@ -75,7 +76,7 @@ C0/C1 可在账号线继续推进时独立实施；C2 依赖 C1 稳定图契约�
 
 - **A0 账号、注册与登录（前置，已交付）**：A0.1 身份/登录会话与升级、A0.2 邮箱密码注册/验证/找回与 SMTP、A0.3 Google OIDC 注册/登录，以及 Ticket 06/08 的密码/邮箱安全管理与登录方式显式绑定/解绑均已交付。稳定 User 与登录方式分离，外部身份按 `(issuer, subject)` 唯一，不凭同邮箱自动合并；Web 登录会话独立于 PAT 与对话 Session；支持 `open | invite_only | closed` 注册策略，登录安全、CSRF、限流、邮件与 OAuth 一次性事务已随 A0 落地。Wave A/B/C 跨票据验收均通过。仅真实 Google 公网部署实测仍受合规 HTTPS 域名、Client 配置与测试账号阻塞，不等于绑定入口未实现。
 - **A1 Team 与成员（已交付）**：Ticket 09 已交付 Team 创建/选择、邮箱定向邀请/撤销/接受、成员列表与无账号邀请注册；Ticket 13 已交付成员角色调整、移除、显式所有权转移与最后一个 Owner 保护。邀请消费、成员建立、治理变更、审计与受影响 Run 的停止命令均保持事务一致性；注册不自动加入 Default team 或授权已有 Worker。
-- **A2 凭证管理与安全完善（部分交付）**：Ticket 14 已交付 PAT 签发/列表/撤销/原子轮换、`read | write | execute | admin` 作用域、设备会话管理与凭据生命周期审计；旧无 scope PAT 失效后重签，不猜测旧权限。Ticket 15 继续交付可筛选审计检索与导出边界。日志与审计不记密码、Token、OAuth code 或完整聊天。
+- **A2 凭证管理与安全完善（已交付）**：Ticket 14 已交付 PAT 签发/列表/撤销/原子轮换、`read | write | execute | admin` 作用域与设备会话；Ticket 15 已交付账号状态/认证版本、停用恢复、销号去标识、外部身份墓碑，以及可筛选 cursor 审计和同权限 NDJSON 导出。旧无 scope PAT 失效后重签，不猜测旧权限。日志与审计不记密码、Token、OAuth code 或完整聊天。
 - **A3 授权执行点穿透（Ticket 10–13 已交付闭环）**：Project、Worker、Session 三层 Grant 与 ShareScope 已接入现有读写、Journal、SSE 和执行控制，执行取权限交集并保留真实操作者；成员移除会原子撤销入口、关闭已打开实时流并为进行中 Run 写入可恢复的停止命令。新增搜索/最近工作/下载入口时仍须补同一授权门。
 
 A0 与 M3/M4 可并行，A1/A3 需共同定义成员与资源授权契约；A0 单独完成只允许受控验收，A3 未验收前不得开放不互信多用户。Google 首版在 Server 配置，Worker 保留独立本地账号，不自动共享登录身份或本地会话。Google 实测需合规 HTTPS 域名、Client 配置与测试账号；未配置只标真实验收阻塞，不以模拟测试宣称已支持。
@@ -258,6 +259,6 @@ M2 已交付的双宿主会话能力作为 C3 的运行时基础，但不据此�
 3. 原型到稿后对照评审；无原型也可用已编写线框推进，不阻塞所有设计。
 4. 按 S4 队列/停止、S5 时间线/详情、S6 查找/重命名继续纵向交付；环境、集群页面逐步细化。
 5. 现有或新增阻断问题按证据处理；历史 Web 启动提示仅在仍可复现或阻碍当前路径时优先修复，不再作为默认前置任务。
-6. 账号线 A0 已走完 A0.1（Ticket 04）/A0.2（Ticket 05）/A0.3（Ticket 07），并以 Ticket 06/08 完成密码/邮箱安全管理及登录方式显式绑定/解绑；Wave A/B/C 跨票据验收均通过（`apps/server/scripts/verify-wave-ab.mjs`、`verify-wave-c.mjs`）。A1 的 Team 创建、邀请与成员治理（Ticket 09/13）、A3 的 Project/Worker/Session 授权与实时撤权（Ticket 10–13）、A2 的 PAT 与设备会话管理（Ticket 14）已交付；下一步是 Ticket 15 可筛选审计检索。采用 [账号系统设计](design/account-identity-system.md) 的交互与验收矩阵；真实 Google 部署实测仍需合规 HTTPS 域名、Client 配置与测试账号，未配置时只标注真实验收阻塞。
+6. 账号线 A0 已走完 A0.1（Ticket 04）/A0.2（Ticket 05）/A0.3（Ticket 07），并以 Ticket 06/08 完成密码/邮箱安全管理及登录方式显式绑定/解绑；Wave A/B/C 跨票据验收均通过（`apps/server/scripts/verify-wave-ab.mjs`、`verify-wave-c.mjs`）。A1 的 Team 创建、邀请与成员治理（Ticket 09/13）、A3 的 Project/Worker/Session 授权与实时撤权（Ticket 10–13）、A2 的 PAT、设备会话、账号生命周期与可筛选审计（Ticket 14/15）已交付；下一步回到产品主线的新增搜索/最近工作/下载授权或后续正式票据。采用 [账号系统设计](design/account-identity-system.md) 的交互与验收矩阵；真实 Google 部署实测仍需合规 HTTPS 域名、Client 配置与测试账号，未配置时只标注真实验收阻塞。
 7. 画布线先执行 C0 模块合同，再执行 C1 Fork/血缘权威；两者不改现有 UI 依赖。C1 稳定后才安装 `@xyflow/react` 推进 C2，避免先画静态假图后补领域语义。
 8. C3 复用已交付双宿主 Session Runtime，实现同一 Session Surface 的画布/专注连续切换；C4 等待 A3 权限门，C5 独立验收布局性能，C6 先完成 Ticket 23 编排合同再推进 Ticket 21 投影。

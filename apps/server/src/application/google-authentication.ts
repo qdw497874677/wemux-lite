@@ -389,9 +389,9 @@ export class GoogleAuthenticationService {
 
   private async signInBound(input: { readonly claims: GoogleIdentityClaims; readonly client?: string; readonly supersede: LoginSession | null; readonly returnTo: string | null; readonly consumedAt: Timestamp; readonly bound: ExternalLoginIdentity }): Promise<GoogleFinish> {
     const user = await this.input.store.identity.getUser(input.bound.userId)
-    if (!user) {
+    if (!user || (user.status ?? 'active') !== 'active') {
       await this.note('identity.oauth_orphaned_identity', { provider: 'google', identityId: input.bound.id })
-      throw new AppError(409, '该 Google 身份绑定的账号已不存在，请联系实例管理员', 'identity_orphaned')
+      throw new AppError(409, '该 Google 身份绑定的账号不可用，请联系实例管理员', 'identity_orphaned')
     }
     await this.input.store.transaction(tx => tx.identity.touchLoginIdentity({ id: input.bound.id, lastSignInAt: input.consumedAt }))
     await this.note('identity.oauth_signed_in', { provider: 'google', authenticationMethod: 'google', identityId: input.bound.id }, user.id)
@@ -424,7 +424,7 @@ export class GoogleAuthenticationService {
     try {
       const user = await this.input.store.transaction(async tx => {
         const taken = new Set((await tx.identity.listUsers()).map(candidate => candidate.username))
-        const created: User = { id: randomUUID() as UserId, username: deriveUsername(display, name => taken.has(name)), email: input.primaryEmail, createdAt: input.at }
+        const created: User = { id: randomUUID() as UserId, username: deriveUsername(display, name => taken.has(name)), email: input.primaryEmail, createdAt: input.at, status: 'active', authVersion: 0, statusChangedAt: input.at, deletedAt: null }
         const identity: ExternalLoginIdentity = {
           id: randomUUID(), provider: 'google', issuer: claims.issuer, subject: claims.subject, userId: created.id,
           emailAtSignIn: claims.email, emailVerified: claims.emailVerified, createdAt: input.at, lastSignInAt: input.at,

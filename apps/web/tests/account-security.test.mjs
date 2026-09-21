@@ -72,7 +72,7 @@ test('password and email forms defer strong auth to the server and report the re
   // 没有本地密码的账号不说“输入当前密码”，而是说清需要先重新登录。
   assert.match(page, /账号没有本地密码：请先用 Google 重新登录一次再操作。/)
   assert.match(page, /passwordSet \? passwordForm\.current : undefined/)
-  assert.doesNotMatch(page, /fetch\(/)
+  assert.doesNotMatch(page, /\bfetch\(/)
   assert.doesNotMatch(page, /localStorage\.setItem\('(csrf|token)'/)
 })
 
