@@ -56,7 +56,7 @@ export async function seedAdministrator(store: ServerStore, overrides: SeedAdmin
     if (email && !await tx.identity.getUserEmail(userId)) {
       await tx.identity.saveUserEmail({ emailNormalized: normalizeEmail(email)!.normalized, userId, emailDisplay: email, createdAt: assignedAt })
     }
-    await tx.identity.savePersonalAccessToken({ id: randomUUID() as CredentialId, userId, tokenHash: hashSecret(token), expiresAt: overrides.expiresAt ?? farFuture, revokedAt: null })
+    await tx.identity.savePersonalAccessToken({ id: randomUUID() as CredentialId, userId, name: '测试管理员', scopes: ['read', 'write', 'execute', 'admin'], tokenHash: hashSecret(token), createdAt: assignedAt, expiresAt: overrides.expiresAt ?? farFuture, lastUsedAt: null, revokedAt: null })
     // 幂等：同一用户重复播种（多个夹具共用同一个 store）不写第二条归属，也不触发唯一约束。
     if (!await tx.identity.findInstanceAdministrator(userId)) await tx.identity.saveInstanceAdministrator(record)
   })

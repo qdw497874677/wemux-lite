@@ -182,6 +182,7 @@ export interface ServerIdentityWriter {
   removeSessionGrant(sessionId: SessionId, userId: UserId): Promise<void>
   savePersonalAccessToken(record: PersonalAccessTokenRecord): Promise<void>
   revokePersonalAccessToken(id: import('@wemux/domain').CredentialId, revokedAt: Timestamp): Promise<void>
+  touchPersonalAccessToken(id: import('@wemux/domain').CredentialId, lastUsedAt: Timestamp): Promise<void>
   /** Revokes every PAT of a user (or of all users when userId is null) and reports how many changed. */
   revokePersonalAccessTokens(userId: UserId | null, revokedAt: Timestamp): Promise<number>
   /** 覆盖式保存实例设置（单例）；策略变更必须可审计。 */

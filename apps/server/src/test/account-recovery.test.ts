@@ -76,7 +76,7 @@ async function issueLegacyTokens(store: SqliteServerStore, userId: UserId, secre
   const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() as Timestamp
   await store.transaction(async tx => {
     for (const [index, secret] of secrets.entries()) {
-      await tx.identity.savePersonalAccessToken({ id: `legacy-pat-${index}` as CredentialId, userId, tokenHash: hashSecret(secret), expiresAt, revokedAt: null })
+      await tx.identity.savePersonalAccessToken({ id: `legacy-pat-${index}` as CredentialId, userId, name: `恢复测试 ${index + 1}`, scopes: ['read', 'write', 'execute', 'admin'], tokenHash: hashSecret(secret), createdAt: new Date().toISOString() as Timestamp, expiresAt, lastUsedAt: null, revokedAt: null })
     }
   })
 }

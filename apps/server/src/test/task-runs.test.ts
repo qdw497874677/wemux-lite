@@ -30,7 +30,7 @@ const context = { actor: instanceOperatorId, requestId: 'runs-test' }
 async function issuePat(store: ServerStore, userId: UserId, ttlMs: number): Promise<string> {
   const token = `test-pat-${randomUUID()}`
   const expiresAt = new Date(Date.now() + ttlMs).toISOString() as Timestamp
-  await store.transaction(async tx => tx.identity.savePersonalAccessToken({ id: randomUUID() as CredentialId, userId, tokenHash: hashSecret(token), expiresAt, revokedAt: null }))
+  await store.transaction(async tx => tx.identity.savePersonalAccessToken({ id: randomUUID() as CredentialId, userId, name: '任务测试', scopes: ['read', 'write', 'execute', 'admin'], tokenHash: hashSecret(token), createdAt: new Date().toISOString() as Timestamp, expiresAt, lastUsedAt: null, revokedAt: null }))
   return token
 }
 

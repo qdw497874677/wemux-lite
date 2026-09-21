@@ -48,6 +48,21 @@ test('account security client methods match the server contract', () => {
   assert.match(dto, /removable: boolean/)
 })
 
+test('personal access tokens expose one-time plaintext and scoped lifecycle controls', () => {
+  assert.match(client, /personalAccessTokens: '\/api\/auth\/personal-access-tokens'/)
+  assert.match(client, /rotatePersonalAccessToken: \(tokenId: string\) => `\/api\/auth\/personal-access-tokens\/\$\{id\(tokenId\)\}\/rotate`/)
+  assert.match(client, /createPersonalAccessToken: \(body: \{ name: string; scopes: PersonalAccessTokenScopeDTO\[\]; expiresAt: string \}\)/)
+  assert.match(dto, /export type PersonalAccessTokenScopeDTO = 'read' \| 'write' \| 'execute' \| 'admin'/)
+  assert.match(dto, /export interface IssuedPersonalAccessTokenDTO extends PersonalAccessTokenDTO \{ token: string \}/)
+  assert.match(page, /明文令牌仅显示这一次/)
+  assert.match(page, /api\.createPersonalAccessToken/)
+  assert.match(page, /api\.rotatePersonalAccessToken/)
+  assert.match(page, /api\.revokePersonalAccessToken/)
+  assert.match(page, /copyText\(issuedPat\.token\)/)
+  assert.match(page, /selectElementText\(issuedPatElement\)/)
+  assert.doesNotMatch(page, /localStorage.*issuedPat|sessionStorage.*issuedPat/)
+})
+
 // 强认证判定必须在服务端：前端只能如实提示“需要当前密码”，不能自己放行。
 test('password and email forms defer strong auth to the server and report the revocation they caused', () => {
   assert.match(page, /api\.changePassword\(\{ currentPassword: passwordSet \? passwordForm\.current : undefined, newPassword: passwordForm\.next \}\)/)

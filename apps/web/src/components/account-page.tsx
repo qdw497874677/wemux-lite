@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { KeyRound, Link2, LogOut, Mail, MonitorSmartphone, RefreshCw, ShieldCheck, UserRound } from 'lucide-react'
+import { Check, Copy, KeyRound, Link2, LogOut, Mail, MonitorSmartphone, RefreshCw, RotateCw, ShieldCheck, Trash2, UserRound } from 'lucide-react'
 import type { Api, AccountSession } from '../api/client'
-import type { AccountSecurityViewDTO, RegistrationPolicyDTO } from '../api/dto'
+import type { AccountSecurityViewDTO, PersonalAccessTokenScopeDTO, RegistrationPolicyDTO } from '../api/dto'
 import { formatChineseTime } from '../lib/display'
 import { readLinkError, readLinkNotice, withoutLinkParams } from '../lib/oauth-error'
+import { copyText, selectElementText } from '../lib/utils.ts'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
@@ -13,6 +14,7 @@ import { Input } from './ui/input'
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message.replace(/^请求失败（HTTP \d+）：/, '') : '请求失败'
 const policyLabels: Record<RegistrationPolicyDTO, string> = { open: '开放注册', invite_only: '仅邀请', closed: '关闭注册' }
 const methodLabels: Record<string, string> = { password: '本地密码', google: 'Google' }
+const scopeLabels: Record<PersonalAccessTokenScopeDTO, string> = { read: '读取', write: '写入', execute: '执行', admin: '管理' }
 const minutesLeft = (expiresAt: string): string => {
   const left = Math.round((Date.parse(expiresAt) - Date.now()) / 60000)
   return Number.isFinite(left) && left > 0 ? `${left} 分钟` : '几分钟'
@@ -61,7 +63,12 @@ export function AccountPage({ api, session, onSignOut, onOpenConnection, linkNot
   const [emailForm, setEmailForm] = useState({ email: '', current: '' })
   const [unbinding, setUnbinding] = useState<{ id: string; kind: string } | null>(null)
   const [unbindPassword, setUnbindPassword] = useState('')
+  const [patForm, setPatForm] = useState<{ name: string; scopes: PersonalAccessTokenScopeDTO[]; days: string }>({ name: '', scopes: ['read'], days: '30' })
+  const [issuedPat, setIssuedPat] = useState<{ token: string; name: string } | null>(null)
+  const [copiedPat, setCopiedPat] = useState(false)
+  const [issuedPatElement, setIssuedPatElement] = useState<HTMLElement | null>(null)
   const sessions = useQuery({ queryKey: ['login-sessions'], queryFn: ({ signal }) => api.loginSessions(signal) })
+  const personalAccessTokens = useQuery({ queryKey: ['personal-access-tokens'], queryFn: ({ signal }) => api.personalAccessTokens(signal) })
   const policy = useQuery({ queryKey: ['registration-policy'], queryFn: ({ signal }) => api.registrationPolicy(signal), enabled: session.instanceAdministrator })
   const capabilities = useQuery({ queryKey: ['auth-options'], queryFn: ({ signal }) => api.authOptions(signal) })
   const security = useQuery({ queryKey: ['account-security'], queryFn: ({ signal }) => api.accountSecurity(signal) })
@@ -108,6 +115,18 @@ export function AccountPage({ api, session, onSignOut, onOpenConnection, linkNot
     // 响应自带最新的登录方式列表，直接写进缓存，省一次往返。
     await client.invalidateQueries({ queryKey: ['account-security'] })
   })
+
+  const submitPat = () => void act('pat:create', async () => {
+    const days = Number(patForm.days)
+    if (!Number.isInteger(days) || days < 1 || days > 365) throw new Error('有效期需为 1–365 天。')
+    const issued = await api.createPersonalAccessToken({ name: patForm.name.trim(), scopes: patForm.scopes, expiresAt: new Date(Date.now() + days * 86400000).toISOString() })
+    setIssuedPat({ token: issued.token, name: issued.name }); setCopiedPat(false)
+    setPatForm({ name: '', scopes: ['read'], days: '30' })
+    await client.invalidateQueries({ queryKey: ['personal-access-tokens'] })
+  })
+
+  const toggleScope = (scope: PersonalAccessTokenScopeDTO) => setPatForm(form => ({ ...form, scopes: form.scopes.includes(scope) ? form.scopes.filter(value => value !== scope) : [...form.scopes, scope] }))
+  const copyIssuedPat = () => void (async () => { if (!issuedPat) return; const copied = await copyText(issuedPat.token); setCopiedPat(copied); if (!copied && issuedPatElement) { selectElementText(issuedPatElement); setNotice('已选中令牌，请按 Ctrl+C 或长按复制。') } })()
 
   const googleMethod = view?.methods.find(method => method.kind === 'google')
   const strongAuthHint = passwordSet
@@ -235,6 +254,42 @@ export function AccountPage({ api, session, onSignOut, onOpenConnection, linkNot
       <div className="flex flex-wrap gap-2">
         <Button variant="destructive" disabled={busy !== ''} onClick={() => void act('logout-all', () => api.logoutAll(), onSignOut)}>退出全部设备</Button>
       </div>
+    </section>
+
+    <section className="grid gap-4 rounded-xl border border-border bg-card p-4">
+      <div>
+        <h2 className="flex items-center gap-2 text-sm font-semibold"><KeyRound aria-hidden className="size-4 text-muted-foreground" />个人访问令牌</h2>
+        <p className="mt-1 max-w-3xl text-sm leading-6 text-muted-foreground">给 CLI 或脚本使用。范围只限制令牌能做什么，仍不能越过你当前拥有的 Project、Worker 与 Session 权限。</p>
+      </div>
+      <form className="grid gap-3 rounded-lg border border-border bg-muted/20 p-3 lg:grid-cols-[minmax(0,1fr)_8rem_auto]" onSubmit={event => { event.preventDefault(); if (!busy) submitPat() }}>
+        <label className="grid gap-1 text-sm font-medium">名称
+          <Input value={patForm.name} maxLength={80} placeholder="例如：部署脚本" onChange={event => setPatForm(form => ({ ...form, name: event.target.value }))} />
+        </label>
+        <label className="grid gap-1 text-sm font-medium">有效期（天）
+          <Input type="number" min="1" max="365" value={patForm.days} onChange={event => setPatForm(form => ({ ...form, days: event.target.value }))} />
+        </label>
+        <Button className="self-end whitespace-nowrap" type="submit" disabled={busy !== '' || !patForm.name.trim() || patForm.scopes.length === 0}>{busy === 'pat:create' ? '正在创建…' : '创建令牌'}</Button>
+        <fieldset className="grid gap-2 lg:col-span-3">
+          <legend className="text-sm font-medium">访问范围</legend>
+          <div className="flex flex-wrap gap-2">{(Object.keys(scopeLabels) as PersonalAccessTokenScopeDTO[]).map(scope => <label key={scope} className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm">
+            <input type="checkbox" checked={patForm.scopes.includes(scope)} onChange={() => toggleScope(scope)} />
+            <span>{scopeLabels[scope]}</span>
+          </label>)}</div>
+          <p className="text-xs leading-5 text-muted-foreground">读取可查看已获权资源；写入用于编辑；执行用于发送消息与启动任务；管理用于调整共享、Grant 和实例级操作。</p>
+        </fieldset>
+      </form>
+      {issuedPat && <div className="grid gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
+        <p className="text-sm font-medium text-amber-100">{issuedPat.name} 的明文令牌仅显示这一次</p>
+        <code ref={setIssuedPatElement} className="select-all overflow-x-auto rounded-md bg-background px-3 py-2 text-xs text-foreground">{issuedPat.token}</code>
+        <div className="flex flex-wrap gap-2"><Button size="sm" variant="outline" onClick={() => void copyIssuedPat()}>{copiedPat ? <Check className="size-4" /> : <Copy className="size-4" />}{copiedPat ? '已复制' : '复制令牌'}</Button><Button size="sm" variant="ghost" onClick={() => { setIssuedPat(null); setCopiedPat(false) }}>我已保存</Button></div>
+      </div>}
+      {personalAccessTokens.isPending ? <p role="status" className="text-sm text-muted-foreground">正在读取访问令牌…</p>
+        : personalAccessTokens.error ? <p role="alert" className="text-sm text-red-300">{errorText(personalAccessTokens.error)}</p>
+          : (personalAccessTokens.data ?? []).length === 0 ? <p className="text-sm text-muted-foreground">还没有个人访问令牌。</p>
+            : <ul className="grid gap-2">{personalAccessTokens.data!.map(token => <li key={token.id} className="grid gap-2 rounded-lg border border-border px-3 py-3 text-sm sm:grid-cols-[minmax(0,1fr)_auto]">
+              <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><strong className="truncate">{token.name}</strong>{token.revokedAt && <Badge variant="outline">已撤销</Badge>}</div><div className="mt-1 flex flex-wrap gap-1">{token.scopes.map(scope => <Badge key={scope} variant="secondary">{scopeLabels[scope]}</Badge>)}</div><p className="mt-1 text-xs text-muted-foreground">创建 {formatChineseTime(token.createdAt)} · 到期 {formatChineseTime(token.expiresAt)}{token.lastUsedAt ? ` · 最近使用 ${formatChineseTime(token.lastUsedAt)}` : ''}</p></div>
+              {!token.revokedAt && <div className="flex items-center gap-1 sm:justify-end"><Button size="sm" variant="ghost" disabled={busy !== ''} onClick={() => void act(`pat:rotate:${token.id}`, async () => { const rotated = await api.rotatePersonalAccessToken(token.id, token.expiresAt); setIssuedPat({ token: rotated.token, name: rotated.name }); setCopiedPat(false); await client.invalidateQueries({ queryKey: ['personal-access-tokens'] }) })}><RotateCw className="size-4" />轮换</Button><Button size="sm" variant="ghost" disabled={busy !== ''} onClick={() => void act(`pat:revoke:${token.id}`, () => api.revokePersonalAccessToken(token.id), () => client.invalidateQueries({ queryKey: ['personal-access-tokens'] }))}><Trash2 className="size-4" />撤销</Button></div>}
+            </li>)}</ul>}
     </section>
 
     {session.instanceAdministrator && <section className="grid gap-3 rounded-xl border border-border bg-card p-4">

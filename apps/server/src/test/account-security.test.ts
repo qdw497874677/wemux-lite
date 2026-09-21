@@ -100,8 +100,8 @@ async function seedTokens(store: SqliteServerStore, userId: UserId, count: numbe
   await store.transaction(async tx => {
     for (let index = 0; index < count; index++) {
       await tx.identity.savePersonalAccessToken({
-        id: randomUUID() as CredentialId, userId, tokenHash: hashSecret(`pat-${userId}-${index}`),
-        expiresAt: '2099-01-01T00:00:00.000Z' as Timestamp, revokedAt: null,
+        id: randomUUID() as CredentialId, userId, name: `安全测试 ${index + 1}`, scopes: ['read'], tokenHash: hashSecret(`pat-${userId}-${index}`),
+        createdAt: new Date().toISOString() as Timestamp, expiresAt: '2099-01-01T00:00:00.000Z' as Timestamp, lastUsedAt: null, revokedAt: null,
       })
     }
   })

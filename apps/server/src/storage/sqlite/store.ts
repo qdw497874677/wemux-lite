@@ -407,6 +407,7 @@ export class SqliteServerStore implements ServerStore {
       removeSessionGrant: async (sessionId, userId) => { this.db.prepare("DELETE FROM records WHERE kind='session-grant' AND id=?").run(`${sessionId}:${userId}`) },
       savePersonalAccessToken: async r => this.put('pat', r.id, r),
       revokePersonalAccessToken: async (id, revokedAt) => { const r = this.get<PersonalAccessTokenRecord>('pat', id); if (r) this.put('pat', id, { ...r, revokedAt }) },
+      touchPersonalAccessToken: async (id, lastUsedAt) => { const r = this.get<PersonalAccessTokenRecord>('pat', id); if (r && r.revokedAt === null) this.put('pat', id, { ...r, lastUsedAt }) },
       revokePersonalAccessTokens: async (userId, revokedAt) => {
         let revoked = 0
         for (const record of this.list<PersonalAccessTokenRecord>('pat')) {

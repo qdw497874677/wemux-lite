@@ -9,6 +9,7 @@ import type { GoogleAuthenticationService } from '../application/google-authenti
 import type { AccountSecurityService } from '../application/account-security-service.js'
 import type { InstanceSettingsService } from '../application/instance-settings.js'
 import type { TeamService } from '../application/team-service.js'
+import type { PersonalAccessTokenService } from '../application/personal-access-token-service.js'
 import { AppError } from '../application/errors.js'
 import { clearedSessionCookie, isSecureRequest, readCookie, sessionCookie } from './cookies.js'
 
@@ -38,6 +39,7 @@ export interface AuthRouteContext {
   readonly google?: GoogleAuthenticationService | null
   readonly security?: AccountSecurityService | null
   readonly teams?: TeamService | null
+  readonly personalAccessTokens?: PersonalAccessTokenService | null
 }
 
 /** 一次性 state 的 Cookie 名：与发起浏览器绑定，回调后立即清除。 */
@@ -314,6 +316,27 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<boolea
     return respond(200, await identity.account(user, rotated.session))
   }
   if (method === 'GET' && path === '/auth/sessions') return respond(200, { items: await identity.listSessions(session.userId, session.id) })
+  if (path === '/auth/personal-access-tokens') {
+    const tokens = context.personalAccessTokens
+    if (!tokens) throw new AppError(503, '访问令牌功能未启用', 'pat_disabled')
+    if (method === 'GET') return respond(200, { items: await tokens.list(session.userId) })
+    if (method === 'POST') {
+      assertCookieWriteAllowed(identity, request, session)
+      return respond(201, await tokens.create(session.userId, await context.readBody() as { name?: unknown; scopes?: unknown; expiresAt?: unknown }))
+    }
+  }
+  const personalAccessToken = path.match(/^\/auth\/personal-access-tokens\/([^/]+)(?:\/(rotate))?$/)
+  if (personalAccessToken) {
+    const tokens = context.personalAccessTokens
+    if (!tokens) throw new AppError(503, '访问令牌功能未启用', 'pat_disabled')
+    assertCookieWriteAllowed(identity, request, session)
+    const tokenId = decodeURIComponent(personalAccessToken[1]!) as import('@wemux/domain').CredentialId
+    if (method === 'DELETE' && !personalAccessToken[2]) { await tokens.revoke(session.userId, tokenId); response.writeHead(204).end(); return true }
+    if (method === 'POST' && personalAccessToken[2] === 'rotate') {
+      const input = await context.readBody() as { expiresAt?: unknown }
+      return respond(201, await tokens.rotate(session.userId, tokenId, input.expiresAt))
+    }
+  }
   if (method === 'POST' && path === '/auth/logout') {
     assertCookieWriteAllowed(identity, request, session)
     await identity.logout(session)

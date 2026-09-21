@@ -1,6 +1,6 @@
 # 账号、注册与 Google 登录设计
 
-状态：持续交付中的设计基线。A0 账号/注册/Google/安全管理、A1 Team 创建与邀请，以及 A3 的 Project、Worker、Session 授权基础闭环（Ticket 10–12）已实现并验收；成员治理与实时撤权、A2 PAT/审计仍未完成。对应路线图 A0–A3 / M6，不以登录成功宣称全部团队权限已完成。
+状态：持续交付中的设计基线。A0 账号/注册/Google/安全管理、A1 Team 创建/邀请/成员治理、A2 PAT 与设备会话（Ticket 14），以及 A3 的 Project、Worker、Session 授权与实时撤权闭环（Ticket 10–13）已实现并验收；A2 的可筛选审计检索仍未完成。对应路线图 A0–A3 / M6，不以登录成功宣称全部团队权限已完成。
 
 依据：[产品方向](../product-direction.md)、[领域术语](../../CONTEXT.md)、[路线图](../roadmap.md)。
 
@@ -83,7 +83,7 @@
 | OAuthTransaction | stateHash、浏览器绑定、nonce、短期 PKCE verifier、provider、login/link 意图、UserId、返回路径、到期/消费状态 |
 | VerificationChallenge | tokenHash、userId 或注册记录、目标邮箱、用途、到期与消费状态；用途不可互换 |
 | TeamInvitation | teamId、目标邮箱、角色、tokenHash、邀请者、期限、消费/撤销状态 |
-| PAT | userId、tokenHash、scope、期限、撤销状态；有效权限始终与当前资源授权取交集 |
+| PAT | userId、名称、tokenHash、scope、创建/到期/最近使用/撤销状态；有效权限始终与当前资源授权取交集 |
 
 必须原子保证：邮箱唯一性、Google 身份唯一性、邀请码消费、初始化单次完成、最后 Owner/最后登录方式保护、成员撤销与 Grant 失效。账号状态及认证版本必须参与每次认证，不能依赖登录时快照。
 
@@ -128,7 +128,7 @@ Server → 签发本站 HttpOnly Cookie → 团队选择 / 原授权页面
 
 - 管理员：`WEMUX_ADMIN_EMAILS`（或 `createWemuxServer({ administratorEmails })`）声明邮箱，命中即实例管理员（审计 `instance.administrator_assigned` / `instance.administrator_recovered`）；声明邮箱在 `invite_only`/`closed` 下仍可注册（`identity.registration_allowed`、`identity.oauth_registration_allowed` 审计里标注 `declared_administrator`），其他邮箱照旧受限。没有引导令牌、没有 `instance_claim`、没有 `POST /auth/setup`；未声明任何邮箱时任何账号都不会获得管理员权限。账号为 `user` 记录，密码存 `local-credential`（`scrypt$v1$N=16384,r=8,p=1`，独立盐值）。
 - 登录会话：独立 `login_sessions` 表（32 字节令牌只存 SHA-256 哈希，另有 CSRF 哈希、空闲/绝对过期、`revoked_at`），Cookie 为 `wemux_login_session`，HttpOnly、SameSite=Lax、host-only，路径 `/`；接口 `GET /auth/options`、`POST /auth/login|logout|logout-all`、`GET /auth/me|auth/sessions`、`DELETE /auth/sessions/:id`。写操作同时校验 Origin 与 `X-CSRF-Token`；`GET /auth/me` 在缺少或不匹配 CSRF 时轮换令牌并一次性返回新明文。
-- 凭据隔离：浏览器 Cookie 只能作为登录会话使用，Bearer 只能作为 PAT 使用；`wemux-session-*` 前缀明确拒绝（`retired_credential`），PAT 要求非空过期时间。
+- 凭据隔离：浏览器 Cookie 只能作为登录会话使用，Bearer 只能作为 PAT 使用；`wemux-session-*` 前缀明确拒绝（`retired_credential`），PAT 要求非空过期时间与非空 scope。Ticket 14 已实现 `read | write | execute | admin` 能力上限，并继续与 Project/Worker/Session Grant 取交集。
 - 主机本地恢复：`node dist/cli.js credentials list|reset-password|revoke`（`apps/server/src/application/recovery.ts` 提供 `AccountRecovery`）。它只在 Server 所在主机的进程内可用，不注册任何 HTTP 路由，也不签发会话：`reset-password` 撤销该账号全部登录会话与（默认）PAT、写审计 `credentials.recovered`，明文密码只在 stdout 出现一次；`revoke` 只清凭据并写审计 `credentials.revoked`。改实例管理员只需改 `WEMUX_ADMIN_EMAILS`；若新邮箱还没有账号，仍需它自己完成注册与验证。审计元数据只记录 `channel: host-local` 与撤销计数，不含任何秘密。
 - 秘密屏蔽：密码、会话/CSRF 令牌、PAT 不得出现在审计、落盘明文或 CLI 输出；由 `apps/server/src/test/account-redaction.test.ts` 以“全库字节扫描 + 审计字段检查 + CLI 输出检查”回归锁定。
 
@@ -168,11 +168,20 @@ Server → 签发本站 HttpOnly Cookie → 团队选择 / 原授权页面
 - 审计与秘密：`credentials.login_method_bound` / `credentials.login_method_unbound` 留痕，审计只记渠道与结果，不含 code、state、密码或令牌。
 - 证据：`apps/server/src/test/account-security.test.ts`（含绑定会话归属、他人身份抢绑、Google-only 设密码、最后方式保护）、`apps/web/tests/account-security.test.mjs`、`apps/server/scripts/verify-wave-c.mjs`。验收摘要见 `docs/acceptance/account-identity-security-and-linking.md`。
 
+### 5.6 已交付：PAT 与设备会话管理（Ticket 14）
+
+- 设备会话：沿用 `GET /auth/sessions`、`DELETE /auth/sessions/:id`、`POST /auth/logout-all`；只返回客户端标签、认证方式、创建/活动/到期与当前设备标记，不返回令牌或哈希。
+- PAT 路由：`GET|POST /auth/personal-access-tokens`、`DELETE /auth/personal-access-tokens/:id`、`POST /auth/personal-access-tokens/:id/rotate`。创建/轮换明文只显示一次；列表只返回名称、scope、创建/到期/最近使用/撤销时间。
+- scope：`read | write | execute | admin` 是请求能力上限，路由仍把 UserId 交给 Project/Worker/Session Application Service 做资源授权；scope 绝不生成 Grant。旧无 scope PAT 返回 401，不按历史管理员身份猜测补权。
+- 长连接：当前用户授权长连接为 Project/Session SSE；心跳周期重新验证 PAT，撤销或到期后断开。Worker WebSocket 使用独立 Worker Credential，不接受 PAT。
+- 审计：`pat.created`、`pat.used`、`pat.revoked`、`pat.rotated`、`pat.authentication_failed` 只记录 token id、scope、时间与结果，绝不记录明文；通用检索与导出留给 Ticket 15。
+- Web：`apps/web/src/components/account-page.tsx` 提供创建、一次性复制/手动选择降级、轮换、撤销与设备列表。真实浏览器证据见 `.scratch/product-convergence/evidence/ticket-14-pat-and-device-sessions.md`。
+
 ## 6. API 与交互切片
 
 以下全部为设计目标，统一挂 `/api`，不暗示已存在这些接口。鉴权写操作遵循幂等、CAS 和专用一次性令牌语义，不能缓存含秘密响应。
 
-已完成（对照下表：账号安全组已交付密码/邮箱/登录方式三条，团队与客户端两组仍未开始）：登录/会话、注册/验证/找回、Google 与账号安全组的接口已按 §5.1–§5.5 的实际形态存在，见各节列出的路由。
+已完成（对照下表）：登录/会话、注册/验证/找回、Google、账号安全、Team 主路径与 PAT/设备会话接口已按 §5.1–§5.6 的实际形态存在；客户端组只剩通用审计检索未开始。
 
 | 分组 | 拟议入口 |
 | --- | --- |
@@ -183,7 +192,7 @@ Server → 签发本站 HttpOnly Cookie → 团队选择 / 原授权页面
 | Google | `POST /auth/oauth/google/start`、`GET /auth/oauth/google/callback` |
 | 账号安全 | `POST /account/reauthenticate`、`GET /account/identities`、`POST /account/identities/google/link`、`DELETE /account/identities/:id`、`PUT /account/password`、邮箱变更发起/确认、停用/销号 |
 | 团队 | Team 创建/选择、成员管理、邀请创建/撤销/接受、所有权转移 |
-| 客户端 | PAT 创建/列表/撤销/轮换，审计检索 |
+| 客户端 | PAT 创建/列表/撤销/轮换（已实现），审计检索（待 Ticket 15） |
 
 交互：落地页内联登录/注册，邮箱待验证页、忘记/重置密码页、Google 失败页、首次团队选择/空态、账号资料与安全页、团队成员与邀请页、实例登录策略设置。所有入口有加载/失败/重试/过期状态、桌面/手机与键盘路径；原应用内连接弹窗仅承担重连，不替代账号落地页。
 
@@ -195,8 +204,8 @@ Server → 签发本站 HttpOnly Cookie → 团队选择 / 原授权页面
 2. **A0.2 本地注册与恢复**：邮箱密码注册、邮件验证、找回、登录/退出与安全页；SMTP 生命周期。
 3. **A0.3 Google OIDC**：新账号注册、已有账号登录、显式绑定/解绑、异常与部署配置；真实 Google 浏览器验收。
 4. **A1 团队加入**：Team 创建、邀请与成员生命周期；与 A3 同时定义授权契约。
-5. **A2 凭证管理**：PAT 与设备管理/审计完善，不延后 A0 的 CSRF、限流与秘密保护。
-6. **A3 全路径授权**：Ticket 10–12 已交付 Project、Worker、Session 的查询/写入/实时订阅/执行基础权限与真实操作者；Ticket 13 继续交付成员移除时的原子 Grant 撤销、已打开实时流持续复核与进行中执行撤权。P2 委派不得绕过此门槛。
+5. **A2 凭证管理**：Ticket 14 已交付 PAT 与设备管理、凭据生命周期审计；Ticket 15 补可筛选审计检索，不延后 A0 的 CSRF、限流与秘密保护。
+6. **A3 全路径授权**：Ticket 10–13 已交付 Project、Worker、Session 的查询/写入/实时订阅/执行权限、真实操作者、成员治理与实时撤权；成员移除后现有 Grant 经有效 membership 重新求值，已打开实时流断开重鉴权，受影响 Run 写入可恢复停止命令。P2 委派不得绕过此门槛。
 
 至少覆盖以下可重复场景，实际执行才创建 acceptance 报告：
 

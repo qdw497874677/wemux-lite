@@ -4,7 +4,7 @@ import { readDeviceId } from '../lib/device-scope.ts'
 import type {
   ApprovalDecisionDTO, RuntimeCommandDTO, PatchSessionDTO, CommandResultDTO,
   AccountPayloadDTO, AccountViewDTO, AcceptedEmailDTO, AccountSecurityViewDTO, AuthOptionsDTO, CommandDTO, CreateEnrollmentTokenDTO, CreateProjectDTO,
-  CreateSessionDTO, CreateWorkspaceDTO, EmailChangeAcceptedDTO, EmailChangeConfirmedDTO, EnrollmentTokenDTO, EventsPageDTO, GoogleLinkStartDTO, LoginMethodUnboundDTO, LoginSessionDTO, PasswordChangeDTO, PasswordResetDTO, ProjectDTO,
+  CreateSessionDTO, CreateWorkspaceDTO, EmailChangeAcceptedDTO, EmailChangeConfirmedDTO, EnrollmentTokenDTO, EventsPageDTO, GoogleLinkStartDTO, IssuedPersonalAccessTokenDTO, LoginMethodUnboundDTO, LoginSessionDTO, PasswordChangeDTO, PasswordResetDTO, PersonalAccessTokenDTO, PersonalAccessTokenScopeDTO, ProjectDTO,
   RegistrationPolicyDTO, RegistrationPolicyViewDTO, SendMessageDTO, SendResultDTO, SessionDTO, SessionResourceDTO, ServerEventsPageDTO, TailnetInfoDTO, VerifiedEmailDTO, WorkerDTO, WorkspaceDTO,
 } from './dto'
 
@@ -38,6 +38,9 @@ export const routes = {
   registrationPolicy: '/api/settings/registration-policy',
   loginSessions: '/api/auth/sessions',
   loginSession: (sessionId: string) => `/api/auth/sessions/${id(sessionId)}`,
+  personalAccessTokens: '/api/auth/personal-access-tokens',
+  personalAccessToken: (tokenId: string) => `/api/auth/personal-access-tokens/${id(tokenId)}`,
+  rotatePersonalAccessToken: (tokenId: string) => `/api/auth/personal-access-tokens/${id(tokenId)}/rotate`,
   enrollmentTokens: '/api/enrollment-tokens',
   tailnet: '/api/cluster/tailnet',
   workers: '/api/workers',
@@ -194,7 +197,12 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
       if (account.csrfToken) csrfToken = account.csrfToken
       return account
     },
-    loginSessions: (signal?: AbortSignal) => list<LoginSessionDTO>(routes.loginSessions, signal),    revokeLoginSession: (sessionId: string) => request<void>(routes.loginSession(sessionId), undefined, undefined, 'DELETE'),
+    loginSessions: (signal?: AbortSignal) => list<LoginSessionDTO>(routes.loginSessions, signal),
+    revokeLoginSession: (sessionId: string) => request<void>(routes.loginSession(sessionId), undefined, undefined, 'DELETE'),
+    personalAccessTokens: (signal?: AbortSignal) => list<PersonalAccessTokenDTO>(routes.personalAccessTokens, signal),
+    createPersonalAccessToken: (body: { name: string; scopes: PersonalAccessTokenScopeDTO[]; expiresAt: string }) => request<IssuedPersonalAccessTokenDTO>(routes.personalAccessTokens, body),
+    revokePersonalAccessToken: (tokenId: string) => request<void>(routes.personalAccessToken(tokenId), undefined, undefined, 'DELETE'),
+    rotatePersonalAccessToken: (tokenId: string, expiresAt: string) => request<IssuedPersonalAccessTokenDTO>(routes.rotatePersonalAccessToken(tokenId), { expiresAt }),
     logout: async () => { await request<void>(routes.authLogout, {}); csrfToken = '' },
     // 邮箱注册与找回（Ticket 05）：全部是未登录可用的入口，响应形状统一，不泄露邮箱是否存在。
     register: (input: { email: string; displayName: string; password: string; invitationToken?: string }) => request<AcceptedEmailDTO>(routes.authRegister, input),

@@ -6,7 +6,7 @@ import type { Notifications } from '../application/notifications.js'
 export class ProjectStreams {
   private readonly clients = new Set<ServerResponse>()
   constructor(private readonly notifications: Notifications) {}
-  open(response: ServerResponse, projectId: string, actor: UserId, authorize: () => Promise<unknown>): void {
+  open(response: ServerResponse, projectId: string, actor: UserId, authorize: () => Promise<unknown>, credentialAuthorize: () => Promise<unknown> = authorize): void {
     let closed = false, checking = false
     const write = (data: string) => {
       if (!closed && !response.write(data)) response.destroy()
@@ -17,7 +17,7 @@ export class ProjectStreams {
     const reauthorize = () => {
       if (checking || closed) return
       checking = true
-      void authorize().then(() => write(': heartbeat\n\n'), () => response.destroy()).finally(() => { checking = false })
+      void credentialAuthorize().then(authorize).then(() => write(': heartbeat\n\n'), () => response.destroy()).finally(() => { checking = false })
     }
     const unsubscribeAuthorization = this.notifications.onAuthorization(actor, reauthorize)
     this.clients.add(response)

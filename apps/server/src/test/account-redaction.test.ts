@@ -75,7 +75,7 @@ async function driveLifecycle(): Promise<{ lifecycle: Lifecycle; close: () => Pr
   const user = await store.identity.getUserByLogin(username)
   assert.ok(user)
   await store.transaction(async tx => {
-    await tx.identity.savePersonalAccessToken({ id: 'redaction-pat' as CredentialId, userId: user.id, tokenHash: hashSecret(pat), expiresAt: new Date(Date.now() + 60_000).toISOString() as Timestamp, revokedAt: null })
+    await tx.identity.savePersonalAccessToken({ id: 'redaction-pat' as CredentialId, userId: user.id, name: '脱敏测试', scopes: ['read'], tokenHash: hashSecret(pat), createdAt: new Date().toISOString() as Timestamp, expiresAt: new Date(Date.now() + 60_000).toISOString() as Timestamp, lastUsedAt: null, revokedAt: null })
   })
   const recovery = new AccountRecovery(store, new AdministratorDirectory(store.identity, [email]))
   const report = await recovery.resetPassword({ login: email })

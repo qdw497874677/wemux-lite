@@ -26,6 +26,7 @@ import type { TeamService } from '../application/team-service.js'
 import type { ProjectAccessService } from '../application/project-access-service.js'
 import type { WorkerAccessService } from '../application/worker-access-service.js'
 import type { SessionAccessService } from '../application/session-access-service.js'
+import type { PersonalAccessTokenService } from '../application/personal-access-token-service.js'
 import { sendTeamInvitationMail } from '../application/team-invitation-mail.js'
 import type { MailSettings } from '../application/mail/email-delivery.js'
 import { readCookie } from './cookies.js'
@@ -49,7 +50,20 @@ function json(response: ServerResponse, status: number, data: unknown): void {
 
 export interface WorkerControl { disconnectWorker(workerId: import('@wemux/domain').WorkerId): void }
 
-export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, _adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams, identity?: IdentityService | null, registration?: EmailRegistrationService | null, settings?: InstanceSettingsService | null, google?: GoogleAuthenticationService | null, lineage?: SessionLineageService | null, security?: AccountSecurityService | null, teams?: TeamService | null, mail?: MailSettings | null, projects?: ProjectAccessService | null, workerAccess?: WorkerAccessService | null, sessionAccess?: SessionAccessService | null) {
+/** PAT scope 是请求能力上限，资源 Grant 仍在服务层继续取交集。 */
+function requiredPatAccess(path: string, method: string | undefined): import('../application/auth.js').RequestAccess {
+  if (method === 'GET' || method === 'HEAD') return 'read'
+  if (/^\/sessions\/[^/]+\/(messages|turn\/stop|runtime\/commands|runtime\/approvals\/)/.test(path)
+    || /\/tasks\/[^/]+\/(launch|runs\/[^/]+\/cancel)$/.test(path)
+    || method === 'POST' && (path === '/sessions' || /\/session-forks$/.test(path))) return 'execute'
+  if (/^\/teams\/[^/]+\/(members\/|ownership-transfer|invitations(?:\/|$))/.test(path)
+    || /^\/(projects|workers|sessions)\/[^/]+\/(access|grants)(?:\/|$)/.test(path)
+    || /^\/workers\/[^/]+\/revoke$/.test(path)
+    || path === '/bootstrap' || path === '/enrollment-tokens' || /\/capability-assets$/.test(path)) return 'admin'
+  return 'write'
+}
+
+export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, _adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams, identity?: IdentityService | null, registration?: EmailRegistrationService | null, settings?: InstanceSettingsService | null, google?: GoogleAuthenticationService | null, lineage?: SessionLineageService | null, security?: AccountSecurityService | null, teams?: TeamService | null, mail?: MailSettings | null, projects?: ProjectAccessService | null, workerAccess?: WorkerAccessService | null, sessionAccess?: SessionAccessService | null, personalAccessTokens?: PersonalAccessTokenService | null) {
   return (request: IncomingMessage, response: ServerResponse): void => {
     void (async () => {
       const url = new URL(request.url ?? '/', 'http://localhost'), rawPath = url.pathname === '/' ? '/' : url.pathname.replace(/\/$/, '')
@@ -96,9 +110,21 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
       const resolved = identity ? await identity.resolveSession(readCookie(request.headers.cookie, identity.cookieName)) : null
       const loginSession = resolved && identity ? await identity.touch(resolved) : null
       const credential: RequestCredential = { bearer, loginSession }
-      if (await handleAuthRoute({ request, response, path, method, readBody: () => body(request), auth, identity: identity ?? null, service, loginSession, bearer, registration, settings, google, security })) return
+      if (await handleAuthRoute({ request, response, path, method, readBody: () => body(request), auth, identity: identity ?? null, service, loginSession, bearer, registration, settings, google, security, personalAccessTokens })) return
       const unsafe = method !== 'GET' && method !== 'HEAD'
       if (unsafe && loginSession) assertCookieWriteAllowed(identity ?? null, request, loginSession)
+      const taskRoute = Boolean(tasks && (path.match(/^\/projects\/([^/]+)\/(activity|reviews)$/) || /^\/projects\/[^/]+\/tasks(?:\/|$)/.test(path)))
+      let requestActor: Awaited<ReturnType<AuthenticationService['actor']>> | null = null
+      let requestAccess: import('../application/auth.js').RequestAccess | null = null
+      if (bearer && !loginSession && !taskRoute) {
+        requestAccess = requiredPatAccess(path, method)
+        try { requestActor = await auth.actor(credential, requestAccess) }
+        catch (error) {
+          if (error instanceof AppError && error.code === 'pat_scope_required' && personalAccessTokens) await personalAccessTokens.recordFailedAuthentication({ bearer, requiredScope: requestAccess, reason: error.code })
+          throw error
+        }
+      }
+      response.once('finish', () => { if (requestActor && requestAccess && response.statusCode < 400) void auth.recordPatUse(requestActor, requestAccess).catch(() => undefined) })
       if (teams && path === '/teams' && (method === 'GET' || method === 'POST')) {
         const actor = await auth.taskActor(credential)
         if (method === 'GET') json(response, 200, { items: await teams.list(actor) })
@@ -135,6 +161,7 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
       const projectEvents = path.match(/^\/projects\/([^/]+)\/events$/)
       if (tasks && projectStreams && projectEvents && method === 'GET') {
         const actor = await auth.taskActor(credential)
+        const authorizeCredential = async () => { if (bearer && !loginSession) await auth.actor(credential, 'read') }
         const authorize = async () => tasks.authorizeProject(projectEvents[1], { actor, requestId: randomUUID(), teamId: url.searchParams.get('teamId') ?? undefined })
         try { await authorize() }
         catch (error) {
@@ -143,13 +170,16 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
           }
           throw error
         }
-        projectStreams.open(response, projectEvents[1], actor, authorize); return
+        projectStreams.open(response, projectEvents[1], actor, authorize, authorizeCredential); return
       }
       const projectReader = path.match(/^\/projects\/([^/]+)\/(activity|reviews)$/)
       if (tasks && (projectReader || /^\/projects\/[^/]+\/tasks(?:\/|$)/.test(path))) {
         const match = path.match(/^\/projects\/([^/]+)\/tasks(?:\/([^/]+)(?:\/(transition|move|activity|links|workspaces|assignment|runs|launch|sessions)(?:\/([^/]+)(?:\/(retry|cancel|review))?)?)?)?$/)
         try {
-          const actor = await auth.taskActor(credential)
+          const required = requiredPatAccess(path, method)
+          const authenticated = bearer && !loginSession ? await auth.actor(credential, required) : null
+          const actor = authenticated?.userId ?? await auth.taskActor(credential, required)
+          response.once('finish', () => { if (authenticated && response.statusCode < 400) void auth.recordPatUse(authenticated, required).catch(() => undefined) })
           if (!match && !projectReader) throw new TaskError('not_found', 'Route not found')
           const [, projectId, taskId, action, linkId, retry] = match ?? ['', projectReader![1]]
           const requestId = request.headers['x-request-id'] ?? randomUUID()
@@ -187,6 +217,7 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
           }
           throw new TaskError('not_found', 'Route not found')
         } catch (error) {
+          if (bearer && !loginSession && error instanceof AppError && error.code === 'pat_scope_required' && personalAccessTokens) await personalAccessTokens.recordFailedAuthentication({ bearer, requiredScope: requiredPatAccess(path, method), reason: error.code })
           const failure = error instanceof TaskError ? error : error instanceof AppError ? new TaskError(error.status === 401 ? 'unauthorized' : error.status === 403 ? 'forbidden' : error.status === 404 ? 'not_found' : error.status === 409 ? 'runtime_unavailable' : 'invalid_request', error.message) : null
           if (!failure) throw error
           json(response, failure.status, { error: { code: failure.code, message: failure.message, ...(failure.details ? { details: failure.details } : {}) } }); return
@@ -264,7 +295,7 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
           if (lastId !== undefined && (typeof lastId !== 'string' || !/^\d+$/.test(lastId))) throw new AppError(400, 'Invalid Last-Event-ID')
           const from = integer(Number(url.searchParams.get('fromSeq') ?? (lastId === undefined ? 1 : Number(lastId) + 1)), 'fromSeq', 1)
           if (path.endsWith('/events')) json(response, 200, await service.events(id, from, Number(url.searchParams.get('limit') ?? 100), actor))
-          else streams.open(response, id, from, actor)
+          else streams.open(response, id, from, actor, bearer && !loginSession ? () => auth.actor(credential, 'read') : undefined)
           return
         }
       }

@@ -5,7 +5,7 @@ import { ServerService } from '../application/server-service.js'
 export class SessionStreams {
   private readonly clients = new Set<ServerResponse>()
   constructor(private readonly service: ServerService) {}
-  open(response: ServerResponse, sessionId: SessionId, fromSeq: number, actor?: UserId): void {
+  open(response: ServerResponse, sessionId: SessionId, fromSeq: number, actor?: UserId, authorize?: () => Promise<unknown>): void {
     let cursor = fromSeq, pumping = false, dirty = true, closed = false
     this.clients.add(response)
     const write = (data: string): boolean => {
@@ -38,7 +38,10 @@ export class SessionStreams {
     const unsubscribeAuthorization = actor === undefined ? () => undefined : this.service.notifications.onAuthorization(actor, () => { void pump() })
     response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' })
     response.flushHeaders()
-    const timer = setInterval(() => { write(': heartbeat\n\n') }, 15000)
+    const timer = setInterval(() => {
+      if (!authorize) { write(': heartbeat\n\n'); return }
+      void authorize().then(() => write(': heartbeat\n\n'), () => response.destroy())
+    }, 15000)
     timer.unref()
     response.on('close', () => { closed = true; clearInterval(timer); unsubscribe(); unsubscribeAuthorization(); this.clients.delete(response) })
     void pump()

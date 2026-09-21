@@ -122,6 +122,12 @@ export interface LoginSessionDTO {
   authenticatedAt: string; createdAt: string; lastSeenAt: string
   idleExpiresAt: string; absoluteExpiresAt: string; revokedAt: string | null
 }
+export type PersonalAccessTokenScopeDTO = 'read' | 'write' | 'execute' | 'admin'
+export interface PersonalAccessTokenDTO {
+  id: string; name: string; scopes: PersonalAccessTokenScopeDTO[]
+  createdAt: string; expiresAt: string; lastUsedAt: string | null; revokedAt: string | null
+}
+export interface IssuedPersonalAccessTokenDTO extends PersonalAccessTokenDTO { token: string }
 export type RegistrationPolicyDTO = 'open' | 'invite_only' | 'closed'
 /** 注册与邮件能力：`emailDelivery` 为 false 时前端必须如实告知，不得模拟“邮件已发送”。 */
 export interface RegistrationCapabilitiesDTO {
