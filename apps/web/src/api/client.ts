@@ -1,4 +1,5 @@
 import type { Run, LaunchRequest, LaunchResponse, TaskSummary, TaskDetail, TaskCreate, TaskPatch, TaskActivity, AssignmentRequest, CreateTaskWorkspaceRequest, UnbindWorkspaceRequest } from '@wemux/web-contract/task-platform'
+import type { SessionGraphResponse } from '@wemux/web-contract/session-graph'
 import { randomId } from '../lib/random.ts'
 import { readDeviceId } from '../lib/device-scope.ts'
 import type {
@@ -75,6 +76,7 @@ export const routes = {
   sessionAccess: (sessionId: string) => `/api/sessions/${id(sessionId)}/access`,
   sessionGrants: (sessionId: string) => `/api/sessions/${id(sessionId)}/grants`,
   sessionGrant: (sessionId: string, userId: string) => `/api/sessions/${id(sessionId)}/grants/${id(userId)}`,
+  sessionGraph: (projectId: string) => `/api/projects/${id(projectId)}/session-graph`,
   deleteSession: (sessionId: string) => `/api/sessions/${id(sessionId)}`,
   messages: (sessionId: string) => `/api/sessions/${id(sessionId)}/messages`,
   stopTurn: (sessionId: string) => `/api/sessions/${id(sessionId)}/turn/stop`,
@@ -165,6 +167,7 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
   }
   return {
     launchScope: JSON.stringify([window.location.origin, readDeviceId(), config.teamId]),
+    sessionGraph: (projectId: string, signal?: AbortSignal) => request<SessionGraphResponse>(routes.sessionGraph(projectId), undefined, signal),
     pendingReviews: (p: string, signal?: AbortSignal) => list<import('@wemux/web-contract/task-platform').ReviewRequest>(`/api/projects/${id(p)}/reviews`, signal),
     projectActivity: (p: string, after = 0, signal?: AbortSignal) => list<import('@wemux/web-contract/task-platform').ProjectActivityItem>(`/api/projects/${id(p)}/activity?after=${after}`, signal),
     review: (p: string, t: string, runId: string, signal?: AbortSignal) => request<{ review: import('@wemux/web-contract/task-platform').ReviewRequest | null }>(`/api/projects/${id(p)}/tasks/${id(t)}/runs/${id(runId)}/review`, undefined, signal),

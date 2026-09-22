@@ -197,6 +197,8 @@ type SessionPresentation = 'canvas-summary' | 'canvas-interactive' | 'focus' | '
 
 所有形态共享同一 `SessionViewModel`、草稿存储、流订阅和控制器。Presentation 只决定显示密度，不创建第二份 Session state。最大化时优先保持 Module 挂载，通过共享布局/portal 改变容器；如果虚拟化要求重挂载，连续状态必须提升到该 Module，而不是留在具体聊天组件内部。
 
+Ticket 19 已按此约束落地共享 `SessionSurface`：Canvas 交互节点与 focus 复用 `useSession`、`SubmissionController`、Composer 和控制面；URL 保存 active Session，本地偏好只保存 summary/interactive 呈现态，同时最多一个完整交互节点。
+
 ### 4.7 Canvas Viewport Module
 
 第一版由 `@xyflow/react` 实现，封装平移、缩放、选择、拖动、可见区域和 MiniMap。业务 feature 不直接散落 React Flow 类型；依赖集中在前端基础设施 Adapter 中，以便升级或替换时保持 Locality。

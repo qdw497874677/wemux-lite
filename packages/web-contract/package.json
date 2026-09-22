@@ -13,6 +13,10 @@
     "./task-platform": {
       "types": "./dist/task-platform.d.ts",
       "import": "./dist/task-platform.js"
+    },
+    "./session-graph": {
+      "types": "./dist/session-graph.d.ts",
+      "import": "./dist/session-graph.js"
     }
   },
   "files": ["dist"],
