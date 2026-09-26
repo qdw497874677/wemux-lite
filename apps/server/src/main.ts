@@ -20,5 +20,5 @@ const webStaticPath = resolve(process.env.WEMUX_WEB_DIST ?? resolve(repositoryRo
 const servingWeb = existsSync(webStaticPath) && statSync(webStaticPath).isDirectory()
 mkdirSync(dirname(databasePath), { recursive: true })
 const app = createWemuxServer({ databasePath, administratorEmails, workerPackagePath, webStaticPath: servingWeb ? webStaticPath : undefined })
-console.log(`Wemux Lite server listening on ${await app.listen(Number(process.env.PORT ?? 3001), process.env.HOST ?? '127.0.0.1')}${servingWeb ? ` (serving web UI from ${webStaticPath})` : ' (web UI not configured; set WEMUX_WEB_DIST or run npm run dev:web)'}`)
+console.log(`Wemux Lite server listening on ${await app.listen(Number(process.env.PORT ?? 3001), process.env.HOST ?? '0.0.0.0')}${servingWeb ? ` (serving web UI from ${webStaticPath})` : ' (web UI not configured; set WEMUX_WEB_DIST or run npm run dev:web)'}`)
 for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => { void app.close().catch(error => { console.error(error); process.exitCode = 1 }) })

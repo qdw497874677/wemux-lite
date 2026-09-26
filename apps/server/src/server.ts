@@ -19,6 +19,9 @@ import { ServerService } from './application/server-service.js'
 import { SessionLineageService } from './application/session-lineage-service.js'
 import { TeamService } from './application/team-service.js'
 import { ProjectAccessService } from './application/project-access-service.js'
+import { CanvasCollaborationService } from './application/canvas-collaboration-service.js'
+import { CanvasLayoutService } from './application/canvas-layout-service.js'
+import { SqliteCanvasLayoutRepository } from './storage/sqlite/canvas-layout-repository.js'
 import { WorkerAccessService } from './application/worker-access-service.js'
 import { SessionAccessService } from './application/session-access-service.js'
 import { PersonalAccessTokenService } from './application/personal-access-token-service.js'
@@ -27,6 +30,7 @@ import { WorkerService } from './application/worker-service.js'
 import { httpHandler } from './http/handler.js'
 import { SessionStreams } from './http/sse.js'
 import { ProjectStreams } from './http/project-sse.js'
+import { CanvasCollaborationStreams } from './http/canvas-collaboration-sse.js'
 import type { StaticSite } from './http/static.js'
 import { WorkerGateway } from './worker-ws/gateway.js'
 import { ServerTransportStore } from './worker-ws/transport-store.js'
@@ -89,6 +93,8 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const notifications = new Notifications()
   const teams = new TeamService(store, notifications)
   const projects = new ProjectAccessService(store, notifications)
+  const canvasCollaboration = new CanvasCollaborationService(projects)
+  const canvasCollaborationStreams = new CanvasCollaborationStreams(canvasCollaboration, notifications)
   const workerAccess = new WorkerAccessService(store, notifications)
   const sessionAccess = new SessionAccessService(store, projects, notifications)
   const personalAccessTokens = new PersonalAccessTokenService(store)
@@ -109,9 +115,36 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const streams = new SessionStreams(service)
   // 血缘服务与画布渲染无关：它只读写领域事实，查询端点不在 handler 里拼装边。
   const lineage = new SessionLineageService(store, service, administrators, undefined, notifications)
+  const canvasLayouts = new CanvasLayoutService(store, new SqliteCanvasLayoutRepository(store), projects, lineage)
   const projectStreams = new ProjectStreams(notifications)
   let gateway: WorkerGateway | undefined
-  const server = createServer(httpHandler(service, auth, streams, capabilities, options.workerPackagePath ? { tarballPath: options.workerPackagePath } : undefined, { disconnectWorker: id => gateway?.disconnect(id) }, options.webStaticPath ? { root: options.webStaticPath } : undefined, options.adminSessionTtlMs, new TaskService(store, event => notifications.project(event), service), projectStreams, identity, registration, settings, google, lineage, security, teams, mail.settings, projects, workerAccess, sessionAccess, personalAccessTokens, lifecycle))
+  const server = createServer(httpHandler({
+    service,
+    auth,
+    streams,
+    capabilities,
+    downloads: options.workerPackagePath ? { tarballPath: options.workerPackagePath } : undefined,
+    control: { disconnectWorker: id => gateway?.disconnect(id) },
+    staticSite: options.webStaticPath ? { root: options.webStaticPath } : undefined,
+    tasks: new TaskService(store, event => notifications.project(event), service),
+    projectStreams,
+    identity,
+    registration,
+    settings,
+    google,
+    lineage,
+    security,
+    teams,
+    mail: mail.settings,
+    projects,
+    workerAccess,
+    sessionAccess,
+    personalAccessTokens,
+    lifecycle,
+    canvasCollaboration,
+    canvasCollaborationStreams,
+    canvasLayouts,
+  }))
   const workers = new WorkerService(store, notifications)
   gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))
   let closed = false
