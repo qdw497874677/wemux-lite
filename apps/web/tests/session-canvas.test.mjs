@@ -64,6 +64,19 @@ test('React Flow adapter keeps authorization placeholders closed and relations r
   assert.doesNotMatch(source, /node\.summary\?\./)
 })
 
+test('canvas composes AI Elements workflow semantics, contextual toolbar and filters', async () => {
+  const source = await readFile(new URL('../src/features/session-canvas/adapters/react-flow/react-flow-canvas.tsx', import.meta.url), 'utf8')
+  for (const name of ['NodeHeader', 'NodeTitle', 'NodeDescription', 'NodeAction', 'NodeContent', 'NodeFooter', 'Toolbar', 'Panel']) assert.match(source, new RegExp(`<${name}`))
+  assert.match(source, /展开对话/)
+  assert.match(source, /打开专注会话/)
+  assert.match(source, /复制会话 ID/)
+  assert.match(source, /仅活跃/)
+  assert.match(source, /仅 Fork/)
+  assert.match(source, /AiEdge\.Animated/)
+  assert.match(source, /AiEdge\.Temporary/)
+  assert.match(source, /const handles = \{ target: incoming\.has\(node\.sessionId\), source: outgoing\.has\(node\.sessionId\) \}/)
+})
+
 test('canvas shell contains an error boundary and non-canvas session fallback', async () => {
   const source = await readFile(new URL('../src/features/session-canvas/session-canvas.tsx', import.meta.url), 'utf8')
   assert.match(source, /class CanvasRenderBoundary extends Component/)

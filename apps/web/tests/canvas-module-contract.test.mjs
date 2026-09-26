@@ -48,13 +48,15 @@ async function violations(dirs, predicate) {
 }
 
 const REACT_FLOW_ADAPTER_DIR = 'apps/web/src/features/session-canvas/adapters/react-flow/'
+const AI_ELEMENTS_DIR = 'apps/web/src/components/ai-elements/'
+const AI_ELEMENTS_WORKFLOW_FILES = new Set(['canvas.tsx', 'connection.tsx', 'controls.tsx', 'edge.tsx', 'node.tsx', 'panel.tsx', 'toolbar.tsx'].map(file => `${AI_ELEMENTS_DIR}${file}`))
 
-test('renderer isolation: @xyflow/react only resolves inside the canvas react-flow adapter', async () => {
+test('renderer isolation: @xyflow/react stays in the canvas adapter and AI Elements workflow primitives', async () => {
   const found = await violations(
     ['apps/web/src', 'packages/domain/src', 'packages/server-domain/src', 'packages/web-contract/src', 'apps/server/src', 'apps/worker/src'],
-    (specifier, file) => isReactFlow(specifier) && !file.startsWith(REACT_FLOW_ADAPTER_DIR),
+    (specifier, file) => isReactFlow(specifier) && !file.startsWith(REACT_FLOW_ADAPTER_DIR) && !AI_ELEMENTS_WORKFLOW_FILES.has(file),
   )
-  assert.deepEqual(found, [], `@xyflow/react 只允许出现在 ${REACT_FLOW_ADAPTER_DIR}；其余位置必须使用领域无关的画布读模型`)
+  assert.deepEqual(found, [], '@xyflow/react 只允许出现在会话画布适配器与 AI Elements workflow 语义组件；领域与应用层必须使用渲染器无关的画布读模型')
 })
 
 test('canvas model and application layers stay renderer-free', async () => {
