@@ -39,10 +39,19 @@ export interface TimelineUsage {
   usage: RuntimeUsageDTO
 }
 
+export interface TimelineReasoning {
+  kind: 'reasoning'
+  id: string
+  turnId: string
+  text: string
+  duration: number
+  running: boolean
+}
+
 export interface QueuedItem { commandId: string; messageId: string; content: string; position: number }
 export interface PendingApproval { approvalId: string; turnId: string; action: unknown; reason?: string }
 
-export type ChatTimelineItem = TimelineMessage | TimelineTool | TimelineNotice | TimelineUsage
+export type ChatTimelineItem = TimelineMessage | TimelineTool | TimelineNotice | TimelineUsage | TimelineReasoning
 
 /** AI Elements consumes the AI SDK UIMessage shape, while Wemux keeps its own durable AgentEvent journal. */
 export function timelineMessageToUIMessage(message: TimelineMessage): UIMessage {
@@ -60,6 +69,7 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
   const queued = new Map<string, QueuedItem>()
   const approvals = new Map<string, PendingApproval>()
   const turnMessages = new Map<string, string>()
+  const turnStartedAt = new Map<string, number>()
 
   const assistantMessage = (turnId: string) => {
     let message = messages.find(item => item.id === `assistant:${turnId}`)
@@ -102,6 +112,7 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
         queued.delete(payload.messageId)
         activeTurnId = payload.turnId
         turnMessages.set(payload.turnId, payload.messageId)
+        turnStartedAt.set(payload.turnId, Date.parse(event.occurredAt))
         const message = messages.find(item => item.id === payload.messageId)
         if (message) message.status = 'started'
         const entry = timeline.find(item => item.kind === 'message' && item.id === payload.messageId)
@@ -146,9 +157,17 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
           timeline.push({ kind: 'notice', id: `runtime:${event.seq}`, text: payload.reason, tone: payload.state === 'failed' || payload.state === 'unavailable' ? 'error' : 'info' })
         }
         break
-      case 'tool.started':
+      case 'tool.started': {
+        // AgentEvent currently has no provider-neutral thinking payload. Keep the
+        // adapter seam explicit and derive only an honest pre-tool status until it does.
+        const occurredAt = Date.parse(event.occurredAt)
+        const startedAt = turnStartedAt.get(payload.turnId)
+        const elapsed = occurredAt - (startedAt ?? occurredAt)
+        const duration = Number.isFinite(elapsed) ? Math.max(1, Math.round(elapsed / 1000)) : 1
+        timeline.push({ kind: 'reasoning', id: `reasoning:${payload.toolCallId}`, turnId: payload.turnId, text: `准备调用工具：${payload.toolName}`, duration, running: false })
         timeline.push({ kind: 'tool', id: `tool:${payload.toolCallId}`, turnId: payload.turnId, toolCallId: payload.toolCallId, toolName: payload.toolName, input: payload.input, output: '', status: 'running', exitCode: null })
         break
+      }
       case 'tool.output.delta': {
         let tool = timeline.find(item => item.kind === 'tool' && item.toolCallId === payload.toolCallId)
         if (!tool || tool.kind !== 'tool') {

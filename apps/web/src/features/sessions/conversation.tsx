@@ -1,13 +1,15 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
-import { Bot, Check, ChevronRight, Copy, ImagePlus, Paperclip } from 'lucide-react'
+import { useEffect, useRef, useState, useSyncExternalStore, type MutableRefObject } from 'react'
+import { Bot, Check, ChevronRight, Copy } from 'lucide-react'
 import type { Api } from '../../api/client.ts'
 import type { SessionDTO } from '../../api/dto.ts'
 import type { ChatTimelineItem, TimelineTool } from '../../api/journal.ts'
 import { timelineMessageToUIMessage } from '../../api/journal.ts'
 import { Action, ActionsBar } from '../../components/ai-elements/actions.tsx'
 import { Loader } from '../../components/ai-elements/loader.tsx'
+import { Attachment, AttachmentInfo, AttachmentPreview, AttachmentRemove, Attachments } from '../../components/ai-elements/attachments.tsx'
 import { Message, MessageContent } from '../../components/ai-elements/message.tsx'
-import { PromptInput, PromptInputFooter, PromptInputSubmit, PromptInputTextarea, PromptInputTools } from '../../components/ai-elements/prompt-input.tsx'
+import { PromptInput, PromptInputActionAddAttachments, PromptInputActionMenu, PromptInputActionMenuButton, PromptInputActionMenuContent, PromptInputActionMenuTrigger, PromptInputBody, PromptInputFooter, PromptInputHeader, PromptInputSubmit, PromptInputTextarea, PromptInputTools, usePromptInputAttachments, type PromptInputMessage } from '../../components/ai-elements/prompt-input.tsx'
+import { Reasoning, ReasoningContent, ReasoningTrigger } from '../../components/ai-elements/reasoning.tsx'
 import { Response } from '../../components/ai-elements/response.tsx'
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput, type ToolState } from '../../components/ai-elements/tool.tsx'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../../components/ui/tooltip.tsx'
@@ -37,6 +39,7 @@ export function TimelineEntry({ entry, onOpenContext }: { entry: ChatTimelineIte
     return <div className="ml-12 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted-foreground/70" aria-label="运行用量">{parts.length ? parts.map(part => <span key={part} className="rounded-lg bg-white/5 px-2.5 py-1">{part}</span>) : <span>暂无用量数据</span>}</div>
   }
   if (entry.kind === 'notice') return <div role={entry.tone === 'error' ? 'alert' : 'status'} className={cn('ml-12 rounded-2xl px-4 py-3 text-sm shadow-sm', entry.tone === 'error' ? 'border border-red-500/30 bg-red-500/15 text-red-200' : 'border border-border bg-card/70 text-muted-foreground')}><p className="whitespace-pre-wrap break-words leading-6">{entry.text}</p></div>
+  if (entry.kind === 'reasoning') return <div className="ml-12"><Reasoning duration={entry.duration}><ReasoningTrigger duration={entry.duration} running={entry.running} /><ReasoningContent>{entry.text}</ReasoningContent></Reasoning></div>
   if (entry.kind === 'tool') {
     const input = formatToolValue(entry.input)
     const output = entry.output || (!input ? '等待工具输出…' : '')
@@ -89,8 +92,9 @@ const slashCommands = [
 
 export function Composer({ api, controller, session, activeTurnId = null, canSend, blockedReason, confirmedIds }: { api?: Api; controller: SubmissionController; session: SessionDTO; activeTurnId?: string | null; canSend: boolean; blockedReason: string; confirmedIds: string[] }) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot)
+  const submitRef = useRef<(message: PromptInputMessage) => void>(() => undefined)
+  const sendWithAttachmentsRef = useRef(false)
   const [notice, setNotice] = useState<ComposerNotice>(null)
-  const [unsupportedNotice, setUnsupportedNotice] = useState<string | null>(null)
   const [commandPending, setCommandPending] = useState<'compact' | 'stop' | null>(null)
   useEffect(() => { controller.confirm(confirmedIds) }, [controller, confirmedIds.join(',')])
   canSend = canSend && session.access?.canWrite !== false && session.sendCapability?.allowed === true
@@ -101,11 +105,6 @@ export function Composer({ api, controller, session, activeTurnId = null, canSen
   const hint = state.pending ? '正在发送…' : state.receipt ? '消息已送达，等待 Agent 回复' : canSend ? running ? 'Agent 正在运行，新消息将进入队列' : 'Enter 发送，Shift+Enter 换行' : `${blockedReason}，草稿仍会保留`
   const commandQuery = state.draft.startsWith('/') ? state.draft.trim().toLowerCase() : ''
   const visibleCommands = commandQuery ? slashCommands.filter(command => command.name.startsWith(commandQuery)) : []
-  const showUnsupported = (kind: '文件' | '图片') => {
-    const text = `即将支持：${kind}将上传到工作区`
-    setUnsupportedNotice(text)
-    setNotice({ tone: 'info', text })
-  }
   const stop = async () => {
     const turnId = activeTurnId || session.activeTurnId
     if (!api || !turnId || !canControl || commandPending) {
@@ -138,18 +137,49 @@ export function Composer({ api, controller, session, activeTurnId = null, canSen
     else if (name === '/stop') void stop()
     else setNotice({ tone: 'info', text: '可用命令：/compact 压缩上下文；/stop 停止当前回合；/help 显示本帮助。Enter 发送，Shift+Enter 换行。' })
   }
-  return <div className="conversation-composer shrink-0 px-3 py-3 sm:px-6 sm:py-4"><div className="conversation-content mx-auto max-w-4xl"><PromptInput className="relative" onSubmit={() => { if (canSend && !state.pending && state.draft.trim() && !state.draft.startsWith('/')) void controller.send() }}>
-    {visibleCommands.length > 0 && <div className="absolute inset-x-0 bottom-full z-20 mb-2 overflow-hidden rounded-xl border border-border bg-popover p-1.5 shadow-lg" role="listbox" aria-label="斜杠命令">{visibleCommands.map(command => <button key={command.name} type="button" role="option" className="flex w-full items-start gap-3 rounded-lg px-3 py-2 text-left hover:bg-accent focus:bg-accent focus:outline-none" onClick={() => executeCommand(command.name)}><code className="text-sm text-violet-300">{command.name}</code><span><strong className="block text-sm font-medium">{command.label}</strong><small className="text-muted-foreground">{command.description}</small></span></button>)}</div>}
-    {unsupportedNotice && <button type="button" role="status" onClick={() => setUnsupportedNotice(null)} className="absolute bottom-14 left-3 z-10 rounded-xl border border-border bg-popover px-3 py-2 text-left text-xs text-popover-foreground shadow-lg">{unsupportedNotice}<span className="ml-2 text-muted-foreground">点击关闭</span></button>}
-    <label className="sr-only" htmlFor={`session-prompt-${session.id}`}>消息内容</label>
-    <PromptInputTextarea id={`session-prompt-${session.id}`} value={state.draft} onChange={event => { controller.edit(event.target.value); setNotice(null); setUnsupportedNotice(null) }} maxLength={16_000} aria-invalid={Boolean(state.error) || undefined} placeholder={canSend ? '给 Agent 发送消息，输入 / 查看命令…' : `${blockedReason}，可以先编辑草稿`} />
-    <PromptInputFooter><PromptInputTools className="flex-wrap">
-      <TooltipProvider delayDuration={250}><Tooltip><TooltipTrigger asChild><button type="button" aria-disabled="true" onClick={() => showUnsupported('文件')} className="grid size-8 place-items-center rounded-lg text-muted-foreground opacity-60 hover:bg-accent hover:text-foreground" aria-label="添加附件（即将支持）"><Paperclip className="size-4" /></button></TooltipTrigger><TooltipContent>即将支持：文件将上传到工作区</TooltipContent></Tooltip><Tooltip><TooltipTrigger asChild><button type="button" aria-disabled="true" onClick={() => showUnsupported('图片')} className="grid size-8 place-items-center rounded-lg text-muted-foreground opacity-60 hover:bg-accent hover:text-foreground" aria-label="添加图片（即将支持）"><ImagePlus className="size-4" /></button></TooltipTrigger><TooltipContent>即将支持：图片将上传到工作区</TooltipContent></Tooltip></TooltipProvider>
-      <span className="truncate rounded-full bg-muted px-2.5 py-1 text-xs text-muted-foreground" title="会话创建后，智能体与模型保持固定">{session.agentKey} · {session.modelId || 'Agent 默认模型'}</span><span role={state.error || notice?.tone === 'error' ? 'alert' : 'status'} className={cn('min-w-0 flex-1 truncate text-xs text-muted-foreground', (state.error || notice?.tone === 'error') && 'text-red-300')}>{state.error || notice?.text || hint}</span></PromptInputTools>
-      <PromptInputSubmit status={running || commandPending === 'stop' ? 'streaming' : state.pending ? 'submitted' : state.error ? 'error' : 'ready'} onStop={running ? () => void stop() : undefined} disabled={running ? !api || !canControl || commandPending === 'stop' : !canSend || state.pending || !state.draft.trim() || state.draft.startsWith('/')} title={running ? '停止当前回合' : retry ? '重试发送' : '发送消息'} />
-    </PromptInputFooter>
+  return <div className="conversation-composer shrink-0 px-3 py-3 sm:px-6 sm:py-4"><div className="conversation-content mx-auto max-w-4xl"><PromptInput className="relative" onSubmit={message => submitRef.current(message)}>
+    <ComposerContents session={session} controller={controller} state={state} canSend={canSend} blockedReason={blockedReason} running={running} canControl={canControl} retry={retry} hint={hint} notice={notice} setNotice={setNotice} commandPending={commandPending} stop={stop} visibleCommands={visibleCommands} executeCommand={executeCommand} submitRef={submitRef} sendWithAttachmentsRef={sendWithAttachmentsRef} />
   </PromptInput></div></div>
 }
+
+function ComposerContents({ session, controller, state, canSend, blockedReason, running, canControl, retry, hint, notice, setNotice, commandPending, stop, visibleCommands, executeCommand, submitRef, sendWithAttachmentsRef }: { session: SessionDTO; controller: SubmissionController; state: ReturnType<SubmissionController['snapshot']>; canSend: boolean; blockedReason: string; running: boolean; canControl: boolean; retry: boolean; hint: string; notice: ComposerNotice; setNotice: (notice: ComposerNotice) => void; commandPending: 'compact' | 'stop' | null; stop: () => Promise<void>; visibleCommands: readonly typeof slashCommands[number][]; executeCommand: (name: typeof slashCommands[number]['name']) => void; submitRef: MutableRefObject<(message: PromptInputMessage) => void>; sendWithAttachmentsRef: MutableRefObject<boolean> }) {
+  const attachments = usePromptInputAttachments()
+  const submit = async (message: PromptInputMessage) => {
+    if (!canSend || state.pending || state.draft.startsWith('/')) return
+    const textParts: string[] = []
+    let skipped = 0
+    for (const attachment of message.files ?? []) {
+      if (isInlineTextAttachment(attachment.file) && attachment.size < 10 * 1024) {
+        const content = await attachment.file.text()
+        textParts.push(`附件：${attachment.name}\n\n\`\`\`${attachmentLanguage(attachment.name)}\n${content}\n\`\`\``)
+      } else skipped++
+    }
+    const content = [message.text.trim(), ...textParts].filter(Boolean).join('\n\n')
+    if (skipped) setNotice({ tone: 'info', text: '附件将随后支持上传到工作区；本次仅发送文本和小于 10KB 的文本附件。' })
+    if (!content) return
+    controller.edit(content)
+    sendWithAttachmentsRef.current = true
+    try { await controller.send() }
+    finally { sendWithAttachmentsRef.current = false }
+    if (controller.snapshot().draft === '') attachments.clear()
+  }
+  submitRef.current = message => { void submit(message) }
+  return <>
+    {visibleCommands.length > 0 && <div className="absolute inset-x-0 bottom-full z-20 mb-2 overflow-hidden rounded-xl border border-border bg-popover p-1.5 shadow-lg" role="listbox" aria-label="斜杠命令">{visibleCommands.map(command => <button key={command.name} type="button" role="option" className="flex w-full items-start gap-3 rounded-lg px-3 py-2 text-left hover:bg-accent focus:bg-accent focus:outline-none" onClick={() => executeCommand(command.name)}><code className="text-sm text-violet-300">{command.name}</code><span><strong className="block text-sm font-medium">{command.label}</strong><small className="text-muted-foreground">{command.description}</small></span></button>)}</div>}
+    {attachments.files.length > 0 && <PromptInputHeader><Attachments variant="inline">{attachments.files.map(attachment => <Attachment key={attachment.id} data={attachment} onRemove={() => attachments.remove(attachment.id)}><AttachmentPreview /><AttachmentInfo /><AttachmentRemove /></Attachment>)}</Attachments></PromptInputHeader>}
+    <PromptInputBody><label className="sr-only" htmlFor={`session-prompt-${session.id}`}>消息内容</label><PromptInputTextarea id={`session-prompt-${session.id}`} value={sendWithAttachmentsRef.current ? '' : state.draft} onChange={event => { controller.edit(event.target.value); setNotice(null) }} maxLength={16_000} aria-invalid={Boolean(state.error) || undefined} placeholder={canSend ? '给 Agent 发送消息，输入 / 查看命令…' : `${blockedReason}，可以先编辑草稿`} /></PromptInputBody>
+    <PromptInputFooter><PromptInputTools className="flex-wrap">
+      <PromptInputActionMenu><PromptInputActionMenuTrigger asChild><PromptInputActionMenuButton /></PromptInputActionMenuTrigger><PromptInputActionMenuContent align="start"><PromptInputActionAddAttachments kind="file" /><PromptInputActionAddAttachments kind="image" /></PromptInputActionMenuContent></PromptInputActionMenu>
+      <span className="truncate rounded-full bg-muted px-2.5 py-1 text-xs text-muted-foreground" title="会话创建后，智能体与模型保持固定">{session.agentKey} · {session.modelId || 'Agent 默认模型'}</span><span role={state.error || notice?.tone === 'error' ? 'alert' : 'status'} className={cn('min-w-0 flex-1 truncate text-xs text-muted-foreground', (state.error || notice?.tone === 'error') && 'text-red-300')}>{state.error || notice?.text || hint}</span></PromptInputTools>
+      <PromptInputSubmit status={running || commandPending === 'stop' ? 'streaming' : state.pending ? 'submitted' : state.error ? 'error' : 'ready'} onStop={running ? () => void stop() : undefined} disabled={running ? !canControl || commandPending === 'stop' : !canSend || state.pending || (!state.draft.trim() && !attachments.files.length) || state.draft.startsWith('/')} title={running ? '停止当前回合' : retry ? '重试发送' : '发送消息'} />
+    </PromptInputFooter>
+  </>
+}
+
+const textAttachmentExtensions = new Set(['txt', 'md', 'markdown', 'json', 'js', 'jsx', 'ts', 'tsx', 'css', 'html', 'xml', 'yaml', 'yml', 'toml', 'ini', 'csv', 'sh', 'py', 'rb', 'go', 'rs', 'java', 'c', 'h', 'cpp', 'sql'])
+function attachmentExtension(name: string) { return name.includes('.') ? name.split('.').pop()?.toLowerCase() ?? '' : '' }
+function isInlineTextAttachment(file: File) { return file.type.startsWith('text/') || ['application/json', 'application/xml', 'application/javascript'].includes(file.type) || textAttachmentExtensions.has(attachmentExtension(file.name)) }
+function attachmentLanguage(name: string) { const extension = attachmentExtension(name); return extension === 'markdown' ? 'md' : extension }
 
 export function OptimisticMessages({ controller, confirmedIds }: { controller: SubmissionController; confirmedIds: string[] }) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot)

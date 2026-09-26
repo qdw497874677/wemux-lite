@@ -5,8 +5,10 @@ import type { SessionDTO } from '../../api/dto.ts'
 import { useSession } from '../../api/use-session.ts'
 import { TimelineEntry, Composer, OptimisticMessages } from './conversation.tsx'
 import { Conversation, ConversationContent, ConversationEmptyState, ConversationScrollButton } from '../../components/ai-elements/conversation.tsx'
+import { Suggestion, Suggestions } from '../../components/ai-elements/suggestion.tsx'
 import { ClusterControls } from './cluster-controls.tsx'
 import { SubmissionController } from './submission.ts'
+import { applySessionSuggestion, emptySessionSuggestions } from './suggestions.ts'
 import { Badge } from '../../components/ui/badge.tsx'
 import { Button } from '../../components/ui/button.tsx'
 import { runtimeStateLabel } from '../../lib/display.ts'
@@ -34,6 +36,7 @@ export function SessionSurface({ api, session, presentation, projectPath, worker
   const currentSession = session
   const interactive = presentation !== 'canvas-summary'
   const controls = presentation === 'focus' || presentation === 'run'
+  const chooseSuggestion = (suggestion: string) => applySessionSuggestion(controller, document.getElementById(`session-prompt-${session.id}`), suggestion)
 
   return <section className={`session-surface session-surface-${presentation}`} data-session-id={session.id}>
     <header className="session-surface-header">
@@ -41,7 +44,7 @@ export function SessionSurface({ api, session, presentation, projectPath, worker
       <div className="session-surface-actions"><Badge variant={session.runtimeState === 'running' ? 'success' : 'outline'}>{runtimeStateLabel[session.runtimeState]}</Badge>{presentation === 'canvas-interactive' && onOpenFocus ? <Button size="sm" variant="outline" onClick={onOpenFocus}>进入专注视图</Button> : null}</div>
     </header>
     <Conversation className="session-surface-timeline" aria-live="polite"><ConversationContent className="gap-3 p-4">
-      {!history.timeline.length && <ConversationEmptyState title={history.checkedAt ? canSend ? '暂无消息，可以开始对话。' : blockedReason : '正在加载会话历史…'} />}
+      {!history.timeline.length && <ConversationEmptyState title={history.checkedAt ? canSend ? '暂无消息，可以开始对话。' : blockedReason : '正在加载会话历史…'}>{history.checkedAt && canSend ? <div className="flex max-w-2xl flex-col items-center gap-4"><div className="space-y-1"><h3 className="text-sm font-medium">暂无消息，可以开始对话。</h3><p className="text-sm text-muted-foreground">选择一个建议，或在下方输入你的问题。</p></div><Suggestions className="justify-center">{emptySessionSuggestions.map(suggestion => <Suggestion key={suggestion} suggestion={suggestion} onClick={() => chooseSuggestion(suggestion)}>{suggestion}</Suggestion>)}</Suggestions></div> : <h3 className="text-sm font-medium">{history.checkedAt ? blockedReason : '正在加载会话历史…'}</h3>}</ConversationEmptyState>}
       {history.timeline.map(entry => <TimelineEntry key={entry.id} entry={entry} />)}
       <OptimisticMessages controller={controller} confirmedIds={confirmedIds} />
     </ConversationContent><ConversationScrollButton className="nodrag nopan" /></Conversation>
