@@ -8,6 +8,8 @@ export async function sessionIdleReason(tx: ServerStoreTx, sessionId: SessionId)
   const worker = await tx.resources.getWorker(session.binding.agent.workerId)
   const freshness = await tx.cache.getFreshness(sessionId)
   if (worker?.connectionState !== 'online' || freshness?.status !== 'synced' || freshness.workerLastSeq !== freshness.contiguousSeq) return 'Session Journal is not fresh; wait for synchronization'
+  const workerSessions = await tx.resources.listSessions()
+  if (workerSessions.some(candidate => !candidate.deletedAt && candidate.binding.agent.workerId === worker.id && ['running', 'stopping'].includes(candidate.runtimeState))) return 'Worker has an active Session invocation'
   const queued = new Set<string>(), active = new Set<string>(), observed = new Set<string>()
   let from = 1 as EventSeq
   for (;;) {

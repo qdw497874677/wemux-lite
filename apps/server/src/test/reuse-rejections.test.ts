@@ -36,6 +36,7 @@ const cases = [
   ['accepted enqueue beyond window', 'reuse_ineligible', 'Session has pending enqueue delivery; explicitly confirm a new Session'],
   ['independent queued message', 'reuse_ineligible', busy],
   ['active Turn', 'reuse_ineligible', busy],
+  ['Worker active Session invocation', 'reuse_ineligible', 'Worker has an active Session invocation; explicitly confirm a new Session'],
   ['unresolved accepted cancellation', 'active_run', 'Task already has an active Run'],
   ['nonterminal linked Run', 'active_run', 'Task already has an active Run'],
 ] as const
@@ -81,6 +82,7 @@ for (const [name, code, message] of cases) test(`public reuse rejection matrix: 
     if (name !== 'missing Session') await store.transaction(tx => tx.resources.saveSession(candidate))
     if (name !== 'unknown Journal') await store.transaction(tx => tx.cache.recordWorkerHead(candidate.id, 0 as EventSeq))
     if (name === 'Worker offline') await store.transaction(async tx => { const current = (await tx.resources.getWorker(worker.id))!; await tx.resources.saveWorker({ ...current, connectionState: 'offline' }) })
+    if (name === 'Worker active Session invocation') await store.transaction(tx => tx.resources.saveSession({ ...eligible, runtimeState: 'running' }))
     const event = (seq: number, payload: JournalEvent['payload']): JournalEvent => ({ sessionId: candidate.id, seq: seq as EventSeq, occurredAt: at, payload })
     if (name === 'stale Journal') await store.transaction(tx => tx.cache.recordWorkerHead(candidate.id, 1 as EventSeq))
     if (name === 'gapped Journal') await store.transaction(async tx => { await tx.cache.applyEvents(candidate.id, [event(2, { kind: 'session.runtime.changed', state: 'idle', reason: null })]); await tx.cache.recordWorkerHead(candidate.id, 2 as EventSeq) })
