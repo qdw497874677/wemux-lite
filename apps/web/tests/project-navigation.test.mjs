@@ -14,15 +14,24 @@ test('mobile project pages prioritize conversation and keep workspace access dir
   assert.match(app, /<MainCanvas>.*<ProjectQuickNav/)
   assert.doesNotMatch(app, /setContextOpen\(matchMedia/)
 })
-test('project conversation route is a single draft canvas; sessions remain in the workspace tree', () => {
+test('project routes use API project ids and only load the graph on overview', () => {
+  const app = source('../src/App.tsx')
+  const navigation = source('../src/features/sessions/navigation.tsx')
+  assert.match(app, /onProject=\{id => go\(`\/projects\/\$\{encodeURIComponent\(id\)\}\/sessions`\)\}/)
+  assert.match(navigation, /onSelect=\{\(\) => onProject\(item\.id\)\}/)
+  assert.doesNotMatch(navigation, /onProject\(item\.name\)/)
+  assert.match(app, /enabled: Boolean\(projectId\) && section === 'overview'/)
+})
+
+test('project conversation route is a single draft canvas; recent sessions remain contextually accessible', () => {
   const app = source('../src/App.tsx')
   assert.match(app, /section === 'sessions' \? <div className="m-auto w-full">\{quickEntry\}/)
   assert.doesNotMatch(app, /ProjectSessionList/)
   assert.match(app, /workspaceId && sessions.filter/)
   const navigation = source('../src/features/sessions/navigation.tsx')
   assert.match(navigation, /aria-label="新建会话"/)
-  assert.match(navigation, /aria-label="新建工作区"/)
-  assert.match(navigation, /workspaceSessions.map\(session/)
+  assert.match(navigation, /\['workspaces', '工作区', FolderGit2\]/)
+  assert.match(navigation, /visibleSessions.map\(session/)
   assert.match(navigation, /onCreate\('session'\)/)
 })
 test('overview exposes readable recent sessions and existing workspaces', () => {

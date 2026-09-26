@@ -1,6 +1,6 @@
 import { isExecutable, capabilityLabel } from '../../lib/capability'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, ChevronDown, ChevronRight, CircleCheck, CircleX, FolderGit2, LoaderCircle, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, RefreshCw, Search, Send, Server, ServerCog, Settings2, Wrench, WifiOff } from 'lucide-react'
+import { Activity, Bot, Check, ChevronsUpDown, CircleCheck, CircleX, FolderGit2, LayoutDashboard, LoaderCircle, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, RefreshCw, Search, Send, Server, ServerCog, Settings2, SquareKanban, Wrench, WifiOff } from 'lucide-react'
 import type { ProjectDTO, SendMessageDTO, SessionDTO, WorkerDTO, WorkspaceDTO } from '../../api/dto'
 import { useSession } from '../../api/use-session'
 import type { ChatMessage, ChatTimelineItem, TimelineTool } from '../../api/journal'
@@ -15,42 +15,83 @@ import { CreateDialog, type CreateKind } from '../../components/create-dialog'
 import { WorkerEnrollmentDialog } from '../../components/worker-enrollment-dialog'
 import { ClusterPage } from '../../components/cluster-page'
 import { cn } from '../../lib/utils'
-import { formatChineseTime, runtimeStateLabel, workerStateLabel, workspaceStateLabel } from '../../lib/display'
+import { formatChineseTime, formatRelativeTime, runtimeStateLabel, workerStateLabel, workspaceStateLabel } from '../../lib/display'
 
-export function Sidebar({ projects, projectId, workspaces, workers, sessions, sessionId, query, loading, projectLoading, connected, onQuery, onProject, onSession, onCreate, onManageSession }: { projects: ProjectDTO[]; projectId: string; workspaces: WorkspaceDTO[]; workers: WorkerDTO[]; sessions: SessionDTO[]; sessionId: string; query: string; loading: boolean; projectLoading: boolean; connected: boolean; onQuery: (value: string) => void; onProject: (id: string) => void; onSession: (id: string) => void; onCreate: (kind: CreateKind, workspaceId?: string) => void; onManageSession: (id: string, patch: { title?: string; archived?: boolean }) => Promise<void> }) {
-  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+const runtimeDotClass: Record<SessionDTO['runtimeState'], string> = {
+  idle: 'bg-zinc-500',
+  queued: 'bg-amber-400',
+  running: 'bg-sky-400',
+  stopping: 'bg-amber-400',
+  unavailable: 'bg-rose-400',
+  failed: 'bg-rose-400',
+}
+
+const sectionLabelClass = 'text-[11px] font-medium uppercase tracking-wide text-muted-foreground'
+
+export function Sidebar({ projects, projectId, section, workspaces, sessions, sessionId, query, loading, projectLoading, connected, onProject, onNavigate, onSession, onCreate, onManageSession }: { projects: ProjectDTO[]; projectId: string; section: string; workspaces: WorkspaceDTO[]; sessions: SessionDTO[]; sessionId: string; query: string; loading: boolean; projectLoading: boolean; connected: boolean; onProject: (id: string) => void; onNavigate: (path: string) => void; onSession: (id: string) => void; onCreate: (kind: CreateKind, workspaceId?: string) => void; onManageSession: (id: string, patch: { title?: string; archived?: boolean }) => Promise<void> }) {
+  const project = projects.find(item => item.id === projectId)
   const normalizedQuery = query.trim().toLowerCase()
-  const selectedWorkspaceId = sessions.find(item => item.id === sessionId)?.workspaceId
-  useEffect(() => {
-    if (selectedWorkspaceId) setCollapsed(current => current[selectedWorkspaceId] ? { ...current, [selectedWorkspaceId]: false } : current)
-  }, [selectedWorkspaceId])
+  const visibleSessions = sessions
+    .filter(item => !normalizedQuery || `${item.title} ${item.agentKey} ${item.modelId ?? ''}`.toLowerCase().includes(normalizedQuery))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+  const currentSection = section === 'tasks' ? 'board' : section
+  const workspaceName = (workspaceId: string) => workspaces.find(item => item.id === workspaceId)?.name ?? workspaceId
+  const navigation = [
+    ['sessions', '新对话 / 会话', MessageSquarePlus],
+    ['workspaces', '工作区', FolderGit2],
+    ['board', '任务', SquareKanban],
+    ['activity', '活动', Activity],
+  ] as const
+
   return <aside className="flex h-full min-h-0 flex-col border-r border-border bg-card/40">
-    <div className="flex min-h-12 shrink-0 items-center justify-between border-b border-border px-3"><strong className="text-sm">项目资源</strong><Button variant="ghost" size="icon" aria-label="新建项目" disabled={!connected} onClick={() => onCreate('project')}><Plus className="size-4" /></Button></div>
-    <div className="min-h-0 flex-1 overflow-y-auto p-3">
-      <div className="space-y-1">{projects.map(project => <button key={project.id} aria-current={project.id === projectId ? 'true' : undefined} onClick={() => onProject(project.id)} className={cn('flex min-h-10 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-muted-foreground hover:bg-accent', project.id === projectId && 'bg-accent text-foreground ring-1 ring-border')}><FolderGit2 className="size-4 shrink-0" /><span title={project.name} className="min-w-0 flex-1 truncate">{project.name}</span>{project.id === projectId && <ChevronDown className="size-3.5 shrink-0" />}</button>)}{!projects.length && <p className="p-2 text-sm text-muted-foreground">{loading ? '正在加载项目…' : connected ? '暂无项目，请先新建项目。' : '连接服务端后显示项目。'}</p>}</div>
-      {projectId && <section className="ml-4 mt-2 border-l border-border pl-2" aria-label="当前项目资源树">
-        <div className="mb-2 flex min-h-9 items-center justify-between pl-2"><span className="text-[11px] text-muted-foreground">工作区</span><div className="flex items-center"><Button variant="ghost" size="icon" aria-label="新建会话" disabled={!connected} onClick={() => onCreate('session')}><MessageSquarePlus className="size-4" /></Button><Button variant="ghost" size="icon" aria-label="新建工作区" disabled={!connected} onClick={() => onCreate('workspace')}><Plus className="size-4" /></Button></div></div>
-        {projectLoading ? <p className="px-2 py-3 text-sm text-muted-foreground">正在加载 Workspace…</p> : workspaces.map(workspace => {
-          const worker = workers.find(item => item.id === workspace.workerId)
-          const workspaceMatches = `${workspace.name} ${worker?.name ?? workspace.workerId}`.toLowerCase().includes(normalizedQuery)
-          const workspaceSessions = sessions.filter(item => item.workspaceId === workspace.id && (!normalizedQuery || workspaceMatches || `${item.title} ${item.agentKey} ${item.modelId}`.toLowerCase().includes(normalizedQuery)))
-          const isCollapsed = collapsed[workspace.id] ?? false
-          if (normalizedQuery && !workspaceMatches && !workspaceSessions.length) return null
-          return <div key={workspace.id} className="mb-2 overflow-hidden rounded-lg border border-border bg-background/35">
-            <button className="flex min-h-10 w-full items-center gap-2 px-2.5 py-2 text-left" aria-expanded={!isCollapsed} onClick={() => setCollapsed(current => ({ ...current, [workspace.id]: !isCollapsed }))}>{isCollapsed ? <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" /> : <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />}<span className="min-w-0 flex-1 truncate text-sm font-medium">{workspace.name}</span><Badge variant={workspace.status === 'ready' ? 'success' : workspace.status === 'failed' ? 'danger' : 'warning'}>{workspaceStateLabel[workspace.status]}</Badge></button>
-            {!isCollapsed && <div className="ml-4 border-l border-border pb-2 pl-2">
-              <div className="flex min-h-8 items-center justify-between pr-1"><span className="text-[11px] text-muted-foreground">会话</span><Button variant="ghost" size="icon" className="size-7" aria-label={`在 ${workspace.name} 新建会话`} disabled={!connected || workspace.status !== 'ready' || worker?.connectionState !== 'online'} onClick={() => onCreate('session', workspace.id)}><MessageSquarePlus className="size-3.5" /></Button></div>
-              {workspaceSessions.map(session => <div key={session.id} className="mb-1 flex items-center gap-1"><button aria-current={session.id === sessionId ? 'true' : undefined} className={cn('min-h-10 min-w-0 flex-1 rounded-md border border-transparent px-2 py-2 text-left text-xs hover:bg-accent', session.id === sessionId && 'border-indigo-500/20 bg-indigo-500/10')} onClick={() => onSession(session.id)}><span title={session.title} className="block truncate font-medium">{session.title}</span><small className="mt-1 block truncate text-[10px] text-muted-foreground">{session.agentKey} · {session.modelId} · {runtimeStateLabel[session.runtimeState]}</small></button><DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" size="icon" className="size-8 shrink-0" aria-label={`会话操作 ${session.title}`}><MoreHorizontal className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => { const title = window.prompt('重命名会话', session.title)?.trim(); if (title && title !== session.title) void onManageSession(session.id, { title }) }}>重命名</DropdownMenuItem><DropdownMenuItem onSelect={() => { if (window.confirm(`归档会话「${session.title}」？归档后将不再显示在会话列表中。`)) void onManageSession(session.id, { archived: true }) }}>归档</DropdownMenuItem></DropdownMenuContent></DropdownMenu></div>)}
-              {!workspaceSessions.length && <p className="px-2 py-2 text-xs text-muted-foreground">{normalizedQuery ? '没有匹配的会话' : '尚未创建会话'}</p>}
-            </div>}
-            <div className="flex min-h-8 items-center gap-2 border-t border-border bg-card/40 px-3 text-[10px] text-muted-foreground"><Server className="size-3 shrink-0" /><span className="shrink-0">执行节点</span><span className="min-w-0 flex-1 truncate text-foreground/80">{worker?.name ?? workspace.workerId}</span><span className={cn('size-2 rounded-full', worker?.connectionState === 'online' ? 'bg-emerald-400' : worker?.connectionState === 'revoked' ? 'bg-red-400' : 'bg-amber-400')} role="img" aria-label={worker ? workerStateLabel[worker.connectionState] : '节点未知'} /></div>
-            {workspace.failureReason && <p className="border-t border-border px-3 py-2 text-xs text-red-300">{workspace.failureReason}</p>}
+    <div className="shrink-0 border-b border-border p-2.5">
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button type="button" className="flex min-h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-sm font-medium text-foreground hover:bg-accent" aria-label="切换项目">
+            <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate" title={project?.name}>{project?.name ?? (loading ? '正在加载项目…' : '选择项目')}</span>
+            <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-52">
+          {projects.map(item => <DropdownMenuItem key={item.id} onSelect={() => onProject(item.id)}><FolderGit2 /><span className="min-w-0 flex-1 truncate">{item.name}</span>{item.id === projectId && <Check className="ml-auto" />}</DropdownMenuItem>)}
+          {!projects.length && <DropdownMenuItem disabled>{loading ? '正在加载项目…' : '暂无项目'}</DropdownMenuItem>}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem disabled={!connected} onSelect={() => onCreate('project')}><Plus />新建项目</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+
+    {projectId && <nav aria-label="项目页面" className="shrink-0 border-b border-border px-2 py-3">
+      <p className={cn(sectionLabelClass, 'mb-1.5 px-2')}>导航</p>
+      <div className="space-y-0.5">
+        {navigation.map(([path, label, Icon]) => <a key={path} href={`/projects/${encodeURIComponent(projectId)}/${path}`} aria-current={currentSection === path ? 'page' : undefined} onClick={event => { event.preventDefault(); onNavigate(path) }} className={cn('flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground', currentSection === path && 'bg-accent text-foreground')}><Icon className="size-4 shrink-0" /><span className="truncate">{label}</span></a>)}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild><button type="button" className={cn('flex min-h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-sm text-muted-foreground hover:bg-accent hover:text-foreground', ['overview', 'settings'].includes(currentSection) && 'bg-accent text-foreground')}><MoreHorizontal className="size-4 shrink-0" /><span>更多</span></button></DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-44"><DropdownMenuItem onSelect={() => onNavigate('overview')}><LayoutDashboard />项目概览</DropdownMenuItem><DropdownMenuItem onSelect={() => onNavigate('settings')}><Settings2 />项目设置</DropdownMenuItem></DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </nav>}
+
+    <section className="flex min-h-0 flex-1 flex-col" aria-label="最近会话">
+      <div className="flex shrink-0 items-center justify-between px-4 pb-1.5 pt-3">
+        <p className={sectionLabelClass}>最近会话</p>
+        <Button variant="ghost" iconOnly size="icon-xs" className="size-7 rounded-md" aria-label="新建会话" disabled={!connected || !projectId} onClick={() => onCreate('session')}><Plus className="size-3.5" /></Button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+        {projectLoading ? <p className="px-2 py-3 text-xs text-muted-foreground">正在加载会话…</p> : visibleSessions.map(session => {
+          const fullDetails = `${session.title}\n工作区：${workspaceName(session.workspaceId)}\n智能体 / 模型：${session.agentKey} / ${session.modelId || '默认模型'}\n状态：${runtimeStateLabel[session.runtimeState]}\n更新：${formatChineseTime(session.updatedAt)}`
+          return <div key={session.id} className="group flex items-center gap-1">
+            <button type="button" title={fullDetails} aria-current={session.id === sessionId ? 'true' : undefined} className={cn('min-w-0 flex-1 rounded-md px-2.5 py-2 text-left text-muted-foreground hover:bg-accent hover:text-foreground', session.id === sessionId && 'bg-accent text-foreground')} onClick={() => onSession(session.id)}>
+              <span className="block truncate text-sm font-medium">{session.title}</span>
+              <span className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground"><span className={cn('size-1.5 shrink-0 rounded-full', runtimeDotClass[session.runtimeState])} aria-label={runtimeStateLabel[session.runtimeState]} role="img" /><span>{formatRelativeTime(session.updatedAt)}</span></span>
+            </button>
+            <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" iconOnly size="icon-xs" className="size-7 shrink-0 rounded-md opacity-0 group-hover:opacity-100 focus:opacity-100" aria-label={`会话操作 ${session.title}`}><MoreHorizontal className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => { const title = window.prompt('重命名会话', session.title)?.trim(); if (title && title !== session.title) void onManageSession(session.id, { title }) }}>重命名</DropdownMenuItem><DropdownMenuItem onSelect={() => { if (window.confirm(`归档会话「${session.title}」？归档后将不再显示在会话列表中。`)) void onManageSession(session.id, { archived: true }) }}>归档</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
           </div>
         })}
-        {!projectLoading && !workspaces.length && <p className="px-2 py-3 text-sm text-muted-foreground">当前项目暂无 Workspace</p>}
-        {query && <Button variant="ghost" size="sm" className="mt-2 w-full" onClick={() => onQuery('')}>清除搜索</Button>}
-      </section>}
-    </div>
+        {!projectLoading && !visibleSessions.length && <p className="px-2 py-3 text-xs leading-5 text-muted-foreground">{normalizedQuery ? '没有匹配的会话' : projectId ? '暂无会话，从上方开始新对话。' : connected ? '请先选择项目。' : '连接服务端后显示会话。'}</p>}
+      </div>
+    </section>
   </aside>
 }
 

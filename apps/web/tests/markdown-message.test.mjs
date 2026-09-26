@@ -33,9 +33,11 @@ test('incomplete streaming Markdown stays renderable until its final delimiters 
   for (let i = 1; i <= text.length; i++) assert.doesNotThrow(() => render(text.slice(0, i)))
   assert.match(render(text), /language-ts/)
 })
-test('confirmed and optimistic messages use Markdown, tools remain literal output', () => {
+test('confirmed and optimistic messages use AI Elements Response, tools remain literal output', () => {
   const source = readFileSync(new URL('../src/features/sessions/conversation.tsx', import.meta.url), 'utf8')
-  assert.match(source, /<MarkdownMessage text=\{entry.text\}/)
-  assert.match(source, /<MarkdownMessage text=\{item.content\}/)
-  assert.match(source, /\{entry.output\}<\/pre>/)
+  const response = readFileSync(new URL('../src/components/ai-elements/response.tsx', import.meta.url), 'utf8')
+  assert.match(source, /<Response>\{text\}<\/Response>/)
+  assert.match(source, /<Response>\{item.content\}<\/Response>/)
+  assert.match(response, /<MarkdownMessage text=\{String\(children \?\? ''\)\}/)
+  assert.match(source, /<ToolOutput output=\{output\}/)
 })

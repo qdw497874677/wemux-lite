@@ -19,6 +19,7 @@ import { RouterProvider, useRouterState, useNavigate } from '@tanstack/react-rou
 import { makeRouter } from './app/router'
 import { useResources } from './app/resources'
 import { TimelineEntry, Composer, OptimisticMessages } from './features/sessions/conversation'
+import { Conversation, ConversationContent, ConversationEmptyState, ConversationScrollButton } from './components/ai-elements/conversation.tsx'
 import { SessionInfoPanel } from './features/sessions/session-info-panel.tsx'
 import { SessionCanvas } from './features/session-canvas/session-canvas.tsx'
 import { Sidebar, ContextPanel } from './features/sessions/navigation'
@@ -184,7 +185,7 @@ function Workbench({ config, onSettings, onUnauthorized, onSignOut }: { config: 
   const projectData = useProject(api, projectId)
   const graphQuery = useQuery({
     queryKey: ['session-graph', projectId],
-    enabled: Boolean(projectId),
+    enabled: Boolean(projectId) && section === 'overview',
     queryFn: ({ signal }) => api.sessionGraph(projectId, signal),
   })
   const quickStarts = useRef(new Map<string, QuickStartController>())
@@ -220,10 +221,6 @@ function Workbench({ config, onSettings, onUnauthorized, onSignOut }: { config: 
   // message enters the timeline immediately; the journal projection takes over
   // once the durable message.queued event arrives (same messageId ⇒ dedup).
   const [echo, setEcho] = useState<{ sessionId: string; message: ChatMessage } | null>(null)
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const nearBottomRef = useRef(true)
-  const previousTimelineSizeRef = useRef(0)
-  const previousSessionRef = useRef(sessionId)
   const selection = !loading && !projectLoading && !error ? resolveSelection(location.pathname, location.searchStr, projects, workspaces, sessions) : {}
   const validSelection = !loading && !projectLoading && !error && !selection.error
   const history = useSession(api, validSelection ? sessionId : '', revision)
@@ -264,23 +261,6 @@ function Workbench({ config, onSettings, onUnauthorized, onSignOut }: { config: 
     ? [...history.timeline, { kind: 'message', ...echo.message }]
     : history.timeline
   useEffect(() => { if (echo && (echo.sessionId !== sessionId || history.messages.some(item => item.id === echo.message.id))) setEcho(null) }, [echo, sessionId, history.messages])
-  useEffect(() => {
-    const node = scrollRef.current
-    const sessionChanged = previousSessionRef.current !== sessionId
-    if (sessionChanged) {
-      previousSessionRef.current = sessionId
-      previousTimelineSizeRef.current = 0
-      nearBottomRef.current = true
-    }
-    if (!node || (!sessionChanged && !nearBottomRef.current)) return
-    const frame = requestAnimationFrame(() => node.scrollTo({ top: node.scrollHeight, behavior: previousTimelineSizeRef.current ? 'smooth' : 'auto' }))
-    previousTimelineSizeRef.current = timeline.length
-    return () => cancelAnimationFrame(frame)
-  }, [sessionId, history.events.at(-1)?.seq, timeline])
-  const trackTimelineScroll = () => {
-    const node = scrollRef.current
-    if (node) nearBottomRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 120
-  }
   const visibleSessions = sessions.filter(item => !item.archivedAt)
   const connectionState: ConnectionState = !browserOnline ? 'offline' : loading ? 'connecting' : connected ? 'connected' : error.includes('401') || error.includes('令牌') ? 'unauthorized' : 'unreachable'
   const connectionLabel = { connecting: '正在连接服务端', connected: '服务端已连接', unauthorized: '管理员令牌无效', unreachable: '无法访问服务端', offline: '浏览器离线' }[connectionState]
@@ -308,14 +288,14 @@ function Workbench({ config, onSettings, onUnauthorized, onSignOut }: { config: 
     refresh()
     if (patch.archived && id === sessionId) go(`${projectBase}/sessions`)
   }
-  const sidebar = <Sidebar projects={projects} projectId={projectId} workspaces={workspaces} workers={workers} sessions={visibleSessions} sessionId={sessionId} query={query} loading={loading} projectLoading={projectLoading} connected={connected} onQuery={setQuery} onProject={id => go(`/projects/${encodeURIComponent(id)}/sessions`)} onSession={id => go(`/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(id)}`)} onCreate={openResource} onManageSession={manageSession} />
+  const sidebar = <Sidebar projects={projects} projectId={projectId} section={section} workspaces={workspaces} sessions={visibleSessions} sessionId={sessionId} query={query} loading={loading} projectLoading={projectLoading} connected={connected} onProject={id => go(`/projects/${encodeURIComponent(id)}/sessions`)} onNavigate={path => go(`/projects/${encodeURIComponent(projectId)}/${path}`)} onSession={id => go(`/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(id)}`)} onCreate={openResource} onManageSession={manageSession} />
 
   function EmptyWorkspace() {
     const action = !connected ? { label: '连接服务端', run: onSettings } : !projects.length ? { label: '新建项目', run: () => openResource('project') } : !workspaces.length ? { label: '新建工作区', run: () => openResource('workspace') } : { label: '新建会话', run: () => openResource('session') }
     return <div className="grid min-h-full place-content-center justify-items-center gap-3 px-6 text-center"><Bot className="size-11 text-violet-300" /><h2 className="text-base font-semibold">{connected ? '开始一次智能体会话' : '连接 Wemux Lite 服务端'}</h2><p className="max-w-md text-sm leading-6 text-muted-foreground">{connected ? !projects.length ? '先创建项目，用来组织工作区和会话。' : !workspaces.length ? '为当前项目创建工作区，工作节点会准备仓库和执行目录。' : '工作区准备好后，选择智能体与模型创建会话。' : '输入部署服务端时设置的管理员令牌，连接后即可管理工作节点、项目与会话。'}</p><Button onClick={action.run}>{action.label}</Button></div>
   }
 
-  if (parts[0] === 'teams') return <TeamPage api={api} />
+  if (parts[0] === 'teams') return <TeamPage api={api} onBack={() => go('/projects')} />
   const globalRail = <GlobalRail><a href="/projects" onClick={event => { event.preventDefault(); go('/projects') }}>项目</a><a href="/teams" onClick={event => { event.preventDefault(); go('/teams') }}>团队</a><a href="/runtime" onClick={event => { event.preventDefault(); go('/runtime') }}>运行时</a><a href="/cluster" onClick={event => { event.preventDefault(); go('/cluster') }}>集群</a><a href="/components" onClick={event => { event.preventDefault(); go('/components') }}>组件</a><a href="/settings" onClick={event => { event.preventDefault(); go('/settings') }}>设置</a></GlobalRail>
   return <RunLayerContext.Provider value={setRunLayers}><AppShell>
     <header className="flex min-h-14 shrink-0 items-center gap-2 border-b border-border px-2 sm:gap-3 sm:px-4">
@@ -342,9 +322,9 @@ function Workbench({ config, onSettings, onUnauthorized, onSignOut }: { config: 
         {history.error && <p role="alert" className="px-4 py-3 text-sm text-red-300">{history.error} 当前历史可能不完整。</p>}
         <div className="flex min-h-0 flex-1">
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <div ref={scrollRef} onScroll={trackTimelineScroll} className="conversation-timeline min-h-0 flex-1 overflow-y-auto px-3 py-4 sm:px-6 sm:py-6" aria-live="polite" aria-relevant="additions text">{!selected ? <EmptyWorkspace /> : <div className="conversation-content space-y-5">{!timeline.length && <p className="py-8 text-center text-sm text-muted-foreground">{history.checkedAt ? canSend ? '暂无消息，可以开始对话。' : sendBlockedReason : '正在加载会话历史…'}</p>}{timeline.map(entry => <TimelineEntry key={entry.id} entry={entry} onOpenContext={selected ? () => setInfoPanelOpen(true) : undefined} />)}{selected && <OptimisticMessages controller={submission(selected.id)} confirmedIds={confirmed} />}</div>}</div>
+            <Conversation key={sessionId} className="conversation-timeline" aria-live="polite" aria-relevant="additions text"><ConversationContent className="conversation-content mx-auto w-full max-w-4xl">{!selected ? <EmptyWorkspace /> : <>{!timeline.length && <ConversationEmptyState title={history.checkedAt ? canSend ? '暂无消息，可以开始对话。' : sendBlockedReason : '正在加载会话历史…'} />}{timeline.map(entry => <TimelineEntry key={entry.id} entry={entry} onOpenContext={() => setInfoPanelOpen(true)} />)}<OptimisticMessages controller={submission(selected.id)} confirmedIds={confirmed} /></>}</ConversationContent><ConversationScrollButton /></Conversation>
             {selected && <ClusterControls key={`controls:${selected.id}`} api={api} session={selected} activeTurnId={history.activeTurnId} queuedItems={history.queuedItems} pendingApprovals={history.pendingApprovals} enabled={connected && browserOnline && worker?.connectionState === 'online' && history.freshness?.status === 'synced' && !history.error} />}
-            {selected && <Composer key={selected.id} controller={submission(selected.id)} session={selected} canSend={canSend} blockedReason={sendBlockedReason} confirmedIds={confirmed} />}
+            {selected && <Composer key={selected.id} api={api} controller={submission(selected.id)} session={selected} activeTurnId={history.activeTurnId} canSend={canSend} blockedReason={sendBlockedReason} confirmedIds={confirmed} />}
           </div>
           {selected && infoPanelOpen && <SessionInfoPanel api={api} session={selected} workspace={workspace} worker={worker} project={project} onChanged={refresh} onClose={() => setInfoPanelOpen(false)} />}
         </div>

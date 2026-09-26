@@ -5,11 +5,12 @@ import test from 'node:test'
 const appSource = (await Promise.all(['App.tsx', 'features/sessions/navigation.tsx'].map(path => readFile(new URL(`../src/${path}`, import.meta.url), 'utf8')))).join('\n')
 const createDialogSource = await readFile(new URL('../src/components/create-dialog.tsx', import.meta.url), 'utf8')
 
-test('workbench navigation nests sessions under their workspace and treats workers as execution metadata', () => {
-  assert.match(appSource, /项目 → Workspace → Session；Worker 提供执行环境/)
-  assert.match(appSource, /item\.workspaceId === workspace\.id/)
-  assert.match(appSource, />执行节点</)
-  assert.match(appSource, /onCreate\('session', workspace\.id\)/)
+test('project sidebar separates navigation from contextual sessions and omits worker metadata', () => {
+  assert.match(appSource, /aria-label="切换项目"/)
+  assert.match(appSource, /aria-label="项目页面"/)
+  assert.match(appSource, /aria-label="最近会话"/)
+  assert.match(appSource, /formatRelativeTime\(session\.updatedAt\)/)
+  assert.doesNotMatch(appSource, />执行节点</)
   assert.doesNotMatch(appSource, /项目 → Workspace → Worker → Session/)
 })
 

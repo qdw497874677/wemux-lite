@@ -32,8 +32,29 @@ export const commandStateLabel: Record<CommandStatus, string> = {
   cancelled: '已取消',
 }
 
-export function formatChineseTime(value: string | number | Date): string {
+type DateValue = string | number | Date | null | undefined
+
+function validTimestamp(value: DateValue): number | null {
+  if (value === null || value === undefined || value === '') return null
+  const timestamp = new Date(value).getTime()
+  return Number.isFinite(timestamp) ? timestamp : null
+}
+
+export function formatChineseTime(value: DateValue): string {
+  const timestamp = validTimestamp(value)
+  if (timestamp === null) return '时间未知'
   return new Intl.DateTimeFormat('zh-CN', {
     month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
-  }).format(new Date(value))
+  }).format(new Date(timestamp))
+}
+
+export function formatRelativeTime(value: DateValue, now = Date.now()): string {
+  const timestamp = validTimestamp(value)
+  if (timestamp === null) return '时间未知'
+  const elapsed = Math.max(0, now - timestamp)
+  if (elapsed < 60_000) return '刚刚'
+  if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)} 分钟前`
+  if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)} 小时前`
+  if (elapsed < 604_800_000) return `${Math.floor(elapsed / 86_400_000)} 天前`
+  return new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric' }).format(new Date(timestamp))
 }
