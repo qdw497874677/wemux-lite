@@ -65,6 +65,18 @@ export class SqliteServerStore implements ServerStore {
     }
   }
   close(): void { this.db.close() }
+  async getRecord<T>(kind: string, id: string): Promise<T | null> { return this.committedRead(() => this.get<T>(kind, id)) }
+  async putRecord(kind: string, id: string, value: unknown): Promise<void> { await this.committedWrite(() => this.put(kind, id, value)) }
+  private async committedRead<T>(read: () => T): Promise<T> {
+    const result = this.queue.then(read)
+    this.queue = result.catch(() => undefined)
+    return result
+  }
+  private async committedWrite(write: () => void): Promise<void> {
+    const result = this.queue.then(() => { this.db.exec('BEGIN IMMEDIATE'); try { write(); this.db.exec('COMMIT') } catch (error) { this.db.exec('ROLLBACK'); throw error } })
+    this.queue = result.catch(() => undefined)
+    await result
+  }
   private get<T>(kind: string, id: string): T | null {
     const row = this.db.prepare('SELECT data FROM records WHERE kind=? AND id=?').get(kind, id)
     return row ? JSON.parse(String(row.data)) as T : null
@@ -89,9 +101,9 @@ export class SqliteServerStore implements ServerStore {
       failureReason: null,
       location: null,
     }
-    const next = {
+    const next: Workspace['placements'][number] = {
       ...placement,
-      status: compatibility.status,
+      status: compatibility.status as import('@wemux/domain').WorkspacePlacementStatus,
       failureReason: compatibility.failureReason ?? placement.failureReason,
       ...(compatibility.provisioning ? { provisioning: compatibility.provisioning } : {}),
       location: compatibility.location ?? placement.location,
@@ -122,8 +134,8 @@ export class SqliteServerStore implements ServerStore {
         name: legacy.name,
         spec: legacy.spec,
         deletedAt: status === 'deleted' ? (new Date(0).toISOString() as Timestamp) : null,
-        placements: workerId && status && status !== 'unplaced' && status !== 'deleted'
-          ? [{ workerId, status, failureReason: failureReason ?? null, ...(provisioning ? { provisioning } : {}), location: location ?? null }]
+        placements: workerId && status && status !== 'unplaced'
+          ? [{ workerId, status: (status === 'pending' || status === 'provisioning' || status === 'deleting' ? 'stopped' : status) as import('@wemux/domain').WorkspacePlacementStatus, failureReason: failureReason ?? null, ...(provisioning ? { provisioning } : {}), location: location ?? null }]
           : [],
       } satisfies Workspace
     })()

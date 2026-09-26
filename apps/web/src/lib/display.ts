@@ -7,12 +7,11 @@ export const workerStateLabel = {
 } as const
 
 export const workspaceStateLabel: Record<WorkspaceDTO['status'], string> = {
-  pending: '等待处理',
-  provisioning: '正在初始化',
-  ready: '已就绪',
-  failed: '初始化失败',
-  deleting: '正在删除',
+  ready: '运行中',
+  stopped: '已停止',
   deleted: '已删除',
+  failed: '创建失败',
+  unhealthy: '不健康',
 }
 
 export const runtimeStateLabel: Record<RuntimeState, string> = {

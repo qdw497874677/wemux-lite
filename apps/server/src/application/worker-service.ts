@@ -103,7 +103,7 @@ export class WorkerService {
           }
           if (message.receipt.status === 'rejected') {
             for (const workspace of await tx.resources.listWorkspaces()) {
-              const placement = workspace.placements.find(value => value.workerId === workerId && value.provisioning?.commandId === message.receipt.commandId && ['pending', 'provisioning'].includes(value.status))
+              const placement = workspace.placements.find(value => value.workerId === workerId && value.provisioning?.commandId === message.receipt.commandId && value.status === 'stopped')
               if (!placement?.provisioning) continue
               const at = now(), reason = message.receipt.error.message
               await tx.resources.saveWorkspace({ ...workspace, workerId, status: 'failed' as const, failureReason: reason, provisioning: { ...placement.provisioning, reportedAt: at }, location: placement.location, placements: workspace.placements.map(value => value.workerId === workerId ? { ...placement, status: 'failed' as const, failureReason: reason, provisioning: { ...placement.provisioning!, reportedAt: at } } : value) })
@@ -122,14 +122,15 @@ export class WorkerService {
             // Attempt identity is authoritative. Legacy reports are accepted only
             // before any explicit retry; their timestamps cannot prove attempt ownership.
             if (r.commandId ? r.commandId !== placement.provisioning?.commandId : placement.provisioning?.replacedAttempt === true) break
-            const allowed = placement.status === 'deleting' ? ['deleting', 'deleted', 'failed'] : ['pending', 'provisioning', 'ready', 'failed']
-            if (!allowed.includes(r.status)) throw new AppError(409, 'Invalid workspace transition')
-            if (placement.status === 'ready' && r.status !== 'ready') break
+            const reportedStatus: import('@wemux/domain').WorkspacePlacementStatus = r.status === 'pending' || r.status === 'provisioning' || r.status === 'deleting' || r.status === 'unplaced' ? 'stopped' : r.status
+            const allowed: import('@wemux/domain').WorkspacePlacementStatus[] = placement.status === 'deleted' ? ['deleted'] : placement.status === 'ready' ? ['ready', 'failed'] : placement.status === 'failed' ? ['failed'] : ['stopped', 'ready', 'failed', 'deleted']
+            if (placement.status === 'ready' && reportedStatus !== 'ready') break
+            if (!allowed.includes(reportedStatus)) break
             if (placement.provisioning?.reportedAt && r.occurredAt < placement.provisioning.reportedAt) break
-            if (placement.status === 'failed' && r.status !== 'failed') break
+            if (placement.status === 'failed' && reportedStatus !== 'failed') break
             if (!r.commandId && placement.provisioning && r.occurredAt < placement.provisioning.startedAt) break
-            const same = placement.status === r.status && placement.failureReason === r.reason && JSON.stringify(placement.location) === JSON.stringify(r.location)
-            const next: import('@wemux/server-domain').WorkspacePlacement = { ...placement, status: r.status as import('@wemux/domain').WorkspacePlacementStatus, failureReason: r.reason, location: r.location, ...(placement.provisioning ? { provisioning: { ...placement.provisioning, reportedAt: r.occurredAt } } : {}) }
+            const same = placement.status === reportedStatus && placement.failureReason === r.reason && JSON.stringify(placement.location) === JSON.stringify(r.location)
+            const next: import('@wemux/server-domain').WorkspacePlacement = { ...placement, status: reportedStatus as import('@wemux/domain').WorkspacePlacementStatus, failureReason: r.reason, location: r.location, ...(placement.provisioning ? { provisioning: { ...placement.provisioning, reportedAt: r.occurredAt } } : {}) }
             await tx.resources.saveWorkspace({ ...w, workerId, status: next.status, failureReason: next.failureReason, provisioning: next.provisioning, location: next.location, placements: w.placements.map(value => value.workerId === workerId ? next : value) })
             if (!same) await workspaceActivity(w.id, r.status, r.reason, r.occurredAt)
           } else {

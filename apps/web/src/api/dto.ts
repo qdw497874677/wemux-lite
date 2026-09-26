@@ -25,7 +25,7 @@ export interface EnrollmentTokenDTO { token: string; expiresAt: string }
 export interface ProjectDTO { id: string; teamId: string; ownerId: string; name: string; shareScope: 'owner-only' | 'selected-members' | 'team'; accessRole: 'owner' | 'viewer' | 'contributor' | 'manager' }
 export interface WorkspacePlacementDTO {
   workerId: string
-  status: 'pending' | 'provisioning' | 'ready' | 'failed' | 'deleting' | 'deleted'
+  status: 'ready' | 'stopped' | 'deleted' | 'failed' | 'unhealthy'
   failureReason: string | null
   location: { rootPath: string } | null
 }

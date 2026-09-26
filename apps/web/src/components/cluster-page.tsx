@@ -38,7 +38,7 @@ const commandTone = (status: CommandStatus) =>
         : 'warning'
 
 const workspaceTone: Record<WorkspaceDTO['status'], 'success' | 'warning' | 'danger' | 'outline' | 'default'> = {
-  ready: 'success', provisioning: 'warning', pending: 'default', failed: 'danger', deleting: 'warning', deleted: 'outline',
+  ready: 'success', stopped: 'outline', deleted: 'outline', failed: 'danger', unhealthy: 'warning',
 }
 
 const runtimeTone = (state: SessionDTO['runtimeState']) =>
@@ -91,7 +91,7 @@ export function ClusterPage({ api, connected, canEnrollWorkers, onAddWorker, onR
   }, [sessions])
   const workspaceCountByWorker = useMemo(() => {
     const counts = new Map<string, number>()
-    for (const workspace of workspaces) counts.set(workspace.workerId, (counts.get(workspace.workerId) ?? 0) + 1)
+    for (const workspace of workspaces) for (const placement of workspace.placements) counts.set(placement.workerId, (counts.get(placement.workerId) ?? 0) + 1)
     return counts
   }, [workspaces])
 
@@ -99,8 +99,8 @@ export function ClusterPage({ api, connected, canEnrollWorkers, onAddWorker, onR
     workersOnline: workers.filter(worker => worker.connectionState === 'online').length,
     workersTotal: workers.length,
     workspacesReady: workspaces.filter(workspace => workspace.status === 'ready').length,
-    workspacesTransitioning: workspaces.filter(workspace => workspace.status === 'pending' || workspace.status === 'provisioning').length,
-    workspacesFailed: workspaces.filter(workspace => workspace.status === 'failed').length,
+    workspacesStopped: workspaces.filter(workspace => workspace.status === 'stopped').length,
+    workspacesFailed: workspaces.filter(workspace => workspace.status === 'failed' || workspace.status === 'unhealthy').length,
     sessionsRunning: sessions.filter(session => session.runtimeState === 'running').length,
     sessionsTotal: sessions.length,
     commandsPending: commands.filter(command => command.status === 'pending').length,
@@ -133,7 +133,7 @@ export function ClusterPage({ api, connected, canEnrollWorkers, onAddWorker, onR
 
       <section className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
         <Stat label="工作节点在线" value={`${stats.workersOnline} / ${stats.workersTotal}`} tone={stats.workersTotal === 0 ? 'warning' : stats.workersOnline === stats.workersTotal ? 'success' : 'warning'} hint="心跳 2 分钟内视为在线" />
-        <Stat label="工作区" value={`${stats.workspacesReady} 就绪`} tone={stats.workspacesFailed > 0 ? 'danger' : stats.workspacesTransitioning > 0 ? 'warning' : 'success'} hint={`${stats.workspacesTransitioning} 供给中 · ${stats.workspacesFailed} 失败`} />
+        <Stat label="工作区" value={`${stats.workspacesReady} 运行中`} tone={stats.workspacesFailed > 0 ? 'danger' : stats.workspacesStopped > 0 ? 'warning' : 'success'} hint={`${stats.workspacesStopped} 已停止 · ${stats.workspacesFailed} 异常`} />
         <Stat label="会话运行" value={`${stats.sessionsRunning} / ${stats.sessionsTotal}`} tone={stats.sessionsRunning > 0 ? 'success' : undefined} hint="运行中 / 全部会话" />
         <Stat label="待交付命令" value={String(stats.commandsPending)} tone={stats.commandsFailed > 0 ? 'danger' : stats.commandsPending > 0 ? 'warning' : 'success'} hint={`${stats.commandsFailed} 失败/拒绝`} />
       </section>
@@ -176,7 +176,7 @@ export function ClusterPage({ api, connected, canEnrollWorkers, onAddWorker, onR
       <Tabs defaultValue={canEnrollWorkers ? 'commands' : 'workspaces'} variant="plain" className="space-y-3">
         <TabsList className="w-full justify-start overflow-x-auto">
           {canEnrollWorkers && <TabsTrigger value="commands">命令交付（{commands.length}）</TabsTrigger>}
-          <TabsTrigger value="workspaces">工作区初始化（{workspaces.length}）</TabsTrigger>
+          <TabsTrigger value="workspaces">工作区落点（{workspaces.reduce((sum, workspace) => sum + workspace.placements.length, 0)}）</TabsTrigger>
           <TabsTrigger value="sessions">会话运行（{sessions.length}）</TabsTrigger>
         </TabsList>
 
@@ -199,17 +199,17 @@ export function ClusterPage({ api, connected, canEnrollWorkers, onAddWorker, onR
         <TabsContent value="workspaces" className="rounded-xl border border-border bg-card">
           <StageTable
             headers={['工作区', '项目', '工作节点', '状态', '失败原因', '操作']}
-            empty="暂无工作区。在工作台创建后，会依次进入等待处理、正在初始化和已就绪状态。"
-            rows={workspaces.map(workspace => [
+            empty="暂无工作区落点。在工作台创建工作区并选择工作节点后会建立 Placement。"
+            rows={workspaces.flatMap(workspace => workspace.placements.map(placement => [
               <strong key="name" className="text-xs">{workspace.name}</strong>,
               <span key="project">{projectName.get(workspace.projectId) ?? shortId(workspace.projectId)}</span>,
-              <span key="worker">{workerName.get(workspace.workerId) ?? shortId(workspace.workerId)}</span>,
-              <Badge key="status" variant={workspaceTone[workspace.status]}>{workspaceStateLabel[workspace.status]}</Badge>,
-              workspace.failureReason ? <span key="reason" className="max-w-48 truncate text-red-300" title={workspace.failureReason}>{workspace.failureReason}</span> : <span key="reason" className="text-muted-foreground">—</span>,
-              workspace.status === 'pending' || workspace.status === 'failed'
-                ? <Button key="retry" variant="ghost" size="sm" className="h-7 text-[11px]" disabled={busy === `retry:${workspace.id}`} onClick={() => void act(`retry:${workspace.id}`, () => api.reprovisionWorkspace(workspace.id))}><UploadCloud className="size-3.5" />重新下发</Button>
+              <span key="worker">{workerName.get(placement.workerId) ?? shortId(placement.workerId)}</span>,
+              <Badge key="status" variant={workspaceTone[placement.status]}>{workspaceStateLabel[placement.status]}</Badge>,
+              placement.failureReason ? <span key="reason" className="max-w-48 truncate text-red-300" title={placement.failureReason}>{placement.failureReason}</span> : <span key="reason" className="text-muted-foreground">—</span>,
+              placement.status === 'stopped' || placement.status === 'failed'
+                ? <Button key="retry" variant="ghost" size="sm" className="h-7 text-[11px]" disabled={busy === `retry:${workspace.id}:${placement.workerId}`} onClick={() => void act(`retry:${workspace.id}:${placement.workerId}`, () => api.reprovisionWorkspace(workspace.id, placement.workerId))}><UploadCloud className="size-3.5" />重新下发</Button>
                 : <span key="none" className="text-muted-foreground">—</span>,
-            ])}
+            ]))}
           />
         </TabsContent>
 

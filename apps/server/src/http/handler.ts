@@ -28,6 +28,9 @@ import type { WorkerAccessService } from '../application/worker-access-service.j
 import type { SessionAccessService } from '../application/session-access-service.js'
 import type { PersonalAccessTokenService } from '../application/personal-access-token-service.js'
 import type { AccountLifecycleService } from '../application/account-lifecycle-service.js'
+import type { CanvasCollaborationService } from '../application/canvas-collaboration-service.js'
+import type { CanvasLayoutService } from '../application/canvas-layout-service.js'
+import type { CanvasCollaborationStreams } from './canvas-collaboration-sse.js'
 import { sendTeamInvitationMail } from '../application/team-invitation-mail.js'
 import type { MailSettings } from '../application/mail/email-delivery.js'
 import { readCookie } from './cookies.js'
@@ -64,7 +67,7 @@ function requiredPatAccess(path: string, method: string | undefined): import('..
   return 'write'
 }
 
-export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, _adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams, identity?: IdentityService | null, registration?: EmailRegistrationService | null, settings?: InstanceSettingsService | null, google?: GoogleAuthenticationService | null, lineage?: SessionLineageService | null, security?: AccountSecurityService | null, teams?: TeamService | null, mail?: MailSettings | null, projects?: ProjectAccessService | null, workerAccess?: WorkerAccessService | null, sessionAccess?: SessionAccessService | null, personalAccessTokens?: PersonalAccessTokenService | null, lifecycle?: AccountLifecycleService | null) {
+export function httpHandler(service: ServerService, auth: AuthenticationService, streams: SessionStreams, capabilities?: CapabilityService, downloads?: WorkerDownloads, control?: WorkerControl, staticSite?: StaticSite, _adminSessionTtlMs = 7 * 24 * 60 * 60 * 1000, tasks?: TaskService, projectStreams?: ProjectStreams, identity?: IdentityService | null, registration?: EmailRegistrationService | null, settings?: InstanceSettingsService | null, google?: GoogleAuthenticationService | null, lineage?: SessionLineageService | null, security?: AccountSecurityService | null, teams?: TeamService | null, mail?: MailSettings | null, projects?: ProjectAccessService | null, workerAccess?: WorkerAccessService | null, sessionAccess?: SessionAccessService | null, personalAccessTokens?: PersonalAccessTokenService | null, lifecycle?: AccountLifecycleService | null, canvasCollaboration?: CanvasCollaborationService | null, canvasCollaborationStreams?: CanvasCollaborationStreams | null, canvasLayouts?: CanvasLayoutService | null) {
   return (request: IncomingMessage, response: ServerResponse): void => {
     void (async () => {
       const url = new URL(request.url ?? '/', 'http://localhost'), rawPath = url.pathname === '/' ? '/' : url.pathname.replace(/\/$/, '')
@@ -159,6 +162,32 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
         }
         if (method === 'DELETE' && teamResource[2] === 'invitations' && childId) { json(response, 200, await teams.revoke(actor, teamId, childId)); return }
       }
+      const canvasLayoutRoute = path.match(/^\/projects\/([^/]+)\/canvas-layout$/)
+      if (canvasLayouts && canvasLayoutRoute) {
+        const projectId = canvasLayoutRoute[1] as ProjectId
+        if (method === 'GET') { json(response, 200, await canvasLayouts.get(await auth.taskActor(credential, 'read'), projectId, url.searchParams.get('scope'))); return }
+        if (method === 'PUT') {
+          const input = await body(request) as Record<string, unknown>
+          const scope = input?.scope === 'project' ? 'admin' : 'write'
+          json(response, 200, await canvasLayouts.save(await auth.taskActor(credential, scope), projectId, input)); return
+        }
+      }
+      const canvasCollaborationEvents = path.match(/^\/projects\/([^/]+)\/canvas\/collaboration\/events$/)
+      if (canvasCollaborationStreams && canvasCollaborationEvents && method === 'GET') {
+        const lastEventId = request.headers['last-event-id']
+        if (lastEventId !== undefined && (typeof lastEventId !== 'string' || !/^\d+$/.test(lastEventId))) throw new AppError(400, 'Invalid Last-Event-ID')
+        const after = Number(lastEventId ?? url.searchParams.get('after') ?? 0)
+        await canvasCollaborationStreams.open(response, await auth.taskActor(credential), canvasCollaborationEvents[1] as ProjectId, after); return
+      }
+      const canvasCollaborationRoute = path.match(/^\/projects\/([^/]+)\/canvas\/collaboration(?:\/(presence))?$/)
+      if (canvasCollaboration && canvasCollaborationRoute) {
+        const actor = await auth.taskActor(credential), projectId = canvasCollaborationRoute[1] as ProjectId, resource = canvasCollaborationRoute[2]
+        if (!resource && method === 'GET') { json(response, 200, await canvasCollaboration.snapshot(actor, projectId)); return }
+        if (resource === 'presence' && method === 'PUT') {
+          const input = await body(request) as Record<string, unknown>
+          json(response, 200, await canvasCollaboration.updatePresence(actor, projectId, { displayName: String(input.displayName ?? '协作者'), activeSessionId: typeof input.activeSessionId === 'string' ? input.activeSessionId : null, typing: input.typing === true })); return
+        }
+      }
       const projectEvents = path.match(/^\/projects\/([^/]+)\/events$/)
       if (tasks && projectStreams && projectEvents && method === 'GET') {
         const actor = await auth.taskActor(credential)
@@ -245,14 +274,14 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
         if (!id) {
           const authorized = await projects.list(actor, url.searchParams.get('teamId') ?? undefined)
           const allowed = new Set(authorized.map(project => project.id))
-          if (kind === 'workspaces') { const items = (await service.listWorkspaces()).filter(item => allowed.has(item.projectId)); json(response, 200, { items: url.searchParams.get('projectId') ? items.filter(item => item.projectId === url.searchParams.get('projectId')) : items }); return }
+          if (kind === 'workspaces') { const items = (await service.listWorkspaceViews()).filter(item => allowed.has(item.projectId)); json(response, 200, { items: url.searchParams.get('projectId') ? items.filter(item => item.projectId === url.searchParams.get('projectId')) : items }); return }
           if (!sessionAccess) throw new AppError(503, 'Session access is disabled')
           const archived = url.searchParams.get('archived')
           if (archived !== null && archived !== 'true' && archived !== 'false') throw new AppError(400, 'archived must be true or false')
           const items = (await sessionAccess.list(actor)).filter(item => allowed.has(item.projectId) && (archived === null || Boolean(item.archivedAt) === (archived === 'true')))
           json(response, 200, { items: await Promise.all(items.map(item => service.sessionView(item.id, actor))) }); return
         }
-        if (kind === 'workspaces') { const workspace = await service.getWorkspace(id as WorkspaceId); await projects.require(actor, workspace.projectId); json(response, 200, workspace); return }
+        if (kind === 'workspaces') { const workspace = await service.getWorkspace(id as WorkspaceId); await projects.require(actor, workspace.projectId); json(response, 200, await service.workspaceView(id as WorkspaceId)); return }
         if (!sessionAccess) throw new AppError(503, 'Session access is disabled')
         await sessionAccess.require(actor, id as SessionId)
         json(response, 200, await service.sessionView(id as SessionId, actor)); return
@@ -383,7 +412,7 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
           if (kind === 'projects') {
             json(response, 200, { items: await service.listProjects() })
           } else if (kind === 'workspaces') {
-            const items = await service.listWorkspaces()
+            const items = await service.listWorkspaceViews()
             json(response, 200, { items: projectId ? items.filter(item => item.projectId === projectId) : items })
           } else {
             const archived = url.searchParams.get('archived')
@@ -403,7 +432,7 @@ export function httpHandler(service: ServerService, auth: AuthenticationService,
           const input = await body(request)
           json(response, 201, kind === 'projects' ? await service.createProject(input, operator) : kind === 'workspaces' ? await service.createWorkspace(input, operator) : await service.createSession(input, operator)); return
         }
-        if (id && method === 'GET') { json(response, 200, kind === 'projects' ? await service.getProject(id as ProjectId) : kind === 'workspaces' ? await service.getWorkspace(id as WorkspaceId) : await service.sessionView(id as SessionId)); return }
+        if (id && method === 'GET') { json(response, 200, kind === 'projects' ? await service.getProject(id as ProjectId) : kind === 'workspaces' ? await service.workspaceView(id as WorkspaceId) : await service.sessionView(id as SessionId)); return }
         if (id && method === 'PATCH') { json(response, 200, await service.update(kind, id, await body(request))); return }
         if (id && method === 'DELETE') { await service.delete(kind, id); response.writeHead(204); response.end(); return }
       }
