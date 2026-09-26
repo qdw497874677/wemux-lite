@@ -50,7 +50,7 @@ export function SessionSurface({ api, session, presentation, projectPath, worker
     </ConversationContent><ConversationScrollButton className="nodrag nopan" /></Conversation>
     {history.stream !== 'live' && <p className="session-surface-signal">实时更新正在重连，历史仍会继续补传。</p>}
     {interactive && <div className="session-surface-composer nodrag nopan nowheel"><Composer api={api} controller={controller} session={currentSession} activeTurnId={history.activeTurnId} canSend={canSend} blockedReason={blockedReason} confirmedIds={confirmedIds} /></div>}
-    {controls && <ClusterControls api={api} session={currentSession} activeTurnId={history.activeTurnId} queuedItems={history.queuedItems} pendingApprovals={history.pendingApprovals} enabled={canSend} />}
+    {controls && <ClusterControls api={api} session={currentSession} queuedItems={history.queuedItems} pendingApprovals={history.pendingApprovals} enabled={canSend} />}
     {controls && <footer className="session-surface-footer">{projectPath}</footer>}
   </section>
 }

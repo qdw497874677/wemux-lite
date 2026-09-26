@@ -15,6 +15,7 @@ import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput, type ToolState } 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../../components/ui/tooltip.tsx'
 import { cn, copyText, selectElementText } from '../../lib/utils.ts'
 import { randomId } from '../../lib/random.ts'
+import { useCompactAction } from './cluster-controls.tsx'
 import { SubmissionController } from './submission.ts'
 
 const formatUsageNumber = (value: number | undefined) => value === undefined ? null : new Intl.NumberFormat('zh-CN').format(value)
@@ -95,14 +96,16 @@ export function Composer({ api, controller, session, activeTurnId = null, canSen
   const submitRef = useRef<(message: PromptInputMessage) => void>(() => undefined)
   const sendWithAttachmentsRef = useRef(false)
   const [notice, setNotice] = useState<ComposerNotice>(null)
-  const [commandPending, setCommandPending] = useState<'compact' | 'stop' | null>(null)
+  const [commandPending, setCommandPending] = useState<'stop' | null>(null)
+  const compactAction = useCompactAction(api, session.id)
   useEffect(() => { controller.confirm(confirmedIds) }, [controller, confirmedIds.join(',')])
   canSend = canSend && session.access?.canWrite !== false && session.sendCapability?.allowed === true
   blockedReason = session.access?.canWrite === false ? '当前账号只有查看权限' : session.sendCapability?.allowed === false ? session.sendCapability.reason : !session.sendCapability ? '暂时无法确认发送权限' : blockedReason
   const running = session.runtimeState === 'running' || Boolean(activeTurnId)
   const canControl = session.access?.canControl ?? session.canManage
   const retry = state.attempt?.content === state.draft.trim()
-  const hint = state.pending ? '正在发送…' : state.receipt ? '消息已送达，等待 Agent 回复' : canSend ? running ? 'Agent 正在运行，新消息将进入队列' : 'Enter 发送，Shift+Enter 换行' : `${blockedReason}，草稿仍会保留`
+  const defaultHint = state.pending ? '正在发送…' : state.receipt ? '消息已送达，等待 Agent 回复' : canSend ? running ? 'Agent 正在运行，新消息将进入队列' : 'Enter 发送，Shift+Enter 换行' : `${blockedReason}，草稿仍会保留`
+  const hint = compactAction.action?.status === 'pending' ? '正在压缩上下文…' : compactAction.action?.status === 'error' ? '压缩失败，输入 /compact 重试' : defaultHint
   const commandQuery = state.draft.startsWith('/') ? state.draft.trim().toLowerCase() : ''
   const visibleCommands = commandQuery ? slashCommands.filter(command => command.name.startsWith(commandQuery)) : []
   const stop = async () => {
@@ -123,13 +126,8 @@ export function Composer({ api, controller, session, activeTurnId = null, canSen
       setNotice({ tone: 'error', text: running ? '请先停止当前回合，再压缩上下文。' : '当前无法压缩上下文，请检查连接或权限。' })
       return
     }
-    setCommandPending('compact'); setNotice({ tone: 'info', text: '正在提交上下文压缩请求…' })
-    try {
-      const commandId = randomId()
-      await api.invokeRuntimeCommand(session.id, { commandId, operationId: randomId(), name: 'compact' })
-      setNotice({ tone: 'info', text: '压缩请求已提交，等待 Worker 执行。' })
-    } catch (error) { setNotice({ tone: 'error', text: error instanceof Error ? error.message : '压缩请求失败，请重试。' }) }
-    finally { setCommandPending(null) }
+    setNotice(null)
+    await compactAction.compact()
   }
   const executeCommand = (name: typeof slashCommands[number]['name']) => {
     controller.edit('')
@@ -142,7 +140,7 @@ export function Composer({ api, controller, session, activeTurnId = null, canSen
   </PromptInput></div></div>
 }
 
-function ComposerContents({ session, controller, state, canSend, blockedReason, running, canControl, retry, hint, notice, setNotice, commandPending, stop, visibleCommands, executeCommand, submitRef, sendWithAttachmentsRef }: { session: SessionDTO; controller: SubmissionController; state: ReturnType<SubmissionController['snapshot']>; canSend: boolean; blockedReason: string; running: boolean; canControl: boolean; retry: boolean; hint: string; notice: ComposerNotice; setNotice: (notice: ComposerNotice) => void; commandPending: 'compact' | 'stop' | null; stop: () => Promise<void>; visibleCommands: readonly typeof slashCommands[number][]; executeCommand: (name: typeof slashCommands[number]['name']) => void; submitRef: MutableRefObject<(message: PromptInputMessage) => void>; sendWithAttachmentsRef: MutableRefObject<boolean> }) {
+function ComposerContents({ session, controller, state, canSend, blockedReason, running, canControl, retry, hint, notice, setNotice, commandPending, stop, visibleCommands, executeCommand, submitRef, sendWithAttachmentsRef }: { session: SessionDTO; controller: SubmissionController; state: ReturnType<SubmissionController['snapshot']>; canSend: boolean; blockedReason: string; running: boolean; canControl: boolean; retry: boolean; hint: string; notice: ComposerNotice; setNotice: (notice: ComposerNotice) => void; commandPending: 'stop' | null; stop: () => Promise<void>; visibleCommands: readonly typeof slashCommands[number][]; executeCommand: (name: typeof slashCommands[number]['name']) => void; submitRef: MutableRefObject<(message: PromptInputMessage) => void>; sendWithAttachmentsRef: MutableRefObject<boolean> }) {
   const attachments = usePromptInputAttachments()
   const submit = async (message: PromptInputMessage) => {
     if (!canSend || state.pending || state.draft.startsWith('/')) return
