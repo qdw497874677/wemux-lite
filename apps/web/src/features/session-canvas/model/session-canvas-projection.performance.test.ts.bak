@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { performance } from 'node:perf_hooks'
+import type { SessionGraphSnapshot } from '@wemux/web-contract/session-graph'
+import { projectSessionGraph } from './session-canvas-projection.ts'
+
+test('projects a 150-node lineage within the 50ms pure-projection budget', () => {
+  const nodes = Array.from({ length: 150 }, (_, index) => ({ sessionId: `session-${index}`, visibility: 'visible' as const, summary: { title: `Session ${index}`, projectId: 'project-1', workspaceId: 'workspace-1', workerId: 'worker-1', agentKey: 'pi', modelId: 'gpt', runtimeState: 'ready' as const, lastActivityAt: null, branchCount: index < 149 ? 1 : 0 } }))
+  const edges = Array.from({ length: 149 }, (_, index) => ({ key: `fork:${index}`, relation: { type: 'fork' as const, forkId: `fork-${index}` }, sourceSessionId: `session-${index}`, targetSessionId: `session-${index + 1}` }))
+  const graph = { revision: 'g-large', nodes, edges, hiddenRelationCount: null } satisfies SessionGraphSnapshot
+  const startedAt = performance.now()
+  const projection = projectSessionGraph(graph, 'session-75')
+  const elapsedMs = performance.now() - startedAt
+  assert.equal(projection.nodes.length, 150)
+  assert.equal(projection.edges.length, 149)
+  assert.ok(elapsedMs < 50, `projection took ${elapsedMs.toFixed(2)}ms`)
+})

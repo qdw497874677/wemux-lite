@@ -149,7 +149,6 @@ const mapNodes = (api: Api, projectId: string, projection: SessionCanvasProjecti
   position: node.position,
   draggable: node.sessionId !== interactiveSessionId,
   selected: node.sessionId === interactiveSessionId ? true : undefined,
-  draggable: true,
   deletable: false,
   data: node.visibility === 'visible'
     ? { kind: 'visible', summary: node.summary!, selected: node.selected || node.sessionId === interactiveSessionId, interactive: node.sessionId === interactiveSessionId, api, projectId, onSelect, onOpen, onActivate, onSetMode }

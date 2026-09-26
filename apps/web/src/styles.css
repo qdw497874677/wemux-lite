@@ -1,9 +1,12 @@
 @import "tailwindcss";
+@source "../node_modules/streamdown/dist/*.js";
 
 /* Session Canvas: a dense, readable lineage surface. Graph facts remain Server-authoritative;
    this layer only gives the stable projection a responsive visual hierarchy. */
 .session-canvas { min-height: 0; overflow: hidden; border: 1px solid color-mix(in srgb, var(--border) 88%, transparent); border-radius: 1rem; background: color-mix(in srgb, var(--card) 82%, transparent); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.035); }
 .session-canvas-header { display: flex; min-height: 4.5rem; align-items: center; justify-content: space-between; gap: 1rem; border-bottom: 1px solid var(--border); padding: 1rem 1.25rem; }
+.session-canvas-presence { display: flex; max-width: 55%; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .45rem; font-size: .7rem; color: var(--muted-foreground); }
+.session-canvas-presence-member { max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border)); border-radius: 999px; background: color-mix(in srgb, var(--primary) 10%, var(--card)); padding: .25rem .55rem; color: var(--foreground); }
 .session-canvas-scroll { min-height: 28rem; overflow: auto; background-image: radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--foreground) 9%, transparent) 1px, transparent 0); background-size: 24px 24px; }
 .session-canvas-grid { display: grid; min-width: max(100%, calc(var(--canvas-columns) * 18rem)); grid-template-columns: repeat(var(--canvas-columns), minmax(16rem, 1fr)); gap: 2.5rem; padding: 1.5rem; }
 .session-canvas-column { position: relative; display: flex; min-width: 0; flex-direction: column; gap: 1rem; }
@@ -37,9 +40,9 @@ button.session-canvas-node:active { transform: translateY(0) scale(.99); }
 .session-surface-header { display: flex; align-items: flex-start; justify-content: space-between; gap: .75rem; border-bottom: 1px solid var(--border); padding: .9rem 1rem; }
 .session-surface-header h2 { margin: .1rem 0 .2rem; font-size: .95rem; font-weight: 650; }
 .session-surface-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .5rem; }
-.session-surface-timeline { display: flex; min-height: 14rem; max-height: 20rem; flex-direction: column; gap: .75rem; overflow-y: auto; padding: 1rem; }
+.session-surface-timeline { position: relative; min-height: 14rem; max-height: 20rem; }
 .session-surface-timeline .ml-12 { margin-left: 0; }
-.session-surface-timeline article > div { max-width: 92%; }
+.session-surface-timeline [data-message-id] > div { max-width: 92%; }
 .session-surface-composer { border-top: 1px solid var(--border); background: color-mix(in srgb, var(--card) 98%, transparent); }
 .session-surface-composer .conversation-composer { padding: .75rem; }
 .session-surface-jump { align-self: center; border-radius: 999px; border: 1px solid var(--border); background: var(--background); padding: .35rem .7rem; font-size: .7rem; color: var(--foreground); box-shadow: 0 8px 20px rgb(0 0 0 / .18); }

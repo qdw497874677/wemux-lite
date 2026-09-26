@@ -1,3 +1,4 @@
+import type { UIMessage } from 'ai'
 import type { JournalEventDTO, RuntimeState, RuntimeUsageDTO } from './dto'
 
 export interface ChatMessage {
@@ -42,6 +43,11 @@ export interface QueuedItem { commandId: string; messageId: string; content: str
 export interface PendingApproval { approvalId: string; turnId: string; action: unknown; reason?: string }
 
 export type ChatTimelineItem = TimelineMessage | TimelineTool | TimelineNotice | TimelineUsage
+
+/** AI Elements consumes the AI SDK UIMessage shape, while Wemux keeps its own durable AgentEvent journal. */
+export function timelineMessageToUIMessage(message: TimelineMessage): UIMessage {
+  return { id: message.id, role: message.role, parts: [{ type: 'text', text: message.text }] }
+}
 
 // Rebuild from the ordered, durable journal. The timeline keeps assistant text
 // segments on either side of tool calls instead of flattening the whole turn.
