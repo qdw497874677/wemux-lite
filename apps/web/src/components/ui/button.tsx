@@ -1,129 +1,63 @@
-import type { ButtonHTMLAttributes } from 'react'
+/* Derived from pingdotgg/t3code (MIT). */
+import { mergeProps } from '@base-ui/react/merge-props'
+import { useRender } from '@base-ui/react/use-render'
 import { cva, type VariantProps } from 'class-variance-authority'
-import { cn } from '@/lib/utils'
+import type * as React from 'react'
+import { cn } from '../../lib/utils.ts'
 
-/**
- * Button recipe ported from TailGrids (MIT, github.com/TailGrids).
- * Geometry, focus ring and disabled states follow the TailGrids
- * `variant x appearance` matrix; colour comes exclusively from the
- * `--color-button-*` tokens in styles.css, so both themes stay in sync.
- * The variant names keep the Wemux API used across the workbench.
- */
 const buttonVariants = cva(
-  'ring-focus inline-flex items-center justify-center gap-3 whitespace-nowrap rounded-lg font-medium outline-none transition focus:ring-3 disabled:pointer-events-none [&>svg]:shrink-0 [&>svg]:text-current',
+  'inline-flex items-center justify-center gap-3 rounded-lg font-medium transition focus:ring-3 disabled:pointer-events-none [&>svg]:text-current outline-none ring-focus whitespace-nowrap [&>svg]:shrink-0',
   {
     variants: {
       variant: {
-        default: '',
-        secondary: '',
-        outline: '',
-        ghost: '',
-        destructive: '',
-        success: '',
+        default: 'border-button-primary-background bg-button-primary-background text-button-primary-text shadow-xs hover:bg-button-primary-hover-background',
+        secondary: 'border-transparent bg-secondary text-secondary-foreground hover:bg-accent',
+        outline: '[--control-icon-color:var(--contrast-muted-foreground)] border-button-outline-border bg-button-outline-background text-button-outline-text shadow-xs hover:bg-button-outline-hover-background hover:text-button-outline-hover-text',
+        ghost: '[--control-icon-color:var(--contrast-muted-foreground)] border-transparent text-foreground hover:bg-accent',
+        destructive: 'border-button-error-background bg-button-error-background text-button-error-text shadow-xs hover:bg-button-error-hover-background',
+        success: 'border-button-success-background bg-button-success-background text-button-success-text shadow-xs hover:bg-button-success-hover-background',
+        glass: 'surface-glass [--control-icon-color:var(--contrast-muted-foreground)] rounded-full border-border/60 text-foreground shadow-sm',
+        link: 'border-transparent text-foreground underline-offset-4 hover:underline',
+        'warning-outline': 'border-warning-border bg-warning-surface text-warning-foreground hover:bg-warning/20',
       },
-      appearance: {
-        fill: '',
-        outline: '',
-      },
-      // 按钮高度由 padding 驱动（TailGrids 的做法）。图标按钮不能“先上 padding 再清零”：
-      // Tailwind 里 `p-0` 与 `px-3.5` 的优先级由生成顺序决定，清零不可靠。
-      // 因此图标形态直接走独立的 size 键（`icon*`），class 里根本没有 padding。
+      appearance: { fill: '', outline: '' },
       size: {
-        // TailGrids drives button height with padding (`py-2.5` plus a per-step
-        // horizontal padding) and keeps only the icon steps square. Fixed `h-*`
-        // utilities would overrule that padding, which made our outlined buttons
-        // two pixels shorter than the reference and left filled ones with 0px
-        // vertical padding.
-        xs: 'px-3.5 py-2.5 text-xs [&>svg]:size-5',
-        sm: 'px-3.5 py-2.5 text-sm [&>svg]:size-5',
-        default: 'px-4 py-2.5 [&>svg]:size-6',
-        lg: 'px-5 py-2.5 [&>svg]:size-6',
-        icon: 'size-11 [&>svg]:size-6',
-        'icon-xs': 'size-8 text-xs [&>svg]:size-5',
-        'icon-sm': 'size-10 text-sm [&>svg]:size-5',
-        'icon-lg': 'size-11 text-lg [&>svg]:size-6',
+        xs: 'h-7 gap-1 px-2 text-xs',
+        sm: 'h-8 gap-1.5 px-2.5 text-sm sm:h-7',
+        default: 'h-9 px-3 text-sm sm:h-8',
+        lg: 'h-10 px-3.5 sm:h-9',
+        icon: 'size-9 p-0 sm:size-8',
+        'icon-xs': 'size-7 p-0 sm:size-6',
+        'icon-sm': 'size-8 p-0 sm:size-7',
+        'icon-lg': 'size-10 p-0 sm:size-9',
       },
     },
     compoundVariants: [
-      // Disabled surfaces for the filled and outlined matrices.
-      // Buttons with explicit disabled tokens must not be dimmed a second time by
-      // the global `:disabled` opacity, or the token colours wash out.
-      {
-        variant: ['default', 'destructive', 'success'],
-        appearance: 'fill',
-        className: 'disabled:bg-button-disabled-background disabled:text-button-disabled-text disabled:opacity-100',
-      },
-      {
-        variant: ['default', 'destructive', 'success'],
-        appearance: 'outline',
-        className: 'border disabled:border-button-outline-disabled-border disabled:bg-button-outline-disabled-background disabled:text-button-outline-disabled-text disabled:opacity-100',
-      },
-      {
-        variant: 'default',
-        appearance: 'fill',
-        className: 'bg-button-primary-background text-button-primary-text hover:bg-button-primary-hover-background focus:ring-button-primary-focus-ring',
-      },
-      {
-        variant: 'default',
-        appearance: 'outline',
-        className: 'border-button-outline-border bg-button-outline-background text-button-outline-text hover:bg-button-outline-hover-background hover:text-button-outline-hover-text focus:ring-button-outline-focus-ring',
-      },
-      {
-        variant: 'secondary',
-        className: 'bg-secondary text-secondary-foreground hover:bg-accent focus:ring-button-outline-focus-ring',
-      },
-      {
-        variant: 'outline',
-        className: 'border border-button-outline-border bg-button-outline-background text-button-outline-text hover:bg-button-outline-hover-background hover:text-button-outline-hover-text focus:ring-button-outline-focus-ring disabled:border-button-outline-disabled-border disabled:bg-button-outline-disabled-background disabled:text-button-outline-disabled-text disabled:opacity-100',
-      },
-      {
-        variant: 'ghost',
-        className: 'text-button-ghost-text hover:bg-button-ghost-hover-background hover:text-button-ghost-hover-text focus:ring-2 focus:ring-primary-400',
-      },
-      {
-        variant: 'destructive',
-        appearance: 'fill',
-        className: 'bg-button-error-background text-button-error-text hover:bg-button-error-hover-background focus:ring-button-error-focus-ring',
-      },
-      {
-        variant: 'destructive',
-        appearance: 'outline',
-        className: 'border-button-error-outline-border bg-button-error-outline-background text-button-error-outline-text hover:bg-button-error-outline-hover-background hover:text-button-error-outline-hover-text focus:ring-button-error-outline-focus-ring',
-      },
-      {
-        variant: 'success',
-        appearance: 'fill',
-        className: 'bg-button-success-background text-button-success-text hover:bg-button-success-hover-background focus:ring-button-success-focus-ring',
-      },
-      {
-        variant: 'success',
-        appearance: 'outline',
-        className: 'border-button-success-outline-border bg-button-success-outline-background text-button-success-outline-text hover:bg-button-success-outline-hover-background hover:text-button-success-outline-hover-text focus:ring-button-success-outline-focus-ring',
-      },
-      // Icon buttons keep TailGrids' square geometry per size step.
-      { size: 'xs', className: '[&>svg]:size-5' },
+      { variant: 'default', appearance: 'outline', className: 'border-button-outline-border bg-button-outline-background text-button-outline-text hover:bg-button-outline-hover-background hover:text-button-outline-hover-text' },
+      { variant: 'destructive', appearance: 'outline', className: 'border-button-error-outline-border bg-button-error-outline-background text-button-error-outline-text hover:bg-button-error-outline-hover-background hover:text-button-error-outline-hover-text' },
+      { variant: 'success', appearance: 'outline', className: 'border-button-success-outline-border bg-button-success-outline-background text-button-success-outline-text hover:bg-button-success-outline-hover-background hover:text-button-success-outline-hover-text' },
     ],
     defaultVariants: { variant: 'default', appearance: 'fill', size: 'default' },
   },
 )
 
-export type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & VariantProps<typeof buttonVariants> & {
-  /** 图标按钮：忽略 padding，改用 TailGrids 对应尺寸的方形边长（size-8 / size-10 / size-11）。 */
+export type ButtonProps = useRender.ComponentProps<'button'> & VariantProps<typeof buttonVariants> & {
   iconOnly?: boolean
 }
 
-const iconSizeBySize: Record<NonNullable<ButtonProps['size']>, 'icon-xs' | 'icon-sm' | 'icon' | 'icon-lg'> = {
-  xs: 'icon-xs',
-  sm: 'icon-sm',
-  default: 'icon',
-  lg: 'icon-lg',
-  icon: 'icon',
-  'icon-xs': 'icon-xs',
-  'icon-sm': 'icon-sm',
-  'icon-lg': 'icon-lg',
+const iconSizeBySize = {
+  xs: 'icon-xs', sm: 'icon-sm', default: 'icon', lg: 'icon-lg',
+  icon: 'icon', 'icon-xs': 'icon-xs', 'icon-sm': 'icon-sm', 'icon-lg': 'icon-lg',
+} as const
+
+export function Button({ className, variant, appearance, size, iconOnly, render, ...props }: ButtonProps) {
+  const resolvedSize = iconOnly ? iconSizeBySize[size ?? 'default'] : size
+  const defaultProps = {
+    className: cn(buttonVariants({ variant, appearance, size: resolvedSize }), className),
+    'data-slot': 'button',
+    type: render ? undefined : ('button' as React.ButtonHTMLAttributes<HTMLButtonElement>['type']),
+  }
+  return useRender({ defaultTagName: 'button', props: mergeProps<'button'>(defaultProps, props), render })
 }
 
-export function Button({ className, variant, appearance, size, iconOnly, type = 'button', ...props }: ButtonProps) {
-  const resolvedSize = iconOnly ? iconSizeBySize[size ?? 'default'] : size
-  return <button type={type} className={cn(buttonVariants({ variant, appearance, size: resolvedSize }), className)} {...props} />
-}
+export { buttonVariants }

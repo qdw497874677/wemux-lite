@@ -1,88 +1,37 @@
-import type { ReactNode } from 'react'
+/* Derived from pingdotgg/t3code (MIT). */
+import { useRender } from '@base-ui/react/use-render'
 import { cva, type VariantProps } from 'class-variance-authority'
-import { cn } from '@/lib/utils'
+import type { ReactNode } from 'react'
+import { cn } from '../../lib/utils.ts'
 
-/**
- * Badge recipe ported from TailGrids (MIT), incl. the prefix/suffix icon
- * padding matrix. `color` exposes the full TailGrids palette; `variant` keeps
- * the smaller Wemux API and is translated onto it.
- */
-const badgeVariants = cva('inline-flex items-center gap-2 rounded-full font-medium [&>svg]:size-3 [&>svg]:text-current', {
-  variants: {
-    size: {
-      sm: 'py-0.5 text-xs',
-      md: 'py-0.5 text-sm',
-      lg: 'py-1 text-sm',
+const badgeVariants = cva(
+  'inline-flex items-center gap-2 rounded-full font-medium [&>svg]:size-3 [&>svg]:text-current',
+  {
+    variants: {
+      variant: {
+        default: 'border-transparent bg-primary text-primary-foreground',
+        secondary: 'border-transparent bg-secondary text-secondary-foreground',
+        destructive: 'border-transparent bg-error text-white',
+        danger: 'border-transparent bg-error text-white',
+        success: 'border-transparent bg-success text-white',
+        warning: 'border-transparent bg-warning text-black',
+        outline: 'border-border text-foreground',
+      },
     },
-    color: {
-      gray: 'bg-badge-neutral-background text-badge-neutral-text',
-      primary: 'bg-badge-primary-background text-badge-primary-text',
-      error: 'bg-badge-error-background text-badge-error-text',
-      warning: 'bg-badge-warning-background text-badge-warning-text',
-      success: 'bg-badge-success-background text-badge-success-text',
-      cyan: 'bg-badge-cyan-background text-badge-cyan-text',
-      sky: 'bg-badge-sky-background text-badge-sky-text',
-      blue: 'bg-badge-blue-background text-badge-blue-text',
-      violet: 'bg-badge-violet-background text-badge-violet-text',
-      purple: 'bg-badge-purple-background text-badge-purple-text',
-      pink: 'bg-badge-pink-background text-badge-pink-text',
-      rose: 'bg-badge-rose-background text-badge-rose-text',
-      orange: 'bg-badge-orange-background text-badge-orange-text',
-    },
-    prefixIcon: { true: '', false: '' },
-    suffixIcon: { true: '', false: '' },
+    defaultVariants: { variant: 'default' },
   },
-  compoundVariants: [
-    { prefixIcon: false, suffixIcon: false, size: 'sm', className: 'px-2' },
-    { prefixIcon: false, suffixIcon: false, size: 'md', className: 'px-2.5' },
-    { prefixIcon: false, suffixIcon: false, size: 'lg', className: 'px-3' },
-    { prefixIcon: true, suffixIcon: false, size: 'sm', className: 'pr-2 pl-1.5' },
-    { prefixIcon: true, suffixIcon: false, size: 'md', className: 'pr-2.5 pl-2' },
-    { prefixIcon: true, suffixIcon: false, size: 'lg', className: 'pr-3 pl-2.5' },
-    { prefixIcon: false, suffixIcon: true, size: 'sm', className: 'pr-1.5 pl-2' },
-    { prefixIcon: false, suffixIcon: true, size: 'md', className: 'pr-2 pl-2.5' },
-    { prefixIcon: false, suffixIcon: true, size: 'lg', className: 'pr-2.5 pl-3' },
-    { prefixIcon: true, suffixIcon: true, size: 'sm', className: 'px-1.5' },
-    { prefixIcon: true, suffixIcon: true, size: 'md', className: 'px-2' },
-    { prefixIcon: true, suffixIcon: true, size: 'lg', className: 'px-2.5' },
-  ],
-  defaultVariants: { size: 'sm', color: 'primary', prefixIcon: false, suffixIcon: false },
-})
+)
 
-const legacyVariants = {
-  default: 'primary',
-  secondary: 'gray',
-  success: 'success',
-  warning: 'warning',
-  danger: 'error',
-  outline: 'gray',
-} as const
-
-type BadgeColorProps = VariantProps<typeof badgeVariants>
-
-export type BadgeProps = Omit<BadgeColorProps, 'prefixIcon' | 'suffixIcon'> & {
-  variant?: keyof typeof legacyVariants
+export type BadgeProps = useRender.ComponentProps<'span'> & VariantProps<typeof badgeVariants> & {
   prefixIcon?: ReactNode
-  suffixIcon?: ReactNode
-  className?: string
-  children?: ReactNode
 }
 
-export function Badge({ color, variant, size, prefixIcon, suffixIcon, className, children, ...props }: BadgeProps & { title?: string }) {
-  const resolved = color ?? (variant ? legacyVariants[variant] : 'primary')
-  const outlined = variant === 'outline'
-  return (
-    <span
-      className={cn(
-        badgeVariants({ color: resolved, size, prefixIcon: Boolean(prefixIcon), suffixIcon: Boolean(suffixIcon) }),
-        outlined && 'border border-base-200 bg-transparent text-text-100',
-        className,
-      )}
-      {...props}
-    >
-      {prefixIcon}
-      {children}
-      {suffixIcon}
-    </span>
-  )
+export function Badge({ className, variant, prefixIcon, children, render, ...props }: BadgeProps) {
+  return useRender({
+    defaultTagName: 'span',
+    props: { ...props, className: cn(badgeVariants({ variant }), className), children: <>{prefixIcon}{children}</>, 'data-slot': 'badge' },
+    render,
+  })
 }
+
+export { badgeVariants }

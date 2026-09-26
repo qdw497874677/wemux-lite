@@ -1,6 +1,6 @@
 import { isExecutable, capabilityLabel } from '../../lib/capability'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Activity, Bot, Check, ChevronsUpDown, CircleCheck, CircleX, FolderGit2, LayoutDashboard, LoaderCircle, Menu, MessageSquarePlus, MoreHorizontal, Network, Plus, RefreshCw, Search, Send, Server, ServerCog, Settings2, SquareKanban, Wrench, WifiOff } from 'lucide-react'
+import { Bot, Check, ChevronsUpDown, CircleCheck, CircleX, FolderGit2, LoaderCircle, Menu, MoreHorizontal, Network, Plus, RefreshCw, Search, Send, Server, ServerCog, Wrench, WifiOff } from 'lucide-react'
 import type { ProjectDTO, SendMessageDTO, SessionDTO, WorkerDTO, WorkspaceDTO } from '../../api/dto'
 import { useSession } from '../../api/use-session'
 import type { ChatMessage, ChatTimelineItem, TimelineTool } from '../../api/journal'
@@ -15,6 +15,7 @@ import { CreateDialog, type CreateKind } from '../../components/create-dialog'
 import { WorkerEnrollmentDialog } from '../../components/worker-enrollment-dialog'
 import { ClusterPage } from '../../components/cluster-page'
 import { cn } from '../../lib/utils'
+import { projectNavigationItems } from '../../components/navigation-items.ts'
 import { formatChineseTime, formatRelativeTime, runtimeStateLabel, workerStateLabel, workspaceStateLabel } from '../../lib/display'
 
 const runtimeDotClass: Record<SessionDTO['runtimeState'], string> = {
@@ -28,7 +29,7 @@ const runtimeDotClass: Record<SessionDTO['runtimeState'], string> = {
 
 const sectionLabelClass = 'text-[11px] font-medium uppercase tracking-wide text-muted-foreground'
 
-export function Sidebar({ projects, projectId, section, workspaces, sessions, sessionId, query, loading, projectLoading, connected, onProject, onNavigate, onSession, onCreate, onManageSession }: { projects: ProjectDTO[]; projectId: string; section: string; workspaces: WorkspaceDTO[]; sessions: SessionDTO[]; sessionId: string; query: string; loading: boolean; projectLoading: boolean; connected: boolean; onProject: (id: string) => void; onNavigate: (path: string) => void; onSession: (id: string) => void; onCreate: (kind: CreateKind, workspaceId?: string) => void; onManageSession: (id: string, patch: { title?: string; archived?: boolean }) => Promise<void> }) {
+export function Sidebar({ projects, projectId, section, workspaces, sessions, sessionId, query, loading, projectLoading, connected, onProject, onNavigate, onSession, onCreate, onManageSession }: { projects: ProjectDTO[]; projectId: string; section: string; workspaces: WorkspaceDTO[]; sessions: SessionDTO[]; sessionId: string; query: string; loading: boolean; projectLoading: boolean; connected: boolean; onProject: (id: string) => void; onNavigate: (path: string) => void; onSession: (id: string) => void; onCreate: (kind: CreateKind | 'session', workspaceId?: string) => void; onManageSession: (id: string, patch: { title?: string; archived?: boolean }) => Promise<void> }) {
   const project = projects.find(item => item.id === projectId)
   const normalizedQuery = query.trim().toLowerCase()
   const visibleSessions = sessions
@@ -36,13 +37,6 @@ export function Sidebar({ projects, projectId, section, workspaces, sessions, se
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   const currentSection = section === 'tasks' ? 'board' : section
   const workspaceName = (workspaceId: string) => workspaces.find(item => item.id === workspaceId)?.name ?? workspaceId
-  const navigation = [
-    ['sessions', '新对话 / 会话', MessageSquarePlus],
-    ['workspaces', '工作区', FolderGit2],
-    ['board', '任务', SquareKanban],
-    ['activity', '活动', Activity],
-  ] as const
-
   return <aside className="flex h-full min-h-0 flex-col border-r border-border bg-card/40">
     <div className="shrink-0 border-b border-border p-2.5">
       <DropdownMenu>
@@ -65,11 +59,7 @@ export function Sidebar({ projects, projectId, section, workspaces, sessions, se
     {projectId && <nav aria-label="项目页面" className="shrink-0 border-b border-border px-2 py-3">
       <p className={cn(sectionLabelClass, 'mb-1.5 px-2')}>导航</p>
       <div className="space-y-0.5">
-        {navigation.map(([path, label, Icon]) => <a key={path} href={`/projects/${encodeURIComponent(projectId)}/${path}`} aria-current={currentSection === path ? 'page' : undefined} onClick={event => { event.preventDefault(); onNavigate(path) }} className={cn('flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground', currentSection === path && 'bg-accent text-foreground')}><Icon className="size-4 shrink-0" /><span className="truncate">{label}</span></a>)}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild><button type="button" className={cn('flex min-h-9 w-full items-center gap-2.5 rounded-md px-2.5 text-left text-sm text-muted-foreground hover:bg-accent hover:text-foreground', ['overview', 'settings'].includes(currentSection) && 'bg-accent text-foreground')}><MoreHorizontal className="size-4 shrink-0" /><span>更多</span></button></DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-44"><DropdownMenuItem onSelect={() => onNavigate('overview')}><LayoutDashboard />项目概览</DropdownMenuItem><DropdownMenuItem onSelect={() => onNavigate('settings')}><Settings2 />项目设置</DropdownMenuItem></DropdownMenuContent>
-        </DropdownMenu>
+        {projectNavigationItems.map(({ path, label, icon: Icon }) => <a key={path} href={`/projects/${encodeURIComponent(projectId)}/${path}`} aria-current={currentSection === path ? 'page' : undefined} onClick={event => { event.preventDefault(); onNavigate(path) }} className={cn('flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground', currentSection === path && 'bg-accent text-foreground')}><Icon className="size-4 shrink-0" /><span className="truncate">{label}</span></a>)}
       </div>
     </nav>}
 

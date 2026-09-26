@@ -1,6 +1,120 @@
 @import "tailwindcss";
 @source "../node_modules/streamdown/dist/*.js";
 
+/* Design tokens derived from pingdotgg/t3code (MIT). */
+:root {
+  /* Compact geometry shared by controls, navigation and floating surfaces. */
+  --control-radius: 0.5rem;
+  --sidebar-content-inset: 0.5rem;
+  --sidebar-control-gap: 0.5rem;
+  --sidebar-row-content-inset: 0.625rem;
+  --command-shell-inset: 0.5rem;
+  --command-content-inset: 1rem;
+  --floating-content-inset: 0.75rem;
+  --z-sheet: 46;
+
+  /* Glass surfaces stay semantic so reduced-transparency and theme overrides compose. */
+  --glass-blur: 16px;
+  --glass-opacity: 80%;
+  --glass-saturation: 1.08;
+
+  /* Dark-first contrast controls. Consumers may raise these percentages without rewriting components. */
+  --appearance-contrast-base: 100%;
+  --appearance-contrast-boost: 0%;
+  --appearance-contrast-border-boost: 0%;
+  --appearance-contrast-target: white;
+
+  --warning: #eab308;
+  --warning-foreground: #facc15;
+  --warning-surface: color-mix(in srgb, var(--warning) 16%, transparent);
+  --warning-border: color-mix(in srgb, var(--warning) 34%, transparent);
+  --error: #ef4444;
+  --error-foreground: #f87171;
+  --error-surface: color-mix(in srgb, var(--error) 16%, transparent);
+  --error-border: color-mix(in srgb, var(--error) 34%, transparent);
+  --success: #22c55e;
+  --success-foreground: #4ade80;
+  --success-surface: color-mix(in srgb, var(--success) 16%, transparent);
+  --success-border: color-mix(in srgb, var(--success) 34%, transparent);
+  --info: #3b82f6;
+  --info-foreground: #60a5fa;
+  --info-surface: color-mix(in srgb, var(--info) 16%, transparent);
+  --info-border: color-mix(in srgb, var(--info) 34%, transparent);
+  --update: var(--color-primary-500);
+  --update-foreground: var(--color-primary-300);
+  --update-surface: color-mix(in srgb, var(--update) 18%, transparent);
+  --update-border: color-mix(in srgb, var(--update) 34%, transparent);
+
+  --diff-addition: var(--success);
+  --diff-addition-foreground: var(--success-foreground);
+  --diff-deletion: var(--error);
+  --diff-deletion-foreground: var(--error-foreground);
+
+  /* Source colors used by the computed contrast foregrounds below. */
+  --placeholder: var(--color-text-200);
+  --secondary-label: var(--color-text-100);
+  --icon-muted: var(--color-text-100);
+  --message-surface: var(--color-card-background-100);
+  --message-foreground: var(--color-foreground-50);
+  --sidebar: var(--color-background-50);
+  --sidebar-foreground: var(--color-foreground-50);
+  --sidebar-muted-foreground: var(--color-text-100);
+  --sidebar-border: var(--border-color-base-100);
+}
+
+/* Explicit dark variant mirrors t3code while keeping Wemux's dark values as the defaults. */
+.dark {
+  color-scheme: dark;
+  --appearance-contrast-target: white;
+  --glass-blur: 16px;
+  --glass-saturation: 1.08;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not(.dark) {
+    --appearance-contrast-target: black;
+    --border-color-base-200: #e5e7eb;
+    --color-background-100: #ffffff;
+    --color-input-background: #ffffff;
+    --color-input-primary-focus-border: #91aeff;
+    --glass-blur: 12px;
+    --glass-saturation: 1.14;
+    --warning-foreground: #a16207;
+    --warning-surface: color-mix(in srgb, var(--warning) 8%, transparent);
+    --warning-border: color-mix(in srgb, var(--warning) 28%, transparent);
+    --error-foreground: #b91c1c;
+    --error-surface: color-mix(in srgb, var(--error) 8%, transparent);
+    --error-border: color-mix(in srgb, var(--error) 28%, transparent);
+    --success-foreground: #15803d;
+    --success-surface: color-mix(in srgb, var(--success) 8%, transparent);
+    --success-border: color-mix(in srgb, var(--success) 28%, transparent);
+    --info-foreground: #1d4ed8;
+    --info-surface: color-mix(in srgb, var(--info) 8%, transparent);
+    --info-border: color-mix(in srgb, var(--info) 28%, transparent);
+    --update-foreground: var(--color-primary-600);
+    --update-surface: color-mix(in srgb, var(--update) 12%, transparent);
+    --update-border: color-mix(in srgb, var(--update) 28%, transparent);
+  }
+}
+
+:root {
+  --contrast-input: color-mix(in srgb, var(--color-input) var(--appearance-contrast-base), var(--color-foreground) var(--appearance-contrast-border-boost));
+  --contrast-border: color-mix(in srgb, var(--color-border) var(--appearance-contrast-base), var(--color-foreground) var(--appearance-contrast-border-boost));
+  --contrast-foreground: color-mix(in oklab, var(--color-foreground) var(--appearance-contrast-base), var(--appearance-contrast-target) var(--appearance-contrast-boost));
+  --contrast-muted-foreground: color-mix(in oklab, var(--color-muted-foreground) var(--appearance-contrast-base), var(--appearance-contrast-target) var(--appearance-contrast-boost));
+  --contrast-placeholder: color-mix(in oklab, var(--placeholder) var(--appearance-contrast-base), var(--appearance-contrast-target) var(--appearance-contrast-boost));
+  --contrast-secondary-label: color-mix(in oklab, var(--secondary-label) var(--appearance-contrast-base), var(--appearance-contrast-target) var(--appearance-contrast-boost));
+  --contrast-icon-muted: color-mix(in oklab, var(--icon-muted) var(--appearance-contrast-base), var(--appearance-contrast-target) var(--appearance-contrast-boost));
+  --contrast-card-foreground: color-mix(in oklab, var(--color-card-foreground) var(--appearance-contrast-base), var(--appearance-contrast-target) var(--appearance-contrast-boost));
+  --contrast-popover-foreground: color-mix(in oklab, var(--color-popover-foreground) var(--appearance-contrast-base), var(--appearance-contrast-target) var(--appearance-contrast-boost));
+  --contrast-accent-foreground: color-mix(in oklab, var(--color-accent-foreground) var(--appearance-contrast-base), var(--appearance-contrast-target) var(--appearance-contrast-boost));
+  --contrast-secondary-foreground: color-mix(in oklab, var(--color-secondary-foreground) var(--appearance-contrast-base), var(--appearance-contrast-target) var(--appearance-contrast-boost));
+  --contrast-message-foreground: color-mix(in oklab, var(--message-foreground) var(--appearance-contrast-base), var(--appearance-contrast-target) var(--appearance-contrast-boost));
+  --contrast-sidebar-foreground: color-mix(in oklab, var(--sidebar-foreground) var(--appearance-contrast-base), var(--appearance-contrast-target) var(--appearance-contrast-boost));
+  --contrast-sidebar-muted-foreground: color-mix(in oklab, var(--sidebar-muted-foreground) var(--appearance-contrast-base), var(--appearance-contrast-target) var(--appearance-contrast-boost));
+  --contrast-sidebar-border: color-mix(in srgb, var(--sidebar-border) var(--appearance-contrast-base), var(--sidebar-foreground) var(--appearance-contrast-border-boost));
+}
+
 /* Session Canvas: a dense, readable lineage surface. Graph facts remain Server-authoritative;
    this layer only gives the stable projection a responsive visual hierarchy. */
 .session-canvas { min-height: 0; overflow: hidden; border: 1px solid color-mix(in srgb, var(--border) 88%, transparent); border-radius: 1rem; background: color-mix(in srgb, var(--card) 82%, transparent); box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.035); }
@@ -26,12 +140,13 @@ button.session-canvas-node:active { transform: translateY(0) scale(.99); }
 @media (prefers-reduced-motion: reduce) { .session-canvas-node { transition: none; } button.session-canvas-node:hover, button.session-canvas-node:active { transform: none; } }
 .session-canvas-viewport { width: 100%; height: clamp(34rem, 70vh, 50rem); background: color-mix(in srgb, var(--background) 88%, transparent); }
 .session-canvas-viewport .react-flow__node { width: 18rem; }
+.session-canvas-viewport .react-flow__node:has(.session-flow-node-interactive) { width: min(38rem, 72vw); }
 .session-canvas-viewport .react-flow__edge-path { stroke: color-mix(in srgb, var(--primary) 44%, var(--border)); }
 .session-canvas-viewport .react-flow__edge.selected .react-flow__edge-path, .session-canvas-viewport .react-flow__edge:focus .react-flow__edge-path { stroke: var(--primary); stroke-width: 2; }
-.session-canvas-viewport .react-flow__controls { overflow: hidden; border: 1px solid var(--border); border-radius: .75rem; background: color-mix(in srgb, var(--background) 94%, transparent); box-shadow: 0 12px 30px rgb(0 0 0 / .18); }
-.session-canvas-viewport .react-flow__controls-button { border-color: var(--border); background: transparent; color: var(--foreground); }
+.session-canvas-viewport .react-flow__controls-button { color: var(--foreground); fill: currentColor; }
 .session-canvas-viewport .react-flow__minimap { overflow: hidden; border: 1px solid var(--border); border-radius: .75rem; background: color-mix(in srgb, var(--background) 94%, transparent); }
 .session-flow-node { width: 18rem; border: 1px solid color-mix(in srgb, var(--border) 90%, transparent); border-radius: .9rem; background: color-mix(in srgb, var(--background) 94%, transparent); padding: 1rem; color: var(--foreground); box-shadow: 0 16px 40px rgb(0 0 0 / .17); transition: width 180ms ease, border-color 150ms ease, box-shadow 150ms ease; }
+.session-flow-node-semantic { width: 18rem; color: var(--foreground); box-shadow: 0 16px 40px rgb(0 0 0 / .17); }
 .session-flow-node-selected { border-color: color-mix(in srgb, var(--primary) 78%, transparent); background: color-mix(in srgb, var(--primary) 10%, var(--background)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 18%, transparent), 0 18px 44px rgb(0 0 0 / .2); }
 .session-flow-node-interactive { position: relative; width: min(38rem, 72vw); max-width: 38rem; min-height: 36rem; padding: 0; overflow: visible; }
 .session-surface-collapse { position: absolute; right: .75rem; top: 3.7rem; z-index: 4; border-radius: .45rem; border: 1px solid var(--border); background: color-mix(in srgb, var(--background) 94%, transparent); padding: .3rem .55rem; font-size: .68rem; color: var(--muted-foreground); }
@@ -390,6 +505,30 @@ button.session-canvas-node:active { transform: translateY(0) scale(.99); }
   --color-border: var(--color-base-100);
   --color-input: var(--color-base-300);
   --color-ring: var(--color-primary-400);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-warning-surface: var(--warning-surface);
+  --color-warning-border: var(--warning-border);
+  --color-error: var(--error);
+  --color-error-foreground: var(--error-foreground);
+  --color-error-surface: var(--error-surface);
+  --color-error-border: var(--error-border);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-success-surface: var(--success-surface);
+  --color-success-border: var(--success-border);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-info-surface: var(--info-surface);
+  --color-info-border: var(--info-border);
+  --color-update: var(--update);
+  --color-update-foreground: var(--update-foreground);
+  --color-update-surface: var(--update-surface);
+  --color-update-border: var(--update-border);
+  --color-diff-addition: var(--diff-addition);
+  --color-diff-addition-foreground: var(--diff-addition-foreground);
+  --color-diff-deletion: var(--diff-deletion);
+  --color-diff-deletion-foreground: var(--diff-deletion-foreground);
 
   /* ── Wemux-only tokens (no TailGrids counterpart) ───────────────────── */
   --radius-pill: 9999px;
@@ -400,10 +539,10 @@ button.session-canvas-node:active { transform: translateY(0) scale(.99); }
   --duration-slow: 380ms;
   --shadow-glow: 0 0 32px rgb(55 88 249 / .22);
   --shadow-float: 0 8px 32px rgb(3 7 18 / .4), 0 2px 8px rgb(3 7 18 / .2);
-  --status-success: #4ade80;
-  --status-warning: #fbbf24;
-  --status-danger: #f87171;
-  --status-info: #91aeff;
+  --status-success: var(--success-foreground);
+  --status-warning: var(--warning-foreground);
+  --status-danger: var(--error-foreground);
+  --status-info: var(--info-foreground);
 }
 
 /* ── Base layer ─────────────────────────────────────────────────────────
@@ -457,11 +596,11 @@ code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospac
 
 /* Glassmorphism surface — use sparingly for overlays/panels only. */
 .surface-glass {
-  background: rgb(30 38 52 / .68);
-  backdrop-filter: blur(20px) saturate(1.5);
-  -webkit-backdrop-filter: blur(20px) saturate(1.5);
-  border: 1px solid rgb(255 255 255 / .08);
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / .06), var(--shadow-float);
+  background: color-mix(in srgb, var(--color-card) var(--glass-opacity), transparent);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+  border: 1px solid color-mix(in srgb, var(--contrast-foreground) 8%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--contrast-foreground) 6%, transparent), var(--shadow-float);
 }
 
 /* Gradient accent utilities */
@@ -835,17 +974,17 @@ code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospac
     --color-border: var(--color-base-100);
     --shadow-glow: 0 0 20px rgb(55 88 249 / .12);
     --shadow-float: 0 8px 32px rgb(17 24 39 / .12), 0 2px 8px rgb(17 24 39 / .06);
-    --status-success: #16a34a;
-    --status-warning: #b45309;
-    --status-danger: #dc2626;
-    --status-info: #2237ee;
+    --status-success: var(--success-foreground);
+    --status-warning: var(--warning-foreground);
+    --status-danger: var(--error-foreground);
+    --status-info: var(--info-foreground);
   }
   html { color-scheme: light; }
   .grain-overlay::after { opacity: .018; }
   .surface-glass {
-    background: rgb(255 255 255 / .78);
-    border-color: rgb(17 24 39 / .08);
-    box-shadow: inset 0 1px 0 rgb(255 255 255 / .6), var(--shadow-md);
+    background: color-mix(in srgb, var(--color-card) var(--glass-opacity), transparent);
+    border-color: color-mix(in srgb, var(--contrast-foreground) 8%, transparent);
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--contrast-foreground) 6%, transparent), var(--shadow-md);
   }
   .ai-prompt-input {
     border-color: rgb(17 24 39 / .12);
