@@ -18,6 +18,7 @@
     "@radix-ui/react-collapsible": "^1.1.20",
     "@radix-ui/react-dialog": "latest",
     "@radix-ui/react-dropdown-menu": "latest",
+    "@radix-ui/react-popover": "^1.1.23",
     "@radix-ui/react-select": "latest",
     "@radix-ui/react-tabs": "latest",
     "@radix-ui/react-tooltip": "latest",
