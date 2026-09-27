@@ -70,3 +70,30 @@ test('synchronous send throw leaves editor intact without a speculative completi
  assert.equal(controller.state.attempt,null); assert.deepEqual(controller.state.echoes,[])
  assert.equal(controller.state.error,'sync failure'); controller.dispose()
 })
+
+test('edit prefill keeps Journal immutable and marks the next send as a new message', async () => {
+ const bodies = []; let id = 0
+ const controller = new SubmissionController({ send: async (_, body) => { bodies.push(body); return ack(body) }, command: async () => ({ status: 'accepted' }) }, 's', () => `id-${++id}`)
+ controller.prefillForEdit('original text')
+ assert.equal(controller.state.draft, 'original text')
+ assert.equal(controller.state.draftNotice, '\u7f16\u8f91\u91cd\u53d1\u5c06\u4f5c\u4e3a\u65b0\u6d88\u606f\u53d1\u9001\uff0c\u5bf9\u8bdd\u5386\u53f2\u4e0d\u4f1a\u6539\u5199\u3002')
+ controller.edit('edited text')
+ assert.equal(controller.state.draftNotice, '\u7f16\u8f91\u91cd\u53d1\u5c06\u4f5c\u4e3a\u65b0\u6d88\u606f\u53d1\u9001\uff0c\u5bf9\u8bdd\u5386\u53f2\u4e0d\u4f1a\u6539\u5199\u3002')
+ await controller.send()
+ assert.equal(bodies[0].content, 'edited text')
+ assert.equal(bodies[0].messageId, 'id-2')
+ controller.dispose()
+})
+
+test('failed retry reuses uncertain request identity while Journal retry sends a new message', async () => {
+ const bodies = []; let id = 0; let fail = true
+ const controller = new SubmissionController({ send: async (_, body) => { bodies.push(body); if (fail) throw { status: 504 }; return ack(body) }, command: async () => ({ status: 'accepted' }) }, 's', () => `id-${++id}`)
+ controller.edit('failed text'); await controller.send()
+ const failedId = controller.state.attempt.messageId
+ fail = false; await controller.retryAttempt(failedId)
+ assert.equal(bodies[1].messageId, failedId)
+ await controller.resendAsNew('journal failure text')
+ assert.notEqual(bodies[2].messageId, failedId)
+ assert.equal(bodies[2].content, 'journal failure text')
+ controller.dispose()
+})

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import fs from 'node:fs/promises'
 
-const sources = Object.fromEntries(await Promise.all(['App.tsx', 'features/sessions/conversation.tsx', 'features/sessions/slash-commands.ts', 'features/sessions/cluster-controls.tsx', 'features/sessions/pending-approval-panel.tsx', 'components/ai-elements/prompt-input.tsx', 'components/context-window-meter.tsx'].map(async path => [path, await fs.readFile(new URL(`../src/${path}`, import.meta.url), 'utf8')])))
+const sources = Object.fromEntries(await Promise.all(['App.tsx', 'features/sessions/conversation.tsx', 'features/sessions/slash-commands.ts', 'features/sessions/cluster-controls.tsx', 'features/sessions/pending-approval-panel.tsx', 'components/ai-elements/prompt-input.tsx', 'components/ai-elements/actions.tsx', 'components/context-window-meter.tsx'].map(async path => [path, await fs.readFile(new URL(`../src/${path}`, import.meta.url), 'utf8')])))
 const app = Object.values(sources).join('\n')
 const reproPath = new URL('../../../scripts/e2e-message.mjs', import.meta.url)
 const repro = await fs.readFile(reproPath, 'utf8').catch(() => null)
@@ -64,4 +64,16 @@ test('session model chip exposes supported models and preserves unsupported fall
 test('repository e2e script does not send timestamp markers to a persistent session', () => {
   if (repro === null) return
   assert.doesNotMatch(repro, /Date\.now\(\)|browser-repro|timeline-e2e|final-e2e|echo-check/)
+})
+
+
+
+test('message actions expose honest edit, retry and local-hide semantics', () => {
+  const conversation = sources['features/sessions/conversation.tsx']
+  const actions = sources['components/ai-elements/actions.tsx']
+  assert.match(conversation, /message\.role === 'user' && !retryable && messageActions\?\.onEdit/)
+  assert.match(conversation, /entry\.status === 'failed' \|\| entry\.status === 'rejected'/)
+  assert.ok(conversation.includes(''))
+  assert.ok(conversation.includes(' Journal '))
+  assert.match(actions, /sm:group-hover:opacity-100 sm:group-focus-within:opacity-100/)
 })

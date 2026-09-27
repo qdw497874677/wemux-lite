@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { Api } from '../../api/client.ts'
 import type { AgentDTO, SessionDTO } from '../../api/dto.ts'
 import { useSession } from '../../api/use-session.ts'
-import { TimelineEntry, Composer, OptimisticMessages } from './conversation.tsx'
+import { TimelineEntry, Composer, OptimisticMessages, useMessageActions } from './conversation.tsx'
 import { Conversation, ConversationContent, ConversationEmptyState, ConversationScrollButton } from '../../components/ai-elements/conversation.tsx'
 import { Suggestion, Suggestions } from '../../components/ai-elements/suggestion.tsx'
 import { ClusterControls } from './cluster-controls.tsx'
@@ -39,6 +39,7 @@ export function SessionSurface({ api, session, presentation, projectPath, worker
   const interactive = presentation !== 'canvas-summary'
   const controls = presentation === 'focus' || presentation === 'run'
   const chooseSuggestion = (suggestion: string) => applySessionSuggestion(controller, document.getElementById(`session-prompt-${session.id}`), suggestion)
+  const { hiddenMessageIds, localNotice, messageActions } = useMessageActions(controller, session.id, canSend)
 
   return <section className={`session-surface session-surface-${presentation}`} data-session-id={session.id}>
     <header className="session-surface-header">
@@ -47,8 +48,9 @@ export function SessionSurface({ api, session, presentation, projectPath, worker
     </header>
     <Conversation className="session-surface-timeline conversation-timeline" aria-live="polite"><ConversationContent className="conversation-content gap-3 px-3 py-3 sm:px-4 sm:py-4">
       {!history.timeline.length && <ConversationEmptyState title={history.checkedAt ? canSend ? '暂无消息，可以开始对话。' : blockedReason : '正在加载会话历史…'}>{history.checkedAt && canSend ? <div className="flex max-w-[var(--chat-max-width)] flex-col items-center gap-3"><div className="space-y-1"><h3 className="text-sm font-medium">暂无消息，可以开始对话。</h3><p className="text-xs leading-5 text-muted-foreground/60">选择一个建议，或在下方输入你的问题。</p></div><Suggestions className="justify-center">{emptySessionSuggestions.map(suggestion => <Suggestion key={suggestion} suggestion={suggestion} onClick={() => chooseSuggestion(suggestion)}>{suggestion}</Suggestion>)}</Suggestions></div> : <h3 className="text-sm font-medium">{history.checkedAt ? blockedReason : '正在加载会话历史…'}</h3>}</ConversationEmptyState>}
-      {history.timeline.map(entry => <TimelineEntry key={entry.id} entry={entry} />)}
-      <OptimisticMessages controller={controller} confirmedIds={confirmedIds} />
+      {history.timeline.filter(entry => !hiddenMessageIds.has(entry.id)).map(entry => <TimelineEntry key={entry.id} entry={entry} messageActions={messageActions} />)}
+      {localNotice && <p role="status" className="text-center text-xs text-muted-foreground">{localNotice}</p>}
+      <OptimisticMessages controller={controller} confirmedIds={confirmedIds} hiddenMessageIds={hiddenMessageIds} messageActions={messageActions} />
     </ConversationContent><ConversationScrollButton className="nodrag nopan" /></Conversation>
     {history.stream !== 'live' && <p className="session-surface-signal">实时更新正在重连，历史仍会继续补传。</p>}
     {controls && <ClusterControls api={api} session={currentSession} queuedItems={history.queuedItems} enabled={canSend} />}

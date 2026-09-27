@@ -19,7 +19,7 @@ import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tan
 import { RouterProvider, useRouterState, useNavigate } from '@tanstack/react-router'
 import { makeRouter } from './app/router'
 import { useResources } from './app/resources'
-import { TimelineEntry, Composer, OptimisticMessages } from './features/sessions/conversation'
+import { TimelineEntry, Composer, OptimisticMessages, useMessageActions } from './features/sessions/conversation'
 import { Conversation, ConversationContent, ConversationEmptyState, ConversationScrollButton } from './components/ai-elements/conversation.tsx'
 import { SessionInfoPanel } from './features/panels/session-info-panel.tsx'
 import { SessionCanvasPanel } from './features/panels/session-canvas-panel.tsx'
@@ -176,9 +176,10 @@ function LeasedSessionSurface({ api, session, agent, revision, controller, conne
   const confirmed = history.messages.map(item => item.id)
   const canSend = Boolean(connected && browserOnline && session.access?.canWrite !== false && session.sendCapability?.allowed)
   const blockedReason = !browserOnline ? '浏览器当前离线' : !connected ? '尚未连接服务端' : session.access?.canWrite === false ? '当前账号只有查看权限' : session.sendCapability?.allowed ? '' : session.sendCapability?.reason ?? 'Authoritative capability data unavailable'
+  const { hiddenMessageIds, localNotice, messageActions } = useMessageActions(controller, session.id, canSend)
   return <section hidden={!active} data-session-surface={session.id} className="absolute inset-0 flex min-h-0 min-w-0 flex-col">
     {history.error && <p role="alert" className="px-4 py-3 text-sm text-red-300">{history.error} 当前历史可能不完整。</p>}
-    <Conversation className="conversation-timeline" aria-live="polite" aria-relevant="additions text"><ConversationContent className="conversation-content mx-auto w-full max-w-[var(--chat-max-width)]">{!history.timeline.length && <ConversationEmptyState title={history.checkedAt ? canSend ? '暂无消息，可以开始对话。' : blockedReason : '正在加载会话历史…'} />}{history.timeline.map(entry => <TimelineEntry key={entry.id} entry={entry} onOpenContext={onOpenPanel} />)}<OptimisticMessages controller={controller} confirmedIds={confirmed} /></ConversationContent><ConversationScrollButton /></Conversation>
+    <Conversation className="conversation-timeline" aria-live="polite" aria-relevant="additions text"><ConversationContent className="conversation-content mx-auto w-full max-w-[var(--chat-max-width)]">{!history.timeline.length && <ConversationEmptyState title={history.checkedAt ? canSend ? '暂无消息，可以开始对话。' : blockedReason : '正在加载会话历史…'} />}{history.timeline.filter(entry => !hiddenMessageIds.has(entry.id)).map(entry => <TimelineEntry key={entry.id} entry={entry} onOpenContext={onOpenPanel} messageActions={messageActions} />)}{localNotice && <p role="status" className="text-center text-xs text-muted-foreground">{localNotice}</p>}<OptimisticMessages controller={controller} confirmedIds={confirmed} hiddenMessageIds={hiddenMessageIds} messageActions={messageActions} /></ConversationContent><ConversationScrollButton /></Conversation>
     <ClusterControls api={api} session={session} queuedItems={history.queuedItems} enabled={connected && browserOnline && workerOnline && history.freshness?.status === 'synced' && !history.error} />
     <PendingApprovalPanel api={api} session={session} pendingApprovals={history.pendingApprovals} enabled={connected && browserOnline && workerOnline && history.freshness?.status === 'synced' && !history.error} />
     <Composer api={api} controller={controller} session={session} agent={agent} activeTurnId={history.activeTurnId} canSend={canSend} blockedReason={blockedReason} confirmedIds={confirmed} />

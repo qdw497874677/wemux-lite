@@ -10,7 +10,7 @@ import { LaunchIdentity, LaunchView, taskPrompt } from './launch-draft'
 import { useSession } from '../../api/use-session'
 import { Button } from '../../components/ui/button'
 import { Textarea } from '../../components/ui/textarea'
-import { Composer, TimelineEntry } from '../sessions/conversation'
+import { Composer, TimelineEntry, useMessageActions } from '../sessions/conversation'
 import { SubmissionController } from '../sessions/submission'
 import { useConfirmDialog } from '../../components/ui/confirm-dialog.tsx'
 
@@ -113,6 +113,8 @@ function RunInspector({ run, api }: { run: Run; api: Api }) {
   const journalState = session.data === null ? 'N/A（Session 已删除）' : !online ? 'offline' : journal.error || session.error ? 'stale' : journal.freshness?.status ?? 'unknown'
   useRunLayers(run.snapshot.workerId, journalState)
   const confirmedIds = journal.messages.map(message => message.id)
+  const canSend = Boolean(session.data && online && session.data.access?.canWrite !== false && session.data.sendCapability?.allowed === true)
+  const { hiddenMessageIds, localNotice, messageActions } = useMessageActions(controller, run.sessionId, canSend)
   return <section aria-label="Run inspector" className="space-y-4 border-t border-border pt-4">
     <h3 className="font-semibold">Run #{run.attempt} · {run.status}</h3>
     <LayerStatus online={online} server={session.error || workers.error ? 'stale / unreachable' : session.isPending ? 'unknown' : 'connected'} worker={workers.data?.find(worker => worker.id === run.snapshot.workerId)?.connectionState ?? 'unknown'} journal={journalState} />
@@ -133,7 +135,8 @@ function RunInspector({ run, api }: { run: Run; api: Api }) {
     {deleteError && <p role="alert">{deleteError}</p>}
     {session.data === null && <p role="status">会话已删除，无法加载运行日志。以下运行历史快照仍保留。</p>}
     {journal.error && <p role="alert">{journal.error}</p>}
-    {journal.timeline.map((entry, i) => <TimelineEntry key={i} entry={entry} />)}
-    {session.data && <><h4>追加独立消息（不属于本 Run）</h4><Composer api={api} controller={controller} session={session.data} activeTurnId={journal.activeTurnId} canSend={online && session.data.access?.canWrite !== false && session.data.sendCapability?.allowed === true} blockedReason={!online ? '浏览器当前离线' : session.data.access?.canWrite === false ? '当前账号只有查看权限' : (session.data.sendCapability ?? unavailableCapability).reason} confirmedIds={confirmedIds} /></>}
+    {journal.timeline.filter(entry => !hiddenMessageIds.has(entry.id)).map(entry => <TimelineEntry key={entry.id} entry={entry} messageActions={messageActions} />)}
+    {localNotice && <p role="status">{localNotice}</p>}
+    {session.data && <><h4>追加独立消息（不属于本 Run）</h4><Composer api={api} controller={controller} session={session.data} activeTurnId={journal.activeTurnId} canSend={canSend} blockedReason={!online ? '浏览器当前离线' : session.data.access?.canWrite === false ? '当前账号只有查看权限' : (session.data.sendCapability ?? unavailableCapability).reason} confirmedIds={confirmedIds} /></>}
   </section>
 }

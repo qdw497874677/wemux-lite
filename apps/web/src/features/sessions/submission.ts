@@ -3,13 +3,13 @@ import { randomId } from '../../lib/random.ts'
 import type { Api } from '../../api/client'
 
 export interface SubmissionState {
-  draft: string; version: number; pending: boolean; error: string
+  draft: string; draftNotice: string; version: number; pending: boolean; error: string
   echoes: SendMessageDTO[];
   attempt: SendMessageDTO | null; receipt: { id: string; status: string } | null
 }
 /** Connection-owned uncertain submissions survive view unmounts; abort is not retraction. */
 export class SubmissionController {
-  state: SubmissionState = { echoes: [], draft: '', version: 0, pending: false, error: '', attempt: null, receipt: null }
+  state: SubmissionState = { echoes: [], draft: '', draftNotice: '', version: 0, pending: false, error: '', attempt: null, receipt: null }
   private listeners = new Set<() => void>()
   private observer?: AbortController
   private generation = 0
@@ -22,6 +22,17 @@ export class SubmissionController {
   snapshot = () => this.state
   private update(patch: Partial<SubmissionState>) { if (!this.disposed) { this.state = { ...this.state, ...patch }; this.listeners.forEach(listener => listener()) } }
   edit = (draft: string) => this.update({ draft, version: this.state.version + 1, error: '' })
+  prefillForEdit = (draft: string) => this.update({ draft, draftNotice: '编辑重发将作为新消息发送，对话历史不会改写。', version: this.state.version + 1, error: '' })
+  async resendAsNew(content: string) {
+    if (this.disposed || this.state.pending || !content.trim()) return
+    this.update({ draft: content, draftNotice: '', attempt: null, receipt: null, error: '', version: this.state.version + 1 })
+    await this.send()
+  }
+  async retryAttempt(messageId: string) {
+    if (this.disposed || this.state.pending || this.state.attempt?.messageId !== messageId) return
+    this.update({ draft: this.state.attempt.content, draftNotice: '', error: '', version: this.state.version + 1 })
+    await this.send()
+  }
   confirm(ids: string[]) {
     const echoes = this.state.echoes.filter(item => !ids.includes(item.messageId))
     if (echoes.length !== this.state.echoes.length) this.update({ echoes })
@@ -29,7 +40,7 @@ export class SubmissionController {
       this.generation++; this.observer?.abort()
       this.update({ attempt: null, receipt: null, pending: false, error: '' })
     } }
-  dispose() { this.disposed = true; this.generation++; this.observer?.abort(); this.listeners.clear(); this.state = { echoes: [], draft: '', version: 0, pending: false, error: '', attempt: null, receipt: null } }
+  dispose() { this.disposed = true; this.generation++; this.observer?.abort(); this.listeners.clear(); this.state = { echoes: [], draft: '', draftNotice: '', version: 0, pending: false, error: '', attempt: null, receipt: null } }
   async send() {
     if (this.disposed || this.state.pending || !this.state.draft.trim()) return
     this.observer?.abort()
@@ -43,8 +54,8 @@ export class SubmissionController {
     let request: ReturnType<Api['send']>
     try { request = this.api.send(this.sessionId, body, controller.signal) }
     catch (error) { this.update({ error: error instanceof Error ? error.message : '无法开始发送' }); return }
-    this.update({ attempt: body, echoes: [...this.state.echoes.filter(item => item.messageId !== body.messageId), body], draft: '', pending: true, error: '' })
-    const restore = () => { if (this.state.version === version) this.update({ draft: body.content }) }
+    this.update({ attempt: body, echoes: [...this.state.echoes.filter(item => item.messageId !== body.messageId), body], draft: '', draftNotice: '', pending: true, error: '' })
+    const restore = () => { if (this.state.version === version) this.update({ draft: body.content, version: this.state.version + 1 }) }
     try {
       const result = await request
       if (!current()) return

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type MutableRefObject } from 'react'
-import { Bot, Check, ChevronDown, ChevronRight, Copy, FilePenLine, FileSearch, Globe, Search, Terminal } from 'lucide-react'
+import { Bot, Check, ChevronDown, ChevronRight, Copy, FilePenLine, FileSearch, Globe, Pencil, RotateCcw, Search, Terminal, Trash2 } from 'lucide-react'
 import type { Api } from '../../api/client.ts'
 import type { AgentDTO, SessionDTO } from '../../api/dto.ts'
 import type { ChatTimelineItem, TimelineTool } from '../../api/journal.ts'
@@ -32,7 +32,31 @@ const formatToolValue = (value: unknown) => {
 const toolState = (tool: TimelineTool): ToolState => tool.status === 'running' ? 'input-available' : tool.status === 'completed' ? 'output-available' : tool.status === 'cancelled' ? 'output-denied' : 'output-error'
 const workLogIcons: Record<NonNullable<WorkLogEntry['action']>, typeof Terminal> = { command: Terminal, read: FileSearch, edit: FilePenLine, browser: Globe, search: Search }
 
-export function TimelineEntry({ entry, onOpenContext }: { entry: ChatTimelineItem; onOpenContext?: () => void }) {
+export type MessageActions = { onEdit?: (text: string) => void; onRetry?: (text: string, messageId: string) => void; onHide?: (messageId: string) => void }
+
+export function useMessageActions(controller: SubmissionController, sessionId: string, enabled = true) {
+  const [hiddenMessageIds, setHiddenMessageIds] = useState<Set<string>>(() => new Set())
+  const [localNotice, setLocalNotice] = useState('')
+  useEffect(() => { setHiddenMessageIds(new Set()); setLocalNotice('') }, [sessionId])
+  const focusComposer = () => window.requestAnimationFrame(() => document.getElementById(`session-prompt-${sessionId}`)?.focus())
+  const messageActions: MessageActions = {
+    ...(enabled ? {
+      onEdit: (text: string) => { controller.prefillForEdit(text); focusComposer() },
+      onRetry: (text: string, messageId: string) => {
+        if (controller.snapshot().attempt?.messageId === messageId) void controller.retryAttempt(messageId)
+        else void controller.resendAsNew(text)
+        focusComposer()
+      },
+    } : {}),
+    onHide: (messageId: string) => {
+      setHiddenMessageIds(current => new Set(current).add(messageId))
+      setLocalNotice('，； Journal 。')
+    },
+  }
+  return { hiddenMessageIds, localNotice, messageActions }
+}
+
+export function TimelineEntry({ entry, onOpenContext, messageActions }: { entry: ChatTimelineItem; onOpenContext?: () => void; messageActions?: MessageActions }) {
   if (entry.kind === 'usage') {
     const parts = [
       entry.usage.completeness === 'partial' ? '部分统计' : null,
@@ -56,14 +80,15 @@ export function TimelineEntry({ entry, onOpenContext }: { entry: ChatTimelineIte
       <ToolContent>{presentation.detail && <p className={cn('mb-2 whitespace-pre-wrap break-all text-xs text-muted-foreground', presentation.tone === 'error' && 'text-red-200')}>{presentation.detail}</p>}{presentation.changedFiles?.length ? <ul className="mb-2 space-y-1 text-xs text-muted-foreground" aria-label="变更文件">{presentation.changedFiles.map(file => <li key={file} className="rounded-md bg-muted/60 px-2 py-1 font-mono">{file}</li>)}</ul> : null}{input && <ToolInput input={entry.input} />}<ToolOutput output={output} errorText={presentation.tone === 'error' ? output || '工具执行失败' : undefined} /></ToolContent>
     </Tool></div>
   }
-  return <TimelineMessage entry={entry} onOpenContext={onOpenContext} />
+  return <TimelineMessage entry={entry} onOpenContext={onOpenContext} messageActions={messageActions} />
 }
 
-function TimelineMessage({ entry, onOpenContext }: { entry: Extract<ChatTimelineItem, { kind: 'message' }>; onOpenContext?: () => void }) {
+function TimelineMessage({ entry, onOpenContext, messageActions }: { entry: Extract<ChatTimelineItem, { kind: 'message' }>; onOpenContext?: () => void; messageActions?: MessageActions }) {
   const message = timelineMessageToUIMessage(entry)
   const text = message.parts.filter(part => part.type === 'text').map(part => part.text).join('')
   const contentRef = useRef<HTMLDivElement>(null)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'manual'>('idle')
+  const retryable = message.role === 'user' && (entry.status === 'failed' || entry.status === 'rejected' || entry.status === 'cancelled')
   const copy = async () => {
     if (await copyText(text)) {
       setCopyState('copied')
@@ -80,7 +105,13 @@ function TimelineMessage({ entry, onOpenContext }: { entry: Extract<ChatTimeline
         <MessageContent><div ref={contentRef}>{text ? <Response>{text}</Response> : <span className="flex items-center gap-2 text-muted-foreground"><Loader />等待输出…</span>}</div>
           <div className={cn('mt-1.5 flex items-center gap-1.5', message.role === 'user' && 'justify-end')}><MessageStatus status={entry.status} />{message.role === 'user' && onOpenContext && <button type="button" onClick={onOpenContext} className="rounded-lg p-1 text-muted-foreground/50 transition-all hover:bg-white/10 hover:text-foreground" aria-label="查看会话信息"><ChevronRight className="size-3.5" /></button>}</div>
         </MessageContent>
-        {text && <ActionsBar aria-label="消息操作"><Action onClick={() => void copy()} aria-label="复制消息内容" title={copyState === 'manual' ? '已全选，请 Ctrl+C / 长按复制' : copyState === 'copied' ? '已复制' : '复制消息内容'}>{copyState === 'copied' ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}</Action>{copyState === 'manual' && <span role="status" className="text-xs text-muted-foreground">已全选，请 Ctrl+C / 长按复制</span>}</ActionsBar>}
+        {text && <ActionsBar aria-label="">
+          {message.role === 'user' && !retryable && messageActions?.onEdit && <Action onClick={() => messageActions.onEdit?.(text)} aria-label="" title=""><Pencil className="size-3.5" /></Action>}
+          {retryable && messageActions?.onRetry && <Action onClick={() => messageActions.onRetry?.(text, entry.id)} aria-label="" title=""><RotateCcw className="size-3.5" /></Action>}
+          <Action onClick={() => void copy()} aria-label="" title={copyState === 'manual' ? ' Ctrl+C / ' : copyState === 'copied' ? '' : ''}>{copyState === 'copied' ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}</Action>
+          {messageActions?.onHide && <Action onClick={() => messageActions.onHide?.(entry.id)} aria-label="" title="， Journal"><Trash2 className="size-3.5" /></Action>}
+          {copyState === 'manual' && <span role="status" className="text-xs text-muted-foreground"> Ctrl+C / </span>}
+        </ActionsBar>}
       </div>
     </div>
   </Message>
@@ -186,7 +217,7 @@ function ComposerContents({ api, session, agent, controller, state, canSend, blo
     <PromptInputBody><label className="sr-only" htmlFor={`session-prompt-${session.id}`}>消息内容</label><PromptInputTextarea id={`session-prompt-${session.id}`} value={sendWithAttachmentsRef.current ? '' : state.draft} onChange={event => { controller.edit(event.target.value); setNotice(null) }} maxLength={16_000} aria-invalid={Boolean(state.error) || undefined} placeholder={canSend ? '给 Agent 发送消息，输入 / 查看命令…' : `${blockedReason}，可以先编辑草稿`} /></PromptInputBody>
     <PromptInputFooter><PromptInputTools className="flex-wrap">
       <PromptInputActionMenu><PromptInputActionMenuTrigger asChild><PromptInputActionMenuButton /></PromptInputActionMenuTrigger><PromptInputActionMenuContent align="start"><PromptInputActionAddAttachments kind="file" /><PromptInputActionAddAttachments kind="image" /></PromptInputActionMenuContent></PromptInputActionMenu>
-      <SessionModelChip api={api} session={session} agent={agent} disabled={running || !canControl} onNotice={setNotice} /><ContextWindowMeter usage={contextUsage} onCompact={() => void compact()} compactDisabled={compactDisabled} /><span role={state.error || notice?.tone === 'error' ? 'alert' : 'status'} className={cn('min-w-0 flex-1 truncate text-xs text-muted-foreground/60', (state.error || notice?.tone === 'error') && 'text-red-300')}>{state.error || notice?.text || hint}</span></PromptInputTools>
+      <SessionModelChip api={api} session={session} agent={agent} disabled={running || !canControl} onNotice={setNotice} /><ContextWindowMeter usage={contextUsage} onCompact={() => void compact()} compactDisabled={compactDisabled} /><span role={state.error || notice?.tone === 'error' ? 'alert' : 'status'} className={cn('min-w-0 flex-1 truncate text-xs text-muted-foreground/60', (state.error || notice?.tone === 'error') && 'text-red-300')}>{state.error || notice?.text || state.draftNotice || hint}</span></PromptInputTools>
       <PromptInputSubmit status={running || commandPending === 'stop' ? 'streaming' : state.pending ? 'submitted' : state.error ? 'error' : 'ready'} onStop={running ? () => void stop() : undefined} disabled={running ? !canControl || commandPending === 'stop' : !canSend || state.pending || (!state.draft.trim() && !attachments.files.length) || (state.draft.startsWith('/') && !isAgentCommandInput(agent, state.draft))} title={running ? '停止当前回合' : retry ? '重试发送' : '发送消息'} />
     </PromptInputFooter>
   </>
@@ -228,7 +259,10 @@ function attachmentExtension(name: string) { return name.includes('.') ? name.sp
 function isInlineTextAttachment(file: File) { return file.type.startsWith('text/') || ['application/json', 'application/xml', 'application/javascript'].includes(file.type) || textAttachmentExtensions.has(attachmentExtension(file.name)) }
 function attachmentLanguage(name: string) { const extension = attachmentExtension(name); return extension === 'markdown' ? 'md' : extension }
 
-export function OptimisticMessages({ controller, confirmedIds }: { controller: SubmissionController; confirmedIds: string[] }) {
+export function OptimisticMessages({ controller, confirmedIds, hiddenMessageIds = new Set(), messageActions }: { controller: SubmissionController; confirmedIds: string[]; hiddenMessageIds?: Set<string>; messageActions?: MessageActions }) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot)
-  return <>{state.echoes.filter(item => !confirmedIds.includes(item.messageId)).map(item => <Message key={item.messageId} from="user" data-message-id={item.messageId}><MessageContent><Response>{item.content}</Response><small role="status">{state.pending && state.attempt?.messageId === item.messageId ? '正在提交…' : '等待会话历史确认'}</small></MessageContent></Message>)}</>
+  return <>{state.echoes.filter(item => !confirmedIds.includes(item.messageId) && !hiddenMessageIds.has(item.messageId)).map(item => {
+    const failed = Boolean(state.error && state.attempt?.messageId === item.messageId)
+    return <Message key={item.messageId} from="user" data-message-id={item.messageId}><MessageContent><Response>{item.content}</Response><small role={failed ? 'alert' : 'status'} className={failed ? 'text-red-300' : undefined}>{failed ? '' : state.pending && state.attempt?.messageId === item.messageId ? '…' : ''}</small></MessageContent><ActionsBar aria-label="">{failed && messageActions?.onRetry && <Action onClick={() => messageActions.onRetry?.(item.content, item.messageId)} aria-label="" title=""><RotateCcw className="size-3.5" /></Action>}<Action onClick={() => void copyText(item.content)} aria-label="" title=""><Copy className="size-3.5" /></Action>{messageActions?.onHide && <Action onClick={() => messageActions.onHide?.(item.messageId)} aria-label="" title="， Journal"><Trash2 className="size-3.5" /></Action>}</ActionsBar></Message>
+  })}</>
 }
