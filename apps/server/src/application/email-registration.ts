@@ -1,15 +1,15 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import type { AuditEntryId, Timestamp, UserId } from '@wemux/domain'
 import type { LocalAccountCredential, RegistrationAttempt, RegistrationPolicy, User, UserEmail, VerificationChallenge } from '@wemux/server-domain'
-import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
-import { AppError } from './errors.js'
-import { hashSecret } from './auth.js'
-import { invalidEmailReason, maskEmail, normalizeEmail, type NormalizedEmail } from './email-address.js'
-import { PasswordPolicyError, assertPasswordPolicy, hashPassword, passwordPolicy } from './password.js'
-import { verificationLink, passwordResetLink, type MailSettings, type OutgoingMail } from './mail/email-delivery.js'
-import { systemClock, type Clock, type IdentityService, type IssuedLoginSession } from './identity-service.js'
-import type { InstanceSettingsService } from './instance-settings.js'
-import type { TeamService } from './team-service.js'
+import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
+import { AppError } from './errors.ts'
+import { hashSecret } from './auth.ts'
+import { invalidEmailReason, maskEmail, normalizeEmail, type NormalizedEmail } from './email-address.ts'
+import { PasswordPolicyError, assertPasswordPolicy, hashPassword, passwordPolicy } from './password.ts'
+import { verificationLink, passwordResetLink, type MailSettings, type OutgoingMail } from './mail/email-delivery.ts'
+import { systemClock, type Clock, type IdentityService, type IssuedLoginSession } from './identity-service.ts'
+import type { InstanceSettingsService } from './instance-settings.ts'
+import type { TeamService } from './team-service.ts'
 
 /**
  * 邮箱注册、验证与找回（Ticket 05）。
@@ -47,12 +47,20 @@ export interface ThrottleRule {
 export class FlowThrottle {
   private readonly hits = new Map<string, number[]>()
 
+  private readonly clock: Clock
+
+  private readonly windowMs: number
+
+  private readonly rules: readonly ThrottleRule[]
+
+  private readonly maxKeys: number
+
   constructor(
-    private readonly clock: Clock = systemClock,
-    private readonly windowMs: number = 15 * 60 * 1000,
-    private readonly rules: readonly ThrottleRule[] = [],
-    private readonly maxKeys = 5_000,
-  ) {}
+    clock: Clock = systemClock,
+    windowMs: number = 15 * 60 * 1000,
+    rules: readonly ThrottleRule[] = [],
+    maxKeys = 5_000,
+  ) { this.clock = clock; this.windowMs = windowMs; this.rules = rules; this.maxKeys = maxKeys;}
 
   private limitFor(key: string): number {
     const rule = this.rules.find(candidate => key.startsWith(candidate.prefix))
@@ -163,7 +171,9 @@ export class EmailRegistrationService {
   private readonly verification: EmailVerificationPolicy
   private readonly throttles: Readonly<{ register: FlowThrottle; resend: FlowThrottle; forgot: FlowThrottle }>
 
-  constructor(private readonly input: EmailRegistrationServiceInput) {
+  private readonly input: EmailRegistrationServiceInput
+
+  constructor(input: EmailRegistrationServiceInput) { this.input = input;
     this.clock = input.clock ?? systemClock
     this.verification = input.policy ?? defaultEmailVerificationPolicy
     this.throttles = input.throttles ?? defaultThrottles(this.clock)

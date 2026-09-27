@@ -1,4 +1,4 @@
-import type { RouteDescriptor, RouteParams } from './types.js'
+import type { RouteDescriptor, RouteParams } from './types.ts'
 
 interface CompiledPattern {
   readonly expression: RegExp

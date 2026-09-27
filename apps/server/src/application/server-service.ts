@@ -1,18 +1,18 @@
-import { sessionIdleReason } from './session-idle.js'
+import { sessionIdleReason } from './session-idle.ts'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { AgentKey, ApprovalId, CommandId, EventSeq, Id, MessageId, ModelId, ProjectId, RuntimeOperationId, SessionId, TeamId, Timestamp, TurnId, UserId, WorkerId, WorkspaceId } from '@wemux/domain'
 import type { AuditResource, CommandProjection, Project, Session, Worker, Workspace, WorkspacePlacement } from '@wemux/server-domain'
 import type { WorkerCommand } from '@wemux/wire-protocol'
-import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
-import { AppError, requireValue } from './errors.js'
-import { hashSecret } from './auth.js'
-import { sendCapability } from './action-capabilities.js'
-import type { CapabilityService } from './capability-service.js'
-import { Notifications } from './notifications.js'
-import { integer, object, text } from './validation.js'
-import type { WorkerAccessService } from './worker-access-service.js'
-import type { ProjectAccessService } from './project-access-service.js'
-import type { SessionAccessService } from './session-access-service.js'
+import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
+import { AppError, requireValue } from './errors.ts'
+import { hashSecret } from './auth.ts'
+import { sendCapability } from './action-capabilities.ts'
+import type { CapabilityService } from './capability-service.ts'
+import { Notifications } from './notifications.ts'
+import { integer, object, text } from './validation.ts'
+import type { WorkerAccessService } from './worker-access-service.ts'
+import type { ProjectAccessService } from './project-access-service.ts'
+import type { SessionAccessService } from './session-access-service.ts'
 
 export const newId = <N extends string>(): Id<N> => randomUUID() as Id<N>
 export const now = (): Timestamp => new Date().toISOString() as Timestamp
@@ -43,7 +43,13 @@ export interface ForkTargetSessionInput {
 }
 
 export class ServerService {
-  constructor(private readonly store: ServerStore, readonly notifications: Notifications, private readonly capabilities?: CapabilityService, private readonly workerAccess?: WorkerAccessService, private readonly projectAccess?: ProjectAccessService, private readonly sessionAccess?: SessionAccessService) {}
+  private readonly store: ServerStore
+    readonly notifications: Notifications
+  private readonly capabilities?: CapabilityService
+  private readonly workerAccess?: WorkerAccessService
+  private readonly projectAccess?: ProjectAccessService
+  private readonly sessionAccess?: SessionAccessService
+  constructor(store: ServerStore, notifications: Notifications, capabilities?: CapabilityService, workerAccess?: WorkerAccessService, projectAccess?: ProjectAccessService, sessionAccess?: SessionAccessService) { this.store = store; this.notifications = notifications; this.capabilities = capabilities; this.workerAccess = workerAccess; this.projectAccess = projectAccess; this.sessionAccess = sessionAccess;}
   async requireWorkerUseInTx(tx: ServerStoreTx, actor: UserId, workerId: WorkerId) {
     return this.workerAccess ? this.workerAccess.requireInTx(tx, actor, workerId) : requireValue(await tx.resources.getWorker(workerId))
   }
@@ -495,7 +501,7 @@ export class ServerService {
     const commandId = b.commandId === undefined ? newId<'CommandId'>() : text(b.commandId, 'commandId', 200) as CommandId
     return this.sessionControl(id, commandId, actor, async () => ({ kind: 'runtime.approval.resolve', sessionId: id, approvalId, decision, ...(actor ? { decidedByAccountId: actor } : {}) }))
   }
-  async requireSessionAccessInTx(tx: ServerStoreTx, actor: UserId, id: SessionId, capability: import('./session-access-service.js').SessionAccessCapability = 'read') {
+  async requireSessionAccessInTx(tx: ServerStoreTx, actor: UserId, id: SessionId, capability: import('./session-access-service.ts').SessionAccessCapability = 'read') {
     if (!this.sessionAccess) return this.getSession(id, tx.resources)
     return this.sessionAccess.requireInTx(tx, actor, id, capability)
   }

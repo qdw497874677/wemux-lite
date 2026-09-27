@@ -1,7 +1,7 @@
 import type { ApprovalId, CommandId, SessionForkId, SessionId } from '@wemux/domain'
-import { AppError } from '../../application/errors.js'
-import { integer, object } from '../../application/validation.js'
-import type { RouteDescriptor, RouteRequestContext } from './types.js'
+import { AppError } from '../../application/errors.ts'
+import { integer, object } from '../../application/validation.ts'
+import type { RouteDescriptor, RouteRequestContext } from './types.ts'
 
 const eventCursor = (context: RouteRequestContext): number => {
   const lastId = context.request.headers['last-event-id']
@@ -64,8 +64,17 @@ export const sessionRoutes: readonly RouteDescriptor[] = [
     if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.operator()
     const body = object(await context.readBody()), subpath = body.subpath
     if (typeof subpath !== 'string' || !subpath || subpath.length > 4096 || subpath.includes('\0')) throw new AppError(400, 'Invalid subpath')
-    const maxBytes = body.maxBytes === undefined ? 1024 * 1024 : integer(body.maxBytes, 'maxBytes', 1, 1024 * 1024)
+    const maxBytes = body.maxBytes === undefined ? 1024 * 1024 : integer(body.maxBytes, 'maxBytes', 1, 10 * 1024 * 1024)
     context.json(200, await context.sessionFiles.read(id, subpath, maxBytes))
+  } },
+  { method: 'POST', pattern: '/sessions/:sessionId/fs/write', auth: 'authenticated', handler: async context => {
+    if (!context.sessionFiles) throw new AppError(404, 'Not found')
+    const id = context.params.sessionId as SessionId
+    if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.operator()
+    const body = object(await context.readBody()), subpath = body.subpath, base64Content = body.base64Content
+    if (typeof subpath !== 'string' || !subpath || subpath.length > 4096 || subpath.includes('\0')) throw new AppError(400, 'Invalid subpath')
+    if (typeof base64Content !== 'string' || base64Content.length > Math.ceil((10 * 1024 * 1024) / 3) * 4 + 4) throw new AppError(400, 'Invalid base64Content')
+    context.json(200, await context.sessionFiles.write(id, subpath, base64Content))
   } },
   { method: 'POST', pattern: '/sessions/:sessionId/fs/diff', auth: 'authenticated', handler: async context => {
     if (!context.sessionFiles) throw new AppError(404, 'Not found')

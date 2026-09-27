@@ -1,11 +1,11 @@
 import { DatabaseSync } from 'node:sqlite'
 import type { ConnectorDefinition, ConnectorId } from '@wemux/connector'
-import { migrate } from './migrations.js'
+import { migrate } from './migrations.ts'
 import type {
   ConnectorDistributionRecord,
   ConnectorRepository,
   ConnectorRequestRecord,
-} from '../../application/ports/connector-repository.js'
+} from '../../application/ports/connector-repository.ts'
 
 export class SqliteConnectorRepository implements ConnectorRepository {
   private queue: Promise<unknown> = Promise.resolve()

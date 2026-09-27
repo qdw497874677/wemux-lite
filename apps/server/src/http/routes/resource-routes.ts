@@ -1,5 +1,5 @@
 import type { ProjectId, SessionId, WorkspaceId } from '@wemux/domain'
-import type { RouteDescriptor } from './types.js'
+import type { RouteDescriptor } from './types.ts'
 
 export const resourceRoutes: readonly RouteDescriptor[] = [
   { method: 'POST', pattern: '/projects', auth: 'admin', handler: async context => context.json(201, await context.service.createProject(await context.readBody(), await context.operator())) },

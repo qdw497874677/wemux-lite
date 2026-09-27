@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
-import type { ServerStore } from '../server/src/application/ports/server-store.js'
-import { seedLocalAccount } from '../server/src/test/fixtures/administrator.js'
+import type { ServerStore } from '../server/src/application/ports/server-store.ts'
+import { seedLocalAccount } from '../server/src/test/fixtures/administrator.ts'
 
 /**
  * E2E 管理员会话助手（Ticket 04）。

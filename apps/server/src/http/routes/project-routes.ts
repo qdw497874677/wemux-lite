@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type { ProjectId, SessionId } from '@wemux/domain'
-import { AppError } from '../../application/errors.js'
-import { TaskError } from '../../application/task-service.js'
-import type { RouteDescriptor } from './types.js'
+import { AppError } from '../../application/errors.ts'
+import { TaskError } from '../../application/task-service.ts'
+import type { RouteDescriptor } from './types.ts'
 
 export const projectRoutes: readonly RouteDescriptor[] = [
   { method: 'GET', pattern: '/projects/:projectId/events', auth: 'task', handler: async context => {

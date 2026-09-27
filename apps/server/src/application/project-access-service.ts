@@ -1,15 +1,17 @@
 import { randomUUID } from 'node:crypto'
 import type { ProjectId, UserId } from '@wemux/domain'
 import type { Project, ProjectGrant, ProjectGrantRole, ResourceShareScope } from '@wemux/server-domain'
-import { AppError } from './errors.js'
-import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
-import type { Notifications } from './notifications.js'
+import { AppError } from './errors.ts'
+import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
+import type { Notifications } from './notifications.ts'
 
 export type ProjectAccessRole = 'owner' | ProjectGrantRole
 const rank: Record<ProjectAccessRole, number> = { viewer: 1, contributor: 2, manager: 3, owner: 4 }
 
 export class ProjectAccessService {
-  constructor(private readonly store: ServerStore, private readonly notifications?: Notifications) {}
+  private readonly store: ServerStore
+  private readonly notifications?: Notifications
+  constructor(store: ServerStore, notifications?: Notifications) { this.store = store; this.notifications = notifications;}
 
   async list(actor: UserId, teamId?: string): Promise<readonly (Project & { accessRole: ProjectAccessRole })[]> {
     const projects = (await this.store.resources.listProjects()).filter(project => !project.deletedAt && (!teamId || project.teamId === teamId))

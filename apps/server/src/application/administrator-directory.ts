@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import type { AuditEntryId, Timestamp, UserId } from '@wemux/domain'
 import type { InstanceAdministrator, User } from '@wemux/server-domain'
-import type { ServerIdentityReader, ServerIdentityWriter } from './ports/server-store-types.js'
-import type { ServerAuditWriter } from './ports/server-store-types.js'
-import { AppError } from './errors.js'
-import { normalizeEmail } from './email-address.js'
-import { systemClock, type Clock } from './identity-service.js'
+import type { ServerIdentityReader, ServerIdentityWriter } from './ports/server-store-types.ts'
+import type { ServerAuditWriter } from './ports/server-store-types.ts'
+import { AppError } from './errors.ts'
+import { normalizeEmail } from './email-address.ts'
+import { systemClock, type Clock } from './identity-service.ts'
 
 /**
  * 实例管理员的唯一权威：部署者声明的邮箱，而不是任何可自助完成的状态。
@@ -43,7 +43,9 @@ export function parseAdministratorEmails(raw: string | undefined | readonly stri
 
 export class AdministratorDirectory {
   private readonly declared: readonly string[]
-  constructor(private readonly store: AdministratorReader, declared: readonly string[] = [], private readonly clock: Clock = systemClock) {
+  private readonly store: AdministratorReader
+  private readonly clock: Clock
+  constructor(store: AdministratorReader, declared: readonly string[] = [], clock: Clock = systemClock) { this.store = store; this.clock = clock;
     // 构造时再规范化一次：调用方可以传原始配置串，判定语义只在这里定义。
     this.declared = parseAdministratorEmails(declared)
   }

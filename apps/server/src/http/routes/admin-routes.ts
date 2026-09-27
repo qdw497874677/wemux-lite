@@ -1,7 +1,7 @@
 import type { CommandId } from '@wemux/domain'
-import { AppError } from '../../application/errors.js'
-import { readTailnetSelf } from '../../application/tailnet-info.js'
-import type { RouteDescriptor } from './types.js'
+import { AppError } from '../../application/errors.ts'
+import { readTailnetSelf } from '../../application/tailnet-info.ts'
+import type { RouteDescriptor } from './types.ts'
 
 export const adminRoutes: readonly RouteDescriptor[] = [
   { method: 'GET', pattern: '/', auth: 'admin', handler: async context => { await context.operator(); throw new AppError(404, 'Not found') } },

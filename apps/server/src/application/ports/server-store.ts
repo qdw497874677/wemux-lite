@@ -8,7 +8,7 @@ import type {
   ServerIdentityWriter,
   ServerResourceReader,
   ServerResourceWriter,
-} from './server-store-types.js'
+} from './server-store-types.ts'
 
 /**
  * Server persistence seam. Transactions must not perform network, Agent, or
@@ -18,7 +18,7 @@ import type {
  * awaiting public readers or nested transactions is rejected, never self-blocked.
  */
 export interface ServerStore {
-  readonly tasks: import('./server-store-types.js').ServerTaskReader
+  readonly tasks: import('./server-store-types.ts').ServerTaskReader
   readonly identity: ServerIdentityReader
   readonly resources: ServerResourceReader
   readonly commands: ServerCommandReader
@@ -32,7 +32,7 @@ export interface ServerStore {
  * Derived async contexts become inactive on completion; start background work outside.
  */
 export interface ServerStoreTx {
-  readonly tasks: import('./server-store-types.js').ServerTaskReader & import('./server-store-types.js').ServerTaskWriter
+  readonly tasks: import('./server-store-types.ts').ServerTaskReader & import('./server-store-types.ts').ServerTaskWriter
   readonly identity: ServerIdentityReader & ServerIdentityWriter
   readonly resources: ServerResourceReader & ServerResourceWriter
   readonly commands: ServerCommandReader & ServerCommandWriter

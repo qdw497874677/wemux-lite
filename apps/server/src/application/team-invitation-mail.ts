@@ -1,4 +1,4 @@
-import type { MailSettings } from './mail/email-delivery.js'
+import type { MailSettings } from './mail/email-delivery.ts'
 
 export interface TeamInvitationMailInput {
   readonly teamName: string

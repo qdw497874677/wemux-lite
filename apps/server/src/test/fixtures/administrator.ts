@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import type { CredentialId, ProjectId, TeamId, Timestamp, UserId } from '@wemux/domain'
 import type { InstanceAdministrator, Project, Team, User } from '@wemux/server-domain'
-import { AdministratorDirectory } from '../../application/administrator-directory.js'
-import { hashSecret } from '../../application/auth.js'
-import { normalizeEmail } from '../../application/email-address.js'
-import { hashPassword } from '../../application/password.js'
-import type { ServerStore } from '../../application/ports/server-store.js'
-import type { ServerService } from '../../application/server-service.js'
-import { createWemuxServer, type WemuxServerOptions } from '../../server.js'
+import { AdministratorDirectory } from '../../application/administrator-directory.ts'
+import { hashSecret } from '../../application/auth.ts'
+import { normalizeEmail } from '../../application/email-address.ts'
+import { hashPassword } from '../../application/password.ts'
+import type { ServerStore } from '../../application/ports/server-store.ts'
+import type { ServerService } from '../../application/server-service.ts'
+import { createWemuxServer, type WemuxServerOptions } from '../../server.ts'
 
 /**
  * 测试里的部署者：声明邮箱的账号 + 真实 PAT + 管理员归属记录。

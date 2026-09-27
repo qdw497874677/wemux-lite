@@ -6,7 +6,7 @@
  * 任何可能造成头注入的字符（CR/LF）都在这里被拒绝，而不是在 SMTP 层被“顺便”过滤掉。
  */
 import { randomBytes } from 'node:crypto'
-import { invalidEmailReason, normalizeEmail } from '../email-address.js'
+import { invalidEmailReason, normalizeEmail } from '../email-address.ts'
 
 export interface Mailbox {
   readonly address: string

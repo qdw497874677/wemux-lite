@@ -37,13 +37,17 @@ export interface SmtpEnvelope {
 }
 
 export class SmtpError extends Error {
+    readonly stage: string
+    readonly code: number | null
+    readonly detail: string
+    readonly permanent: boolean
   constructor(
-    readonly stage: string,
-    readonly code: number | null,
-    readonly detail: string,
-    readonly permanent = code !== null && code >= 500,
+    stage: string,
+    code: number | null,
+    detail: string,
+    permanent = code !== null && code >= 500,
   ) {
-    super(`SMTP ${stage} failed${code === null ? '' : ` (${code})`}: ${detail}`)
+    super(`SMTP ${stage} failed${code === null ? '' : ` (${code})`}: ${detail}`); this.stage = stage; this.code = code; this.detail = detail; this.permanent = permanent;
     this.name = 'SmtpError'
   }
 }
@@ -72,7 +76,11 @@ class SmtpSession {
   private waiters: { resolve: (response: Response) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }[] = []
   private closed: Error | null = null
 
-  constructor(private socket: net.Socket | tls.TLSSocket, private readonly timeoutMs: number) {
+  private socket: net.Socket | tls.TLSSocket
+
+  private readonly timeoutMs: number
+
+  constructor(socket: net.Socket | tls.TLSSocket, timeoutMs: number) { this.socket = socket; this.timeoutMs = timeoutMs;
     this.attach(socket)
   }
 

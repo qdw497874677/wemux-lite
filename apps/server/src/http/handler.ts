@@ -1,25 +1,30 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { CapabilityError } from '../application/capability-service.js'
-import { CapabilityTokenError } from '../application/capability-token-service.js'
-import { AppError } from '../application/errors.js'
-import { isWebConsoleAuthPath } from '../application/web-console-routes.js'
-import { readCookie } from './cookies.js'
-import { assertCookieWriteAllowed } from './routes-auth.js'
-import { routes } from './routes/index.js'
-import { requiredPatAccess } from './routes/access.js'
-import { findRoute } from './routes/registry.js'
-import type { HttpHandlerOptions, RouteRequestContext } from './routes/types.js'
-import { serveStaticSite } from './static.js'
+import { CapabilityError } from '../application/capability-service.ts'
+import { CapabilityTokenError } from '../application/capability-token-service.ts'
+import { AppError } from '../application/errors.ts'
+import { isWebConsoleAuthPath } from '../application/web-console-routes.ts'
+import { readCookie } from './cookies.ts'
+import { assertCookieWriteAllowed } from './routes-auth.ts'
+import { routes } from './routes/index.ts'
+import { requiredPatAccess } from './routes/access.ts'
+import { findRoute } from './routes/registry.ts'
+import type { HttpHandlerOptions, RouteRequestContext } from './routes/types.ts'
+import { serveStaticSite } from './static.ts'
 
-async function body(request: IncomingMessage): Promise<unknown> {
+async function rawBody(request: IncomingMessage, maximumBytes: number): Promise<Buffer> {
   let size = 0
   const chunks: Buffer[] = []
   for await (const chunk of request) {
     const buffer = Buffer.from(chunk); size += buffer.length
-    if (size > 1024 * 1024) throw new AppError(413, 'Request too large')
+    if (size > maximumBytes) throw new AppError(413, 'Request too large')
     chunks.push(buffer)
   }
-  try { return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {} }
+  return Buffer.concat(chunks)
+}
+async function body(request: IncomingMessage): Promise<unknown> {
+  const maximumBytes = request.method === 'POST' && /^\/api\/sessions\/[^/]+\/fs\/write\/?$/.test(request.url?.split('?')[0] ?? '') ? 14 * 1024 * 1024 : 1024 * 1024
+  const raw = await rawBody(request, maximumBytes)
+  try { return raw.length ? JSON.parse(raw.toString('utf8')) : {} }
   catch { throw new AppError(400, 'Invalid JSON') }
 }
 
@@ -28,7 +33,7 @@ function json(response: ServerResponse, status: number, data: unknown): void {
   response.end(JSON.stringify(data))
 }
 
-export type { HttpHandlerOptions, WorkerControl } from './routes/types.js'
+export type { HttpHandlerOptions, WorkerControl } from './routes/types.ts'
 
 /** Thin HTTP adapter: normalize the URL, resolve credentials, then dispatch through the domain route table. */
 export function httpHandler(options: HttpHandlerOptions) {
@@ -57,7 +62,7 @@ export function httpHandler(options: HttpHandlerOptions) {
       if (matched.route.auth !== 'public' && unsafe && loginSession) assertCookieWriteAllowed(options.identity ?? null, request, loginSession)
 
       let requestActor: Awaited<ReturnType<typeof options.auth.actor>> | null = null
-      let requestAccess: import('../application/auth.js').RequestAccess | null = null
+      let requestAccess: import('../application/auth.ts').RequestAccess | null = null
       if (matched.route.auth !== 'public' && matched.route.auth !== 'worker' && matched.route.auth !== 'capability' && matched.route.auth !== 'task' && bearer && !loginSession) {
         requestAccess = requiredPatAccess(path, method)
         try { requestActor = await options.auth.actor(credential, requestAccess) }
@@ -73,6 +78,7 @@ export function httpHandler(options: HttpHandlerOptions) {
       const context: RouteRequestContext = {
         ...options, request, response, url, rawPath, path, method, bearer, loginSession, credential, params: matched.params,
         readBody: () => body(request),
+        readRawBody: maximumBytes => rawBody(request, maximumBytes ?? 1024 * 1024),
         json: (status, data) => json(response, status, data),
         noContent: () => { response.writeHead(204).end() },
         actor: access => options.auth.taskActor(credential, access ?? requiredPatAccess(path, method)),

@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { AuditEntryId, Timestamp, UserId, WorkerId } from '@wemux/domain'
 import type { LoginSession, PersonalAccessTokenRecord, PersonalAccessTokenScope } from '@wemux/server-domain'
-import type { ServerStore } from './ports/server-store.js'
-import type { AdministratorDirectory } from './administrator-directory.js'
-import { AppError } from './errors.js'
+import type { ServerStore } from './ports/server-store.ts'
+import type { AdministratorDirectory } from './administrator-directory.ts'
+import { AppError } from './errors.ts'
 
 export const hashSecret = (secret: string): string => createHash('sha256').update(secret).digest('hex')
 
@@ -30,7 +30,9 @@ export const retiredSessionPrefix = 'wemux-session-'
  * 实例管理员由 `AdministratorDirectory` 依据部署声明判定，本服务只转达结论。
  */
 export class AuthenticationService {
-  constructor(private readonly store: ServerStore, private readonly administrators: AdministratorDirectory) {}
+  private readonly store: ServerStore
+  private readonly administrators: AdministratorDirectory
+  constructor(store: ServerStore, administrators: AdministratorDirectory) { this.store = store; this.administrators = administrators;}
   private async bearerRecord(token: string): Promise<PersonalAccessTokenRecord> {
     if (token.startsWith(retiredSessionPrefix)) throw new AppError(401, '旧会话凭证已退役，请重新登录', 'retired_credential')
     const record = await this.store.identity.findPersonalAccessToken(hashSecret(token))

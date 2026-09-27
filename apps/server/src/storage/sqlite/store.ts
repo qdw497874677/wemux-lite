@@ -3,10 +3,10 @@ import { DatabaseSync } from 'node:sqlite'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { AgentInboxMessage, CapabilityAsset, EventSeq, JournalEvent, ProjectId, SessionId, TeamId, Timestamp, WorkerId } from '@wemux/domain'
 import type { AuditEntry, AuditPage, AuditQuery, CommandProjection, EnrollmentTokenRecord, ExternalLoginIdentity, Membership, OAuthTransaction, PersonalAccessTokenRecord, RegistrationAttempt, SessionCacheState, SessionForkRecord, TeamInvitation, User, UserEmail, VerificationChallenge, VerificationPurpose, Worker, WorkerCredentialRecord, Workspace } from '@wemux/server-domain'
-import type { ServerStore, ServerStoreTx } from '../../application/ports/server-store.js'
-import type { PendingCommand } from '../../application/ports/server-store-types.js'
-import { AppError } from '../../application/errors.js'
-import { migrate } from './migrations.js'
+import type { ServerStore, ServerStoreTx } from '../../application/ports/server-store.ts'
+import type { PendingCommand } from '../../application/ports/server-store-types.ts'
+import { AppError } from '../../application/errors.ts'
+import { migrate } from './migrations.ts'
 
 /** One Fork per (Project, requestId): the idempotency index row points at the winning Fork. */
 const forkRequestIndexId = (projectId: ProjectId, requestId: string): string => `${projectId}:${requestId}`

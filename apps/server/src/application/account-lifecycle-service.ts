@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { AuditEntryId, CommandId, EventSeq, MessageId, SessionId, Timestamp, TurnId, UserId, WorkerId } from '@wemux/domain'
 import type { AuditPage, AuditQuery, User, UserStatus } from '@wemux/server-domain'
-import type { AdministratorDirectory } from './administrator-directory.js'
-import { AppError } from './errors.js'
-import type { Clock, IdentityService } from './identity-service.js'
-import { systemClock } from './identity-service.js'
-import type { Notifications } from './notifications.js'
-import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
+import type { AdministratorDirectory } from './administrator-directory.ts'
+import { AppError } from './errors.ts'
+import type { Clock, IdentityService } from './identity-service.ts'
+import { systemClock } from './identity-service.ts'
+import type { Notifications } from './notifications.ts'
+import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
 
 export interface AccountLifecycleView {
   readonly status: UserStatus
@@ -19,13 +19,18 @@ const versionOf = (user: User): number => user.authVersion ?? 0
 const at = (clock: Clock): Timestamp => clock.now().toISOString() as Timestamp
 
 export class AccountLifecycleService {
+  private readonly store: ServerStore
+  private readonly administrators: AdministratorDirectory
+  private readonly identity: IdentityService
+  private readonly notifications?: Notifications
+  private readonly clock: Clock
   constructor(
-    private readonly store: ServerStore,
-    private readonly administrators: AdministratorDirectory,
-    private readonly identity: IdentityService,
-    private readonly notifications?: Notifications,
-    private readonly clock: Clock = systemClock,
-  ) {}
+    store: ServerStore,
+    administrators: AdministratorDirectory,
+    identity: IdentityService,
+    notifications?: Notifications,
+    clock: Clock = systemClock,
+  ) { this.store = store; this.administrators = administrators; this.identity = identity; this.notifications = notifications; this.clock = clock;}
 
   async view(actorId: UserId): Promise<AccountLifecycleView> {
     const user = await this.requireUser(actorId)

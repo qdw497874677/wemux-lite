@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import type { CommandId, EventSeq, SessionId, Timestamp, TurnId, WorkerId } from '@wemux/domain'
 import type { WorkerCommand } from '@wemux/wire-protocol'
 import type { Run, TaskActivity } from '@wemux/web-contract/task-platform'
-import type { ServerStoreTx } from './ports/server-store.js'
+import type { ServerStoreTx } from './ports/server-store.ts'
 
 export const isActiveRun = (run: Pick<Run, 'status'>) => ['pending', 'running', 'cancelling'].includes(run.status)
 

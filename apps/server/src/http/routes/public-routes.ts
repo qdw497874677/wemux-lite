@@ -1,7 +1,7 @@
 import type { CapabilityToolName } from '@wemux/domain'
-import { AppError } from '../../application/errors.js'
-import { serveWorkerDownload } from '../worker-downloads.js'
-import type { RouteDescriptor } from './types.js'
+import { AppError } from '../../application/errors.ts'
+import { serveWorkerDownload } from '../worker-downloads.ts'
+import type { RouteDescriptor } from './types.ts'
 
 export const publicRoutes: readonly RouteDescriptor[] = [
   { method: 'GET', pattern: '/health', auth: 'public', handler: ({ json }) => json(200, { status: 'ok' }) },

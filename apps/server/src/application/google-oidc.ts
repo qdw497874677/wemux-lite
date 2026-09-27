@@ -7,7 +7,7 @@
  * - 身份主键是规范 `(issuer, subject)`；邮箱只用于首次建号的人性化命名与冲突判定。
  */
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose'
-import { normalizeEmail, invalidEmailReason } from './email-address.js'
+import { normalizeEmail, invalidEmailReason } from './email-address.ts'
 
 /** Google 的两种等价写法；规范化后统一为 `accounts.google.com`，避免同一个人被当成两个身份。 */
 export const googleIssuer = 'accounts.google.com'

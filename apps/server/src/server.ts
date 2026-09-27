@@ -1,44 +1,50 @@
-import { TaskService } from './application/task-service.js'
+import { TaskService } from './application/task-service.ts'
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
-import { SqliteServerStore } from './storage/sqlite/store.js'
-import { AuthenticationService } from './application/auth.js'
-import { AdministratorDirectory, parseAdministratorEmails } from './application/administrator-directory.js'
-import { IdentityService, defaultLoginSessionPolicy, defaultSessionCookieName, systemClock } from './application/identity-service.js'
-import { InstanceSettingsService } from './application/instance-settings.js'
-import { EmailRegistrationService } from './application/email-registration.js'
-import { AccountSecurityService } from './application/account-security-service.js'
-import { GoogleAuthenticationService, resolveGoogleSettings, type GoogleEnvironment } from './application/google-authentication.js'
-import type { GoogleTokenVerifier } from './application/google-oidc.js'
-import { resolveMailSettings, type MailEnv, type MailSettings } from './application/mail/email-delivery.js'
-import { CapabilityService } from './application/capability-service.js'
-import { CapabilityTokenService } from './application/capability-token-service.js'
-import { now } from './application/server-service.js'
-import { Notifications } from './application/notifications.js'
-import { ServerService } from './application/server-service.js'
-import { SessionLineageService } from './application/session-lineage-service.js'
-import { TeamService } from './application/team-service.js'
-import { ProjectAccessService } from './application/project-access-service.js'
-import { CanvasCollaborationService } from './application/canvas-collaboration-service.js'
-import { CanvasLayoutService } from './application/canvas-layout-service.js'
-import { ConnectorService } from './application/connector-service.js'
-import { SqliteCanvasLayoutRepository } from './storage/sqlite/canvas-layout-repository.js'
-import { SqliteConnectorRepository } from './storage/sqlite/connector-repository.js'
-import { WorkerAccessService } from './application/worker-access-service.js'
-import { SessionAccessService } from './application/session-access-service.js'
-import { PersonalAccessTokenService } from './application/personal-access-token-service.js'
-import { AccountLifecycleService } from './application/account-lifecycle-service.js'
-import { WorkerService } from './application/worker-service.js'
-import { SessionFileService } from './application/session-file-service.js'
-import { SessionTerminalService } from './application/session-terminal-service.js'
-import { httpHandler } from './http/handler.js'
-import { SessionStreams } from './http/sse.js'
-import { TerminalStreams } from './http/terminal-sse.js'
-import { ProjectStreams } from './http/project-sse.js'
-import { CanvasCollaborationStreams } from './http/canvas-collaboration-sse.js'
-import type { StaticSite } from './http/static.js'
-import { WorkerGateway } from './worker-ws/gateway.js'
-import { ServerTransportStore } from './worker-ws/transport-store.js'
+import { SqliteServerStore } from './storage/sqlite/store.ts'
+import { AuthenticationService } from './application/auth.ts'
+import { AdministratorDirectory, parseAdministratorEmails } from './application/administrator-directory.ts'
+import { IdentityService, defaultLoginSessionPolicy, defaultSessionCookieName, systemClock } from './application/identity-service.ts'
+import { InstanceSettingsService } from './application/instance-settings.ts'
+import { EmailRegistrationService } from './application/email-registration.ts'
+import { AccountSecurityService } from './application/account-security-service.ts'
+import { GoogleAuthenticationService, resolveGoogleSettings, type GoogleEnvironment } from './application/google-authentication.ts'
+import type { GoogleTokenVerifier } from './application/google-oidc.ts'
+import { resolveMailSettings, type MailEnv, type MailSettings } from './application/mail/email-delivery.ts'
+import { CapabilityService } from './application/capability-service.ts'
+import { CapabilityTokenService } from './application/capability-token-service.ts'
+import { now } from './application/server-service.ts'
+import { Notifications } from './application/notifications.ts'
+import { ServerService } from './application/server-service.ts'
+import { SessionLineageService } from './application/session-lineage-service.ts'
+import { TeamService } from './application/team-service.ts'
+import { ProjectAccessService } from './application/project-access-service.ts'
+import { CanvasCollaborationService } from './application/canvas-collaboration-service.ts'
+import { CanvasLayoutService } from './application/canvas-layout-service.ts'
+import { ConnectorService } from './application/connector-service.ts'
+import { ChannelService } from './application/channel-service.ts'
+import { ChannelRouter } from './application/channel-router.ts'
+import { ChannelOutbox } from './application/channel-outbox.ts'
+import { GenericWebhookAdapter } from './channels/generic-webhook-adapter.ts'
+import { AesGcmSecretCodec } from '@wemux/connector'
+import { SqliteCanvasLayoutRepository } from './storage/sqlite/canvas-layout-repository.ts'
+import { SqliteConnectorRepository } from './storage/sqlite/connector-repository.ts'
+import { SqliteChannelRepository } from './storage/sqlite/channel-repository.ts'
+import { WorkerAccessService } from './application/worker-access-service.ts'
+import { SessionAccessService } from './application/session-access-service.ts'
+import { PersonalAccessTokenService } from './application/personal-access-token-service.ts'
+import { AccountLifecycleService } from './application/account-lifecycle-service.ts'
+import { WorkerService } from './application/worker-service.ts'
+import { SessionFileService } from './application/session-file-service.ts'
+import { SessionTerminalService } from './application/session-terminal-service.ts'
+import { httpHandler } from './http/handler.ts'
+import { SessionStreams } from './http/sse.ts'
+import { TerminalStreams } from './http/terminal-sse.ts'
+import { ProjectStreams } from './http/project-sse.ts'
+import { CanvasCollaborationStreams } from './http/canvas-collaboration-sse.ts'
+import type { StaticSite } from './http/static.ts'
+import { WorkerGateway } from './worker-ws/gateway.ts'
+import { ServerTransportStore } from './worker-ws/transport-store.ts'
 
 export interface WemuxServerOptions {
   databasePath: string
@@ -58,6 +64,10 @@ export interface WemuxServerOptions {
   google?: GoogleEnvironment
   /** 自托管替身 Provider（本地验收、集成测试）用的令牌验证器；生产不要传。 */
   googleVerifier?: GoogleTokenVerifier
+  /** Channel token encryption key; defaults to WEMUX_CONNECTOR_ENCRYPTION_KEY. */
+  channelEncryptionKey?: string
+  /** Test/deployment guarded-fetch override for Channel callbacks. */
+  channelFetch?: typeof fetch
 }
 
 /** 邮件配置错误不阻断控制面启动：降级为“不可用 + 原因”，由 /auth/options 公开。 */
@@ -126,7 +136,14 @@ export function createWemuxServer(options: WemuxServerOptions) {
   let gateway: WorkerGateway | undefined
   const connectorRepository = new SqliteConnectorRepository(options.databasePath)
   const connectors = new ConnectorService(connectorRepository, store, projects, workerAccess, notifications)
-  const workers = new WorkerService(store, notifications, (workerId, report) => connectors.report(workerId, report))
+  const channelRepository = new SqliteChannelRepository(options.databasePath)
+  const encryptionKey = options.channelEncryptionKey?.trim() || process.env.WEMUX_CONNECTOR_ENCRYPTION_KEY?.trim()
+  const channelCodec = encryptionKey ? new AesGcmSecretCodec({ currentKey: encryptionKey, previousKeys: process.env.WEMUX_CONNECTOR_ENCRYPTION_PREVIOUS_KEYS?.split(',').map(value => value.trim()).filter(Boolean) }) : null
+  const channels = new ChannelService(channelRepository, channelCodec, projects, sessionAccess, workerAccess)
+  const channelRouter = new ChannelRouter(channelRepository, sessionAccess, projects, workerAccess, service)
+  const channelOutbox = new ChannelOutbox(channelRepository, projects, sessionAccess, workerAccess, store, { deploymentAllowsPrivateNetwork: process.env.WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK === 'true', connectorAllowsPrivateNetwork: true }, options.channelFetch)
+  const genericWebhook = new GenericWebhookAdapter(channelRepository, channelCodec)
+  const workers = new WorkerService(store, notifications, (workerId, report) => connectors.report(workerId, report), async (sessionId, events) => { await channelOutbox.projectJournal(sessionId, events); setImmediate(() => void channelOutbox.drain().catch(() => undefined)) })
   const workerGateway = { send: (workerId: import('@wemux/domain').WorkerId, payload: import('@wemux/wire-protocol').ServerPayload) => {
     if (!gateway) throw new Error('Worker gateway is not ready')
     return gateway.send(workerId, payload)
@@ -163,6 +180,10 @@ export function createWemuxServer(options: WemuxServerOptions) {
     canvasCollaborationStreams,
     canvasLayouts,
     connectors,
+    channels,
+    channelRouter,
+    channelOutbox,
+    genericWebhook,
   }))
   gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))
   let closed = false
@@ -191,6 +212,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
       await gateway.close()
       if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
       connectorRepository.close()
+      channelRepository.close()
       store.close()
     },
   }

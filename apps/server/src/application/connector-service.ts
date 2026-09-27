@@ -4,12 +4,12 @@ import type { ConnectorDefinition, ConnectorId, HttpConnectorDefinition } from '
 import { stableFingerprint } from '@wemux/connector'
 import type { ConnectorMutationResult, ConnectorTestResult } from '@wemux/server-domain'
 import type { ConnectorRevisionReport, WorkerCommand } from '@wemux/wire-protocol'
-import { AppError } from './errors.js'
-import type { Notifications } from './notifications.js'
-import type { ProjectAccessService } from './project-access-service.js'
-import type { WorkerAccessService } from './worker-access-service.js'
-import type { ServerStore } from './ports/server-store.js'
-import type { ConnectorRepository, ConnectorRequestRecord } from './ports/connector-repository.js'
+import { AppError } from './errors.ts'
+import type { Notifications } from './notifications.ts'
+import type { ProjectAccessService } from './project-access-service.ts'
+import type { WorkerAccessService } from './worker-access-service.ts'
+import type { ServerStore } from './ports/server-store.ts'
+import type { ConnectorRepository, ConnectorRequestRecord } from './ports/connector-repository.ts'
 
 interface WriteInput { readonly projectId: ProjectId; readonly requestId: string; readonly fingerprint: string }
 interface DefinitionInput extends WriteInput { readonly definition: unknown }

@@ -10,14 +10,14 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { AuditEntryId, Timestamp, UserId } from '@wemux/domain'
 import type { ExternalLoginIdentity, LoginSession, User, UserEmail } from '@wemux/server-domain'
-import type { ServerStore } from './ports/server-store.js'
-import { AppError } from './errors.js'
-import { deriveUsername } from './email-registration.js'
-import { maskEmail } from './email-address.js'
-import { hashSecret } from './auth.js'
-import { systemClock, type Clock, type IdentityService, type IssuedLoginSession } from './identity-service.js'
-import type { InstanceSettingsService } from './instance-settings.js'
-import { GoogleExchangeError, GoogleVerificationError, createGoogleTokenVerifier, googleIssuer, normalizeGoogleIssuer, safeReturnTo, type GoogleIdentityClaims, type GoogleTokenVerifier } from './google-oidc.js'
+import type { ServerStore } from './ports/server-store.ts'
+import { AppError } from './errors.ts'
+import { deriveUsername } from './email-registration.ts'
+import { maskEmail } from './email-address.ts'
+import { hashSecret } from './auth.ts'
+import { systemClock, type Clock, type IdentityService, type IssuedLoginSession } from './identity-service.ts'
+import type { InstanceSettingsService } from './instance-settings.ts'
+import { GoogleExchangeError, GoogleVerificationError, createGoogleTokenVerifier, googleIssuer, normalizeGoogleIssuer, safeReturnTo, type GoogleIdentityClaims, type GoogleTokenVerifier } from './google-oidc.ts'
 
 export interface GoogleEnvironment {
   readonly [key: string]: string | undefined
@@ -108,7 +108,8 @@ export class GoogleAuthenticationService {
   private readonly clock: Clock
   private readonly verifier: GoogleTokenVerifier
   private readonly transactionMs: number
-  constructor(private readonly input: GoogleAuthenticationInput) {
+  private readonly input: GoogleAuthenticationInput
+  constructor(input: GoogleAuthenticationInput) { this.input = input;
     this.clock = input.clock ?? systemClock
     this.verifier = input.verifier ?? createGoogleTokenVerifier()
     this.transactionMs = input.transactionMs ?? googleTransactionMs

@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import type { ProjectId, SessionId, UserId } from '@wemux/domain'
-import type { ProjectAccessRole } from './project-access-service.js'
+import type { ProjectAccessRole } from './project-access-service.ts'
 import type { Session, SessionGrant, SessionShareScope } from '@wemux/server-domain'
-import { AppError } from './errors.js'
-import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
-import type { ProjectAccessService } from './project-access-service.js'
-import type { Notifications } from './notifications.js'
+import { AppError } from './errors.ts'
+import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
+import type { ProjectAccessService } from './project-access-service.ts'
+import type { Notifications } from './notifications.ts'
 
 export type SessionAccessCapability = 'read' | 'write' | 'control'
 export interface SessionAccessView {
@@ -18,7 +18,10 @@ export interface SessionAccessView {
 const projectRank: Record<ProjectAccessRole, number> = { viewer: 1, contributor: 2, manager: 3, owner: 4 }
 
 export class SessionAccessService {
-  constructor(private readonly store: ServerStore, private readonly projects: ProjectAccessService, private readonly notifications?: Notifications) {}
+  private readonly store: ServerStore
+  private readonly projects: ProjectAccessService
+  private readonly notifications?: Notifications
+  constructor(store: ServerStore, projects: ProjectAccessService, notifications?: Notifications) { this.store = store; this.projects = projects; this.notifications = notifications;}
 
   async list(actor: UserId): Promise<readonly (Session & { access: SessionAccessView })[]> {
     const visible = await Promise.all((await this.store.resources.listSessions()).filter(session => !session.deletedAt).map(async session => {

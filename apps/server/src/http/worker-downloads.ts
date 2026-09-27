@@ -2,7 +2,7 @@ import { ncDownloadScript } from '@wemux/web-contract'
 import { open } from 'node:fs/promises'
 import type { ServerResponse } from 'node:http'
 import { pipeline } from 'node:stream/promises'
-import { AppError } from '../application/errors.js'
+import { AppError } from '../application/errors.ts'
 
 export const workerTarballPath = '/downloads/worker.tgz'
 export const workerInstallerPath = '/downloads/install-worker.sh'

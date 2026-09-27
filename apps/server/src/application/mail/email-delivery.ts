@@ -10,9 +10,9 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { WEB_CONSOLE_AUTH_PATHS } from '../web-console-routes.js'
-import { buildMailData, parseMailbox, type Mailbox } from './message.js'
-import { sendSmtpMessage, type SmtpConfig, type SmtpSecurity } from './smtp-client.js'
+import { WEB_CONSOLE_AUTH_PATHS } from '../web-console-routes.ts'
+import { buildMailData, parseMailbox, type Mailbox } from './message.ts'
+import { sendSmtpMessage, type SmtpConfig, type SmtpSecurity } from './smtp-client.ts'
 
 export interface OutgoingMail {
   readonly to: string
@@ -27,8 +27,9 @@ export interface EmailDelivery {
 
 /** 没有可用投递路径时的显式状态：接口层据此返回“未开放”而不是“已发送”。 */
 export class MailNotConfiguredError extends Error {
-  constructor(readonly reason: string) {
-    super(`Email delivery is not configured: ${reason}`)
+    readonly reason: string
+  constructor(reason: string) {
+    super(`Email delivery is not configured: ${reason}`); this.reason = reason;
     this.name = 'MailNotConfiguredError'
   }
 }
@@ -47,7 +48,10 @@ export interface MailSettings {
 
 export class SmtpEmailDelivery implements EmailDelivery {
   readonly kind = 'smtp' as const
-  constructor(private readonly config: SmtpConfig, private readonly from: Mailbox, private readonly clock: () => Date = () => new Date()) {}
+  private readonly config: SmtpConfig
+  private readonly from: Mailbox
+  private readonly clock: () => Date
+  constructor(config: SmtpConfig, from: Mailbox, clock: () => Date = () => new Date()) { this.config = config; this.from = from; this.clock = clock;}
 
   async deliver(mail: OutgoingMail): Promise<void> {
     const data = buildMailData({ from: this.from, to: [parseMailbox(mail.to)], subject: mail.subject, text: mail.text, date: this.clock() })
@@ -57,7 +61,10 @@ export class SmtpEmailDelivery implements EmailDelivery {
 
 export class OutboxEmailDelivery implements EmailDelivery {
   readonly kind = 'outbox' as const
-  constructor(private readonly directory: string, private readonly from: Mailbox, private readonly clock: () => Date = () => new Date()) {}
+  private readonly directory: string
+  private readonly from: Mailbox
+  private readonly clock: () => Date
+  constructor(directory: string, from: Mailbox, clock: () => Date = () => new Date()) { this.directory = directory; this.from = from; this.clock = clock;}
 
   async deliver(mail: OutgoingMail): Promise<void> {
     const recipient = parseMailbox(mail.to)

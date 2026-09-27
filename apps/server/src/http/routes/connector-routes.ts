@@ -1,8 +1,8 @@
 import type { ConnectorId } from '@wemux/connector'
 import { stableFingerprint } from '@wemux/connector'
 import type { ProjectId, WorkerId } from '@wemux/domain'
-import { AppError } from '../../application/errors.js'
-import type { RouteDescriptor, RouteRequestContext } from './types.js'
+import { AppError } from '../../application/errors.ts'
+import type { RouteDescriptor, RouteRequestContext } from './types.ts'
 
 const service = (context: RouteRequestContext) => {
   if (!context.connectors) throw new AppError(404, 'Not found')

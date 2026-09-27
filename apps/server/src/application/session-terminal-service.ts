@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import type { SessionId, WorkerId } from '@wemux/domain'
 import type { TerminalRequestPayload, TerminalResponsePayload } from '@wemux/wire-protocol'
-import { AppError } from './errors.js'
-import type { ServerService } from './server-service.js'
-import type { WorkerService } from './worker-service.js'
+import { AppError } from './errors.ts'
+import type { ServerService } from './server-service.ts'
+import type { WorkerService } from './worker-service.ts'
 
 export interface WorkerTerminalGateway {
   send(workerId: WorkerId, payload: TerminalRequestPayload): Promise<void>
@@ -16,12 +16,16 @@ type TerminalInput =
   | { readonly operation: 'dispose'; readonly terminalId: string }
 
 export class SessionTerminalService {
+  private readonly sessions: ServerService
+  private readonly workers: WorkerService
+  private readonly gateway: WorkerTerminalGateway
+  private readonly timeoutMs: number
   constructor(
-    private readonly sessions: ServerService,
-    private readonly workers: WorkerService,
-    private readonly gateway: WorkerTerminalGateway,
-    private readonly timeoutMs = 10_000,
-  ) {}
+    sessions: ServerService,
+    workers: WorkerService,
+    gateway: WorkerTerminalGateway,
+    timeoutMs = 10_000,
+  ) { this.sessions = sessions; this.workers = workers; this.gateway = gateway; this.timeoutMs = timeoutMs;}
 
   request(sessionId: SessionId, input: TerminalInput): Promise<TerminalResponsePayload> {
     return this.perform(sessionId, input)

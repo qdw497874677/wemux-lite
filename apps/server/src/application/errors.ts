@@ -1,5 +1,7 @@
 export class AppError extends Error {
-  constructor(readonly status: number, message: string, readonly code?: string) { super(message) }
+  readonly status: number
+  readonly code?: string
+  constructor(status: number, message: string, code?: string) { super(message); this.status = status; this.code = code }
 }
 export function requireValue<T>(value: T | null | undefined, message = 'Not found'): T {
   if (value == null) throw new AppError(404, message)

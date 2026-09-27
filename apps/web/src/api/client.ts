@@ -1,6 +1,7 @@
 import type { Run, LaunchRequest, LaunchResponse, TaskSummary, TaskDetail, TaskCreate, TaskPatch, TaskActivity, AssignmentRequest, CreateTaskWorkspaceRequest, UnbindWorkspaceRequest } from '@wemux/web-contract/task-platform'
 import type { CanvasLayoutResponse, CanvasLayoutSaveRequest, CanvasLayoutSaveResponse, CanvasLayoutScope, SessionGraphResponse } from '@wemux/web-contract/session-graph'
 import type { ConnectorDTO, ConnectorListDTO, ConnectorTestDTO, ConnectorWriteDTO } from '@wemux/web-contract/connectors'
+import type { ChannelListDTO, CreateChannelBindingDTO, CreateChannelDTO, CreatedChannelDTO } from '@wemux/web-contract/channels'
 import { randomId } from '../lib/random.ts'
 import { readDeviceId } from '../lib/device-scope.ts'
 import type {
@@ -71,6 +72,11 @@ export const routes = {
   connectors: (projectId: string) => `/api/projects/${id(projectId)}/connectors`,
   connector: (projectId: string, connectorId: string) => `/api/projects/${id(projectId)}/connectors/${id(connectorId)}`,
   connectorState: (projectId: string, connectorId: string, action: 'enable' | 'disable' | 'test') => `/api/projects/${id(projectId)}/connectors/${id(connectorId)}/${action}`,
+  channels: (projectId: string) => `/api/projects/${id(projectId)}/channels`,
+  channelState: (projectId: string, channelId: string) => `/api/projects/${id(projectId)}/channels/${id(channelId)}/enabled`,
+  channelBindings: (projectId: string) => `/api/projects/${id(projectId)}/channel-bindings`,
+  channelBindingState: (projectId: string, bindingId: string) => `/api/projects/${id(projectId)}/channel-bindings/${id(bindingId)}/enabled`,
+  channelReplay: (projectId: string, deliveryId: string) => `/api/projects/${id(projectId)}/channel-deliveries/${id(deliveryId)}/replay`,
   workspaces: '/api/workspaces',
   workspacePlacements: (workspaceId: string) => `/api/workspaces/${id(workspaceId)}/placements`,
   reprovisionWorkspace: (workspaceId: string) => `/api/workspaces/${id(workspaceId)}/reprovision`,
@@ -283,6 +289,12 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     updateConnector: (projectId: string, connectorId: string, body: ConnectorWriteDTO) => request<ConnectorDTO>(routes.connector(projectId, connectorId), body, undefined, 'PUT'),
     setConnectorEnabled: (projectId: string, connectorId: string, enabled: boolean, body: { requestId: string; expectedRevision: number }) => request<ConnectorDTO>(routes.connectorState(projectId, connectorId, enabled ? 'enable' : 'disable'), body),
     testConnector: (projectId: string, connectorId: string, body: ConnectorTestDTO) => request<{ requestId: string; connectorId: string; workerId: string; revision: number; status: string }>(routes.connectorState(projectId, connectorId, 'test'), body),
+    channels: (projectId: string, signal?: AbortSignal) => request<ChannelListDTO>(routes.channels(projectId), undefined, signal),
+    createChannel: (projectId: string, body: CreateChannelDTO) => request<CreatedChannelDTO>(routes.channels(projectId), body),
+    setChannelEnabled: (projectId: string, channelId: string, body: { requestId: string; expectedRevision: number; enabled: boolean }) => request<unknown>(routes.channelState(projectId, channelId), body),
+    createChannelBinding: (projectId: string, body: CreateChannelBindingDTO) => request<unknown>(routes.channelBindings(projectId), body),
+    setChannelBindingEnabled: (projectId: string, bindingId: string, body: { requestId: string; expectedRevision: number; enabled: boolean }) => request<unknown>(routes.channelBindingState(projectId, bindingId), body),
+    replayChannelDelivery: (projectId: string, deliveryId: string, body: { requestId: string; reason: string }) => request<unknown>(routes.channelReplay(projectId, deliveryId), body),
     projectGrants: (projectId: string, signal?: AbortSignal) => list<{ projectId: string; userId: string; role: 'viewer' | 'contributor' | 'manager' }>(routes.projectGrants(projectId), signal),
     updateProjectAccess: (projectId: string, shareScope: ProjectDTO['shareScope']) => request<ProjectDTO>(routes.projectAccess(projectId), { shareScope }, undefined, 'PATCH'),
     grantProject: (projectId: string, userId: string, role: 'viewer' | 'contributor' | 'manager') => request<{ projectId: string; userId: string; role: string }>(routes.projectGrants(projectId), { userId, role }),

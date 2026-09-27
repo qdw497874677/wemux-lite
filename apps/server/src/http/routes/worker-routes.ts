@@ -1,6 +1,6 @@
 import type { WorkerId } from '@wemux/domain'
-import { AppError } from '../../application/errors.js'
-import type { RouteDescriptor } from './types.js'
+import { AppError } from '../../application/errors.ts'
+import type { RouteDescriptor } from './types.ts'
 
 const access = <T>(value: T | null | undefined): T => {
   if (!value) throw new AppError(404, 'Not found')

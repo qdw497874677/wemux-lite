@@ -20,15 +20,16 @@ import type {
   CapabilityRuntimePayload,
   CapabilitySessionInfoResult,
 } from '@wemux/wire-protocol'
-import type { ServerStore } from './ports/server-store.js'
-import { CapabilityTokenService } from './capability-token-service.js'
+import type { ServerStore } from './ports/server-store.ts'
+import { CapabilityTokenService } from './capability-token-service.ts'
 
 export class CapabilityError extends Error {
+    readonly code: 'forbidden' | 'not-found' | 'invalid-input'
   constructor(
-    readonly code: 'forbidden' | 'not-found' | 'invalid-input',
+    code: 'forbidden' | 'not-found' | 'invalid-input',
     message: string,
   ) {
-    super(message)
+    super(message); this.code = code;
   }
 }
 
@@ -47,11 +48,14 @@ const ASSET_FIELD_LIMIT = 256
 const ASSET_PATH_LIMIT = 1024
 
 export class CapabilityService {
+  private readonly store: ServerStore
+  private readonly now: () => Timestamp
+  private readonly tokens: CapabilityTokenService
   constructor(
-    private readonly store: ServerStore,
-    private readonly now: () => Timestamp,
-    private readonly tokens: CapabilityTokenService,
-  ) {}
+    store: ServerStore,
+    now: () => Timestamp,
+    tokens: CapabilityTokenService,
+  ) { this.store = store; this.now = now; this.tokens = tokens;}
 
   async listProjectAssets(projectId: ProjectId): Promise<readonly CapabilityAsset[]> {
     return this.store.resources.listCapabilityAssets(projectId)

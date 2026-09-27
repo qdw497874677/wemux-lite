@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import type { SessionId, UserId, WorkerId } from '@wemux/domain'
+import type { TerminalEventPayload } from '@wemux/wire-protocol'
 
 export interface NotificationFailure { readonly key: string; readonly error: unknown }
 type Listener = () => void | Promise<void>
@@ -8,7 +9,8 @@ type ErrorReporter = (failure: NotificationFailure) => void | Promise<void>
 /** In-process wakeups only; commands and events remain durable in the store. */
 export class Notifications {
   private readonly emitter = new EventEmitter()
-  constructor(private readonly reportError: ErrorReporter = failure => { console.error('Notification subscriber failed', failure) }) {
+  private readonly reportError: ErrorReporter
+  constructor(reportError: ErrorReporter = failure => { console.error('Notification subscriber failed', failure) }) { this.reportError = reportError;
     this.emitter.setMaxListeners(0)
   }
   project(event: import('@wemux/web-contract/task-platform').ProjectEvent): void { this.emitter.emit(`project:${event.projectId}`, event) }

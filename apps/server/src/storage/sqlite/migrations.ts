@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite'
-import { runInvariants } from './run-invariants.js'
-import { retentionDestinationInvariants, retentionInvariants } from './retention-invariants.js'
+import { runInvariants } from './run-invariants.ts'
+import { retentionDestinationInvariants, retentionInvariants } from './retention-invariants.ts'
 
 const legacyMigrations = [
   `CREATE TABLE records (kind TEXT NOT NULL, id TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)), PRIMARY KEY(kind,id));
@@ -540,6 +540,46 @@ const accountMigrations = [
      request_id TEXT NOT NULL, command_id TEXT NOT NULL, status TEXT NOT NULL,
      credential_availability TEXT NOT NULL, message TEXT, updated_at TEXT NOT NULL,
      PRIMARY KEY(connector_id,worker_id), UNIQUE(command_id));`,
+  `CREATE TABLE IF NOT EXISTS channel_definitions (
+     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0),
+     enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), callback_url TEXT,
+     data TEXT NOT NULL CHECK(json_valid(data)),
+     CHECK(json_extract(data,'$.id') IS id AND json_extract(data,'$.projectId') IS project_id
+       AND json_extract(data,'$.revision') IS revision AND json_extract(data,'$.enabled') IS enabled));
+   CREATE INDEX IF NOT EXISTS channel_definitions_project ON channel_definitions(project_id,id);
+   CREATE TABLE IF NOT EXISTS channel_secrets (
+     credential_id TEXT PRIMARY KEY, channel_id TEXT NOT NULL UNIQUE REFERENCES channel_definitions(id),
+     revision INTEGER NOT NULL CHECK(revision > 0), ciphertext TEXT NOT NULL CHECK(ciphertext LIKE 'enc:v2:%'),
+     created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+   CREATE TABLE IF NOT EXISTS channel_requests (
+     project_id TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+     operation TEXT NOT NULL, result TEXT NOT NULL CHECK(json_valid(result)), created_at TEXT NOT NULL,
+     PRIMARY KEY(project_id,request_id));
+   CREATE TABLE IF NOT EXISTS channel_bindings (
+     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, channel_id TEXT NOT NULL REFERENCES channel_definitions(id),
+     external_conversation_key TEXT NOT NULL, session_id TEXT NOT NULL, worker_id TEXT NOT NULL,
+     revision INTEGER NOT NULL CHECK(revision > 0), enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+     callback_url TEXT NOT NULL, created_by TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)),
+     UNIQUE(channel_id,external_conversation_key),
+     CHECK(json_extract(data,'$.id') IS id AND json_extract(data,'$.projectId') IS project_id
+       AND json_extract(data,'$.channelId') IS channel_id AND json_extract(data,'$.sessionId') IS session_id
+       AND json_extract(data,'$.workerId') IS worker_id AND json_extract(data,'$.revision') IS revision
+       AND json_extract(data,'$.enabled') IS enabled));
+   CREATE INDEX IF NOT EXISTS channel_bindings_project ON channel_bindings(project_id,channel_id);
+   CREATE TABLE IF NOT EXISTS channel_inbound_deliveries (
+     id TEXT PRIMARY KEY, channel_id TEXT NOT NULL REFERENCES channel_definitions(id), project_id TEXT NOT NULL,
+     provider_event_id TEXT NOT NULL, fingerprint TEXT NOT NULL, status TEXT NOT NULL,
+     session_request_id TEXT NOT NULL, received_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+     data TEXT NOT NULL CHECK(json_valid(data)), UNIQUE(channel_id,provider_event_id));
+   CREATE INDEX IF NOT EXISTS channel_inbound_status ON channel_inbound_deliveries(status,received_at);
+   CREATE UNIQUE INDEX IF NOT EXISTS channel_inbound_session_request ON channel_inbound_deliveries(session_request_id);
+   CREATE TABLE IF NOT EXISTS channel_outbound_deliveries (
+     id TEXT PRIMARY KEY, channel_id TEXT NOT NULL REFERENCES channel_definitions(id), binding_id TEXT NOT NULL REFERENCES channel_bindings(id),
+     project_id TEXT NOT NULL, session_id TEXT NOT NULL, journal_identity TEXT NOT NULL,
+     status TEXT NOT NULL, attempt INTEGER NOT NULL CHECK(attempt >= 0), next_attempt_at TEXT, lease_expires_at TEXT,
+     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)),
+     UNIQUE(channel_id,binding_id,journal_identity));
+   CREATE INDEX IF NOT EXISTS channel_outbound_claim ON channel_outbound_deliveries(status,next_attempt_at,lease_expires_at,created_at);`,
 ]
 
 const migrations = [...legacyMigrations, ...accountMigrations]

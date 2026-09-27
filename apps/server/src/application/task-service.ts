@@ -1,18 +1,20 @@
-import { taskFacts, reuseFacts, taskCapabilities, runCapabilities } from './action-capabilities.js'
+import { taskFacts, reuseFacts, taskCapabilities, runCapabilities } from './action-capabilities.ts'
 import { evaluateCapability, type ActionCapability } from '@wemux/web-contract/task-platform'
 import type { SessionId } from '@wemux/domain'
 import { createHash, randomUUID } from 'node:crypto'
 import { launchFingerprintInput, type LaunchRequest, type Run } from '@wemux/web-contract/task-platform'
-import { ensureRunCancel, saveRunProjection, isActiveRun } from './run-projection.js'
+import { ensureRunCancel, saveRunProjection, isActiveRun } from './run-projection.ts'
 import { transitionTask, type ProjectId, type UserId } from '@wemux/domain'
 import { taskStatuses, taskErrorStatus, type TaskDetail, type TaskErrorCode, type TaskActivity, type ProjectEvent, type TaskStatus, type Assignment } from '@wemux/web-contract/task-platform'
 import type { WorkspaceId, WorkerId } from '@wemux/domain'
-import type { ServerService } from './server-service.js'
-import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
+import type { ServerService } from './server-service.ts'
+import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
 
 export class TaskError extends Error {
+  readonly code: TaskErrorCode
   readonly status: number
-  constructor(readonly code: TaskErrorCode, message: string, readonly details?: Record<string, unknown>) { super(message); this.status = taskErrorStatus[code] }
+  readonly details?: Record<string, unknown>
+  constructor(code: TaskErrorCode, message: string, details?: Record<string, unknown>) { super(message); this.code = code; this.status = taskErrorStatus[code]; this.details = details }
 }
 const invalid = (message: string): never => { throw new TaskError('invalid_request', message) }
 function object(value: unknown): Record<string, unknown> {
@@ -40,7 +42,14 @@ function content(input: Record<string, unknown>): Partial<TaskDetail> {
 export interface TaskContext { actor: UserId; teamId?: string; requestId: string }
 /** One transaction is the authorization and write boundary. No Assignment or Run creation here. */
 export class TaskService {
-  constructor(private readonly store: ServerStore, private readonly publish: (event: ProjectEvent) => void = () => {}, private readonly server?: ServerService) {}
+  private readonly store: ServerStore
+  private readonly publish: (event: ProjectEvent) => void
+  private readonly server?: ServerService
+  constructor(store: ServerStore, publish: (event: ProjectEvent) => void = () => {}, server?: ServerService) {
+    this.store = store
+    this.publish = publish
+    this.server = server
+  }
   private async project(tx: ServerStoreTx, projectId: string, context: TaskContext, write = false) {
     const project = await tx.resources.getProject(projectId as ProjectId)
     if (!project || project.deletedAt) throw new TaskError('not_found', 'Project not found')

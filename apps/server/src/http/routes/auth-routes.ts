@@ -1,6 +1,6 @@
-import { AppError } from '../../application/errors.js'
-import { handleAuthRoute } from '../routes-auth.js'
-import type { HttpMethod, RouteDescriptor, RouteRequestContext } from './types.js'
+import { AppError } from '../../application/errors.ts'
+import { handleAuthRoute } from '../routes-auth.ts'
+import type { HttpMethod, RouteDescriptor, RouteRequestContext } from './types.ts'
 
 const handle = async (context: RouteRequestContext): Promise<void> => {
   const handled = await handleAuthRoute({

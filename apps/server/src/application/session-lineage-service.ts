@@ -27,12 +27,12 @@ import {
   isSessionForkContextPolicy,
 } from '@wemux/domain'
 import { narrowForkAccess, type Project, type Session, type SessionForkRecord, type SessionLineageNodeDecision } from '@wemux/server-domain'
-import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
-import type { AdministratorDirectory } from './administrator-directory.js'
-import { AppError, requireValue } from './errors.js'
-import { Notifications } from './notifications.js'
-import { canonicalCommand, newId, now, type ForkTargetSessionInput } from './server-service.js'
-import { integer, object, text } from './validation.js'
+import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
+import type { AdministratorDirectory } from './administrator-directory.ts'
+import { AppError, requireValue } from './errors.ts'
+import { Notifications } from './notifications.ts'
+import { canonicalCommand, newId, now, type ForkTargetSessionInput } from './server-service.ts'
+import { integer, object, text } from './validation.ts'
 
 /**
  * Ticket 17 (C1): Session Fork 与血缘权威。Fork 是后端持久事实：目标 Session 创建、
@@ -106,13 +106,18 @@ const defaultNodeLimit = 200
 const maxNodeLimit = 1000
 
 export class SessionLineageService {
+  private readonly store: ServerStore
+  private readonly targets: ForkTargetSessionCreator
+  private readonly administrators: AdministratorDirectory
+  private readonly access: SessionLineageAccess
+  private readonly notifications?: Notifications
   constructor(
-    private readonly store: ServerStore,
-    private readonly targets: ForkTargetSessionCreator,
-    private readonly administrators: AdministratorDirectory,
-    private readonly access: SessionLineageAccess = grantLineageAccess(administrators),
-    private readonly notifications?: Notifications,
-  ) {}
+    store: ServerStore,
+    targets: ForkTargetSessionCreator,
+    administrators: AdministratorDirectory,
+    access: SessionLineageAccess = grantLineageAccess(administrators),
+    notifications?: Notifications,
+  ) { this.store = store; this.targets = targets; this.administrators = administrators; this.access = access; this.notifications = notifications;}
 
   /**
    * 创建 Fork：校验来源可读与 cursor 已持久化，原子创建目标 Session 与血缘记录。

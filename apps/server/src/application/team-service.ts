@@ -1,11 +1,11 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { AuditEntryId, CommandId, EventSeq, MessageId, SessionId, TeamId, Timestamp, TurnId, UserId, WorkerId } from '@wemux/domain'
 import type { Membership, Team, TeamInvitation, TeamInvitationStatus, TeamRole, User } from '@wemux/server-domain'
-import { hashSecret } from './auth.js'
-import { normalizeEmail } from './email-address.js'
-import { AppError } from './errors.js'
-import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
-import type { Notifications } from './notifications.js'
+import { hashSecret } from './auth.ts'
+import { normalizeEmail } from './email-address.ts'
+import { AppError } from './errors.ts'
+import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
+import type { Notifications } from './notifications.ts'
 
 const now = (): Timestamp => new Date().toISOString() as Timestamp
 const invitationLifetimeMs = 7 * 24 * 60 * 60 * 1000
@@ -29,7 +29,9 @@ export interface TeamInvitationView {
 }
 
 export class TeamService {
-  constructor(private readonly store: ServerStore, private readonly notifications?: Notifications) {}
+  private readonly store: ServerStore
+  private readonly notifications?: Notifications
+  constructor(store: ServerStore, notifications?: Notifications) { this.store = store; this.notifications = notifications;}
 
   async create(actorId: UserId, input: unknown): Promise<TeamSummary> {
     const name = teamName(input)

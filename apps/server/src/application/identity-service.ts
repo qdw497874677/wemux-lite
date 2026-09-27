@@ -1,11 +1,11 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import type { AuditEntryId, TeamId, Timestamp, UserId } from '@wemux/domain'
 import type { LoginSession, User } from '@wemux/server-domain'
-import type { ServerStore } from './ports/server-store.js'
-import type { AdministratorDirectory } from './administrator-directory.js'
-import { AppError } from './errors.js'
-import { hashSecret } from './auth.js'
-import { PasswordPolicyError, assertPasswordPolicy, hashPassword, passwordPolicy, verifyPassword } from './password.js'
+import type { ServerStore } from './ports/server-store.ts'
+import type { AdministratorDirectory } from './administrator-directory.ts'
+import { AppError } from './errors.ts'
+import { hashSecret } from './auth.ts'
+import { PasswordPolicyError, assertPasswordPolicy, hashPassword, passwordPolicy, verifyPassword } from './password.ts'
 
 /** Injectable clock: idle/absolute expiry and rotation windows must be testable without waiting. */
 export interface Clock { now(): Date }
@@ -87,7 +87,10 @@ const clientLabel = (userAgent: string | undefined): string | null => {
 /** 登录失败限流：单进程内滑动窗口，避免用登录请求打满 scrypt 与 CPU。 */
 export class LoginThrottle {
   private readonly failures = new Map<string, number[]>()
-  constructor(private readonly clock: Clock, private readonly limit = 10, private readonly windowMs = 15 * 60 * 1000) {}
+  private readonly clock: Clock
+  private readonly limit: number
+  private readonly windowMs: number
+  constructor(clock: Clock, limit = 10, windowMs = 15 * 60 * 1000) { this.clock = clock; this.limit = limit; this.windowMs = windowMs;}
   private recent(key: string, now: number): number[] {
     const kept = (this.failures.get(key) ?? []).filter(at => now - at < this.windowMs)
     if (kept.length) this.failures.set(key, kept)
@@ -116,13 +119,17 @@ export class IdentityService {
   private readonly throttle: LoginThrottle
   /** 无账号时的等价代价校验对象，避免用响应时间枚举账号。 */
   private readonly dummyHash: Promise<string>
+  private readonly store: ServerStore
+  private readonly administrators: AdministratorDirectory
+  private readonly clock: Clock
+  private readonly policy: LoginSessionPolicy
   constructor(
-    private readonly store: ServerStore,
-    private readonly administrators: AdministratorDirectory,
-    private readonly clock: Clock = systemClock,
-    private readonly policy: LoginSessionPolicy = defaultLoginSessionPolicy,
+    store: ServerStore,
+    administrators: AdministratorDirectory,
+    clock: Clock = systemClock,
+    policy: LoginSessionPolicy = defaultLoginSessionPolicy,
     cookieName = defaultSessionCookieName,
-  ) {
+  ) { this.store = store; this.administrators = administrators; this.clock = clock; this.policy = policy;
     if (!cookieNamePattern.test(cookieName)) throw new Error('Session cookie name must be a simple token')
     this.cookieName = cookieName
     this.throttle = new LoginThrottle(clock)

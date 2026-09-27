@@ -1,10 +1,10 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import type { AuditEntryId, Timestamp, UserId } from '@wemux/domain'
-import type { ServerStore } from './ports/server-store.js'
-import type { AdministratorDirectory } from './administrator-directory.js'
-import { AppError } from './errors.js'
-import { assertPasswordPolicy, hashPassword, passwordPolicy, PasswordPolicyError } from './password.js'
-import { systemClock, type Clock } from './identity-service.js'
+import type { ServerStore } from './ports/server-store.ts'
+import type { AdministratorDirectory } from './administrator-directory.ts'
+import { AppError } from './errors.ts'
+import { assertPasswordPolicy, hashPassword, passwordPolicy, PasswordPolicyError } from './password.ts'
+import { systemClock, type Clock } from './identity-service.ts'
 
 /** 恢复入口只在本机进程内使用；它不注册任何 HTTP 路由，也不提供任何在线提权。 */
 export interface RecoveryAccountView {
@@ -43,7 +43,10 @@ export const generateRecoveryPassword = (): string => randomBytes(18).toString('
  * `instance_administrators`（`source='recovery'`）并留下审计，而不是让身份只在配置里隐式存在。
  */
 export class AccountRecovery {
-  constructor(private readonly store: ServerStore, private readonly administrators: AdministratorDirectory, private readonly clock: Clock = systemClock) {}
+  private readonly store: ServerStore
+  private readonly administrators: AdministratorDirectory
+  private readonly clock: Clock
+  constructor(store: ServerStore, administrators: AdministratorDirectory, clock: Clock = systemClock) { this.store = store; this.administrators = administrators; this.clock = clock;}
 
   private async target(login: string) {
     const trimmed = login.trim()

@@ -1,10 +1,11 @@
 import type { ServerResponse } from 'node:http'
 import type { SessionId } from '@wemux/domain'
-import type { Notifications } from '../application/notifications.js'
+import type { Notifications } from '../application/notifications.ts'
 
 export class TerminalStreams {
   private readonly clients = new Set<ServerResponse>()
-  constructor(private readonly notifications: Notifications) {}
+  private readonly notifications: Notifications
+  constructor(notifications: Notifications) { this.notifications = notifications;}
   open(response: ServerResponse, sessionId: SessionId): void {
     let closed = false
     const write = (event: string, data: unknown) => {

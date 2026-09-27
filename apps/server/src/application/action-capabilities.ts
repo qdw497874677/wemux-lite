@@ -1,7 +1,7 @@
 import { evaluateCapability, taskStatuses, type TaskDetail, type Run, type CapabilityFacts, type TaskCapabilities, type RunCapabilities, type ActionCapability } from '@wemux/web-contract/task-platform'
 import type { SessionId, WorkerId, WorkspaceId, ProjectId } from '@wemux/domain'
-import type { ServerStoreTx } from './ports/server-store.js'
-import { sessionIdleReason } from './session-idle.js'
+import type { ServerStoreTx } from './ports/server-store.ts'
+import { sessionIdleReason } from './session-idle.ts'
 
 export async function taskFacts(tx: ServerStoreTx, task: TaskDetail, actor: string): Promise<CapabilityFacts> {
   const a = task.assignee

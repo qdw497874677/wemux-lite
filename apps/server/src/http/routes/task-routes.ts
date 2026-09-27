@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import { AppError } from '../../application/errors.js'
-import { TaskError } from '../../application/task-service.js'
-import { requiredPatAccess } from './access.js'
-import type { RouteDescriptor, RouteRequestContext } from './types.js'
+import { AppError } from '../../application/errors.ts'
+import { TaskError } from '../../application/task-service.ts'
+import { requiredPatAccess } from './access.ts'
+import type { RouteDescriptor, RouteRequestContext } from './types.ts'
 
 const taskContext = async (context: RouteRequestContext) => {
   if (!context.tasks) throw new TaskError('not_found', 'Route not found')

@@ -1,11 +1,11 @@
-import { isActiveRun, projectRuns, saveRunProjection } from './run-projection.js'
-import type { CommandId, EventSeq, ModelId, SessionId, WorkerId } from '@wemux/domain'
+import { isActiveRun, projectRuns, saveRunProjection } from './run-projection.ts'
+import type { CommandId, EventSeq, JournalEvent, ModelId, SessionId, WorkerId } from '@wemux/domain'
 import type { ProjectEvent } from '@wemux/web-contract/task-platform'
-import type { FileResponsePayload, ServerToWorker, TerminalResponsePayload, WorkerToServer } from '@wemux/wire-protocol'
-import type { ServerStore } from './ports/server-store.js'
-import { AppError, requireValue } from './errors.js'
-import { Notifications } from './notifications.js'
-import { newId, now } from './server-service.js'
+import type { ConnectorRevisionReport, FileResponsePayload, ServerToWorker, TerminalResponsePayload, WorkerToServer } from '@wemux/wire-protocol'
+import type { ServerStore } from './ports/server-store.ts'
+import { AppError, requireValue } from './errors.ts'
+import { Notifications } from './notifications.ts'
+import { newId, now } from './server-service.ts'
 
 /** Worker ownership and journal consistency belong here, not in the WS adapter. */
 export const envelope = (): { readonly messageId: import('@wemux/domain').MessageId } => ({ messageId: newId<'MessageId'>() })
@@ -13,7 +13,16 @@ export const envelope = (): { readonly messageId: import('@wemux/domain').Messag
 export class WorkerService {
   private readonly fileRequests = new Map<string, { readonly workerId: WorkerId; readonly resolve: (response: FileResponsePayload) => void }>()
   private readonly terminalRequests = new Map<string, { readonly workerId: WorkerId; readonly resolve: (response: TerminalResponsePayload) => void }>()
-  constructor(private readonly store: ServerStore, private readonly notifications: Notifications) {}
+  private readonly store: ServerStore
+  private readonly notifications: Notifications
+  private readonly reportConnector: (workerId: WorkerId, report: ConnectorRevisionReport) => void | Promise<void>
+  private readonly projectJournal: (sessionId: SessionId, events: readonly JournalEvent[]) => void | Promise<void>
+  constructor(
+    store: ServerStore,
+    notifications: Notifications,
+    reportConnector: (workerId: WorkerId, report: ConnectorRevisionReport) => void | Promise<void> = () => {},
+    projectJournal: (sessionId: SessionId, events: readonly JournalEvent[]) => void | Promise<void> = () => {},
+  ) { this.store = store; this.notifications = notifications; this.reportConnector = reportConnector; this.projectJournal = projectJournal;}
   registerFileRequest(requestId: string, workerId: WorkerId): { readonly promise: Promise<FileResponsePayload>; readonly cancel: () => void } {
     if (this.fileRequests.has(requestId)) throw new AppError(409, 'Duplicate file request')
     let resolve!: (response: FileResponsePayload) => void
@@ -161,7 +170,9 @@ export class WorkerService {
           break
         }
         case 'event':
-          if (message.scope === 'workspace') {
+          if (message.scope === 'connector') {
+            await this.reportConnector(workerId, message.report)
+          } else if (message.scope === 'workspace') {
             const r = message.report, w = await tx.resources.getWorkspace(r.workspaceId)
             // 与 ownSession 同理：服务器没有该 workspace 的记录时跳过重放的旧报告，而不是回 transport.error。
             if (!w) break
@@ -269,7 +280,14 @@ export class WorkerService {
       }
     })
     for (const event of projectEvents.values()) this.notifications.project(event)
-    for (const id of changed) this.notifications.session(id)
+    for (const id of changed) {
+      this.notifications.session(id)
+      const freshness = await this.store.cache.getFreshness(id)
+      if (freshness) {
+        const page = await this.store.cache.readEvents(id, 1 as EventSeq, freshness.contiguousSeq)
+        await this.projectJournal(id, page.events)
+      }
+    }
     if (commandsChanged || changed.size) this.notifications.commands(workerId)
     return replies
   }

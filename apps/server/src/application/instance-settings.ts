@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import type { AuditEntryId, Timestamp, UserId } from '@wemux/domain'
 import type { InstanceSettings, RegistrationPolicy } from '@wemux/server-domain'
-import type { ServerStore } from './ports/server-store.js'
-import { AppError } from './errors.js'
-import type { Clock } from './identity-service.js'
+import type { ServerStore } from './ports/server-store.ts'
+import { AppError } from './errors.ts'
+import type { Clock } from './identity-service.ts'
 
 /**
  * 实例级注册策略的唯一读写入口。
@@ -33,11 +33,14 @@ export function requireRegistrationPolicy(value: unknown): RegistrationPolicy {
 }
 
 export class InstanceSettingsService {
+  private readonly store: ServerStore
+  private readonly clock: Clock
+  private readonly fallback: RegistrationPolicy
   constructor(
-    private readonly store: ServerStore,
-    private readonly clock: Clock,
-    private readonly fallback: RegistrationPolicy = defaultRegistrationPolicy,
-  ) {}
+    store: ServerStore,
+    clock: Clock,
+    fallback: RegistrationPolicy = defaultRegistrationPolicy,
+  ) { this.store = store; this.clock = clock; this.fallback = fallback;}
 
   /** 已落盘的设置；没有记录时返回 null（调用方使用默认值，不写库）。 */
   stored(): Promise<InstanceSettings | null> { return this.store.identity.getInstanceSettings() }

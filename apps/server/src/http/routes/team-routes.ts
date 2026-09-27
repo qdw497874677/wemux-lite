@@ -1,7 +1,7 @@
 import type { TeamId, UserId } from '@wemux/domain'
-import { AppError } from '../../application/errors.js'
-import { sendTeamInvitationMail } from '../../application/team-invitation-mail.js'
-import type { RouteDescriptor } from './types.js'
+import { AppError } from '../../application/errors.ts'
+import { sendTeamInvitationMail } from '../../application/team-invitation-mail.ts'
+import type { RouteDescriptor } from './types.ts'
 
 const requireTeams = <T>(value: T | null | undefined): T => {
   if (!value) throw new AppError(404, 'Not found')

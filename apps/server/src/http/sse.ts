@@ -1,10 +1,11 @@
 import type { ServerResponse } from 'node:http'
 import type { SessionId, UserId } from '@wemux/domain'
-import { ServerService } from '../application/server-service.js'
+import { ServerService } from '../application/server-service.ts'
 
 export class SessionStreams {
   private readonly clients = new Set<ServerResponse>()
-  constructor(private readonly service: ServerService) {}
+  private readonly service: ServerService
+  constructor(service: ServerService) { this.service = service;}
   open(response: ServerResponse, sessionId: SessionId, fromSeq: number, actor?: UserId, authorize?: () => Promise<unknown>): void {
     let cursor = fromSeq, pumping = false, dirty = true, closed = false
     this.clients.add(response)

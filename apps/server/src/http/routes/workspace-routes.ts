@@ -1,6 +1,6 @@
 import type { WorkspaceId, WorkerId } from '@wemux/domain'
-import { AppError } from '../../application/errors.js'
-import type { RouteDescriptor } from './types.js'
+import { AppError } from '../../application/errors.ts'
+import type { RouteDescriptor } from './types.ts'
 
 export const workspaceRoutes: readonly RouteDescriptor[] = [
   { method: 'GET', pattern: '/workspaces', auth: 'authenticated', handler: async context => {

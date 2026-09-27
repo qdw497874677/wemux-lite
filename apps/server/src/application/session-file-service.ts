@@ -1,21 +1,25 @@
 import { randomUUID } from 'node:crypto'
 import type { SessionId } from '@wemux/domain'
 import type { FileRequestPayload, FileResponsePayload } from '@wemux/wire-protocol'
-import { AppError } from './errors.js'
-import type { ServerService } from './server-service.js'
-import type { WorkerService } from './worker-service.js'
+import { AppError } from './errors.ts'
+import type { ServerService } from './server-service.ts'
+import type { WorkerService } from './worker-service.ts'
 
 export interface WorkerFileGateway {
   send(workerId: import('@wemux/domain').WorkerId, payload: FileRequestPayload): Promise<void>
 }
 
 export class SessionFileService {
+  private readonly sessions: ServerService
+  private readonly workers: WorkerService
+  private readonly gateway: WorkerFileGateway
+  private readonly timeoutMs: number
   constructor(
-    private readonly sessions: ServerService,
-    private readonly workers: WorkerService,
-    private readonly gateway: WorkerFileGateway,
-    private readonly timeoutMs = 10_000,
-  ) {}
+    sessions: ServerService,
+    workers: WorkerService,
+    gateway: WorkerFileGateway,
+    timeoutMs = 10_000,
+  ) { this.sessions = sessions; this.workers = workers; this.gateway = gateway; this.timeoutMs = timeoutMs;}
 
   async list(sessionId: SessionId, subpath: string): Promise<Extract<FileResponsePayload, { ok: true; operation: 'list' }>> {
     return this.request(sessionId, { operation: 'list', subpath }) as Promise<Extract<FileResponsePayload, { ok: true; operation: 'list' }>>

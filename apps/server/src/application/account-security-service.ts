@@ -10,14 +10,14 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import type { AuditEntryId, Timestamp, UserId } from '@wemux/domain'
 import type { ExternalLoginIdentity, LoginSession, User, UserEmail, VerificationChallenge } from '@wemux/server-domain'
-import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
-import { AppError } from './errors.js'
-import { hashSecret } from './auth.js'
-import { invalidEmailReason, maskEmail, normalizeEmail, type NormalizedEmail } from './email-address.js'
-import { PasswordPolicyError, assertPasswordPolicy, hashPassword, passwordPolicy, verifyPassword } from './password.js'
-import { changeEmailLink, type MailSettings, type OutgoingMail } from './mail/email-delivery.js'
-import { FlowThrottle } from './email-registration.js'
-import { systemClock, type Clock, type IdentityService, type LoginSessionPolicy } from './identity-service.js'
+import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
+import { AppError } from './errors.ts'
+import { hashSecret } from './auth.ts'
+import { invalidEmailReason, maskEmail, normalizeEmail, type NormalizedEmail } from './email-address.ts'
+import { PasswordPolicyError, assertPasswordPolicy, hashPassword, passwordPolicy, verifyPassword } from './password.ts'
+import { changeEmailLink, type MailSettings, type OutgoingMail } from './mail/email-delivery.ts'
+import { FlowThrottle } from './email-registration.ts'
+import { systemClock, type Clock, type IdentityService, type LoginSessionPolicy } from './identity-service.ts'
 
 export interface AccountSecurityPolicy {
   /** 无本地密码账号（Google-only）执行凭据面操作所需的近期强认证窗口。 */
@@ -106,7 +106,9 @@ export class AccountSecurityService {
   private readonly sessionPolicy: LoginSessionPolicy
   private readonly throttles: Readonly<{ password: FlowThrottle; emailChange: FlowThrottle }>
 
-  constructor(private readonly input: AccountSecurityInput) {
+  private readonly input: AccountSecurityInput
+
+  constructor(input: AccountSecurityInput) { this.input = input;
     this.clock = input.clock ?? systemClock
     this.policy = input.policy ?? defaultAccountSecurityPolicy
     this.sessionPolicy = input.sessionPolicy ?? { idleMs: 0, absoluteMs: 0, touchIntervalMs: 0, reauthenticateMs: defaultAccountSecurityPolicy.reauthenticateMs }

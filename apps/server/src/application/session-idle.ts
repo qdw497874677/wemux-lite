@@ -1,5 +1,5 @@
 import type { EventSeq, SessionId } from '@wemux/domain'
-import type { ServerStoreTx } from './ports/server-store.js'
+import type { ServerStoreTx } from './ports/server-store.ts'
 
 /** Unknown or incomplete Journal is never proof of idleness. */
 export async function sessionIdleReason(tx: ServerStoreTx, sessionId: SessionId): Promise<string | null> {

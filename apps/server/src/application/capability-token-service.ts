@@ -7,8 +7,9 @@ export interface CapabilityGrantRequest extends Omit<CapabilityGrantClaims, 'id'
 }
 
 export class CapabilityTokenError extends Error {
-  constructor(readonly code: 'invalid-token' | 'expired-token') {
-    super(code)
+    readonly code: 'invalid-token' | 'expired-token'
+  constructor(code: 'invalid-token' | 'expired-token') {
+    super(code); this.code = code;
   }
 }
 
@@ -16,11 +17,14 @@ const encode = (value: string): string => Buffer.from(value, 'utf8').toString('b
 const decode = (value: string): string => Buffer.from(value, 'base64url').toString('utf8')
 
 export class CapabilityTokenService {
+  private readonly secret: string
+  private readonly now: () => Timestamp
+  private readonly defaultTtlMs: number
   constructor(
-    private readonly secret: string,
-    private readonly now: () => Timestamp,
-    private readonly defaultTtlMs = 15 * 60 * 1_000,
-  ) {
+    secret: string,
+    now: () => Timestamp,
+    defaultTtlMs = 15 * 60 * 1_000,
+  ) { this.secret = secret; this.now = now; this.defaultTtlMs = defaultTtlMs;
     if (secret.length < 32) {
       throw new Error('Capability token secret must contain at least 32 characters')
     }

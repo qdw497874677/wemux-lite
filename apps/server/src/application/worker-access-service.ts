@@ -1,15 +1,17 @@
 import { randomUUID } from 'node:crypto'
 import type { UserId, WorkerId } from '@wemux/domain'
 import type { ResourceShareScope, Worker, WorkerGrant, WorkerGrantRole } from '@wemux/server-domain'
-import { AppError } from './errors.js'
-import type { ServerStore, ServerStoreTx } from './ports/server-store.js'
-import type { Notifications } from './notifications.js'
+import { AppError } from './errors.ts'
+import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
+import type { Notifications } from './notifications.ts'
 
 export type WorkerAccessRole = 'owner' | WorkerGrantRole
 const rank: Record<WorkerAccessRole, number> = { use: 1, manage: 2, owner: 3 }
 
 export class WorkerAccessService {
-  constructor(private readonly store: ServerStore, private readonly notifications?: Notifications) {}
+  private readonly store: ServerStore
+  private readonly notifications?: Notifications
+  constructor(store: ServerStore, notifications?: Notifications) { this.store = store; this.notifications = notifications;}
 
   async list(actor: UserId): Promise<readonly (Worker & { accessRole: WorkerAccessRole })[]> {
     const visible = await Promise.all((await this.store.resources.listWorkers()).map(async worker => {

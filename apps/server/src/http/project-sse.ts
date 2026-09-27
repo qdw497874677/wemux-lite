@@ -1,11 +1,12 @@
 import type { ServerResponse } from 'node:http'
 import type { UserId } from '@wemux/domain'
-import type { Notifications } from '../application/notifications.js'
+import type { Notifications } from '../application/notifications.ts'
 
 /** Project events are invalidations, never replayable Journal/activity facts. */
 export class ProjectStreams {
   private readonly clients = new Set<ServerResponse>()
-  constructor(private readonly notifications: Notifications) {}
+  private readonly notifications: Notifications
+  constructor(notifications: Notifications) { this.notifications = notifications;}
   open(response: ServerResponse, projectId: string, actor: UserId, authorize: () => Promise<unknown>, credentialAuthorize: () => Promise<unknown> = authorize): void {
     let closed = false, checking = false
     const write = (data: string) => {

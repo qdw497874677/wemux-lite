@@ -1,11 +1,11 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import type { AuditEntryId, CredentialId, Timestamp, UserId } from '@wemux/domain'
 import type { PersonalAccessTokenRecord, PersonalAccessTokenScope } from '@wemux/server-domain'
-import { AppError } from './errors.js'
-import { hashSecret } from './auth.js'
-import type { Clock } from './identity-service.js'
-import { systemClock } from './identity-service.js'
-import type { ServerStore } from './ports/server-store.js'
+import { AppError } from './errors.ts'
+import { hashSecret } from './auth.ts'
+import type { Clock } from './identity-service.ts'
+import { systemClock } from './identity-service.ts'
+import type { ServerStore } from './ports/server-store.ts'
 
 const allowedScopes = new Set<PersonalAccessTokenScope>(['read', 'write', 'execute', 'admin'])
 const maximumLifetimeMs = 365 * 24 * 60 * 60 * 1000
@@ -37,7 +37,9 @@ const view = (record: PersonalAccessTokenRecord): PersonalAccessTokenView => ({
 })
 
 export class PersonalAccessTokenService {
-  constructor(private readonly store: ServerStore, private readonly clock: Clock = systemClock) {}
+  private readonly store: ServerStore
+  private readonly clock: Clock
+  constructor(store: ServerStore, clock: Clock = systemClock) { this.store = store; this.clock = clock;}
 
   async list(userId: UserId): Promise<readonly PersonalAccessTokenView[]> {
     return (await this.store.identity.listPersonalAccessTokens())

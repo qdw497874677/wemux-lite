@@ -4,12 +4,12 @@ import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { WorkerId } from '@wemux/domain'
 import { parseWorkerTransportFrame, type ServerPayload, type ServerToWorkerFrame, type WorkerHelloFrame } from '@wemux/wire-protocol'
-import { AuthenticationService } from '../application/auth.js'
-import { AppError } from '../application/errors.js'
-import { Notifications } from '../application/notifications.js'
-import { workerMessage } from '../application/validation.js'
-import { WorkerService } from '../application/worker-service.js'
-import { ServerTransportStore } from './transport-store.js'
+import { AuthenticationService } from '../application/auth.ts'
+import { AppError } from '../application/errors.ts'
+import { Notifications } from '../application/notifications.ts'
+import { workerMessage } from '../application/validation.ts'
+import { WorkerService } from '../application/worker-service.ts'
+import { ServerTransportStore } from './transport-store.ts'
 
 interface ActiveConnection { readonly epoch: symbol; readonly socket: WebSocket }
 
@@ -20,7 +20,12 @@ export class WorkerGateway {
   private readonly upgrades = new Set<Duplex>()
   private readonly tasks = new Set<Promise<unknown>>()
   private closing = false
-  constructor(private readonly server: Server, private readonly auth: AuthenticationService, private readonly service: WorkerService, private readonly notifications: Notifications, private readonly transport: ServerTransportStore) { server.on('upgrade', this.upgrade) }
+  private readonly server: Server
+  private readonly auth: AuthenticationService
+  private readonly service: WorkerService
+  private readonly notifications: Notifications
+  private readonly transport: ServerTransportStore
+  constructor(server: Server, auth: AuthenticationService, service: WorkerService, notifications: Notifications, transport: ServerTransportStore) { this.server = server; this.auth = auth; this.service = service; this.notifications = notifications; this.transport = transport; server.on('upgrade', this.upgrade) }
   private track(task: Promise<unknown>): void { this.tasks.add(task); void task.finally(() => this.tasks.delete(task)).catch(() => undefined) }
   private serializeLifecycle<T>(workerId: WorkerId, operation: () => Promise<T>): Promise<T> {
     const previous = this.lifecycle.get(workerId) ?? Promise.resolve()
