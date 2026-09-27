@@ -111,7 +111,7 @@ function TimelineMessage({ entry, onOpenContext, messageActions }: { entry: Extr
     <div className={cn('flex max-w-full items-start gap-2.5', message.role === 'user' && 'flex-row-reverse')}>
       {message.role === 'assistant' && <span className="mt-1 grid size-7 shrink-0 place-items-center rounded-lg bg-accent/70 text-muted-foreground"><Bot className="size-3.5" /></span>}
       <div className={cn('flex min-w-0 max-w-full flex-1 flex-col gap-1', message.role === 'user' && 'items-end')}>
-        <MessageContent><div ref={contentRef}>{text ? <Response>{text}</Response> : <span className="flex items-center gap-2 text-muted-foreground"><Loader />等待输出…</span>}</div>
+        <MessageContent><div ref={contentRef}>{text ? <Response partial={entry.status === 'running' || entry.status === 'started'}>{text}</Response> : <span className="flex items-center gap-2 text-muted-foreground"><Loader />等待输出…</span>}</div>
           <div className={cn('mt-1.5 flex items-center gap-1.5', message.role === 'user' && 'justify-end')}><MessageStatus status={entry.status} />{message.role === 'user' && onOpenContext && <button type="button" onClick={onOpenContext} className="rounded-lg p-1 text-muted-foreground/50 transition-all hover:bg-white/10 hover:text-foreground" aria-label="查看会话信息"><ChevronRight className="size-3.5" /></button>}</div>
         </MessageContent>
         <TimelineTimestamp timestamp={entry.timestamp} className={message.role === 'user' ? 'self-end' : 'self-start'} />

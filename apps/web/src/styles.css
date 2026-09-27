@@ -1195,8 +1195,16 @@ aside button[aria-current]:active:not(:disabled) {
 .message-markdown a { color: var(--color-primary); text-decoration: underline; text-underline-offset: 3px; }
 .message-markdown code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .9em; }
 .message-markdown :not(pre) > code { border-radius: 4px; padding: .12em .3em; background: var(--color-accent); }
-.message-markdown pre { max-width: 100%; overflow-x: auto; margin-block: .8em; padding: 12px 14px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-background); white-space: pre; overflow-wrap: normal; line-height: 1.6; }
+.message-markdown pre { max-width: 100%; overflow-x: auto; margin: 0; padding: 12px 14px; white-space: pre; overflow-wrap: normal; line-height: 1.6; }
 .message-markdown pre code { padding: 0; background: none; }
+.syntax-block { max-width: 100%; overflow: hidden; margin-block: .8em; border: 1px solid var(--color-border); border-radius: 8px; background: color-mix(in srgb, var(--color-background) 88%, var(--color-accent)); }
+.syntax-block-header { display: flex; min-height: 2rem; align-items: center; justify-content: space-between; gap: .75rem; border-bottom: 1px solid color-mix(in srgb, var(--color-border) 75%, transparent); padding: .2rem .35rem .2rem .8rem; }
+.syntax-block-language { overflow: hidden; color: var(--color-muted-foreground); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .7rem; text-overflow: ellipsis; white-space: nowrap; }
+.syntax-block-actions { display: flex; align-items: center; gap: .25rem; }
+.syntax-block-copy { display: inline-grid; min-width: 1.75rem; height: 1.75rem; place-items: center; border-radius: .5rem; color: var(--color-muted-foreground); font-size: .75rem; transition: background-color .15s ease, color .15s ease; }
+.syntax-block-copy:hover { background: var(--color-accent); color: var(--color-foreground); }
+.syntax-block .syntax-line { display: block; min-height: 1.6em; }
+.syntax-block-truncated { margin: 0; border-top: 1px solid color-mix(in srgb, var(--color-border) 75%, transparent); padding: .55rem .8rem; color: var(--color-muted-foreground); font-size: .72rem; }
 .message-markdown .message-table-scroll { max-width: 100%; overflow-x: auto; margin-block: .8em; }
 .message-markdown table { border-collapse: collapse; min-width: 100%; font-size: .95em; }
 .message-markdown th, .message-markdown td { border: 1px solid var(--color-border); padding: .45em .7em; min-width: 5em; }

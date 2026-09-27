@@ -36,8 +36,8 @@ test('incomplete streaming Markdown stays renderable until its final delimiters 
 test('confirmed and optimistic messages use AI Elements Response, tools remain literal output', () => {
   const source = readFileSync(new URL('../src/features/sessions/conversation.tsx', import.meta.url), 'utf8')
   const response = readFileSync(new URL('../src/components/ai-elements/response.tsx', import.meta.url), 'utf8')
-  assert.match(source, /<Response>\{text\}<\/Response>/)
+  assert.match(source, /<Response partial=\{entry\.status === 'running' \|\| entry\.status === 'started'\}>\{text\}<\/Response>/)
   assert.match(source, /<Response>\{item.content\}<\/Response>/)
-  assert.match(response, /<MarkdownMessage text=\{String\(children \?\? ''\)\}/)
+  assert.match(response, /<MarkdownMessage text=\{String\(children \?\? ''\)\} partial=\{partial\}/)
   assert.match(source, /<ToolOutput output=\{output\}/)
 })
