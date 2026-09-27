@@ -169,6 +169,14 @@ export function ClusterPage({ api, connected, canEnrollWorkers, onAddWorker, onR
                 <div className="rounded-md bg-muted/40 px-2.5 py-1.5"><p className="text-muted-foreground">工作区</p><p className="mt-0.5 font-medium">{workspaceCountByWorker.get(worker.id) ?? 0}</p></div>
               </div>
               <p className="mt-2 truncate text-[10px] text-muted-foreground"><Clock className="mr-1 inline size-3" />{worker.version ? `v${worker.version}` : '版本未知'}{worker.platform ? ` · ${worker.platform}` : ''} · 最后在线 {worker.lastSeenAt ? formatChineseTime(worker.lastSeenAt) : '从未'} · 权限 {worker.accessRole}</p>
+              <details className="mt-3 rounded-lg border border-border bg-background/35 px-3 py-2 text-xs">
+                <summary className="cursor-pointer text-violet-200">查看智能体与模型</summary>
+                <div className="mt-2 space-y-3">{worker.capabilities.map(agent => <section key={agent.agentKey} className="border-t border-border pt-2 first:border-t-0 first:pt-0">
+                  <div className="flex items-center justify-between gap-2"><strong>{agent.displayName}</strong><Badge variant={agent.availability.status === 'available' ? 'success' : 'outline'}>{agent.availability.status === 'available' ? '可用' : '不可用'}</Badge></div>
+                  {agent.availability.reason && <p className="mt-1 text-amber-200">{agent.availability.reason}</p>}
+                  {agent.models.length ? <ul className="mt-2 space-y-1 font-mono text-[11px] text-muted-foreground">{agent.models.map(model => <li key={model.modelId}><span className="text-foreground">{model.displayName}</span> · {model.modelId}</li>)}</ul> : <p className="mt-2 text-muted-foreground">未报告模型</p>}
+                </section>)}</div>
+              </details>
               <WorkerAccessPanel api={api} worker={worker} onChanged={() => void client.invalidateQueries({ queryKey: ['workers'] })} />
             </article>
           })}
