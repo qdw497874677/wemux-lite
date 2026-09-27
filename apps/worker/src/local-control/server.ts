@@ -32,7 +32,7 @@ export interface LocalControlServer {
 export interface LocalControlHandlers {
   readonly shutdown?: () => Promise<void>
   readonly workbench?: LocalWorkbenchService
-  readonly cluster?: Pick<ClusterLifecycle, 'connection' | 'discover' | 'enroll' | 'connect' | 'pause' | 'resume' | 'leave' | 'agentSettings' | 'selectAgent' | 'resetAgent'>
+  readonly cluster?: Pick<ClusterLifecycle, 'connection' | 'discover' | 'enroll' | 'connect' | 'pause' | 'resume' | 'leave' | 'agentSettings' | 'selectAgent' | 'resetAgent' | 'listConnectors' | 'saveConnector' | 'deleteConnector' | 'putConnectorCredential' | 'connectorCredentialAvailable' | 'listConnectorApprovals' | 'resolveConnectorApproval'>
 }
 
 function json(response: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
@@ -156,6 +156,33 @@ export async function startLocalControlServer(options: LocalControlServerOptions
         if (!authenticated || request.headers['x-wemux-csrf'] !== authenticated.csrf) return json(response, 403, { error: 'Forbidden' })
         if (token) sessions.delete(token)
         return json(response, 204, null, { 'Set-Cookie': `${sessionCookie}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0` })
+      }
+      if (request.url?.startsWith('/api/local/connectors')) {
+        if (!authenticated) return json(response, 401, { error: 'Authentication required' })
+        if (!handlers.cluster) return json(response, 409, { error: 'Connector control is unavailable' })
+        const target = new URL(request.url, `http://${request.headers.host}`)
+        const segments = target.pathname.split('/').filter(Boolean)
+        if (request.method === 'GET' && target.pathname === '/api/local/connectors') return json(response, 200, { items: await handlers.cluster.listConnectors(), credentialCapability: handlers.cluster.connectorCredentialAvailable() ? 'available' : 'unavailable' })
+        if (request.method === 'GET' && target.pathname === '/api/local/connectors/approvals') return json(response, 200, { items: handlers.cluster.listConnectorApprovals() })
+        if (request.method !== 'GET' && request.headers['x-wemux-csrf'] !== authenticated.csrf) return json(response, 403, { error: 'Forbidden' })
+        if (request.method === 'POST' && target.pathname === '/api/local/connectors') {
+          const definition = await readJson(request)
+          return json(response, 201, await handlers.cluster.saveConnector(definition as unknown as import('@wemux/connector').McpConnectorDefinition))
+        }
+        const connectorId = segments[3]
+        if (request.method === 'DELETE' && segments.length === 4 && connectorId) { await handlers.cluster.deleteConnector(decodeURIComponent(connectorId)); return json(response, 204, null) }
+        if (request.method === 'PUT' && segments.length === 5 && segments[4] === 'credential' && connectorId) {
+          const body = await readJson(request)
+          if (typeof body.id !== 'string' || (body.authType !== 'api_key' && body.authType !== 'custom_credential') || !body.secret || typeof body.secret !== 'object' || Array.isArray(body.secret)) return json(response, 400, { error: '凭证参数无效' })
+          const record = await handlers.cluster.putConnectorCredential({ id: body.id as import('@wemux/connector').ConnectorCredentialId, connectorId: decodeURIComponent(connectorId), authType: body.authType, secret: body.secret as Record<string, string> })
+          return json(response, 200, { id: record.id, revision: record.revision, profile: record.profile })
+        }
+        if (request.method === 'POST' && segments.length === 6 && segments[3] === 'approvals' && segments[5] === 'resolve') {
+          const body = await readJson(request)
+          if (body.decision !== 'approve' && body.decision !== 'deny') return json(response, 400, { error: '批准决定无效' })
+          return json(response, handlers.cluster.resolveConnectorApproval(decodeURIComponent(segments[4]), body.decision) ? 200 : 404, { resolved: true })
+        }
+        return json(response, 404, { error: 'Not found' })
       }
       if (request.url?.startsWith('/api/local/agents')) {
         if (!authenticated) return json(response, 401, { error: 'Authentication required' })

@@ -10,7 +10,7 @@ test('capability tokens use a short TTL and reject malformed or expired tokens',
   const issued = service.issue({
     grantId: 'grant', sessionId: 'session' as SessionId, turnId: 'turn' as TurnId,
     actorAgentId: 'session' as SessionId, projectId: 'project' as any,
-    workspaceId: 'workspace' as any, allowedTools: ['session.info'],
+    workspaceId: 'workspace' as any, allowedTools: ['session.info'], allowedConnectorIds: [],
   })
   assert.equal(Date.parse(issued.claims.expiresAt) - clock, 5_000)
   assert.throws(() => service.verify('missing'), /invalid-token/)

@@ -9,8 +9,10 @@ const tools = [
   { name: 'wemux_agent_send', description: 'Send a durable message to another agent.', inputSchema: { type: 'object', properties: { toAgentId: { type: 'string' }, content: { type: 'string' }, idempotencyKey: { type: 'string' } }, required: ['toAgentId', 'content', 'idempotencyKey'], additionalProperties: false } },
   { name: 'wemux_inbox_list', description: 'List messages sent to this agent.', inputSchema: { type: 'object', properties: { unreadOnly: { type: 'boolean' } }, additionalProperties: false } },
   { name: 'wemux_inbox_read', description: 'Read and acknowledge one inbox message.', inputSchema: { type: 'object', properties: { messageId: { type: 'string' } }, required: ['messageId'], additionalProperties: false } },
+  { name: 'mcp_list_tools', description: 'List bounded tools exposed by one approved MCP connector.', inputSchema: { type: 'object', properties: { connectorId: { type: 'string' } }, required: ['connectorId'], additionalProperties: false } },
+  { name: 'mcp_call', description: 'Call one approved MCP tool.', inputSchema: { type: 'object', properties: { connectorId: { type: 'string' }, connectorRevision: { type: 'number' }, toolName: { type: 'string' }, requestId: { type: 'string' }, toolCallId: { type: 'string' }, arguments: { type: 'object' } }, required: ['connectorId', 'connectorRevision', 'toolName', 'requestId', 'toolCallId', 'arguments'], additionalProperties: false } },
 ] as const
-const operations: Record<string, string> = { wemux_session_info: 'session.info', wemux_agent_list: 'agent.list', wemux_agent_send: 'agent.send', wemux_inbox_list: 'agent.inbox.list', wemux_inbox_read: 'agent.inbox.read' }
+const operations: Record<string, string> = { wemux_session_info: 'session.info', wemux_agent_list: 'agent.list', wemux_agent_send: 'agent.send', wemux_inbox_list: 'agent.inbox.list', wemux_inbox_read: 'agent.inbox.read', mcp_list_tools: 'mcp.list_tools', mcp_call: 'mcp.call' }
 
 export async function handleMcpRequest(request: any): Promise<any> {
   if (request.method === 'initialize') return { protocolVersion: request.params?.protocolVersion ?? '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'wemux-lite-agent', version: '0.1.0' } }

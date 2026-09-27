@@ -9,11 +9,13 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
   constructor(
     private readonly workerDataDir: string,
     private readonly capabilityEndpoint: string | null,
+    private readonly prepareConnectors?: (turn: Turn) => Promise<{ readonly token: string; readonly snapshot: import('@wemux/domain').CapabilitySnapshot; release(): Promise<void> }>,
   ) {}
 
   async prepare(turn: Turn): Promise<PreparedAgentLaunchContext> {
     if (this.active.has(turn.sessionId)) throw new Error(`Capability context is already active for session ${turn.sessionId}`)
-    const snapshot = turn.capabilitySnapshot
+    const connectorContext = this.prepareConnectors ? await this.prepareConnectors(turn) : null
+    const snapshot = connectorContext?.snapshot ?? turn.capabilitySnapshot
     if (!snapshot) return empty()
     const root = join(this.workerDataDir, 'runtime', snapshot.sessionId, turn.id)
     this.active.add(turn.sessionId)
@@ -44,9 +46,10 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
         WEMUX_TURN_ID: turn.id,
         WEMUX_ASSETS_ROOT: root,
       }
-      if (this.capabilityEndpoint && turn.capabilityToken) {
+      const capabilityToken = connectorContext?.token ?? turn.capabilityToken
+      if (this.capabilityEndpoint && capabilityToken) {
         environment.WEMUX_CAPABILITY_ENDPOINT = this.capabilityEndpoint
-        environment.WEMUX_CAPABILITY_TOKEN = turn.capabilityToken
+        environment.WEMUX_CAPABILITY_TOKEN = capabilityToken
       }
       return {
         context: {
@@ -54,17 +57,19 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
           instructions,
           skillsRoot: snapshot.assets.some((asset) => asset.kind === 'skill') ? skillsRoot : null,
           capabilityEndpoint: this.capabilityEndpoint,
-          capabilityToken: turn.capabilityToken,
+          capabilityToken,
           capabilitySnapshot: snapshot,
           environment,
         },
         cleanup: async () => {
           this.active.delete(turn.sessionId)
+          await connectorContext?.release()
           await rm(root, { recursive: true, force: true })
         },
       }
     } catch (error) {
       this.active.delete(turn.sessionId)
+      await connectorContext?.release().catch(() => undefined)
       await rm(root, { recursive: true, force: true }).catch(() => undefined)
       throw error
     }

@@ -25,6 +25,9 @@ import { serverUrl, type WorkerTransport } from '../config.js'
 import { defaultProbe, preflightServer, probeCli } from '../transport/tailscale.js'
 import { openTunnels, type TunnelPool } from '../transport/tailscale-tunnel.js'
 import { orderEndpoints, parsePreference, resolveAutoPreference } from '../transport/endpoints.js'
+import { loadNodePty } from '../terminal/terminal-manager.js'
+import { WorkerConnectorRuntime } from '../connectors/runtime.js'
+import type { McpConnectorDefinition } from '@wemux/connector'
 
 export type WorkerConnectionState = {
   readonly phase: 'offline' | 'connecting' | 'online' | 'degraded'
@@ -63,6 +66,7 @@ export class ClusterLifecycle {
   private transport: WebSocketTransport | null = null
   private gateway: CapabilityGateway | null = null
   private tunnelPool: TunnelPool | null = null
+  private readonly connectors: WorkerConnectorRuntime
   private transitions: Promise<unknown> = Promise.resolve()
   private state: WorkerConnectionState = { phase: 'offline', retryAt: null, failure: null }
 
@@ -70,7 +74,7 @@ export class ClusterLifecycle {
     private readonly store: WorkerStore & LocalState & SessionStore,
     private agents: readonly AgentAdapter[],
     private readonly options: ClusterLifecycleOptions,
-  ) {}
+  ) { this.connectors = new WorkerConnectorRuntime(store as WorkerStore & LocalState & SessionStore & import('../connectors/store.js').WorkerConnectorStore) }
 
   connection() { return this.state }
 
@@ -79,6 +83,14 @@ export class ClusterLifecycle {
     this.transitions = next.catch(() => {})
     return next
   }
+
+  listConnectors() { return this.connectors.listDefinitions() }
+  saveConnector(definition: McpConnectorDefinition) { return this.transition(() => this.connectors.saveDefinition(definition)) }
+  deleteConnector(id: string) { return this.transition(() => this.connectors.deleteDefinition(id)) }
+  putConnectorCredential(input: Parameters<WorkerConnectorRuntime['credentials']['put']>[0]) { return this.transition(() => this.connectors.credentials.put(input)) }
+  connectorCredentialAvailable() { return this.connectors.credentials.available }
+  listConnectorApprovals() { return this.connectors.listApprovals() }
+  resolveConnectorApproval(id: string, decision: 'approve' | 'deny') { return this.connectors.resolveApproval(id, decision) }
 
   async agentSettings() {
     const settings = await readAgentSettings(this.options.home)
@@ -154,12 +166,20 @@ export class ClusterLifecycle {
     const installation = this.store.localInstallation()
     if (!installation) throw new Error('Worker local installation is not initialized')
     const selected = await readAgentSettings(this.options.home)
-    const runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, { send: () => {} }, `local-${installation.installationId}` as import('@wemux/domain').WorkerId, installation.name, undefined, undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }))
+    const workerId = `local-${installation.installationId}` as import('@wemux/domain').WorkerId
+    const gateway = this.gateway ?? new CapabilityGateway(null, this.connectors)
+    const endpoint = await gateway.listen()
+    this.gateway = gateway
+    const runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, { send: () => {} }, workerId, installation.name, new FilesystemAgentLaunchContextProvider(this.options.home, endpoint, turn => this.connectors.registerTurn(turn, workerId)), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }))
     try {
       await runtime.initialize()
       this.runtime = runtime
     } catch (error) {
-      await runtime.shutdown()
+      try { await runtime.shutdown() }
+      finally {
+        await gateway.close()
+        if (this.gateway === gateway) this.gateway = null
+      }
       throw error
     }
   }
@@ -190,7 +210,7 @@ export class ClusterLifecycle {
       this.tunnelPool = pool
       const credential = await readFile(join(this.options.home, identity.credentialRef), 'utf8')
       const selected = await readAgentSettings(this.options.home)
-      const gateway = new CapabilityGateway(urls[0])
+      const gateway = this.gateway ?? new CapabilityGateway(urls[0], this.connectors)
       this.gateway = gateway
       const capabilityEndpoint = await gateway.listen()
       let runtime!: WorkerRuntime
@@ -236,10 +256,10 @@ export class ClusterLifecycle {
         previous.abort()
         await Promise.race([
           previous.shutdown().catch(() => undefined),
-          new Promise<void>(resolve => setTimeout(resolve, 1000).unref()),
+          new Promise<void>(resolve => setTimeout(resolve, 1000)),
         ])
       }
-      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }))
+      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint, turn => this.connectors.registerTurn(turn, identity.workerId)), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), await loadNodePty())
       this.runtime = runtime
       await runtime.initialize()
       this.transport = transport
@@ -293,6 +313,7 @@ export class ClusterLifecycle {
   close() {
     return this.transition(async () => {
       await this.stopRuntime()
+      await this.connectors.shutdown()
       this.state = { phase: 'offline', retryAt: null, failure: null }
     })
   }
@@ -318,9 +339,8 @@ export class ClusterLifecycle {
         // shutdown 可能因挂死的 agent turn 永不 resolve；3s 后同步 abort 强杀子进程兜底，
         // 再给 1s 让 shutdown 收尾，仍不结束则放弃等待（资源已强制释放）。
         const abortTimer = setTimeout(() => { try { runtime.abort() } catch {} }, 3000)
-        abortTimer.unref()
         try {
-          await Promise.race([runtime.shutdown(), new Promise(resolve => setTimeout(resolve, 4000).unref())])
+          await Promise.race([runtime.shutdown(), new Promise(resolve => setTimeout(resolve, 4000))])
         } finally { clearTimeout(abortTimer) }
       }
     } finally {

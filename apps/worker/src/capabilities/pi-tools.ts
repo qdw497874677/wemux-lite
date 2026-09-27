@@ -9,6 +9,8 @@ const definitions = [
   ['wemux_agent_send', 'Send a durable message to another agent in the current Wemux project.', object({ toAgentId: string, content: string, idempotencyKey: string }, ['toAgentId', 'content', 'idempotencyKey']), 'agent.send'],
   ['wemux_inbox_list', 'List messages sent to this agent.', object({ unreadOnly: boolean }), 'agent.inbox.list'],
   ['wemux_inbox_read', 'Read one inbox message and mark it read.', object({ messageId: string }, ['messageId']), 'agent.inbox.read'],
+  ['mcp_list_tools', 'List bounded tools exposed by one approved MCP connector.', object({ connectorId: string }, ['connectorId']), 'mcp.list_tools'],
+  ['mcp_call', 'Call one tool on an approved MCP connector. Writes require per-call approval.', object({ connectorId: string, connectorRevision: { type: 'number' }, toolName: string, requestId: string, toolCallId: string, arguments: { type: 'object' } }, ['connectorId', 'connectorRevision', 'toolName', 'requestId', 'toolCallId', 'arguments']), 'mcp.call'],
 ] as const
 
 // Structural tool definitions: Worker never imports or bundles the Pi SDK.

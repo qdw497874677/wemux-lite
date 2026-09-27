@@ -8,11 +8,13 @@ import type { LocalState } from '../application/ports/local-state.js'
 import type { CommandRecord, SessionExecution } from '../domain/session-execution.js'
 import type { LocalWorkspace, RepositoryCheckout } from '../domain/local-workspace.js'
 import type { LocalAdminRecord, LocalInstallationIdentity } from '../domain/local-installation.js'
+import type { ConnectorDefinition, CredentialRecord, ExecutionResult } from '@wemux/connector'
+import type { ConnectorExecutionRecord, WorkerConnectorStore } from '../connectors/store.js'
 
 export const now = () => new Date().toISOString() as Timestamp
 
 /** Serialized transactions also isolate async port callbacks from other transactions. */
-export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore {
+export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore, WorkerConnectorStore {
   private readonly db: DatabaseSync
   private tail: Promise<unknown> = Promise.resolve()
 
@@ -20,12 +22,12 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore 
     this.db = new DatabaseSync(path)
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;')
     const version = this.db.prepare('PRAGMA user_version').get()?.user_version
-    if (version !== 0 && version !== 1 && version !== 2 && version !== 3) { this.db.close(); throw new Error('Unsupported Worker database schema') }
+    if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== 4) { this.db.close(); throw new Error('Unsupported Worker database schema') }
     if (version === 0) this.db.exec(`BEGIN;
       CREATE TABLE documents (bucket TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(bucket,id));
       CREATE TABLE journal (session_id TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(session_id,seq));
       PRAGMA user_version=1; COMMIT;`)
-    if (version !== 3) {
+    if (version !== 3 && version !== 4) {
       this.db.exec('BEGIN IMMEDIATE')
       try {
         if (version !== 2) this.db.exec(retentionInvariants)
@@ -33,6 +35,13 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore 
         this.db.exec('PRAGMA user_version=3; COMMIT;')
       }
       catch (error) { this.db.exec('ROLLBACK'); this.db.close(); throw error }
+    }
+    if (version !== 4) {
+      this.db.exec(`BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS connector_credentials (id TEXT PRIMARY KEY, owner_kind TEXT NOT NULL CHECK(owner_kind='connector'), owner_id TEXT NOT NULL, auth_type TEXT NOT NULL, ciphertext TEXT NOT NULL, profile_json TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS connector_executions (request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, state TEXT NOT NULL, session_id TEXT NOT NULL, body TEXT NOT NULL, journal_summary TEXT, created_at TEXT NOT NULL, completed_at TEXT);
+        CREATE INDEX IF NOT EXISTS connector_execution_session ON connector_executions(session_id, created_at);
+        PRAGMA user_version=4; COMMIT;`)
     }
   }
   close() { this.db.close() }
@@ -112,6 +121,44 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore 
   saveLocalAdmin: LocalState['saveLocalAdmin'] = record => this.put('identity', 'local-admin', record)
   capabilities: LocalState['capabilities'] = () => this.getDocument('capabilities', 'snapshot') ?? []
   saveCapabilities: LocalState['saveCapabilities'] = value => this.put('capabilities', 'snapshot', value)
+  async listConnectorDefinitions(): Promise<readonly ConnectorDefinition[]> { await this.tail; return this.list<ConnectorDefinition>('connector-definitions') }
+  async getConnectorDefinition(id: string): Promise<ConnectorDefinition | null> { await this.tail; return this.getDocument('connector-definitions', id) }
+  async saveConnectorDefinition(definition: ConnectorDefinition): Promise<void> { await this.tail; this.put('connector-definitions', definition.id, definition) }
+  async deleteConnectorDefinition(id: string): Promise<void> { await this.tail; this.db.prepare('DELETE FROM documents WHERE bucket=? AND id=?').run('connector-definitions', id) }
+  async getConnectorCredential(id: string): Promise<CredentialRecord | null> {
+    await this.tail
+    const row = this.db.prepare('SELECT * FROM connector_credentials WHERE id=?').get(id) as Record<string, unknown> | undefined
+    if (!row) return null
+    return { id: String(row.id), owner: { kind: 'connector', connectorId: String(row.owner_id) }, authType: String(row.auth_type), ciphertext: String(row.ciphertext), profile: JSON.parse(String(row.profile_json)), revision: Number(row.revision), createdAt: String(row.created_at), updatedAt: String(row.updated_at) } as CredentialRecord
+  }
+  async saveConnectorCredential(record: CredentialRecord): Promise<void> {
+    if (record.owner.kind !== 'connector') throw new Error('Worker only stores connector credentials')
+    await this.tail
+    this.db.prepare(`INSERT INTO connector_credentials VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET owner_kind=excluded.owner_kind,owner_id=excluded.owner_id,auth_type=excluded.auth_type,ciphertext=excluded.ciphertext,profile_json=excluded.profile_json,revision=excluded.revision,updated_at=excluded.updated_at`).run(record.id, 'connector', record.owner.connectorId, record.authType, record.ciphertext, JSON.stringify(record.profile), record.revision, record.createdAt, record.updatedAt)
+  }
+  async deleteConnectorCredential(id: string): Promise<void> { await this.tail; this.db.prepare('DELETE FROM connector_credentials WHERE id=?').run(id) }
+  async getConnectorExecution(requestId: string): Promise<ConnectorExecutionRecord | null> {
+    await this.tail
+    const row = this.db.prepare('SELECT body FROM connector_executions WHERE request_id=?').get(requestId) as { body?: unknown } | undefined
+    return row ? JSON.parse(String(row.body)) as ConnectorExecutionRecord : null
+  }
+  async beginConnectorExecution(record: ConnectorExecutionRecord): Promise<'inserted' | 'exists'> {
+    await this.tail
+    const inserted = this.db.prepare('INSERT OR IGNORE INTO connector_executions VALUES (?,?,?,?,?,?,?,?)').run(record.requestId, record.fingerprint, record.state, record.toolCall.sessionId, JSON.stringify(record), null, record.createdAt, null)
+    return inserted.changes === 1 ? 'inserted' : 'exists'
+  }
+  async finishConnectorExecution(requestId: string, result: ExecutionResult, journalSummary: unknown): Promise<void> {
+    await this.tail
+    const row = this.db.prepare('SELECT body FROM connector_executions WHERE request_id=?').get(requestId) as { body?: unknown } | undefined
+    if (!row) throw new Error('Connector execution not found')
+    const current = JSON.parse(String(row.body)) as ConnectorExecutionRecord
+    const record: ConnectorExecutionRecord = { ...current, state: 'completed', result, journalSummary, completedAt: result.completedAt }
+    this.db.prepare('UPDATE connector_executions SET state=?,body=?,journal_summary=?,completed_at=? WHERE request_id=?').run('completed', JSON.stringify(record), JSON.stringify(journalSummary), result.completedAt, requestId)
+  }
+  async listConnectorJournal(sessionId: string): Promise<readonly ConnectorExecutionRecord[]> {
+    await this.tail
+    return (this.db.prepare('SELECT body FROM connector_executions WHERE session_id=? AND state=? ORDER BY created_at').all(sessionId, 'completed') as { body?: unknown }[]).map(row => JSON.parse(String(row.body)) as ConnectorExecutionRecord)
+  }
   listSessions = async () => { await this.tail; return this.list<SessionExecution>('sessions') }
   listWorkspaces = async () => { await this.tail; return this.list<LocalWorkspace>('workspaces') }
   workspaces: WorkerStore['workspaces'] = {
@@ -243,6 +290,13 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore 
         return turn
       },
       bindNativeSession: async ({ sessionId, nativeSession }) => this.put('sessions', sessionId, { ...this.session(sessionId), nativeSession }),
+      setModel: async (id, modelId) => {
+        const session = this.session(id)
+        const previousModelId = session.binding.modelId
+        if (previousModelId === modelId) return
+        this.put('sessions', id, { ...session, binding: { ...session.binding, modelId }, updatedAt: now() })
+        this.append(id, [{ occurredAt: now(), payload: { kind: 'model.changed', previousModelId, modelId } }])
+      },
       requestStop: async (id, turnId) => {
         const turn = this.getDocument<Turn>('turns', turnId)
         if (!turn || turn.sessionId !== id) return { status: 'not-found' }

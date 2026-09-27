@@ -43,6 +43,7 @@ try {
   const installedManifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
   if (installedManifest.dependencies?.['@earendil-works/pi-coding-agent']) fail('Worker must not install a Pi runtime')
   accessSync(join(packageRoot, 'node_modules', 'ws', 'package.json'))
+  accessSync(join(packageRoot, 'node_modules', '@modelcontextprotocol', 'sdk', 'package.json'))
   const missingAgents = JSON.parse(execFileSync(process.execPath, [join(packageRoot, 'dist', 'cli.js'), 'detect', '--home', join(temporaryDirectory, 'no-agents')], {
     encoding: 'utf8', timeout: 20_000, env: { ...process.env, PATH: '' },
   }))

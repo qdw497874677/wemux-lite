@@ -66,7 +66,7 @@ test('Pi-like and OpenCode-like providers satisfy the same public AgentRunner co
       const payload = projectAgentEventToSessionPayload(event, `${provider}-turn` as TurnId)
       return payload ? [payload] : []
     })
-    assert.deepEqual(projected.map(event => event.kind), ['assistant.text.delta', 'usage.updated'])
+    assert.deepEqual(projected.map(event => event.kind), ['assistant.text.delta', 'usage.updated', 'turn.finished'])
     await runner.close()
   }
 })
