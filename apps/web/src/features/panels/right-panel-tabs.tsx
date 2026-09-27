@@ -31,7 +31,7 @@ export function RightPanelTabs<Context extends PanelRenderContext>({ descriptors
   const visible = descriptors.filter(panel => panel.id === active?.id || retained.has(panel.id))
   if (!active) return null
   const ActiveIcon = active.icon
-  return <aside className="right-panel flex h-full min-h-0 w-full flex-col bg-card/75 text-foreground backdrop-blur-[var(--glass-blur)]">
+  return <aside className="right-panel flex h-full min-h-0 w-full flex-col border-l border-border/80 bg-card/75 text-foreground backdrop-blur-[var(--glass-blur)]">
     <header className="flex min-h-10 shrink-0 items-center gap-1 border-b border-contrast-border bg-background/35 px-1.5">
       <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" role="tablist" aria-label="会话面板">
         {descriptors.map(panel => {

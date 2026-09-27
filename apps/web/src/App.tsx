@@ -376,7 +376,7 @@ function Workbench({ config, onSettings, onUnauthorized, onSignOut }: { config: 
           <div className="relative min-h-0 min-w-0 flex-1">
             {retainedSessions.map(item => <LeasedSessionSurface key={item.id} api={api} session={item} revision={revision} controller={submission(item.id)} connected={connected} browserOnline={browserOnline} workerOnline={workers.find(candidate => candidate.id === item.workerId)?.connectionState === 'online'} active={item.id === sessionId} onOpenPanel={() => { setActivePanelId('session-info'); setRightPanelOpen(true) }} />)}
           </div>
-          {rightPanelOpen && wideRightPanel && <div className="w-80 shrink-0 border-l border-contrast-border bg-card/55">{rightPanel}</div>}
+          {rightPanelOpen && wideRightPanel && <div className="w-80 shrink-0 bg-card/55">{rightPanel}</div>}
         </div>
         {!wideRightPanel && <RightPanelSheet open={rightPanelOpen} onClose={() => setRightPanelOpen(false)}>{rightPanel}</RightPanelSheet>}
       </>}</MainCanvas></SidebarInset>
