@@ -92,7 +92,7 @@ export function AuthLinkScreen({ kind, token, onAuthenticated, onGoLogin }: {
   const missing = token.length === 0
   return <main className="landing-root grain-overlay" aria-labelledby="link-title">
     <section className="landing-card">
-      <p className="flex items-center gap-3"><span aria-hidden className="grid size-10 place-items-center rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 text-lg font-black text-white shadow-[0_2px_12px_hsl(244_75%_64%_/.3)]">W</span><strong className="text-base tracking-tight">Wemux Lite</strong></p>
+      <p className="flex items-center gap-3"><span aria-hidden className="grid size-10 place-items-center rounded-xl bg-primary text-lg font-black text-primary-foreground shadow-[0_2px_12px_color-mix(in_oklab,var(--primary)_28%,transparent)]">W</span><strong className="text-base tracking-tight">Wemux Lite</strong></p>
       <h1 id="link-title" className="text-lg font-semibold">{heading}</h1>
 
       {missing ? <>

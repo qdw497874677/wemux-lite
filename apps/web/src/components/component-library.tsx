@@ -47,7 +47,7 @@ const catalog = [
 const swatches: Array<[string, string]> = [
   ['primary-500', 'bg-primary-500'], ['primary-400', 'bg-primary-400'], ['primary-600', 'bg-primary-600'],
   ['success-500', 'bg-success-500'], ['warning-500', 'bg-warning-500'], ['error-500', 'bg-error-500'], ['info-500', 'bg-info-500'],
-  ['badge-violet', 'bg-badge-violet-background'], ['badge-sky', 'bg-badge-sky-background'], ['badge-success', 'bg-badge-success-background'], ['badge-warning', 'bg-badge-warning-background'], ['badge-error', 'bg-badge-error-background'],
+  ['badge-primary', 'bg-badge-primary-background'], ['badge-sky', 'bg-badge-sky-background'], ['badge-success', 'bg-badge-success-background'], ['badge-warning', 'bg-badge-warning-background'], ['badge-error', 'bg-badge-error-background'],
   ['background-100', 'bg-background-100'], ['card-background-100', 'bg-card-background-100'], ['background-soft-100', 'bg-background-soft-100'], ['dropdown-background', 'bg-dropdown-background'],
 ]
 
@@ -163,7 +163,7 @@ export function ComponentLibrary() {
         <Label2>状态徽章</Label2>
         <div className="flex flex-wrap gap-2">
           <Badge>默认</Badge><Badge variant="secondary">次要</Badge><Badge color="success" prefixIcon={<Check />}>在线</Badge>
-          <Badge color="warning">待审查</Badge><Badge color="error">失败</Badge><Badge color="violet">Tailscale</Badge><Badge variant="outline">未连接</Badge>
+          <Badge variant="warning">待审查</Badge><Badge variant="danger">失败</Badge><Badge>Tailscale</Badge><Badge variant="outline">未连接</Badge>
         </div>
         <Label2>通知与提示</Label2>
         <div className="flex flex-wrap items-center gap-3">

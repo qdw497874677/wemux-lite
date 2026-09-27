@@ -374,8 +374,8 @@
         "light": "#ffffff"
       },
       "--color-input-primary-focus-border": {
-        "dark": "#91aeff",
-        "light": "#91aeff"
+        "dark": "var(--color-primary-300)",
+        "light": "var(--color-primary-300)"
       }
     },
     "icons": [

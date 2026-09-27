@@ -68,7 +68,7 @@ export function LandingScreen({ notice, onAuthenticated }: { notice?: string; on
   return <main className="landing-root grain-overlay" aria-labelledby="landing-title">
     <div className="landing-grid">
       <section className="landing-intro">
-        <p className="flex items-center gap-3"><span aria-hidden className="grid size-10 place-items-center rounded-xl bg-gradient-to-br from-indigo-600 to-violet-600 text-lg font-black text-white shadow-[0_2px_12px_hsl(244_75%_64%_/.3)]">W</span><strong className="text-base tracking-tight">Wemux Lite</strong></p>
+        <p className="flex items-center gap-3"><span aria-hidden className="grid size-10 place-items-center rounded-xl bg-primary text-lg font-black text-primary-foreground shadow-[0_2px_12px_color-mix(in_oklab,var(--primary)_28%,transparent)]">W</span><strong className="text-base tracking-tight">Wemux Lite</strong></p>
         <h1 id="landing-title" className="text-3xl font-bold leading-tight tracking-tight sm:text-4xl">自托管的智能体协作控制台</h1>
         <p className="max-w-xl text-sm leading-6 text-muted-foreground sm:text-base sm:leading-7">注册工作节点、组织项目与工作区，和运行在各节点上的智能体对话，并在任务看板上完成分派与人工审查。</p>
         <ul>
@@ -86,7 +86,7 @@ export function LandingScreen({ notice, onAuthenticated }: { notice?: string; on
         {oauthError && <p role="alert" className="flex gap-2 rounded-lg border border-red-500/25 bg-red-500/10 p-3 text-xs leading-5 text-red-200"><AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0" /><span>{oauthError}</span></p>}
         {closedReason && <p className="flex gap-2 rounded-lg border border-border bg-muted/30 p-3 text-xs leading-5 text-muted-foreground"><AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0 text-amber-300" />{closedReason}</p>}
         {mailReason && <p className="flex gap-2 rounded-lg border border-amber-500/25 bg-amber-500/10 p-3 text-xs leading-5 text-amber-100"><AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0" />{mailReason}</p>}
-        {administratorUnregistered && <p className="flex gap-2 rounded-lg border border-border bg-muted/30 p-3 text-xs leading-5 text-muted-foreground"><ShieldCheck aria-hidden className="mt-0.5 size-4 shrink-0 text-indigo-300" />本实例的管理员已由部署声明，但对应账号还没建立。请用部署时声明的那个邮箱注册或登录，该账号会自动获得实例管理员权限。</p>}
+        {administratorUnregistered && <p className="flex gap-2 rounded-lg border border-border bg-muted/30 p-3 text-xs leading-5 text-muted-foreground"><ShieldCheck aria-hidden className="mt-0.5 size-4 shrink-0 text-primary" />本实例的管理员已由部署声明，但对应账号还没建立。请用部署时声明的那个邮箱注册或登录，该账号会自动获得实例管理员权限。</p>}
         {administratorMissing && <p className="flex gap-2 rounded-lg border border-red-500/25 bg-red-500/10 p-3 text-xs leading-5 text-red-200"><AlertTriangle aria-hidden className="mt-0.5 size-4 shrink-0" />本实例未声明管理员邮箱，无法登录控制台。请重启服务端并设置 WEMUX_ADMIN_EMAILS。</p>}
         {options === null
           ? <div className="grid gap-3">

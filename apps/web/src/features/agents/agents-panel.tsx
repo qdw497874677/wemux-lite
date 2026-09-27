@@ -15,7 +15,7 @@ function AgentRow({ entry, onStart }: { entry: AgentPanelEntry; onStart: (entry:
     <div className="flex items-center gap-2 p-2.5">
       <button type="button" className="ring-focus flex min-w-0 flex-1 items-center gap-2 rounded-md text-left" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>
         {expanded ? <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" /> : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />}
-        <Bot className="size-4 shrink-0 text-violet-300" />
+        <Bot className="size-4 shrink-0 text-primary" />
         <span className="min-w-0 flex-1 truncate text-sm font-medium">{entry.displayName}</span>
       </button>
       <span title={available ? '可用' : reason}>

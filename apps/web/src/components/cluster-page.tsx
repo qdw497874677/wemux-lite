@@ -219,7 +219,7 @@ export function ClusterPage({ api, connected, canEnrollWorkers, onAddWorker, onR
             headers={['会话', '项目', '工作节点', '智能体 / 模型', '运行状态', '操作']}
             empty="暂无会话。创建会话后，可在这里查看运行状态和所属工作节点。"
             rows={sessions.map(session => [
-              <span key="title" className="flex items-center gap-2"><Bot className="size-3.5 text-violet-300" /><strong className="text-xs">{session.title}</strong></span>,
+              <span key="title" className="flex items-center gap-2"><Bot className="size-3.5 text-primary" /><strong className="text-xs">{session.title}</strong></span>,
               <span key="project">{projectName.get(session.projectId ?? '') ?? '—'}</span>,
               <span key="worker">{workerName.get(session.workerId) ?? shortId(session.workerId)}</span>,
               <span key="agent" className="text-muted-foreground">{session.agentKey} / {session.modelId}</span>,

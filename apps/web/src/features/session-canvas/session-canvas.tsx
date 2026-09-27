@@ -50,9 +50,9 @@ export function SessionCanvas({ api, projectId, graph, selectedSessionId, intera
   if (!projection) return null
 
   return <section className="session-canvas" aria-label="会话画布">
-    <header className="session-canvas-header">
-      <div><div className="flex items-center gap-2 text-sm font-semibold"><Network className="size-4 text-primary-400" />会话画布</div><p className="mt-1 text-xs text-muted-foreground">{projection.nodes.length} 个会话 · {projection.edges.length} 条 Fork 关系 · {layoutStatus === 'saving' ? '正在保存个人布局' : layoutStatus === 'saved' ? '个人布局已保存' : layoutStatus === 'conflict' ? '图已更新，请重新加载后再保存' : layoutStatus === 'local' ? 'Server 保存不可用，已保留本机布局' : '优先恢复个人布局，再回退团队默认布局'}</p></div>
-      <div className="session-canvas-presence" aria-label="画布在线成员"><span>{collaboration.status === 'live' ? '实时协作已连接' : collaboration.status === 'reconnecting' ? '实时协作正在重连' : collaboration.status === 'unavailable' ? '实时协作暂不可用' : '正在连接实时协作'}</span>{collaboration.snapshot.presence.map(member => <span key={member.userId} className="session-canvas-presence-member" title={member.activeSessionId ? `正在查看 ${member.activeSessionId}` : '正在浏览画布'}>{member.displayName}</span>)}<Badge variant="outline">{projection.revision}</Badge></div>
+    <header className="session-canvas-header canvas-toolbar">
+      <div className="min-w-0 flex-1"><div className="flex items-center gap-2 text-sm font-medium"><Network className="size-4 text-primary" />会话画布</div><p className="mt-0.5 truncate text-xs text-muted-foreground">{projection.nodes.length} 个会话 · {projection.edges.length} 条 Fork 关系 · {layoutStatus === 'saving' ? '正在保存个人布局' : layoutStatus === 'saved' ? '个人布局已保存' : layoutStatus === 'conflict' ? '图已更新，请重新加载后再保存' : layoutStatus === 'local' ? 'Server 保存不可用，已保留本机布局' : '优先恢复个人布局，再回退团队默认布局'}</p></div>
+      <div className="session-canvas-presence shrink-0" aria-label="画布在线成员"><span>{collaboration.status === 'live' ? '实时协作已连接' : collaboration.status === 'reconnecting' ? '实时协作正在重连' : collaboration.status === 'unavailable' ? '实时协作暂不可用' : '正在连接实时协作'}</span>{collaboration.snapshot.presence.map(member => <span key={member.userId} className="session-canvas-presence-member" title={member.activeSessionId ? `正在查看 ${member.activeSessionId}` : '正在浏览画布'}>{member.displayName}</span>)}<Badge variant="outline">{projection.revision}</Badge></div>
     </header>
     {error && <p className="border-b border-amber-500/20 bg-amber-500/10 px-4 py-2 text-xs text-amber-100" role="status">显示上次成功加载的画布。{error}</p>}
     {projection.hiddenRelationCount !== null && projection.hiddenRelationCount > 0 && <p className="flex items-center gap-2 border-b border-border px-4 py-2 text-xs text-muted-foreground"><LockKeyhole className="size-3.5" />另有 {projection.hiddenRelationCount} 条关系因权限未显示。</p>}
@@ -74,5 +74,5 @@ function CanvasFallback({ graph, selectedSessionId, onSelect, onOpen }: { graph:
 }
 
 function CanvasState({ title, detail, action }: { title: string; detail: string; action?: ReactNode }) {
-  return <section className="session-canvas session-canvas-state" aria-label="会话画布"><span className="session-canvas-state-icon"><Workflow className="size-6" /></span><div><h2 className="text-sm font-semibold">{title}</h2><p className="mt-1 max-w-md text-sm leading-6 text-muted-foreground">{detail}</p>{action && <div className="mt-3">{action}</div>}</div></section>
+  return <section className="session-canvas session-canvas-state" aria-label="会话画布"><span className="session-canvas-state-icon"><Workflow className="size-5" /></span><div><h2 className="text-sm font-medium">{title}</h2><p className="mt-1 max-w-md text-xs leading-5 text-muted-foreground">{detail}</p>{action && <div className="mt-3">{action}</div>}</div></section>
 }

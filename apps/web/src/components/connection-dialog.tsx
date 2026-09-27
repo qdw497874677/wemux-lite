@@ -34,7 +34,7 @@ export function ConnectionDialog({ session, expired, onClose, onSignedIn, onSign
 
   return <Dialog open onOpenChange={open => { if (!open) onClose() }}><DialogContent className="max-w-lg">
     <DialogHeader><div className="flex items-center gap-3">
-      <span className="grid size-10 place-items-center rounded-xl bg-indigo-500/10 text-indigo-300"><UserRound className="size-5" /></span>
+      <span className="grid size-10 place-items-center rounded-xl bg-primary/10 text-primary"><UserRound className="size-5" /></span>
       <div>
         <DialogTitle>{showForm ? '登录 Wemux Lite' : '账号'}</DialogTitle>
         <DialogDescription className="mt-1">{showForm ? '使用管理员账号登录；会话保存在 HttpOnly Cookie 中。' : '当前登录的账号与退出方式。'}</DialogDescription>
