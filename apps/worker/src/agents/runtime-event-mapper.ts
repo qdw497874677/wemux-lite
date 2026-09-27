@@ -51,15 +51,15 @@ export function mapRuntimeRecord(provider: 'pi' | 'claude', operationId: Runtime
   const type = text(record.type)
   if (type === 'assistant' || type === 'assistant_message' || type === 'text_delta' || type === 'message_update' || (type === 'message_end' && object(record.message).role === 'assistant')) {
     const value = assistantText(record)
-    return value ? [{ kind: 'event', event: { kind: 'assistant.text.delta', text: value } }] : []
+    return value ? [{ kind: 'event', event: { kind: 'assistant.text.delta', text: value, streamKind: 'assistant_text' } }] : []
   }
   if (type === 'tool_execution_start' || type === 'tool_use') {
     const toolCallId = (text(record.toolCallId) ?? text(record.id) ?? `${provider}-${operationId}-tool`) as ToolCallId
-    return [{ kind: 'event', event: { kind: 'tool.started', toolCallId, toolName: text(record.toolName) ?? text(record.name) ?? 'tool', input: record.args ?? record.input ?? null } }]
+    return [{ kind: 'event', event: { kind: 'tool.started', toolCallId, toolName: text(record.toolName) ?? text(record.name) ?? 'tool', input: record.args ?? record.input ?? null, streamKind: 'command_output' } }]
   }
   if (type === 'tool_execution_update' || type === 'tool_result_delta') {
     const toolCallId = (text(record.toolCallId) ?? text(record.id) ?? `${provider}-${operationId}-tool`) as ToolCallId
-    return [{ kind: 'event', event: { kind: 'tool.output.delta', toolCallId, text: text(record.output) ?? text(record.text) ?? '' } }]
+    return [{ kind: 'event', event: { kind: 'tool.output.delta', toolCallId, text: text(record.output) ?? text(record.text) ?? '', streamKind: 'command_output' } }]
   }
   if (type === 'tool_execution_end' || type === 'tool_result') {
     const toolCallId = (text(record.toolCallId) ?? text(record.id) ?? `${provider}-${operationId}-tool`) as ToolCallId

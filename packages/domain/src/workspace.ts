@@ -1,15 +1,19 @@
 import type { ProjectId, RepositoryId, WorkerId, WorkspaceId } from './ids.js'
 
+export type WorkspacePlacementStatus =
+  | 'ready'
+  | 'stopped'
+  | 'deleted'
+  | 'failed'
+  | 'unhealthy'
+
+/** Worker-local provisioning reports retain operation phases; Server placements expose lifecycle states. */
 export type WorkspaceStatus =
   | 'unplaced'
   | 'pending'
   | 'provisioning'
-  | 'ready'
-  | 'failed'
+  | WorkspacePlacementStatus
   | 'deleting'
-  | 'deleted'
-
-export type WorkspacePlacementStatus = Exclude<WorkspaceStatus, 'unplaced' | 'deleted'>
 
 export type RepositoryWorkspaceOwnership =
   | { readonly kind: 'standalone' }

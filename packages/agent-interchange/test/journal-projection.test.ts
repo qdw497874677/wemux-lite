@@ -29,12 +29,17 @@ test('projects normalized usage and provider tool events without exposing transp
   })
 })
 
-test('projects approval events and ignores terminal/native-session metadata owned by other projections', () => {
+test('projects approval lifecycle and terminal taxonomy into the durable journal', () => {
   const approvalId = 'approval-1' as ApprovalId
-  assert.deepEqual(projectAgentEventToSessionPayload(base({ customMetadata: { provider: { kind: 'approval.requested', approvalId, action: { command: 'rm' }, reason: '需要确认' } } }), turnId), {
+  assert.deepEqual(projectAgentEventToSessionPayload(base({ customMetadata: { wemux: { approval: { kind: 'requested', id: approvalId, action: { command: 'rm' }, reason: '需要确认' } }, provider: { kind: 'approval.requested', approvalId, action: null } } }), turnId), {
     kind: 'approval.requested', turnId, approvalId, action: { command: 'rm' }, reason: '需要确认',
   })
-  assert.equal(projectAgentEventToSessionPayload(base({ customMetadata: { wemux: { terminal: 'completed' } } }), turnId), null)
+  assert.deepEqual(projectAgentEventToSessionPayload(base({ customMetadata: { wemux: { approval: { kind: 'resolved', id: approvalId, decision: 'deny' } }, provider: { kind: 'approval.resolved' } } }), turnId), {
+    kind: 'approval.resolved', turnId, approvalId, decision: 'deny',
+  })
+  assert.deepEqual(projectAgentEventToSessionPayload(base({ customMetadata: { wemux: { terminal: 'failed', error: { code: 'agent-error', message: 'connection refused', abortReason: 'provider_error', failureReason: 'agent_error.provider_network', retryable: true } } } }), turnId), {
+    kind: 'turn.finished', turnId, outcome: 'failed', failure: { code: 'agent-error', message: 'connection refused', abortReason: 'provider_error', failureReason: 'agent_error.provider_network', retryable: true },
+  })
   assert.equal(projectAgentEventToSessionPayload(base({ customMetadata: { wemux: { nativeSession: 'native-1' as never } } }), turnId), null)
 })
 
@@ -50,7 +55,10 @@ test('projects runtime notices including retry budget and drops malformed metada
   })
 })
 
-test('projects compaction and usage scope metadata that the server validator whitelists', () => {
+test('projects stream kinds, compaction and usage scope metadata that the server validator whitelists', () => {
+  assert.deepEqual(projectAgentEventToSessionPayload(base({ content: { role: 'model', parts: [{ text: 'plan' }] }, partial: true, streamKind: 'plan_text' }), turnId), { kind: 'assistant.text.delta', turnId, text: 'plan', streamKind: 'plan_text' })
+  const toolCallId = 'tool-file' as ToolCallId
+  assert.deepEqual(projectAgentEventToSessionPayload(base({ streamKind: 'file_change_output', customMetadata: { provider: { kind: 'tool.output.delta', toolCallId, text: 'updated a.ts' } } }), turnId), { kind: 'tool.output.delta', turnId, toolCallId, text: 'updated a.ts', streamKind: 'file_change_output' })
   assert.deepEqual(projectAgentEventToSessionPayload(base({ customMetadata: { provider: { kind: 'compaction.started', reason: 'auto' } } }), turnId), { kind: 'compaction.started', turnId, reason: 'auto' })
   assert.deepEqual(projectAgentEventToSessionPayload(base({ customMetadata: { provider: { kind: 'compaction.finished', summary: '摘要' } } }), turnId), { kind: 'compaction.finished', turnId, summary: '摘要' })
 })

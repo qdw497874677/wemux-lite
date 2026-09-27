@@ -8,7 +8,7 @@ const operationId = 'op-test' as OperationId
 test('maps tool lifecycle and approval requests without provider-specific UI fields', () => {
   const started = mapRuntimeRecord('pi', operationId, { type: 'tool_execution_start', toolCallId: 'call-1', toolName: 'bash', args: { command: 'pwd' } })
   assert.equal(started[0]?.kind, 'event')
-  assert.deepEqual(started[0]?.kind === 'event' ? started[0].event : null, { kind: 'tool.started', toolCallId: 'call-1', toolName: 'bash', input: { command: 'pwd' } })
+  assert.deepEqual(started[0]?.kind === 'event' ? started[0].event : null, { kind: 'tool.started', toolCallId: 'call-1', toolName: 'bash', input: { command: 'pwd' }, streamKind: 'command_output' })
   const approval = mapRuntimeRecord('pi', operationId, { type: 'approval_required', approvalId: 'approval-1', action: { command: 'rm -rf /tmp/x' }, reason: 'destructive' })
   assert.equal(approval[0]?.kind === 'event' ? approval[0].event.kind : null, 'approval.requested')
 })

@@ -1,5 +1,5 @@
 import type { UIMessage } from 'ai'
-import type { JournalEventDTO, RuntimeState, RuntimeUsageDTO } from './dto'
+import type { AbortReasonDTO, AgentFailureReasonDTO, JournalEventDTO, RuntimeState, RuntimeUsageDTO } from './dto'
 
 export interface ChatMessage {
   id: string
@@ -23,6 +23,7 @@ export interface TimelineTool {
   output: string
   status: 'running' | 'completed' | 'failed' | 'cancelled'
   exitCode: number | null
+  streamKind?: 'command_output' | 'file_change_output'
 }
 
 export interface TimelineNotice {
@@ -30,6 +31,7 @@ export interface TimelineNotice {
   id: string
   text: string
   tone: 'info' | 'error'
+  failureReason?: AgentFailureReasonDTO
 }
 
 export interface TimelineUsage {
@@ -50,8 +52,35 @@ export interface TimelineReasoning {
 
 export interface QueuedItem { commandId: string; messageId: string; content: string; position: number }
 export interface PendingApproval { approvalId: string; turnId: string; action: unknown; reason?: string }
+export interface ApprovalHistoryEntry extends PendingApproval { decision: 'approve' | 'deny' }
 
 export type ChatTimelineItem = TimelineMessage | TimelineTool | TimelineNotice | TimelineUsage | TimelineReasoning
+
+const abortReasonLabels: Record<AbortReasonDTO, string> = {
+  user_stop: '用户已停止本轮',
+  executor_disconnected: '执行节点连接已断开',
+  control_plane_disconnect: '控制面连接已断开',
+  timeout: '本轮执行超时',
+  provider_error: '模型服务执行失败',
+  cancelled: '本轮已取消',
+  unknown: '本轮因未知原因中止',
+}
+const failureReasonLabels: Record<AgentFailureReasonDTO, string> = {
+  'agent_error.context_overflow': '上下文窗口已超限',
+  'agent_error.missing_config': '运行时缺少必要配置',
+  'agent_error.provider_auth_or_access': '模型服务认证或访问被拒绝',
+  'agent_error.provider_quota_limit': '模型服务额度不足',
+  'agent_error.provider_capacity_or_rate_limit': '模型服务容量不足或触发限流',
+  'agent_error.provider_server_error': '模型服务端发生错误',
+  'agent_error.provider_network': '模型服务网络连接中断',
+  'agent_error.model_not_found_or_unavailable': '模型不存在或当前不可用',
+  'agent_error.empty_or_unparseable_output': '智能体未返回可解析结果',
+  'agent_error.agent_timeout': '智能体进程执行超时',
+  'agent_error.runtime_missing_executable': '智能体运行时未安装或不可执行',
+  'agent_error.runtime_version_unsupported': '智能体运行时版本不受支持',
+  'agent_error.process_failure': '智能体进程异常退出',
+  'agent_error.unknown': '智能体发生未知错误',
+}
 
 /** AI Elements consumes the AI SDK UIMessage shape, while Wemux keeps its own durable AgentEvent journal. */
 export function timelineMessageToUIMessage(message: TimelineMessage): UIMessage {
@@ -68,6 +97,7 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
   let activeTurnId: string | null = null
   const queued = new Map<string, QueuedItem>()
   const approvals = new Map<string, PendingApproval>()
+  const approvalHistory: ApprovalHistoryEntry[] = []
   const turnMessages = new Map<string, string>()
   const turnStartedAt = new Map<string, number>()
 
@@ -122,6 +152,12 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
         break
       }
       case 'assistant.text.delta': {
+        if (payload.streamKind === 'reasoning_text' || payload.streamKind === 'plan_text') {
+          const previous = timeline.at(-1)
+          if (previous?.kind === 'reasoning' && previous.turnId === payload.turnId && previous.running) previous.text += payload.text
+          else timeline.push({ kind: 'reasoning', id: `reasoning:${payload.turnId}:${event.seq}`, turnId: payload.turnId, text: payload.text, duration: 1, running: true })
+          break
+        }
         assistantMessage(payload.turnId).text += payload.text
         const previous = timeline.at(-1)
         if (previous?.kind === 'message' && previous.role === 'assistant' && previous.turnId === payload.turnId && previous.status === 'running') {
@@ -144,8 +180,10 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
           if (entry.kind === 'tool' && entry.turnId === payload.turnId && entry.status === 'running') entry.status = payload.outcome === 'cancelled' ? 'cancelled' : 'failed'
         }
         if (payload.failure) {
-          notices.push(payload.failure.message)
-          timeline.push({ kind: 'notice', id: `failure:${payload.turnId}:${event.seq}`, text: payload.failure.message, tone: 'error' })
+          const category = payload.failure.failureReason ? failureReasonLabels[payload.failure.failureReason] : payload.failure.abortReason ? abortReasonLabels[payload.failure.abortReason] : ''
+          const failureText = category && !payload.failure.message.includes(category) ? `${category}：${payload.failure.message}` : payload.failure.message
+          notices.push(failureText)
+          timeline.push({ kind: 'notice', id: `failure:${payload.turnId}:${event.seq}`, text: failureText, tone: 'error', ...(payload.failure.failureReason ? { failureReason: payload.failure.failureReason } : {}) })
         }
         runtimeState = payload.outcome === 'failed' ? 'failed' : messages.some(item => item.role === 'user' && item.status === 'queued') ? 'queued' : 'idle'
         break
@@ -165,15 +203,16 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
         const elapsed = occurredAt - (startedAt ?? occurredAt)
         const duration = Number.isFinite(elapsed) ? Math.max(1, Math.round(elapsed / 1000)) : 1
         timeline.push({ kind: 'reasoning', id: `reasoning:${payload.toolCallId}`, turnId: payload.turnId, text: `准备调用工具：${payload.toolName}`, duration, running: false })
-        timeline.push({ kind: 'tool', id: `tool:${payload.toolCallId}`, turnId: payload.turnId, toolCallId: payload.toolCallId, toolName: payload.toolName, input: payload.input, output: '', status: 'running', exitCode: null })
+        timeline.push({ kind: 'tool', id: `tool:${payload.toolCallId}`, turnId: payload.turnId, toolCallId: payload.toolCallId, toolName: payload.toolName, input: payload.input, output: '', status: 'running', exitCode: null, ...(payload.streamKind ? { streamKind: payload.streamKind } : {}) })
         break
       }
       case 'tool.output.delta': {
         let tool = timeline.find(item => item.kind === 'tool' && item.toolCallId === payload.toolCallId)
         if (!tool || tool.kind !== 'tool') {
-          tool = { kind: 'tool', id: `tool:${payload.toolCallId}`, turnId: payload.turnId, toolCallId: payload.toolCallId, toolName: '工具', input: null, output: '', status: 'running', exitCode: null }
+          tool = { kind: 'tool', id: `tool:${payload.toolCallId}`, turnId: payload.turnId, toolCallId: payload.toolCallId, toolName: '工具', input: null, output: '', status: 'running', exitCode: null, ...(payload.streamKind ? { streamKind: payload.streamKind } : {}) }
           timeline.push(tool)
         }
+        if (payload.streamKind) tool.streamKind = payload.streamKind
         tool.output += payload.text
         break
       }
@@ -197,10 +236,13 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
         approvals.set(payload.approvalId, { approvalId: payload.approvalId, turnId: payload.turnId, action: payload.action, reason: payload.reason })
         timeline.push({ kind: 'notice', id: `approval:${payload.approvalId}`, text: `等待审批${payload.reason ? `：${payload.reason}` : ''}`, tone: 'info' })
         break
-      case 'approval.resolved':
+      case 'approval.resolved': {
+        const approval = approvals.get(payload.approvalId)
         approvals.delete(payload.approvalId)
+        approvalHistory.push({ approvalId: payload.approvalId, turnId: payload.turnId, action: approval?.action ?? null, ...(approval?.reason ? { reason: approval.reason } : {}), decision: payload.decision })
         timeline.push({ kind: 'notice', id: `approval-resolved:${event.seq}`, text: payload.decision === 'approve' ? '审批已批准' : '审批已拒绝', tone: 'info' })
         break
+      }
       case 'compaction.started':
         timeline.push({ kind: 'notice', id: `compaction:${payload.turnId}:${event.seq}`, text: `正在压缩上下文${payload.reason ? `：${payload.reason}` : ''}`, tone: 'info' })
         break
@@ -218,7 +260,7 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
       }
     }
   }
-  return { messages, timeline, notices, runtimeState, activeTurnId, queuedItems: [...queued.values()].sort((a, b) => a.position - b.position), pendingApprovals: [...approvals.values()] }
+  return { messages, timeline, notices, runtimeState, activeTurnId, queuedItems: [...queued.values()].sort((a, b) => a.position - b.position), pendingApprovals: [...approvals.values()], approvalHistory }
 }
 
 export function appendPage(current: readonly JournalEventDTO[], incoming: readonly JournalEventDTO[], sessionId: string) {

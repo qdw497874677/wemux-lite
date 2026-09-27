@@ -9,6 +9,7 @@ import type {
 import type { AgentRef } from './agent.js'
 import type { CapabilitySnapshot } from './capabilities.js'
 import type { ModelId, Timestamp } from './values.js'
+import type { AbortReason, AgentFailureReason } from './agent-failure.js'
 
 export type SessionRuntimeState =
   | 'idle'
@@ -56,6 +57,9 @@ export interface QueuedMessage {
 export interface TurnFailure {
   readonly code: 'interrupted' | 'agent-unavailable' | 'agent-error' | 'internal-error'
   readonly message: string
+  readonly abortReason?: AbortReason
+  readonly failureReason?: AgentFailureReason
+  readonly retryable?: boolean
 }
 
 export interface Turn {

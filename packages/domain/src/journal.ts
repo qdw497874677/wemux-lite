@@ -3,6 +3,8 @@ import type { ApprovalId, RuntimeUsage } from './agent-profile.js'
 import type { SessionRuntimeState, TurnFailure } from './session.js'
 import type { EventSeq, Timestamp } from './values.js'
 
+export type AgentStreamKind = 'assistant_text' | 'reasoning_text' | 'plan_text' | 'command_output' | 'file_change_output'
+
 export type SessionEventPayload =
   | {
       readonly kind: 'message.queued'
@@ -27,6 +29,7 @@ export type SessionEventPayload =
       readonly kind: 'assistant.text.delta'
       readonly turnId: TurnId
       readonly text: string
+      readonly streamKind?: Extract<AgentStreamKind, 'assistant_text' | 'reasoning_text' | 'plan_text'>
     }
   | {
       readonly kind: 'tool.started'
@@ -34,12 +37,14 @@ export type SessionEventPayload =
       readonly toolCallId: ToolCallId
       readonly toolName: string
       readonly input: unknown
+      readonly streamKind?: Extract<AgentStreamKind, 'command_output' | 'file_change_output'>
     }
   | {
       readonly kind: 'tool.output.delta'
       readonly turnId: TurnId
       readonly toolCallId: ToolCallId
       readonly text: string
+      readonly streamKind?: Extract<AgentStreamKind, 'command_output' | 'file_change_output'>
     }
   | {
       readonly kind: 'tool.finished'
