@@ -14,6 +14,7 @@ const buttonVariants = cva(
         secondary: 'border-transparent bg-secondary text-secondary-foreground hover:bg-accent',
         outline: '[--control-icon-color:var(--contrast-muted-foreground)] border-button-outline-border bg-button-outline-background text-button-outline-text shadow-xs hover:bg-button-outline-hover-background hover:text-button-outline-hover-text',
         ghost: '[--control-icon-color:var(--contrast-muted-foreground)] border-transparent text-foreground hover:bg-accent',
+        'ghost-muted': '[--control-icon-color:var(--contrast-muted-foreground)] border-transparent text-muted-foreground hover:bg-accent hover:text-foreground',
         destructive: 'border-button-error-background bg-button-error-background text-button-error-text shadow-xs hover:bg-button-error-hover-background',
         success: 'border-button-success-background bg-button-success-background text-button-success-text shadow-xs hover:bg-button-success-hover-background',
         glass: 'surface-glass [--control-icon-color:var(--contrast-muted-foreground)] rounded-full border-border/60 text-foreground shadow-sm',
