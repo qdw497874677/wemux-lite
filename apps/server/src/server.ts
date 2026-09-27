@@ -21,7 +21,9 @@ import { TeamService } from './application/team-service.js'
 import { ProjectAccessService } from './application/project-access-service.js'
 import { CanvasCollaborationService } from './application/canvas-collaboration-service.js'
 import { CanvasLayoutService } from './application/canvas-layout-service.js'
+import { ConnectorService } from './application/connector-service.js'
 import { SqliteCanvasLayoutRepository } from './storage/sqlite/canvas-layout-repository.js'
+import { SqliteConnectorRepository } from './storage/sqlite/connector-repository.js'
 import { WorkerAccessService } from './application/worker-access-service.js'
 import { SessionAccessService } from './application/session-access-service.js'
 import { PersonalAccessTokenService } from './application/personal-access-token-service.js'
@@ -122,7 +124,9 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const canvasLayouts = new CanvasLayoutService(store, new SqliteCanvasLayoutRepository(store), projects, lineage)
   const projectStreams = new ProjectStreams(notifications)
   let gateway: WorkerGateway | undefined
-  const workers = new WorkerService(store, notifications)
+  const connectorRepository = new SqliteConnectorRepository(options.databasePath)
+  const connectors = new ConnectorService(connectorRepository, store, projects, workerAccess, notifications)
+  const workers = new WorkerService(store, notifications, (workerId, report) => connectors.report(workerId, report))
   const workerGateway = { send: (workerId: import('@wemux/domain').WorkerId, payload: import('@wemux/wire-protocol').ServerPayload) => {
     if (!gateway) throw new Error('Worker gateway is not ready')
     return gateway.send(workerId, payload)
@@ -158,6 +162,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
     canvasCollaboration,
     canvasCollaborationStreams,
     canvasLayouts,
+    connectors,
   }))
   gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))
   let closed = false
@@ -185,6 +190,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
       projectStreams.close()
       await gateway.close()
       if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+      connectorRepository.close()
       store.close()
     },
   }

@@ -2,8 +2,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { createGuardedFetch, stableFingerprint, summarizeAgentResult, type McpConnectorDefinition, type OperationType } from '@wemux/connector'
-import type { ConnectorCredentialSecret } from './credential-store.js'
-import type { McpProcessSupervisor, SupervisedMcpProcess } from './mcp-process-supervisor.js'
+import type { ConnectorCredentialSecret } from './credential-store.ts'
+import type { McpProcessSupervisor, SupervisedMcpProcess } from './mcp-process-supervisor.ts'
 
 export interface McpToolDescriptor {
   readonly name: string
@@ -37,12 +37,14 @@ type Connection = {
 }
 
 export class WorkerMcpClient {
+  private readonly options: McpClientOptions
   private readonly http = new Map<string, Promise<Connection>>()
   private closing = false
   private readonly startupTimeoutMs: number
   private readonly callTimeoutMs: number
 
-  constructor(private readonly options: McpClientOptions) {
+  constructor(options: McpClientOptions) {
+    this.options = options
     this.startupTimeoutMs = options.startupTimeoutMs ?? 10_000
     this.callTimeoutMs = options.callTimeoutMs ?? 30_000
   }

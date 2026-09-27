@@ -10,6 +10,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./connectors": {
+      "types": "./dist/connectors.d.ts",
+      "import": "./dist/connectors.js"
+    },
     "./task-platform": {
       "types": "./dist/task-platform.d.ts",
       "import": "./dist/task-platform.js"

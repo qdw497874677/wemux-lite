@@ -1,12 +1,13 @@
 import type { Run, LaunchRequest, LaunchResponse, TaskSummary, TaskDetail, TaskCreate, TaskPatch, TaskActivity, AssignmentRequest, CreateTaskWorkspaceRequest, UnbindWorkspaceRequest } from '@wemux/web-contract/task-platform'
 import type { CanvasLayoutResponse, CanvasLayoutSaveRequest, CanvasLayoutSaveResponse, CanvasLayoutScope, SessionGraphResponse } from '@wemux/web-contract/session-graph'
+import type { ConnectorDTO, ConnectorListDTO, ConnectorTestDTO, ConnectorWriteDTO } from '@wemux/web-contract/connectors'
 import { randomId } from '../lib/random.ts'
 import { readDeviceId } from '../lib/device-scope.ts'
 import type {
   ApprovalDecisionDTO, RuntimeCommandDTO, PatchSessionDTO, CommandResultDTO,
   AccountPayloadDTO, AccountViewDTO, AcceptedEmailDTO, AccountSecurityViewDTO, AuthOptionsDTO, CommandDTO, CreateEnrollmentTokenDTO, CreateProjectDTO,
   CreateSessionDTO, CreateWorkspaceDTO, EmailChangeAcceptedDTO, EmailChangeConfirmedDTO, EnrollmentTokenDTO, EventsPageDTO, GoogleLinkStartDTO, IssuedPersonalAccessTokenDTO, LoginMethodUnboundDTO, LoginSessionDTO, PasswordChangeDTO, PasswordResetDTO, PersonalAccessTokenDTO, PersonalAccessTokenScopeDTO, ProjectDTO,
-  AccountLifecycleDTO, AuditPageDTO, AuditQueryDTO, ManagedAccountDTO, RegistrationPolicyDTO, RegistrationPolicyViewDTO, SendMessageDTO, SendResultDTO, SessionDTO, SessionResourceDTO, ServerEventsPageDTO, TailnetInfoDTO, VerifiedEmailDTO, WorkerDTO, WorkspaceDTO, FileDiffDTO, FileListDTO, FileReadDTO,
+  AccountLifecycleDTO, AuditPageDTO, AuditQueryDTO, ManagedAccountDTO, RegistrationPolicyDTO, RegistrationPolicyViewDTO, SendMessageDTO, SendResultDTO, SessionDTO, SessionResourceDTO, ServerEventsPageDTO, TailnetInfoDTO, VerifiedEmailDTO, WorkerDTO, WorkspaceDTO, FileDiffDTO, FileListDTO, FileReadDTO, FileWriteDTO,
 } from './dto'
 
 /**
@@ -67,6 +68,9 @@ export const routes = {
   projectAccess: (projectId: string) => `/api/projects/${id(projectId)}/access`,
   projectGrants: (projectId: string) => `/api/projects/${id(projectId)}/grants`,
   projectGrant: (projectId: string, userId: string) => `/api/projects/${id(projectId)}/grants/${id(userId)}`,
+  connectors: (projectId: string) => `/api/projects/${id(projectId)}/connectors`,
+  connector: (projectId: string, connectorId: string) => `/api/projects/${id(projectId)}/connectors/${id(connectorId)}`,
+  connectorState: (projectId: string, connectorId: string, action: 'enable' | 'disable' | 'test') => `/api/projects/${id(projectId)}/connectors/${id(connectorId)}/${action}`,
   workspaces: '/api/workspaces',
   workspacePlacements: (workspaceId: string) => `/api/workspaces/${id(workspaceId)}/placements`,
   reprovisionWorkspace: (workspaceId: string) => `/api/workspaces/${id(workspaceId)}/reprovision`,
@@ -86,6 +90,7 @@ export const routes = {
   runtimeApproval: (sessionId: string, approvalId: string) => `/api/sessions/${id(sessionId)}/runtime/approvals/${id(approvalId)}`,
   sessionFilesList: (sessionId: string) => `/api/sessions/${id(sessionId)}/fs/list`,
   sessionFilesRead: (sessionId: string) => `/api/sessions/${id(sessionId)}/fs/read`,
+  sessionFilesWrite: (sessionId: string) => `/api/sessions/${id(sessionId)}/fs/write`,
   sessionFilesDiff: (sessionId: string) => `/api/sessions/${id(sessionId)}/fs/diff`,
   sessionTerminal: (sessionId: string) => `/api/sessions/${id(sessionId)}/terminal`,
   sessionTerminalAction: (sessionId: string, terminalId: string, action: 'write' | 'resize' | 'dispose') => `/api/sessions/${id(sessionId)}/terminal/${id(terminalId)}/${action}`,
@@ -273,6 +278,11 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
       }))
     },
     projects: (signal?: AbortSignal) => list<ProjectDTO>(routes.projects, signal),
+    connectors: (projectId: string, signal?: AbortSignal) => request<ConnectorListDTO>(routes.connectors(projectId), undefined, signal),
+    createConnector: (projectId: string, body: ConnectorWriteDTO) => request<ConnectorDTO>(routes.connectors(projectId), body),
+    updateConnector: (projectId: string, connectorId: string, body: ConnectorWriteDTO) => request<ConnectorDTO>(routes.connector(projectId, connectorId), body, undefined, 'PUT'),
+    setConnectorEnabled: (projectId: string, connectorId: string, enabled: boolean, body: { requestId: string; expectedRevision: number }) => request<ConnectorDTO>(routes.connectorState(projectId, connectorId, enabled ? 'enable' : 'disable'), body),
+    testConnector: (projectId: string, connectorId: string, body: ConnectorTestDTO) => request<{ requestId: string; connectorId: string; workerId: string; revision: number; status: string }>(routes.connectorState(projectId, connectorId, 'test'), body),
     projectGrants: (projectId: string, signal?: AbortSignal) => list<{ projectId: string; userId: string; role: 'viewer' | 'contributor' | 'manager' }>(routes.projectGrants(projectId), signal),
     updateProjectAccess: (projectId: string, shareScope: ProjectDTO['shareScope']) => request<ProjectDTO>(routes.projectAccess(projectId), { shareScope }, undefined, 'PATCH'),
     grantProject: (projectId: string, userId: string, role: 'viewer' | 'contributor' | 'manager') => request<{ projectId: string; userId: string; role: string }>(routes.projectGrants(projectId), { userId, role }),
@@ -290,6 +300,7 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     resolveApproval: (sessionId: string, approvalId: string, body: ApprovalDecisionDTO) => request<CommandResultDTO>(routes.runtimeApproval(sessionId, approvalId), body),
     listSessionFiles: (sessionId: string, subpath = '', signal?: AbortSignal) => request<FileListDTO>(routes.sessionFilesList(sessionId), { subpath }, signal),
     readSessionFile: (sessionId: string, subpath: string, maxBytes = 1024 * 1024, signal?: AbortSignal) => request<FileReadDTO>(routes.sessionFilesRead(sessionId), { subpath, maxBytes }, signal),
+    writeSessionFile: (sessionId: string, subpath: string, base64Content: string, signal?: AbortSignal) => request<FileWriteDTO>(routes.sessionFilesWrite(sessionId), { subpath, base64Content }, signal, undefined, 60_000),
     diffSessionFile: (sessionId: string, subpath: string, signal?: AbortSignal) => request<FileDiffDTO>(routes.sessionFilesDiff(sessionId), { subpath }, signal),
     createTerminal: (sessionId: string, cols = 80, rows = 24) => request<{ terminalId: string; pid: number }>(routes.sessionTerminal(sessionId), { cols, rows }),
     writeTerminal: (sessionId: string, terminalId: string, data: string) => request<unknown>(routes.sessionTerminalAction(sessionId, terminalId, 'write'), { data }),

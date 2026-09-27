@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { projectAgentEventToSessionPayload, type AgentEvent } from '@wemux/agent-interchange'
 import type { CommandId, EventSeq, SessionId, Timestamp, Turn, TurnId, WorkerId } from '@wemux/domain'
-import type { CommandReceipt, ServerToWorker, WorkerCommand, WorkerToServer } from '@wemux/wire-protocol'
+import type { CommandReceipt, ConnectorRevisionReport, FileRequestPayload, ServerToWorker, TerminalRequestPayload, WorkerCommand, WorkerToServer } from '@wemux/wire-protocol'
 import type { AgentAdapter, AgentTurnEvent, AgentTurnOutcome } from './ports/agent-adapter.js'
 import type { AgentLaunchContextProvider } from './ports/agent-launch-context.js'
 import type { LocalState, RuntimeTransport, WorkspaceProvisioner } from './ports/local-state.js'
@@ -9,6 +9,8 @@ import type { WorkerStore } from './ports/worker-store.js'
 import { WorkerAgentRunner } from './agent-runner.js'
 import { runtimeAdaptersFor } from './runtime-adapters.js'
 import type { RuntimeSessionAdapter } from './ports/runtime-session.js'
+import { diffWorkspaceFile, listWorkspaceFiles, readWorkspaceFile, writeWorkspaceFile } from '../files/workspace-files.js'
+import { TerminalManager, type PtyAdapter } from '../terminal/terminal-manager.js'
 
 const now = () => new Date().toISOString() as Timestamp
 const DEFAULT_AGENT_IDLE_TIMEOUT_MS = 30_000
@@ -25,6 +27,7 @@ export class WorkerRuntime {
   private readonly sent = new Map<SessionId, number>()
   private readonly provisions = new Map<import('@wemux/domain').WorkspaceId, Promise<void>>()
   private readonly agentRunner: WorkerAgentRunner
+  private readonly terminals: TerminalManager | null
   private headRefresh: NodeJS.Timeout | null = null
   private commands: Promise<unknown> = Promise.resolve()
   private publishing: Promise<unknown> = Promise.resolve()
@@ -36,9 +39,29 @@ export class WorkerRuntime {
     private readonly workerId: WorkerId, private readonly name: string,
     private readonly launchContexts: AgentLaunchContextProvider = { prepare: async () => ({ context: null, cleanup: async () => undefined }) },
     private readonly agentTimeouts = { idleMs: DEFAULT_AGENT_IDLE_TIMEOUT_MS, maxMs: DEFAULT_AGENT_MAX_TIMEOUT_MS },
-    runtimeAdapters: ReadonlyMap<import('@wemux/domain').AgentKey, RuntimeSessionAdapter> = runtimeAdaptersFor(agents)) {
+    runtimeAdapters: ReadonlyMap<import('@wemux/domain').AgentKey, RuntimeSessionAdapter> = runtimeAdaptersFor(agents),
+    terminalPty: PtyAdapter | null = null,
+    private readonly connectorControl?: {
+      syncClusterDefinition(definition: Extract<WorkerCommand, { kind: 'connector.definition.sync' }>['definition'], workerId: string): Promise<{ status: ConnectorRevisionReport['status']; credentialAvailability: ConnectorRevisionReport['credentialAvailability']; message: string }>
+      testClusterDefinition(connectorId: string, revision: number): Promise<{ status: ConnectorRevisionReport['status']; credentialAvailability: ConnectorRevisionReport['credentialAvailability']; message: string }>
+    }) {
     this.agentRunner = new WorkerAgentRunner({ agents, runtimeAdapters, sessionStore: store })
+    this.terminals = terminalPty ? new TerminalManager(
+      terminalPty,
+      event => {
+        const sessionId = this.terminalSessions.get(event.terminalId)
+        if (sessionId) this.send({ type: 'terminal.output', sessionId, ...event })
+      },
+      event => {
+        const sessionId = this.terminalSessions.get(event.terminalId)
+        if (!sessionId) return
+        this.terminalSessions.delete(event.terminalId)
+        this.send({ type: 'terminal.exit', sessionId, ...event })
+      },
+    ) : null
   }
+
+  private readonly terminalSessions = new Map<string, SessionId>()
 
   async initialize() {
     this.store.saveCapabilities(await Promise.all(this.agents.map(agent => agent.detect())))
@@ -57,7 +80,7 @@ export class WorkerRuntime {
   }
   async connected() {
     this.sent.clear()
-    this.send({ type: 'capability', workerId: this.workerId, capabilities: this.store.capabilities(), detectedAt: now() })
+    this.send({ type: 'capability', workerId: this.workerId, capabilities: this.store.capabilities(), detectedAt: now(), terminal: { available: this.terminals !== null, ...(this.terminals ? {} : { reason: 'node-pty unavailable' }) } })
     await this.sendHeads()
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = setInterval(() => { void this.sendHeads() }, 1_000)
@@ -68,6 +91,8 @@ export class WorkerRuntime {
     const next = this.commands.then(async () => {
       if (this.closing) return
       if (message.type === 'command') await this.command(message.commandId, message.command, true, 'cluster')
+      if (message.type === 'fs.request') await this.files(message)
+      if (message.type === 'terminal.request') await this.terminal(message)
       if (message.type === 'sync') {
         if (await this.isLocalSession(message.sessionId)) {
           this.send({ type: 'sync', kind: 'gap', sessionId: message.sessionId, fromSeq: message.fromSeq, reason: 'Requested journal range is unavailable' })
@@ -88,6 +113,54 @@ export class WorkerRuntime {
     })
     this.commands = next.catch(() => {})
     return next
+  }
+  private async files(request: FileRequestPayload): Promise<void> {
+    try {
+      const session = await this.store.sessions.get(request.sessionId)
+      if (!session || await this.isLocalSession(request.sessionId)) throw new Error('Session not found')
+      const workspace = await this.store.workspaces.get(session.binding.workspaceId)
+      if (!workspace || workspace.status !== 'ready' || workspace.workerId !== this.workerId) throw new Error('Workspace is not ready')
+      if (request.operation === 'list') {
+        this.send({ type: 'fs.response', requestId: request.requestId, ok: true, operation: 'list', entries: await listWorkspaceFiles(workspace.rootPath, request.subpath) })
+      } else if (request.operation === 'read') {
+        const result = await readWorkspaceFile(workspace.rootPath, request.subpath, request.maxBytes)
+        this.send({ type: 'fs.response', requestId: request.requestId, ok: true, operation: 'read', ...result })
+      } else if (request.operation === 'write') {
+        const result = await writeWorkspaceFile(workspace.rootPath, request.subpath, request.base64Content)
+        this.send({ type: 'fs.response', requestId: request.requestId, ok: true, operation: 'write', ...result })
+      } else {
+        const result = await diffWorkspaceFile(workspace.rootPath, request.subpath)
+        this.send({ type: 'fs.response', requestId: request.requestId, ok: true, operation: 'diff', ...result })
+      }
+    } catch (error) {
+      this.send({ type: 'fs.response', requestId: request.requestId, ok: false, error: error instanceof Error ? error.message : 'File operation failed' })
+    }
+  }
+  private async terminal(request: TerminalRequestPayload): Promise<void> {
+    try {
+      if (!this.terminals) throw new Error('Terminal is unavailable on this worker')
+      const session = await this.store.sessions.get(request.sessionId)
+      if (!session || await this.isLocalSession(request.sessionId)) throw new Error('Session not found')
+      const workspace = await this.store.workspaces.get(session.binding.workspaceId)
+      if (!workspace || workspace.status !== 'ready' || workspace.workerId !== this.workerId) throw new Error('Workspace is not ready')
+      if (request.operation === 'create') {
+        const created = this.terminals.create({ sessionId: request.sessionId, cwd: workspace.rootPath, cols: request.cols, rows: request.rows })
+        this.terminalSessions.set(created.terminalId, request.sessionId)
+        this.send({ type: 'terminal.response', requestId: request.requestId, ok: true, operation: 'create', ...created })
+      } else if (request.operation === 'write') {
+        this.terminals.write(request.sessionId, request.terminalId, request.data)
+        this.send({ type: 'terminal.response', requestId: request.requestId, ok: true, operation: 'write' })
+      } else if (request.operation === 'resize') {
+        this.terminals.resize(request.sessionId, request.terminalId, request.cols, request.rows)
+        this.send({ type: 'terminal.response', requestId: request.requestId, ok: true, operation: 'resize' })
+      } else {
+        this.terminals.dispose(request.sessionId, request.terminalId)
+        this.terminalSessions.delete(request.terminalId)
+        this.send({ type: 'terminal.response', requestId: request.requestId, ok: true, operation: 'dispose' })
+      }
+    } catch (error) {
+      this.send({ type: 'terminal.response', requestId: request.requestId, ok: false, error: error instanceof Error ? error.message : 'Terminal operation failed' })
+    }
   }
   async executeLocal(commandId: CommandId, command: WorkerCommand): Promise<CommandReceipt> {
     if (this.closing) throw new Error('Worker runtime is shutting down')
@@ -124,6 +197,9 @@ export class WorkerRuntime {
     try {
       const approvalTurnId = command.kind === 'runtime.approval.resolve' ? (await this.store.sessions.get(command.sessionId))?.activeTurnId ?? null : null
       await this.validate(command, source)
+      let connectorReport: Omit<ConnectorRevisionReport, 'requestId' | 'connectorId' | 'projectId' | 'workerId' | 'revision' | 'errorCode' | 'occurredAt'> | null = null
+      if (command.kind === 'connector.definition.sync') connectorReport = await this.connectorControl!.syncClusterDefinition(command.definition, this.workerId)
+      if (command.kind === 'connector.test') connectorReport = await this.connectorControl!.testClusterDefinition(command.connectorId, command.connectorRevision)
       await this.store.transaction(async tx => {
         await tx.commands.record({ commandId, command, payloadFingerprint }, receipt)
         switch (command.kind) {
@@ -132,6 +208,9 @@ export class WorkerRuntime {
           case 'session.delete': await tx.sessions.deleteSession(command.sessionId); break
           case 'session.cancel-queued': await tx.sessions.cancelQueued(command.sessionId, command.submissionCommandId); break
           case 'turn.stop': await tx.sessions.requestStop(command.sessionId, command.turnId); break
+          case 'runtime.command':
+            if (command.name === 'set_model') await tx.sessions.setModel(command.sessionId, command.arguments.modelId as import('@wemux/domain').ModelId)
+            break
           case 'runtime.approval.resolve':
             if (!approvalTurnId) throw new Error('Agent invocation is not active')
             await tx.appendJournal(command.sessionId, [{ occurredAt: now(), payload: { kind: 'approval.resolved', turnId: approvalTurnId, approvalId: command.approvalId, decision: command.decision, ...(command.decidedByAccountId ? { decidedByAccountId: command.decidedByAccountId } : {}) } }])
@@ -139,6 +218,7 @@ export class WorkerRuntime {
         }
         if (command.kind !== 'workspace.provision') await tx.commands.setExecutionState({ commandId, state: 'completed', result: null, updatedAt: now() })
       })
+      if (connectorReport && (command.kind === 'connector.definition.sync' || command.kind === 'connector.test')) this.send({ type: 'event', scope: 'connector', report: { requestId: command.requestId, connectorId: command.kind === 'connector.definition.sync' ? command.definition.id : command.connectorId, projectId: command.kind === 'connector.definition.sync' ? command.definition.projectId : command.projectId, workerId: this.workerId, revision: command.kind === 'connector.definition.sync' ? command.definition.revision : command.connectorRevision, ...connectorReport, errorCode: connectorReport.status === 'test_failed' || connectorReport.status === 'unavailable' ? 'connector_unavailable' : null, occurredAt: now() } })
     } catch (error) {
       receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: error instanceof Error ? error.message : 'Invalid command', retryable: false } }
       await this.store.transaction(tx => tx.commands.record({ commandId, command, payloadFingerprint }, receipt))
@@ -151,6 +231,8 @@ export class WorkerRuntime {
     }
     if (command.kind === 'session.delete') {
       this.sent.delete(command.sessionId)
+      this.terminals?.disposeSession(command.sessionId)
+      for (const [terminalId, sessionId] of this.terminalSessions) if (sessionId === command.sessionId) this.terminalSessions.delete(terminalId)
       await this.agentRunner.closeSession(command.sessionId)
       return receipt
     }
@@ -167,6 +249,12 @@ export class WorkerRuntime {
     return Boolean(ownsWorker) && this.store.capabilities().some(c => c.agentKey === binding.agent.agentKey && c.mode === 'execution' && c.availability.status === 'available' && c.models.some(m => m.modelId === binding.modelId))
   }
   private async validate(command: WorkerCommand, source: 'cluster' | 'local') {
+    if (command.kind === 'connector.definition.sync' || command.kind === 'connector.test') {
+      if (source !== 'cluster' || !this.connectorControl) throw new Error('Connector cluster command is unavailable')
+      if (command.kind === 'connector.definition.sync' && command.definition.allowedWorkerIds.length && !command.definition.allowedWorkerIds.includes(this.workerId)) throw new Error('Connector is outside this Worker scope')
+      if (command.kind === 'connector.test' && command.workerId !== this.workerId) throw new Error('Connector test Worker mismatch')
+      return
+    }
     if (command.kind === 'workspace.delete') throw new Error('Workspace deletion is not supported in this MVP')
     if (command.kind === 'workspace.provision') {
       if (source === 'local') throw new Error('Local directories are authorized directly, not provisioned')
@@ -182,6 +270,7 @@ export class WorkerRuntime {
       if (!this.available(binding)) throw new Error('Agent or model unavailable')
       return
     }
+    if (!('sessionId' in command)) throw new Error('Unsupported command')
     const session = await this.store.sessions.get(command.sessionId)
     if (!session) throw new Error('Session not found')
     if ((await this.isLocalSession(command.sessionId)) !== (source === 'local')) throw new Error('Session host scope mismatch')
@@ -191,6 +280,19 @@ export class WorkerRuntime {
     }
     if (command.kind === 'turn.stop' && (await this.store.sessions.getTurn(command.turnId))?.sessionId !== command.sessionId) throw new Error('Turn not found')
     if (command.kind === 'runtime.command') {
+      if (command.name === 'set_model') {
+        if (session.activeTurnId) throw new Error('Model cannot be changed while a turn is active')
+        const modelId = command.arguments.modelId
+        if (typeof modelId !== 'string' || !modelId) throw new Error('modelId is required')
+        const capability = this.store.capabilities().find(item => item.agentKey === session.binding.agent.agentKey)
+        if (!capability?.modelSwap) throw new Error('Agent does not support model swapping')
+        if (!capability.models.some(model => model.modelId === modelId)) throw new Error('Model unavailable')
+        // An idle provider process receives the native Pi set_model command when present.
+        // If it has not been opened yet, the persisted binding is used on the next turn.
+        try { await this.agentRunner.command({ sessionId: command.sessionId, invocationId: command.operationId, name: command.name, arguments: command.arguments }) }
+        catch (error) { if (!(error instanceof Error) || error.message !== 'Agent session is not active') throw error }
+        return
+      }
       await this.agentRunner.command({ sessionId: command.sessionId, invocationId: command.operationId, name: command.name, arguments: command.arguments })
       return
     }
@@ -290,7 +392,8 @@ export class WorkerRuntime {
           configurationFingerprint: fingerprint,
           launchContext: prepared.context,
         })[Symbol.asyncIterator]()
-        if (this.closing || (await this.store.sessions.getTurn(turn.id))?.state === 'stopping') await this.agentRunner.stop(turn.sessionId, turn.id)
+        const stoppingBeforeRun = (await this.store.sessions.getTurn(turn.id))?.state === 'stopping'
+        if (this.closing || stoppingBeforeRun) await this.agentRunner.stop(turn.sessionId, turn.id)
         const startedAt = Date.now()
         while (true) {
           const remainingMs = Math.max(1, this.agentTimeouts.maxMs - (Date.now() - startedAt))
@@ -305,7 +408,13 @@ export class WorkerRuntime {
           const terminal = event.customMetadata?.wemux?.terminal
           if (terminal) {
             outcome = terminal === 'failed'
-              ? { status: 'failed', failure: { code: 'agent-error', message: event.customMetadata?.wemux?.error?.message ?? 'Agent failed' } }
+              ? { status: 'failed', failure: {
+                  code: event.customMetadata?.wemux?.error?.code ?? 'agent-error',
+                  message: event.customMetadata?.wemux?.error?.message ?? 'Agent failed',
+                  ...(event.customMetadata?.wemux?.error?.abortReason ? { abortReason: event.customMetadata.wemux.error.abortReason } : {}),
+                  ...(event.customMetadata?.wemux?.error?.failureReason ? { failureReason: event.customMetadata.wemux.error.failureReason } : {}),
+                  ...(event.customMetadata?.wemux?.error?.retryable !== undefined ? { retryable: event.customMetadata.wemux.error.retryable } : {}),
+                } }
               : { status: terminal }
             break
           }
@@ -323,7 +432,12 @@ export class WorkerRuntime {
         await prepared.cleanup()
       }
     } catch (error) {
-      outcome = { status: 'failed', failure: { code: 'agent-error', message: error instanceof Error ? error.message : 'Agent failed' } }
+      const message = error instanceof Error ? error.message : 'Agent failed'
+      outcome = { status: 'failed', failure: {
+        code: 'agent-error',
+        message,
+        abortReason: error instanceof AgentTimeoutError ? 'timeout' : this.closing ? 'executor_disconnected' : 'provider_error',
+      } }
     }
     await this.store.transaction(tx => tx.sessions.finishTurn(outcome.status === 'failed'
       ? { turnId: turn.id, outcome: 'failed', failure: outcome.failure, finishedAt: now() }
@@ -352,6 +466,8 @@ export class WorkerRuntime {
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = null
     await this.agentRunner.close()
+    this.terminals?.disposeAll()
+    this.terminalSessions.clear()
     await this.provisioner.stop?.()
     await this.commands
     await Promise.all(this.provisions.values())
@@ -366,5 +482,7 @@ export class WorkerRuntime {
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = null
     try { this.agentRunner.abort() } catch {}
+    try { this.terminals?.disposeAll() } catch {}
+    this.terminalSessions.clear()
   }
 }

@@ -15,6 +15,7 @@ export interface WorkerConnectorStore {
   listConnectorDefinitions(): Promise<readonly ConnectorDefinition[]>
   getConnectorDefinition(id: string): Promise<ConnectorDefinition | null>
   saveConnectorDefinition(definition: ConnectorDefinition): Promise<void>
+  saveClusterConnectorDefinition(definition: ConnectorDefinition): Promise<'applied' | 'current' | 'stale'>
   deleteConnectorDefinition(id: string): Promise<void>
   getConnectorCredential(id: string): Promise<CredentialRecord | null>
   saveConnectorCredential(record: CredentialRecord): Promise<void>

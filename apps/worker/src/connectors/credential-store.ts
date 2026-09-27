@@ -1,17 +1,24 @@
 import { AesGcmSecretCodec, type ConnectorCredentialId, type CredentialRecord, type SecretCodec } from '@wemux/connector'
-import type { WorkerConnectorStore } from './store.js'
+import type { WorkerConnectorStore } from './store.ts'
 
 export class ConnectorCredentialError extends Error {
-  constructor(readonly code: 'credential_unavailable' | 'invalid_input', message: string) { super(message) }
+  readonly code: 'credential_unavailable' | 'invalid_input'
+
+  constructor(code: 'credential_unavailable' | 'invalid_input', message: string) {
+    super(message)
+    this.code = code
+  }
 }
 
 export type ConnectorCredentialSecret = Readonly<Record<string, string>>
 
 export class WorkerCredentialStore {
   readonly available: boolean
+  private readonly store: WorkerConnectorStore
   private readonly codec: SecretCodec | null
 
-  constructor(private readonly store: WorkerConnectorStore, options: { readonly key?: string; readonly previousKeys?: readonly string[]; readonly codec?: SecretCodec } = {}) {
+  constructor(store: WorkerConnectorStore, options: { readonly key?: string; readonly previousKeys?: readonly string[]; readonly codec?: SecretCodec } = {}) {
+    this.store = store
     this.codec = options.codec ?? (options.key?.trim() ? new AesGcmSecretCodec({ currentKey: options.key, previousKeys: options.previousKeys }) : null)
     this.available = this.codec !== null
   }

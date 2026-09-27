@@ -2,7 +2,7 @@ export interface Resource { id: string; projectId?: string; workspaceId?: string
 export function resolveSelection(pathname: string, search: string, projects: { id: string }[], workspaces: Resource[], sessions: Resource[]) {
   let parts: string[]
   try { parts = pathname.split('/').filter(Boolean).map(decodeURIComponent) } catch { return { error: '链接编码无效。' } }
-  const sections = ['overview', 'canvas', 'board', 'tasks', 'activity', 'settings', 'workspaces', 'sessions']
+  const sections = ['overview', 'canvas', 'board', 'tasks', 'activity', 'connectors', 'settings', 'workspaces', 'sessions']
   if (parts[0] === 'projects' && parts.length > 2 && (!sections.includes(parts[2]) || parts.length > (['tasks', 'workspaces', 'sessions'].includes(parts[2]) ? 4 : 3))) return { error: '链接不存在。' }
   if (parts[0] && !['projects', 'runtime', 'runtimes', 'cluster', 'settings'].includes(parts[0])) return { error: '链接不存在。' }
   if (parts[0] !== 'projects' && parts.length > 1) return { error: '链接不存在。' }

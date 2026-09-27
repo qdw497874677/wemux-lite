@@ -522,6 +522,24 @@ const accountMigrations = [
      OR NEW.user_id IS NOT OLD.user_id OR NEW.expires_at IS NOT OLD.expires_at
      OR (OLD.consumed_at IS NOT NULL AND NEW.consumed_at IS NOT OLD.consumed_at)
    BEGIN SELECT RAISE(ABORT, 'Verification challenge identity is immutable'); END;`,
+  `CREATE TABLE IF NOT EXISTS connector_definitions (
+     id TEXT PRIMARY KEY,
+     project_id TEXT NOT NULL,
+     revision INTEGER NOT NULL CHECK(revision > 0),
+     enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+     data TEXT NOT NULL CHECK(json_valid(data)),
+     CHECK(json_extract(data,'$.id') IS id AND json_extract(data,'$.projectId') IS project_id
+       AND json_extract(data,'$.revision') IS revision AND json_extract(data,'$.enabled') IS enabled));
+   CREATE INDEX IF NOT EXISTS connector_definitions_project ON connector_definitions(project_id,id);
+   CREATE TABLE IF NOT EXISTS connector_requests (
+     project_id TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+     operation TEXT NOT NULL, connector_id TEXT NOT NULL, result TEXT NOT NULL CHECK(json_valid(result)),
+     created_at TEXT NOT NULL, PRIMARY KEY(project_id,request_id));
+   CREATE TABLE IF NOT EXISTS connector_distributions (
+     connector_id TEXT NOT NULL, worker_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0),
+     request_id TEXT NOT NULL, command_id TEXT NOT NULL, status TEXT NOT NULL,
+     credential_availability TEXT NOT NULL, message TEXT, updated_at TEXT NOT NULL,
+     PRIMARY KEY(connector_id,worker_id), UNIQUE(command_id));`,
 ]
 
 const migrations = [...legacyMigrations, ...accountMigrations]

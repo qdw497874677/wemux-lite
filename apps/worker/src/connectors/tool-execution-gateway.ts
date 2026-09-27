@@ -1,8 +1,8 @@
 import { stableFingerprint, summarizeAgentResult, summarizeJournal, type ConnectorExecutionErrorCode, type ExecutionResult, type McpConnectorDefinition, type OperationType, type ToolCall } from '@wemux/connector'
 import type { CapabilityGrantClaims, CapabilitySnapshot, ToolCallId } from '@wemux/domain'
-import { ConnectorCredentialError, WorkerCredentialStore } from './credential-store.js'
-import { McpLimitError, WorkerMcpClient } from './mcp-client.js'
-import type { WorkerConnectorStore } from './store.js'
+import { ConnectorCredentialError, WorkerCredentialStore } from './credential-store.ts'
+import { McpLimitError, WorkerMcpClient } from './mcp-client.ts'
+import type { WorkerConnectorStore } from './store.ts'
 
 export interface ConnectorApprovalRequest {
   readonly sessionId: string
@@ -39,15 +39,26 @@ export interface ToolExecutionInput {
 }
 
 export class ToolExecutionGateway {
+  private readonly store: WorkerConnectorStore
+  private readonly credentials: WorkerCredentialStore
+  private readonly mcp: WorkerMcpClient
+  private readonly verifier: CapabilityVerifier
+  private readonly approval?: ConnectorApprovalPort
   private readonly active = new Map<string, Promise<ExecutionResult>>()
 
   constructor(
-    private readonly store: WorkerConnectorStore,
-    private readonly credentials: WorkerCredentialStore,
-    private readonly mcp: WorkerMcpClient,
-    private readonly verifier: CapabilityVerifier,
-    private readonly approval?: ConnectorApprovalPort,
-  ) {}
+    store: WorkerConnectorStore,
+    credentials: WorkerCredentialStore,
+    mcp: WorkerMcpClient,
+    verifier: CapabilityVerifier,
+    approval?: ConnectorApprovalPort,
+  ) {
+    this.store = store
+    this.credentials = credentials
+    this.mcp = mcp
+    this.verifier = verifier
+    this.approval = approval
+  }
 
   async listTools(input: Omit<ToolExecutionInput, 'requestId' | 'toolCallId' | 'toolName' | 'input' | 'connectorRevision'>): Promise<ExecutionResult> {
     const requestId = `list:${input.currentTurn.turnId}:${input.connectorId}`
@@ -133,7 +144,16 @@ export class ToolExecutionGateway {
   }
 }
 
-class GatewayError extends Error { constructor(readonly code: ConnectorExecutionErrorCode, message: string, readonly retryable = false) { super(message) } }
+class GatewayError extends Error {
+  readonly code: ConnectorExecutionErrorCode
+  readonly retryable: boolean
+
+  constructor(code: ConnectorExecutionErrorCode, message: string, retryable = false) {
+    super(message)
+    this.code = code
+    this.retryable = retryable
+  }
+}
 function requiresApproval(operationType: OperationType, connector: McpConnectorDefinition) { return operationType !== 'read' || connector.riskDefaults.requireApprovalForRead }
 function success(output: unknown, requestId: string, connectorRevision: number): ExecutionResult { return { ok: true, output, requestId, connectorRevision, completedAt: new Date().toISOString() as never } }
 function failure(code: ConnectorExecutionErrorCode, requestId: string, connectorRevision: number | null, message: string, retryable = false): ExecutionResult { return { ok: false, error: { code, message, retryable, retryAfterMs: null }, requestId, connectorRevision, completedAt: new Date().toISOString() as never } }

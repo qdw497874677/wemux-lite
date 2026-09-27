@@ -1,15 +1,15 @@
 import { DatabaseSync } from 'node:sqlite'
-import { retentionDestinationInvariants, retentionInvariants } from './retention-invariants.js'
+import { retentionDestinationInvariants, retentionInvariants } from './retention-invariants.ts'
 import { randomUUID } from 'node:crypto'
 import type { AgentEvent, AgentSession, SessionKey, SessionStore } from '@wemux/agent-interchange'
 import type { EventSeq, JournalEvent, JournalEventDraft, QueuedMessage, SessionId, Timestamp, Turn, TurnId } from '@wemux/domain'
-import type { WorkerStore, WorkerStoreTx } from '../application/ports/worker-store.js'
-import type { LocalState } from '../application/ports/local-state.js'
-import type { CommandRecord, SessionExecution } from '../domain/session-execution.js'
-import type { LocalWorkspace, RepositoryCheckout } from '../domain/local-workspace.js'
-import type { LocalAdminRecord, LocalInstallationIdentity } from '../domain/local-installation.js'
+import type { WorkerStore, WorkerStoreTx } from '../application/ports/worker-store.ts'
+import type { LocalState } from '../application/ports/local-state.ts'
+import type { CommandRecord, SessionExecution } from '../domain/session-execution.ts'
+import type { LocalWorkspace, RepositoryCheckout } from '../domain/local-workspace.ts'
+import type { LocalAdminRecord, LocalInstallationIdentity } from '../domain/local-installation.ts'
 import type { ConnectorDefinition, CredentialRecord, ExecutionResult } from '@wemux/connector'
-import type { ConnectorExecutionRecord, WorkerConnectorStore } from '../connectors/store.js'
+import type { ConnectorExecutionRecord, WorkerConnectorStore } from '../connectors/store.ts'
 
 export const now = () => new Date().toISOString() as Timestamp
 
@@ -121,10 +121,26 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
   saveLocalAdmin: LocalState['saveLocalAdmin'] = record => this.put('identity', 'local-admin', record)
   capabilities: LocalState['capabilities'] = () => this.getDocument('capabilities', 'snapshot') ?? []
   saveCapabilities: LocalState['saveCapabilities'] = value => this.put('capabilities', 'snapshot', value)
-  async listConnectorDefinitions(): Promise<readonly ConnectorDefinition[]> { await this.tail; return this.list<ConnectorDefinition>('connector-definitions') }
-  async getConnectorDefinition(id: string): Promise<ConnectorDefinition | null> { await this.tail; return this.getDocument('connector-definitions', id) }
+  async listConnectorDefinitions(): Promise<readonly ConnectorDefinition[]> {
+    await this.tail
+    const local = this.list<ConnectorDefinition>('connector-definitions')
+    const cluster = this.list<ConnectorDefinition>('cluster-connector-definitions')
+    const byId = new Map(local.map(value => [value.id, value]))
+    for (const value of cluster) byId.set(value.id, value) // Server project definitions are authoritative on id collision.
+    return [...byId.values()]
+  }
+  async getConnectorDefinition(id: string): Promise<ConnectorDefinition | null> { await this.tail; return this.getDocument('cluster-connector-definitions', id) ?? this.getDocument('connector-definitions', id) }
   async saveConnectorDefinition(definition: ConnectorDefinition): Promise<void> { await this.tail; this.put('connector-definitions', definition.id, definition) }
-  async deleteConnectorDefinition(id: string): Promise<void> { await this.tail; this.db.prepare('DELETE FROM documents WHERE bucket=? AND id=?').run('connector-definitions', id) }
+  async saveClusterConnectorDefinition(definition: ConnectorDefinition): Promise<'applied' | 'current' | 'stale'> {
+    await this.tail
+    const existing = this.getDocument<ConnectorDefinition>('cluster-connector-definitions', definition.id)
+    if (existing && existing.projectId !== definition.projectId) throw new Error('Connector project binding is immutable')
+    if (existing && existing.revision > definition.revision) return 'stale'
+    if (existing && existing.revision === definition.revision) return JSON.stringify(existing) === JSON.stringify(definition) ? 'current' : Promise.reject(new Error('Connector revision content conflict'))
+    this.put('cluster-connector-definitions', definition.id, definition)
+    return 'applied'
+  }
+  async deleteConnectorDefinition(id: string): Promise<void> { await this.tail; this.db.prepare("DELETE FROM documents WHERE bucket IN ('connector-definitions','cluster-connector-definitions') AND id=?").run(id) }
   async getConnectorCredential(id: string): Promise<CredentialRecord | null> {
     await this.tail
     const row = this.db.prepare('SELECT * FROM connector_credentials WHERE id=?').get(id) as Record<string, unknown> | undefined
