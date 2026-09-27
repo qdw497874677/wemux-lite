@@ -5,6 +5,8 @@ export interface AgentDTO {
   version: string | null
   mode: 'detect-only' | 'execution'
   availability: { status: 'available' | 'unavailable' | 'authentication-required'; reason?: string }
+  agentCommands?: string[]
+  compactMode?: 'native' | 'slash-command'
   models: { modelId: string; displayName: string; source: 'detected' | 'configured' }[]
 }
 export interface WorkerDTO {
@@ -98,16 +100,20 @@ export interface RuntimeUsageDTO {
   costUsd?: number
   currency?: 'USD'
 }
+export type AgentStreamKindDTO = 'assistant_text' | 'reasoning_text' | 'plan_text' | 'command_output' | 'file_change_output'
+export type AbortReasonDTO = 'user_stop' | 'executor_disconnected' | 'control_plane_disconnect' | 'timeout' | 'provider_error' | 'cancelled' | 'unknown'
+export type AgentFailureReasonDTO = 'agent_error.context_overflow' | 'agent_error.missing_config' | 'agent_error.provider_auth_or_access' | 'agent_error.provider_quota_limit' | 'agent_error.provider_capacity_or_rate_limit' | 'agent_error.provider_server_error' | 'agent_error.provider_network' | 'agent_error.model_not_found_or_unavailable' | 'agent_error.empty_or_unparseable_output' | 'agent_error.agent_timeout' | 'agent_error.runtime_missing_executable' | 'agent_error.runtime_version_unsupported' | 'agent_error.process_failure' | 'agent_error.unknown'
+export type TurnFailureDTO = { code: 'interrupted' | 'agent-unavailable' | 'agent-error' | 'internal-error'; message: string; abortReason?: AbortReasonDTO; failureReason?: AgentFailureReasonDTO; retryable?: boolean }
 export type EventPayloadDTO =
   | { kind: 'message.queued'; commandId: string; messageId: string; content: string; position: number }
   | { kind: 'message.cancelled'; commandId: string; messageId: string }
   | { kind: 'message.rejected'; commandId: string; messageId: string; reason: string }
   | { kind: 'turn.started'; turnId: string; messageId: string }
-  | { kind: 'assistant.text.delta'; turnId: string; text: string }
-  | { kind: 'turn.finished'; turnId: string; outcome: 'completed' | 'cancelled' | 'failed'; failure: { code: string; message: string } | null }
+  | { kind: 'assistant.text.delta'; turnId: string; text: string; streamKind?: Extract<AgentStreamKindDTO, 'assistant_text' | 'reasoning_text' | 'plan_text'> }
+  | { kind: 'turn.finished'; turnId: string; outcome: 'completed' | 'cancelled' | 'failed'; failure: TurnFailureDTO | null }
   | { kind: 'session.runtime.changed'; state: RuntimeState; reason: string | null }
-  | { kind: 'tool.started'; turnId: string; toolCallId: string; toolName: string; input: unknown }
-  | { kind: 'tool.output.delta'; turnId: string; toolCallId: string; text: string }
+  | { kind: 'tool.started'; turnId: string; toolCallId: string; toolName: string; input: unknown; streamKind?: Extract<AgentStreamKindDTO, 'command_output' | 'file_change_output'> }
+  | { kind: 'tool.output.delta'; turnId: string; toolCallId: string; text: string; streamKind?: Extract<AgentStreamKindDTO, 'command_output' | 'file_change_output'> }
   | { kind: 'tool.finished'; turnId: string; toolCallId: string; exitCode: number | null }
   | { kind: 'approval.requested'; turnId: string; approvalId: string; action: unknown; reason?: string }
   | { kind: 'approval.resolved'; turnId: string; approvalId: string; decision: 'approve' | 'deny' }

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type MutableRefObject } from 'react'
 import { Bot, Check, ChevronRight, Copy, FilePenLine, FileSearch, Globe, Search, Terminal } from 'lucide-react'
 import type { Api } from '../../api/client.ts'
-import type { SessionDTO } from '../../api/dto.ts'
+import type { AgentDTO, SessionDTO } from '../../api/dto.ts'
 import type { ChatTimelineItem, TimelineTool } from '../../api/journal.ts'
 import { timelineMessageToUIMessage } from '../../api/journal.ts'
 import { Action, ActionsBar } from '../../components/ai-elements/actions.tsx'
@@ -20,6 +20,7 @@ import { useCompactAction } from './cluster-controls.tsx'
 import { SubmissionController } from './submission.ts'
 import { normalizeWorkLogEntry, type WorkLogEntry } from './work-log.ts'
 import { terminalContextText, useTerminalContext } from '../terminal/terminal-context.ts'
+import { commandGroups, commandsForAgent, compactRoute, isAgentCommandInput, type SlashCommand } from './slash-commands.ts'
 
 const formatUsageNumber = (value: number | undefined) => value === undefined ? null : new Intl.NumberFormat('zh-CN').format(value)
 const formatToolValue = (value: unknown) => {
@@ -91,13 +92,7 @@ function MessageStatus({ status }: { status: string }) {
 }
 
 type ComposerNotice = { tone: 'info' | 'error'; text: string } | null
-const slashCommands = [
-  { name: '/compact', label: '压缩上下文', description: '请求 Agent 压缩当前会话上下文' },
-  { name: '/stop', label: '停止回合', description: '停止当前正在运行的回合' },
-  { name: '/help', label: '命令帮助', description: '查看输入区支持的命令' },
-] as const
-
-export function Composer({ api, controller, session, activeTurnId = null, canSend, blockedReason, confirmedIds }: { api?: Api; controller: SubmissionController; session: SessionDTO; activeTurnId?: string | null; canSend: boolean; blockedReason: string; confirmedIds: string[] }) {
+export function Composer({ api, controller, session, agent, activeTurnId = null, canSend, blockedReason, confirmedIds }: { api?: Api; controller: SubmissionController; session: SessionDTO; agent?: AgentDTO; activeTurnId?: string | null; canSend: boolean; blockedReason: string; confirmedIds: string[] }) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot)
   const submitRef = useRef<(message: PromptInputMessage) => void>(() => undefined)
   const sendWithAttachmentsRef = useRef(false)
@@ -114,7 +109,7 @@ export function Composer({ api, controller, session, activeTurnId = null, canSen
   const defaultHint = state.pending ? '正在发送…' : state.receipt ? '消息已送达，等待 Agent 回复' : canSend ? running ? 'Agent 正在运行，新消息将进入队列' : 'Enter 发送，Shift+Enter 换行' : `${blockedReason}，草稿仍会保留`
   const hint = compactAction.action?.status === 'pending' ? '正在压缩上下文…' : compactAction.action?.status === 'error' ? '压缩失败，输入 /compact 重试' : defaultHint
   const commandQuery = state.draft.startsWith('/') ? state.draft.trim().toLowerCase() : ''
-  const visibleCommands = commandQuery ? slashCommands.filter(command => command.name.startsWith(commandQuery)) : []
+  const visibleCommandGroups = commandGroups(commandsForAgent(agent), commandQuery)
   const stop = async () => {
     const turnId = activeTurnId || session.activeTurnId
     if (!api || !turnId || !canControl || commandPending) {
@@ -142,21 +137,29 @@ export function Composer({ api, controller, session, activeTurnId = null, canSen
     setNotice(null)
     await compactAction.compact()
   }
-  const executeCommand = (name: typeof slashCommands[number]['name']) => {
+  const sendNativeCommand = (content: string) => {
+    if (!canSend || state.pending) return
+    controller.edit(content)
+    void controller.send()
+  }
+  const executeCommand = (command: SlashCommand) => {
+    if (command.group === 'agent') { sendNativeCommand(command.name); return }
     controller.edit('')
-    if (name === '/compact') void compact()
-    else if (name === '/stop') void stop()
-    else setNotice({ tone: 'info', text: '可用命令：/compact 压缩上下文；/stop 停止当前回合；/help 显示本帮助。Enter 发送，Shift+Enter 换行。' })
+    if (command.name === '/compact') {
+      if (compactRoute(agent) === 'slash-command') sendNativeCommand('/compact')
+      else void compact()
+    } else if (command.name === '/stop') void stop()
+    else setNotice({ tone: 'info', text: '平台命令：/compact 压缩上下文；/stop 停止当前回合；/help 显示本帮助。Agent 原生命令会作为普通消息发送。Enter 发送，Shift+Enter 换行。' })
   }
   return <div className="conversation-composer shrink-0 px-3 py-3 sm:px-4 sm:py-4"><div className="conversation-content mx-auto max-w-[var(--chat-max-width)]"><PromptInput className="relative" onSubmit={message => submitRef.current(message)}>
-    <ComposerContents session={session} controller={controller} state={state} canSend={canSend} blockedReason={blockedReason} running={running} canControl={canControl} retry={retry} hint={hint} notice={notice} setNotice={setNotice} commandPending={commandPending} stop={stop} visibleCommands={visibleCommands} executeCommand={executeCommand} submitRef={submitRef} sendWithAttachmentsRef={sendWithAttachmentsRef} terminalContext={terminalContext} contextUsage={contextUsage} compact={compact} compactDisabled={!api || !canControl || running || Boolean(commandPending)} />
+    <ComposerContents session={session} agent={agent} controller={controller} state={state} canSend={canSend} blockedReason={blockedReason} running={running} canControl={canControl} retry={retry} hint={hint} notice={notice} setNotice={setNotice} commandPending={commandPending} stop={stop} visibleCommandGroups={visibleCommandGroups} executeCommand={executeCommand} submitRef={submitRef} sendWithAttachmentsRef={sendWithAttachmentsRef} terminalContext={terminalContext} contextUsage={contextUsage} compact={compact} compactDisabled={!api || !canControl || running || Boolean(commandPending)} />
   </PromptInput></div></div>
 }
 
-function ComposerContents({ session, controller, state, canSend, blockedReason, running, canControl, retry, hint, notice, setNotice, commandPending, stop, visibleCommands, executeCommand, submitRef, sendWithAttachmentsRef, terminalContext, contextUsage, compact, compactDisabled }: { session: SessionDTO; controller: SubmissionController; state: ReturnType<SubmissionController['snapshot']>; canSend: boolean; blockedReason: string; running: boolean; canControl: boolean; retry: boolean; hint: string; notice: ComposerNotice; setNotice: (notice: ComposerNotice) => void; commandPending: 'stop' | null; stop: () => Promise<void>; visibleCommands: readonly typeof slashCommands[number][]; executeCommand: (name: typeof slashCommands[number]['name']) => void; submitRef: MutableRefObject<(message: PromptInputMessage) => void>; sendWithAttachmentsRef: MutableRefObject<boolean>; terminalContext: ReturnType<typeof useTerminalContext>; contextUsage: ContextWindowUsage | null; compact: () => Promise<void>; compactDisabled: boolean }) {
+function ComposerContents({ session, agent, controller, state, canSend, blockedReason, running, canControl, retry, hint, notice, setNotice, commandPending, stop, visibleCommandGroups, executeCommand, submitRef, sendWithAttachmentsRef, terminalContext, contextUsage, compact, compactDisabled }: { session: SessionDTO; agent?: AgentDTO; controller: SubmissionController; state: ReturnType<SubmissionController['snapshot']>; canSend: boolean; blockedReason: string; running: boolean; canControl: boolean; retry: boolean; hint: string; notice: ComposerNotice; setNotice: (notice: ComposerNotice) => void; commandPending: 'stop' | null; stop: () => Promise<void>; visibleCommandGroups: ReturnType<typeof commandGroups>; executeCommand: (command: SlashCommand) => void; submitRef: MutableRefObject<(message: PromptInputMessage) => void>; sendWithAttachmentsRef: MutableRefObject<boolean>; terminalContext: ReturnType<typeof useTerminalContext>; contextUsage: ContextWindowUsage | null; compact: () => Promise<void>; compactDisabled: boolean }) {
   const attachments = usePromptInputAttachments()
   const submit = async (message: PromptInputMessage) => {
-    if (!canSend || state.pending || state.draft.startsWith('/')) return
+    if (!canSend || state.pending || (state.draft.startsWith('/') && !isAgentCommandInput(agent, state.draft))) return
     const textParts: string[] = []
     let skipped = 0
     for (const attachment of message.files ?? []) {
@@ -177,13 +180,13 @@ function ComposerContents({ session, controller, state, canSend, blockedReason, 
   }
   submitRef.current = message => { void submit(message) }
   return <>
-    {visibleCommands.length > 0 && <div className="absolute inset-x-0 bottom-full z-20 mb-2 overflow-hidden rounded-xl border border-border bg-popover p-1.5 shadow-lg" role="listbox" aria-label="斜杠命令">{visibleCommands.map(command => <button key={command.name} type="button" role="option" className="flex w-full items-start gap-3 rounded-lg px-3 py-2 text-left hover:bg-accent focus:bg-accent focus:outline-none" onClick={() => executeCommand(command.name)}><code className="text-sm text-primary">{command.name}</code><span><strong className="block text-sm font-medium">{command.label}</strong><small className="text-muted-foreground">{command.description}</small></span></button>)}</div>}
+    {visibleCommandGroups.length > 0 && <div className="absolute inset-x-0 bottom-full z-20 mb-2 overflow-hidden rounded-xl border border-border bg-popover p-1.5 shadow-lg" role="listbox" aria-label="斜杠命令">{visibleCommandGroups.map(group => <section key={group.key} aria-label={group.label}><p className="px-3 pb-1 pt-2 text-xs font-medium text-muted-foreground">{group.label}</p>{group.commands.map(command => <button key={`${command.group}:${command.name}`} type="button" role="option" className="flex w-full items-start gap-3 rounded-lg px-3 py-2 text-left hover:bg-accent focus:bg-accent focus:outline-none" onClick={() => executeCommand(command)}><code className="text-sm text-primary">{command.name}</code><span><strong className="block text-sm font-medium">{command.label}</strong><small className="text-muted-foreground">{command.description}</small></span></button>)}</section>)}</div>}
     {(attachments.files.length > 0 || terminalContext.active) && <PromptInputHeader>{terminalContext.active && <details className="rounded-lg border border-primary/20 bg-primary/10 px-3 py-2 text-xs"><summary className="cursor-pointer font-medium text-primary">终端上下文 · 最近 {Math.min(20, terminalContext.lines.length)} 行</summary><pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap text-[11px] text-muted-foreground">{terminalContext.lines.slice(-20).join('\n') || '等待终端输出…'}</pre></details>}{attachments.files.length > 0 && <Attachments variant="inline">{attachments.files.map(attachment => <Attachment key={attachment.id} data={attachment} onRemove={() => attachments.remove(attachment.id)}><AttachmentPreview /><AttachmentInfo /><AttachmentRemove /></Attachment>)}</Attachments>}</PromptInputHeader>}
     <PromptInputBody><label className="sr-only" htmlFor={`session-prompt-${session.id}`}>消息内容</label><PromptInputTextarea id={`session-prompt-${session.id}`} value={sendWithAttachmentsRef.current ? '' : state.draft} onChange={event => { controller.edit(event.target.value); setNotice(null) }} maxLength={16_000} aria-invalid={Boolean(state.error) || undefined} placeholder={canSend ? '给 Agent 发送消息，输入 / 查看命令…' : `${blockedReason}，可以先编辑草稿`} /></PromptInputBody>
     <PromptInputFooter><PromptInputTools className="flex-wrap">
       <PromptInputActionMenu><PromptInputActionMenuTrigger asChild><PromptInputActionMenuButton /></PromptInputActionMenuTrigger><PromptInputActionMenuContent align="start"><PromptInputActionAddAttachments kind="file" /><PromptInputActionAddAttachments kind="image" /></PromptInputActionMenuContent></PromptInputActionMenu>
       <span className="middle-truncate rounded-md bg-muted/70 px-2 py-1 font-mono text-xs text-muted-foreground/60" title="会话创建后，智能体与模型保持固定">{session.agentKey} · {session.modelId || 'Agent 默认模型'}</span><ContextWindowMeter usage={contextUsage} onCompact={() => void compact()} compactDisabled={compactDisabled} /><span role={state.error || notice?.tone === 'error' ? 'alert' : 'status'} className={cn('min-w-0 flex-1 truncate text-xs text-muted-foreground/60', (state.error || notice?.tone === 'error') && 'text-red-300')}>{state.error || notice?.text || hint}</span></PromptInputTools>
-      <PromptInputSubmit status={running || commandPending === 'stop' ? 'streaming' : state.pending ? 'submitted' : state.error ? 'error' : 'ready'} onStop={running ? () => void stop() : undefined} disabled={running ? !canControl || commandPending === 'stop' : !canSend || state.pending || (!state.draft.trim() && !attachments.files.length) || state.draft.startsWith('/')} title={running ? '停止当前回合' : retry ? '重试发送' : '发送消息'} />
+      <PromptInputSubmit status={running || commandPending === 'stop' ? 'streaming' : state.pending ? 'submitted' : state.error ? 'error' : 'ready'} onStop={running ? () => void stop() : undefined} disabled={running ? !canControl || commandPending === 'stop' : !canSend || state.pending || (!state.draft.trim() && !attachments.files.length) || (state.draft.startsWith('/') && !isAgentCommandInput(agent, state.draft))} title={running ? '停止当前回合' : retry ? '重试发送' : '发送消息'} />
     </PromptInputFooter>
   </>
 }

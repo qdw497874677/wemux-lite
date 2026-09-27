@@ -6,6 +6,7 @@ import type { AgentKey, ModelId, NativeSessionRef, ToolCallId } from '@wemux/dom
 import type { AgentAdapter, AgentSignal, AgentTurnInput, LocalAgentDetection } from '../application/ports/agent-adapter.js'
 
 const STDERR_LIMIT = 64 * 1024
+const agentCommands = ['/compact', '/model', '/clear'] as const
 
 export class ClaudeAgent implements Extract<AgentAdapter, { mode: 'execution' }> {
   readonly agentKey = 'claude-code' as AgentKey
@@ -22,8 +23,9 @@ export class ClaudeAgent implements Extract<AgentAdapter, { mode: 'execution' }>
         availability: authenticated ? { status: 'available' } : { status: 'authentication-required', reason: 'Claude Code is not authenticated' },
         authorization,
         runtime: { resume: true, tools: true, approvals: false, usage: false, cancel: true, structuredOutput: false, commands: [] },
+        agentCommands, compactMode: 'slash-command',
         models: authenticated ? ['sonnet', 'opus', 'haiku'].map(id => ({ modelId: id as ModelId, displayName: id, source: 'detected' as const })) : [] }
-    } catch (cause) { const reason = cause instanceof Error ? cause.message : String(cause); return { agentKey: this.agentKey, displayName: 'Claude Code', version: null, mode: this.mode, executablePath: this.command, diagnostics: [reason], availability: { status: 'unavailable', reason }, authorization: { state: 'unknown', instructions: 'Install or repair the local Claude Code CLI before checking credentials.' }, runtime: { resume: true, tools: true, approvals: false, usage: false, cancel: true, structuredOutput: false, commands: [] }, models: [] } }
+    } catch (cause) { const reason = cause instanceof Error ? cause.message : String(cause); return { agentKey: this.agentKey, displayName: 'Claude Code', version: null, mode: this.mode, executablePath: this.command, diagnostics: [reason], availability: { status: 'unavailable', reason }, authorization: { state: 'unknown', instructions: 'Install or repair the local Claude Code CLI before checking credentials.' }, runtime: { resume: true, tools: true, approvals: false, usage: false, cancel: true, structuredOutput: false, commands: [] }, agentCommands, compactMode: 'slash-command', models: [] } }
   }
 
   async startTurn(input: AgentTurnInput) {
@@ -80,11 +82,11 @@ export class ClaudeAgent implements Extract<AgentAdapter, { mode: 'execution' }>
       if (message.session_id && message.session_id !== native) { native = message.session_id; queue.push({ kind: 'native-session', nativeSession: native as NativeSessionRef }) }
       if (message.type === 'result') { result = message as ClaudeResult; return }
       const event = message.type === 'stream_event' ? message.event : null
-      if (event?.type === 'content_block_delta' && event.delta?.type === 'text_delta') queue.push({ kind: 'event', event: { kind: 'assistant.text.delta', text: event.delta.text } })
+      if (event?.type === 'content_block_delta' && event.delta?.type === 'text_delta') queue.push({ kind: 'event', event: { kind: 'assistant.text.delta', text: event.delta.text, streamKind: 'assistant_text' } })
       else if (event?.type === 'content_block_start' && event.content_block?.type === 'tool_use') toolInputs.set(event.index, { id: event.content_block.id as ToolCallId, name: event.content_block.name, json: JSON.stringify(event.content_block.input ?? {}).replace(/^\{\}$/, '') })
       else if (event?.type === 'content_block_delta' && event.delta?.type === 'input_json_delta') { const tool = toolInputs.get(event.index); if (tool) tool.json += event.delta.partial_json ?? '' }
-      else if (event?.type === 'content_block_stop') { const tool = toolInputs.get(event.index); if (tool) { queue.push({ kind: 'event', event: { kind: 'tool.started', toolCallId: tool.id, toolName: tool.name, input: parseJson(tool.json) } }); toolInputs.delete(event.index) } }
-      if (message.type === 'user') for (const block of message.message?.content ?? []) if (block.type === 'tool_result') { const id = block.tool_use_id as ToolCallId; queue.push({ kind: 'event', event: { kind: 'tool.output.delta', toolCallId: id, text: contentText(block.content) } }); queue.push({ kind: 'event', event: { kind: 'tool.finished', toolCallId: id, exitCode: block.is_error ? 1 : 0 } }) }
+      else if (event?.type === 'content_block_stop') { const tool = toolInputs.get(event.index); if (tool) { queue.push({ kind: 'event', event: { kind: 'tool.started', toolCallId: tool.id, toolName: tool.name, input: parseJson(tool.json), streamKind: 'command_output' } }); toolInputs.delete(event.index) } }
+      if (message.type === 'user') for (const block of message.message?.content ?? []) if (block.type === 'tool_result') { const id = block.tool_use_id as ToolCallId; queue.push({ kind: 'event', event: { kind: 'tool.output.delta', toolCallId: id, text: contentText(block.content), streamKind: 'command_output' } }); queue.push({ kind: 'event', event: { kind: 'tool.finished', toolCallId: id, exitCode: block.is_error ? 1 : 0 } }) }
     }
   }
 }

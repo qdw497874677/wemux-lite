@@ -10,6 +10,7 @@ import { piCapabilityExtension } from '../capabilities/pi-tools.js'
 import { findPi, PiRpc } from './pi-rpc.js'
 
 const exec = promisify(execFile)
+const agentCommands = ['/compact', '/model'] as const
 // 0.80.4 introduced settlement; 0.85.1 is our validated lifecycle/extension baseline.
 async function supportedVersion(executable: string, timeout: number) {
   const version = (await exec(executable, ['--version'], { timeout, killSignal: 'SIGKILL', maxBuffer: 65536 })).stdout.trim().slice(0, 256)
@@ -40,10 +41,11 @@ export class PiAgent implements Extract<AgentAdapter, { mode: 'execution' }> {
           ? { state: 'authorized', accountLabel: `${models.length} configured model${models.length === 1 ? '' : 's'}` }
           : { state: 'unauthorized', instructions: 'Authenticate a provider in the local Pi CLI, then restart or refresh the Worker.' },
         runtime: { resume: true, tools: true, approvals: true, usage: false, cancel: true, structuredOutput: false, commands: ['compact', 'set_model', 'set_thinking_level'] },
+        agentCommands, compactMode: 'slash-command',
         models: models.map(model => ({ modelId: modelId(model.provider, model.id), displayName: `${model.name ?? model.id} (${model.provider})`, source: 'configured' })) }
     } catch (cause) {
       const reason = errorText(cause)
-      return { agentKey: this.agentKey, displayName: 'Pi', version, mode: this.mode, executablePath, diagnostics: [reason], availability: { status: 'unavailable', reason }, authorization: { state: 'unknown', instructions: 'Install or repair the local Pi CLI before checking credentials.' }, runtime: { resume: true, tools: true, approvals: true, usage: false, cancel: true, structuredOutput: false, commands: ['compact', 'set_model', 'set_thinking_level'] }, models: [] }
+      return { agentKey: this.agentKey, displayName: 'Pi', version, mode: this.mode, executablePath, diagnostics: [reason], availability: { status: 'unavailable', reason }, authorization: { state: 'unknown', instructions: 'Install or repair the local Pi CLI before checking credentials.' }, runtime: { resume: true, tools: true, approvals: true, usage: false, cancel: true, structuredOutput: false, commands: ['compact', 'set_model', 'set_thinking_level'] }, agentCommands, compactMode: 'slash-command', models: [] }
     } finally { await rpc?.close() }
   }
 
@@ -98,7 +100,7 @@ export class PiAgent implements Extract<AgentAdapter, { mode: 'execution' }> {
         // Journal is append-only: replacement snapshots cannot retract prior text.
         const text = snapshot.startsWith(previous) ? snapshot.slice(previous.length) : `\n[Pi tool output replaced]\n${snapshot}`
         toolOutput.set(id, snapshot)
-        if (text) queue.push({ kind: 'event', event: { kind: 'tool.output.delta', toolCallId: id as ToolCallId, text } })
+        if (text) queue.push({ kind: 'event', event: { kind: 'tool.output.delta', toolCallId: id as ToolCallId, text, streamKind: 'command_output' } })
       }
       let stopped = false
       let finished = false
@@ -131,10 +133,10 @@ export class PiAgent implements Extract<AgentAdapter, { mode: 'execution' }> {
       connection.onFailure = fail
       connection.onEvent = event => {
         if (finished) return
-        if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') queue.push({ kind: 'event', event: { kind: 'assistant.text.delta', text: event.assistantMessageEvent.delta } })
+        if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') queue.push({ kind: 'event', event: { kind: 'assistant.text.delta', text: event.assistantMessageEvent.delta, streamKind: 'assistant_text' } })
         else if (event.type === 'message_end' && event.message?.role === 'assistant') assistant = event.message
         else if (event.type === 'agent_end') assistant = [...(event.messages ?? [])].reverse().find(message => message.role === 'assistant') ?? assistant
-        else if (event.type === 'tool_execution_start') queue.push({ kind: 'event', event: { kind: 'tool.started', toolCallId: event.toolCallId as ToolCallId, toolName: event.toolName, input: event.args } })
+        else if (event.type === 'tool_execution_start') queue.push({ kind: 'event', event: { kind: 'tool.started', toolCallId: event.toolCallId as ToolCallId, toolName: event.toolName, input: event.args, streamKind: 'command_output' } })
         else if (event.type === 'tool_execution_update') output(event.toolCallId, event.partialResult)
         else if (event.type === 'tool_execution_end') {
           output(event.toolCallId, event.result)
