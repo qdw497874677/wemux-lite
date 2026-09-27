@@ -108,7 +108,8 @@ test('quick entry reuses session contracts without Task or Run prerequisite; mob
   assert.match(ui, /运行时诊断/); assert.match(ui, /查看详情/)
   assert.doesNotMatch(ui, /<fieldset/)
   assert.doesNotMatch(ui, /Boolean\(state.attempt && !state.attempt.sessionId\)/)
-  assert.match(src('../src/styles.css'), /max-width: 1080px/)
+  assert.match(src('../src/styles.css'), /--chat-max-width: 45rem/)
+  assert.match(src('../src/styles.css'), /max-width: var\(--chat-max-width\)/)
 })
 
 test('pending enqueue preserves first content until Worker acknowledgement, including reload', async () => {
@@ -180,7 +181,8 @@ test('quick UI keeps mobile workspaces visible, exact select names and stale nav
   assert.match(src('../src/App.tsx'), /key=\{`\$\{projectId\}:\$\{section\}`\}/)
   assert.match(src('../src/App.tsx'), /<QuickStartRecovery/)
   const nav = src('../src/components/project-quick-nav.tsx')
-  assert.ok(nav.indexOf("['workspaces', '工作区']") < nav.indexOf('<DropdownMenu>'))
+  assert.match(nav, /projectNavigationItems\.map/)
+  assert.match(src('../src/components/navigation-items.ts'), /path: 'workspaces'.*shortLabel: '工作区'/)
   assert.doesNotMatch(src('../src/components/project-session-list.tsx'), /点击“新建会话”/)
 })
 

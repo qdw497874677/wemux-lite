@@ -11,6 +11,8 @@
   --command-shell-inset: 0.5rem;
   --command-content-inset: 1rem;
   --floating-content-inset: 0.75rem;
+  --chat-max-width: 45rem;
+  --workspace-titlebar-scroll-fade-height: 2.75rem;
   --z-sheet: 46;
 
   /* Glass surfaces stay semantic so reduced-transparency and theme overrides compose. */
@@ -1002,7 +1004,7 @@ code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospac
   .text-violet-200, .text-violet-300, .text-indigo-200 { color: #5140a6; }
 }
 a[aria-current="page"] { background: var(--color-accent); font-weight: 600; }
-h1 { font-size: 1.25rem; font-weight: 650; }
+h1 { font-size: .875rem; font-weight: 500; }
 
 :root { --status-success: #6ee7b7; --status-warning: #fcd34d; --status-danger: #fca5a5; --status-info: #c4b5fd; }
 @media (prefers-color-scheme: light) { :root { --status-success: #12633e; --status-warning: #795000; --status-danger: #a51b2b; --status-info: #5140a6; } }
@@ -1020,23 +1022,30 @@ h1 { font-size: 1.25rem; font-weight: 650; }
 
 /* Workbench geometry is explicit: rail + project column form navigation, canvas,
    and optional push inspector. Portaled sheets never participate in the grid. */
-.workbench-layout { display: grid; grid-template-columns: 64px 220px minmax(0, 1fr) auto; flex: 1; min-height: 0; }
-.global-rail { display: flex; flex-direction: column; gap: 8px; padding: 12px 4px; border-right: 1px solid var(--color-border); background: var(--color-card); }
-.global-rail a { display: grid; place-items: center; min-height: 44px; font-size: 12px; border-radius: 8px; transition: background-color var(--duration-fast) var(--ease-out-expo), color var(--duration-fast) var(--ease-out-expo), transform var(--duration-fast) var(--ease-spring); }
-.global-rail a:hover { background: var(--color-accent); }
+.workbench-layout { display: grid; grid-template-columns: 56px 232px minmax(0, 1fr) auto; flex: 1; min-height: 0; background: var(--color-background); }
+.global-rail,
+.project-column { position: relative; isolation: isolate; background: color-mix(in srgb, var(--sidebar) var(--glass-opacity), transparent); backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation)); -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation)); }
+.global-rail::before,
+.project-column::before { position: absolute; inset: 0; z-index: -1; pointer-events: none; content: ''; background-image: radial-gradient(circle at 18% 8%, color-mix(in srgb, var(--color-primary) 12%, transparent), transparent 36%), radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--contrast-foreground) 7%, transparent) .65px, transparent .75px); background-size: auto, 8px 8px; opacity: .55; }
+.global-rail { display: flex; flex-direction: column; gap: 4px; padding: 8px 4px; border-right: 1px solid color-mix(in srgb, var(--sidebar-border) 78%, transparent); }
+.global-rail a { display: grid; min-height: 32px; place-items: center; padding-inline: 2px; color: var(--sidebar-muted-foreground); font-size: 11px; border-radius: var(--control-radius); transition: background-color var(--duration-fast) var(--ease-out-expo), color var(--duration-fast) var(--ease-out-expo), transform var(--duration-fast) var(--ease-spring); }
+.global-rail a:hover { background: color-mix(in srgb, var(--color-accent) 78%, transparent); color: var(--sidebar-foreground); }
 .global-rail a:active { transform: scale(.93); }
-.project-column { display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; }
+.project-column { display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; border-right: 1px solid color-mix(in srgb, var(--sidebar-border) 68%, transparent); }
 .canvas-toolbar { display: flex; justify-content: flex-end; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--color-border); }
 .inspector-sheet { margin: 0 !important; box-sizing: border-box; position: fixed !important; inset: 0 0 0 auto !important; max-width: 100vw !important; height: 100dvh; z-index: 50; }
-@media (max-width: 1279px) { .workbench-layout { grid-template-columns: 64px minmax(0, 1fr); } .project-column { display: none; } }
+@media (max-width: 1279px) { .workbench-layout { grid-template-columns: 56px minmax(0, 1fr); } .project-column { display: none; } }
 @media (max-width: 1023px) { .inspector-sheet { inset: 0 !important; width: 100vw !important; height: 100dvh !important; max-width: 100vw !important; margin: 0 !important; } }
 @media (max-width: 767px) { .workbench-layout { grid-template-columns: minmax(0, 1fr); } .workbench-layout > .global-rail { display: none; } .inspector-sheet, .navigation-sheet { width: 100vw !important; max-width: 100vw !important; } }
 @media (min-width: 1280px) {
-  .workbench-layout.conversation-focus { grid-template-columns: 64px minmax(0, 1fr) auto; }
+  .workbench-layout.conversation-focus { grid-template-columns: 56px minmax(0, 1fr) auto; }
   .conversation-focus > .project-column { display: none; }
 }
-.conversation-content { width: 100%; max-width: 1080px; margin-inline: auto; }
-.conversation-composer { padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+.conversation-content { width: 100%; max-width: var(--chat-max-width); margin-inline: auto; }
+.conversation-timeline { background: var(--color-background); }
+.conversation-timeline::before { position: absolute; inset: 0 0 auto; z-index: 8; height: var(--workspace-titlebar-scroll-fade-height); pointer-events: none; content: ''; background: linear-gradient(to bottom, var(--color-background) 8%, color-mix(in srgb, var(--color-background) 76%, transparent) 58%, transparent); }
+.conversation-composer { position: relative; z-index: 9; padding-bottom: max(8px, env(safe-area-inset-bottom)); background: linear-gradient(to top, var(--color-background) 72%, color-mix(in srgb, var(--color-background) 90%, transparent)); }
+.middle-truncate { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Session-bound AI composer. The supplied Motoko-style reference is adapted to
    Wemux semantics: model is informative because a Session binding is immutable. */
@@ -1146,6 +1155,8 @@ h1 { font-size: 1.25rem; font-weight: 650; }
 @media (prefers-reduced-transparency: reduce) {
   .ai-prompt-input { background: var(--color-card); }
   .ai-prompt-input::before { display: none; }
+  .global-rail, .project-column { background: var(--sidebar); backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .global-rail::before, .project-column::before { display: none; }
 }
 
 /* Sidebar interactive items — smooth state transitions. */

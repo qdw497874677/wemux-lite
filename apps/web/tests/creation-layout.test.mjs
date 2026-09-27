@@ -13,9 +13,10 @@ test('resource and task creation share a guarded, scrollable dialog', () => {
     const form = source(path)
     assert.match(form, /<CreationDialog/)
     assert.match(form, /footer=/)
-    assert.match(form, /window.confirm/)
+    assert.match(form, /useConfirmDialog/)
   }
   assert.doesNotMatch(source('../src/components/create-dialog.tsx'), /dirty.current = true/)
+  assert.doesNotMatch(source('../src/components/create-dialog.tsx'), /window.confirm/)
   assert.match(source('../src/features/tasks/board.tsx'), /onBusy=\{setCreateBusy\}/)
 })
 test('conversation focus retains return, searchable navigation and touch newline', () => {
@@ -24,7 +25,8 @@ test('conversation focus retains return, searchable navigation and touch newline
   assert.match(app, /展开导航/)
   assert.match(app, /onFocus=.*setConversationFocus\(false\)/)
   assert.match(app, /projectId && !sessionId/)
-  assert.match(source('../src/styles.css'), /max-width: 1080px/)
+  assert.match(source('../src/styles.css'), /--chat-max-width: 45rem/)
+  assert.match(source('../src/styles.css'), /max-width: var\(--chat-max-width\)/)
   const composer = source('../src/components/ui/ai-prompt-input.tsx')
   assert.match(composer, /nativeEvent\.isComposing/)
   assert.match(composer, /pointer: fine/)

@@ -41,16 +41,16 @@ export function TimelineEntry({ entry, onOpenContext }: { entry: ChatTimelineIte
       formatUsageNumber(entry.usage.totalTokens) && `总计 ${formatUsageNumber(entry.usage.totalTokens)}`,
       entry.usage.costUsd === undefined ? null : `费用 ${entry.usage.currency ?? 'USD'} $${entry.usage.costUsd.toFixed(4)}`,
     ].filter(Boolean)
-    return <div className="ml-12 flex flex-wrap gap-x-4 gap-y-1.5 text-xs text-muted-foreground/70" aria-label="运行用量">{parts.length ? parts.map(part => <span key={part} className="rounded-lg bg-white/5 px-2.5 py-1">{part}</span>) : <span>暂无用量数据</span>}</div>
+    return <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground/60" aria-label="运行用量">{parts.length ? parts.map(part => <span key={part} className="rounded-md bg-accent/45 px-2 py-0.5">{part}</span>) : <span>暂无用量数据</span>}</div>
   }
-  if (entry.kind === 'notice') return <div role={entry.tone === 'error' ? 'alert' : 'status'} className={cn('ml-12 rounded-2xl px-4 py-3 text-sm shadow-sm', entry.tone === 'error' ? 'border border-red-500/30 bg-red-500/15 text-red-200' : 'border border-border bg-card/70 text-muted-foreground')}><p className="whitespace-pre-wrap break-words leading-6">{entry.text}</p></div>
-  if (entry.kind === 'reasoning') return <div className="ml-12"><Reasoning duration={entry.duration}><ReasoningTrigger duration={entry.duration} running={entry.running} /><ReasoningContent>{entry.text}</ReasoningContent></Reasoning></div>
+  if (entry.kind === 'notice') return <div role={entry.tone === 'error' ? 'alert' : 'status'} className={cn('rounded-xl px-3 py-2.5 text-sm', entry.tone === 'error' ? 'border border-red-500/30 bg-red-500/10 text-red-200' : 'border border-border/70 bg-card/55 text-muted-foreground')}><p className="whitespace-pre-wrap break-words leading-6">{entry.text}</p></div>
+  if (entry.kind === 'reasoning') return <div><Reasoning duration={entry.duration}><ReasoningTrigger duration={entry.duration} running={entry.running} /><ReasoningContent>{entry.text}</ReasoningContent></Reasoning></div>
   if (entry.kind === 'tool') {
     const presentation = normalizeWorkLogEntry(entry)
     const Icon = presentation.action ? workLogIcons[presentation.action] : Terminal
     const input = formatToolValue(entry.input)
     const output = entry.output || (!input ? '等待工具输出…' : '')
-    return <div className={cn('ml-12 rounded-2xl', presentation.tone === 'error' && 'border border-red-500/30 bg-red-500/10')}><Tool defaultOpen={entry.status === 'running'}><ToolHeader title={presentation.toolTitle} state={toolState(entry)} icon={<Icon className={cn('size-4', presentation.tone === 'error' && 'text-red-300')} />} />
+    return <div className={cn('rounded-xl', presentation.tone === 'error' && 'border border-red-500/30 bg-red-500/10')}><Tool defaultOpen={entry.status === 'running'}><ToolHeader title={presentation.toolTitle} state={toolState(entry)} icon={<Icon className={cn('size-4', presentation.tone === 'error' && 'text-red-300')} />} />
       <ToolContent>{presentation.detail && <p className={cn('mb-2 whitespace-pre-wrap break-all text-xs text-muted-foreground', presentation.tone === 'error' && 'text-red-200')}>{presentation.detail}</p>}{presentation.changedFiles?.length ? <ul className="mb-2 space-y-1 text-xs text-muted-foreground" aria-label="变更文件">{presentation.changedFiles.map(file => <li key={file} className="rounded-md bg-muted/60 px-2 py-1 font-mono">{file}</li>)}</ul> : null}{input && <ToolInput input={entry.input} />}<ToolOutput output={output} errorText={presentation.tone === 'error' ? output || '工具执行失败' : undefined} /></ToolContent>
     </Tool></div>
   }
@@ -72,9 +72,9 @@ function TimelineMessage({ entry, onOpenContext }: { entry: Extract<ChatTimeline
     setCopyState('manual')
   }
   return <Message from={message.role} data-message-id={message.id} className="animate-fade-up">
-    <div className={cn('flex max-w-full items-start gap-3', message.role === 'user' && 'flex-row-reverse')}>
-      {message.role === 'assistant' && <span className="grid size-9 shrink-0 place-items-center rounded-2xl bg-gradient-to-br from-indigo-500/15 to-purple-500/10 text-violet-300 shadow-sm"><Bot className="size-4" /></span>}
-      <div className={cn('flex min-w-0 max-w-full flex-col gap-1', message.role === 'user' && 'items-end')}>
+    <div className={cn('flex max-w-full items-start gap-2.5', message.role === 'user' && 'flex-row-reverse')}>
+      {message.role === 'assistant' && <span className="mt-1 grid size-7 shrink-0 place-items-center rounded-lg bg-accent/70 text-muted-foreground"><Bot className="size-3.5" /></span>}
+      <div className={cn('flex min-w-0 max-w-full flex-1 flex-col gap-1', message.role === 'user' && 'items-end')}>
         <MessageContent><div ref={contentRef}>{text ? <Response>{text}</Response> : <span className="flex items-center gap-2 text-muted-foreground"><Loader />等待输出…</span>}</div>
           <div className={cn('mt-1.5 flex items-center gap-1.5', message.role === 'user' && 'justify-end')}><MessageStatus status={entry.status} />{message.role === 'user' && onOpenContext && <button type="button" onClick={onOpenContext} className="rounded-lg p-1 text-muted-foreground/50 transition-all hover:bg-white/10 hover:text-foreground" aria-label="查看会话信息"><ChevronRight className="size-3.5" /></button>}</div>
         </MessageContent>
@@ -148,7 +148,7 @@ export function Composer({ api, controller, session, activeTurnId = null, canSen
     else if (name === '/stop') void stop()
     else setNotice({ tone: 'info', text: '可用命令：/compact 压缩上下文；/stop 停止当前回合；/help 显示本帮助。Enter 发送，Shift+Enter 换行。' })
   }
-  return <div className="conversation-composer shrink-0 px-3 py-3 sm:px-6 sm:py-4"><div className="conversation-content mx-auto max-w-4xl"><ContextWindowMeter usage={contextUsage} onCompact={() => void compact()} compactDisabled={!api || !canControl || running || Boolean(commandPending)} /><PromptInput className="relative" onSubmit={message => submitRef.current(message)}>
+  return <div className="conversation-composer shrink-0 px-3 py-3 sm:px-4 sm:py-4"><div className="conversation-content mx-auto max-w-[var(--chat-max-width)]"><ContextWindowMeter usage={contextUsage} onCompact={() => void compact()} compactDisabled={!api || !canControl || running || Boolean(commandPending)} /><PromptInput className="relative" onSubmit={message => submitRef.current(message)}>
     <ComposerContents session={session} controller={controller} state={state} canSend={canSend} blockedReason={blockedReason} running={running} canControl={canControl} retry={retry} hint={hint} notice={notice} setNotice={setNotice} commandPending={commandPending} stop={stop} visibleCommands={visibleCommands} executeCommand={executeCommand} submitRef={submitRef} sendWithAttachmentsRef={sendWithAttachmentsRef} terminalContext={terminalContext} />
   </PromptInput></div></div>
 }
@@ -182,7 +182,7 @@ function ComposerContents({ session, controller, state, canSend, blockedReason, 
     <PromptInputBody><label className="sr-only" htmlFor={`session-prompt-${session.id}`}>消息内容</label><PromptInputTextarea id={`session-prompt-${session.id}`} value={sendWithAttachmentsRef.current ? '' : state.draft} onChange={event => { controller.edit(event.target.value); setNotice(null) }} maxLength={16_000} aria-invalid={Boolean(state.error) || undefined} placeholder={canSend ? '给 Agent 发送消息，输入 / 查看命令…' : `${blockedReason}，可以先编辑草稿`} /></PromptInputBody>
     <PromptInputFooter><PromptInputTools className="flex-wrap">
       <PromptInputActionMenu><PromptInputActionMenuTrigger asChild><PromptInputActionMenuButton /></PromptInputActionMenuTrigger><PromptInputActionMenuContent align="start"><PromptInputActionAddAttachments kind="file" /><PromptInputActionAddAttachments kind="image" /></PromptInputActionMenuContent></PromptInputActionMenu>
-      <span className="truncate rounded-full bg-muted px-2.5 py-1 text-xs text-muted-foreground" title="会话创建后，智能体与模型保持固定">{session.agentKey} · {session.modelId || 'Agent 默认模型'}</span><span role={state.error || notice?.tone === 'error' ? 'alert' : 'status'} className={cn('min-w-0 flex-1 truncate text-xs text-muted-foreground', (state.error || notice?.tone === 'error') && 'text-red-300')}>{state.error || notice?.text || hint}</span></PromptInputTools>
+      <span className="middle-truncate rounded-md bg-muted/70 px-2 py-1 font-mono text-xs text-muted-foreground/60" title="会话创建后，智能体与模型保持固定">{session.agentKey} · {session.modelId || 'Agent 默认模型'}</span><span role={state.error || notice?.tone === 'error' ? 'alert' : 'status'} className={cn('min-w-0 flex-1 truncate text-xs text-muted-foreground/60', (state.error || notice?.tone === 'error') && 'text-red-300')}>{state.error || notice?.text || hint}</span></PromptInputTools>
       <PromptInputSubmit status={running || commandPending === 'stop' ? 'streaming' : state.pending ? 'submitted' : state.error ? 'error' : 'ready'} onStop={running ? () => void stop() : undefined} disabled={running ? !canControl || commandPending === 'stop' : !canSend || state.pending || (!state.draft.trim() && !attachments.files.length) || state.draft.startsWith('/')} title={running ? '停止当前回合' : retry ? '重试发送' : '发送消息'} />
     </PromptInputFooter>
   </>

@@ -53,11 +53,11 @@ export function ConversationContent({ className, children, ...props }: Conversat
     previousChildCount.current = childCount
     if (added) anchor?.contentAdded(added)
   }, [anchor, childCount])
-  return <StickToBottom.Content className={cn('flex flex-col gap-5 p-4 sm:p-6', className)} {...props}>{children}</StickToBottom.Content>
+  return <StickToBottom.Content className={cn('flex flex-col gap-4 px-3 py-3 sm:px-4 sm:py-4', className)} {...props}>{children}</StickToBottom.Content>
 }
 
 export function ConversationEmptyState({ className, title = '暂无消息', description, icon, children, ...props }: ComponentProps<'div'> & { title?: string; description?: string; icon?: ReactNode }) {
-  return <div className={cn('flex size-full min-h-48 flex-col items-center justify-center gap-3 p-8 text-center', className)} {...props}>{children ?? <>{icon && <div className="text-muted-foreground">{icon}</div>}<div className="space-y-1"><h3 className="text-sm font-medium">{title}</h3>{description && <p className="text-sm text-muted-foreground">{description}</p>}</div></>}</div>
+  return <div className={cn('mx-auto flex size-full min-h-48 max-w-[var(--chat-max-width)] flex-col items-center justify-center gap-3 px-4 py-8 text-center', className)} {...props}>{children ?? <>{icon && <div className="text-muted-foreground/60">{icon}</div>}<div className="space-y-1"><h3 className="text-sm font-medium">{title}</h3>{description && <p className="text-xs leading-5 text-muted-foreground/60">{description}</p>}</div></>}</div>
 }
 
 export function ConversationScrollButton({ className, ...props }: ComponentProps<typeof Button>) {

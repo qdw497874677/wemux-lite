@@ -41,7 +41,7 @@ export function PromptInput({ className, onSubmit, children, ...props }: Omit<Co
     onSubmit({ text: String(data.get('message') ?? ''), files }, event)
   }
   const context = { textareaRef, files, add, remove, clear, fileInputRef, imageInputRef }
-  return <PromptInputContext.Provider value={context}><form className={cn('overflow-hidden rounded-2xl border border-border bg-card shadow-sm focus-within:border-primary/60 focus-within:ring-2 focus-within:ring-primary/15', className)} onSubmit={submit} {...props}>{children}<input ref={fileInputRef} className="sr-only" type="file" multiple onChange={event => { if (event.target.files) add(event.target.files); event.target.value = '' }} /><input ref={imageInputRef} className="sr-only" type="file" accept="image/*" multiple onChange={event => { if (event.target.files) add(event.target.files); event.target.value = '' }} /></form></PromptInputContext.Provider>
+  return <PromptInputContext.Provider value={context}><form className={cn('surface-glass overflow-hidden rounded-xl border border-border/70 bg-card/80 shadow-[0_12px_36px_-24px_rgb(0_0_0/.8)] transition-[border-color,box-shadow,background-color] focus-within:border-primary/45 focus-within:bg-card/90 focus-within:ring-2 focus-within:ring-primary/15', className)} onSubmit={submit} {...props}>{children}<input ref={fileInputRef} className="sr-only" type="file" multiple onChange={event => { if (event.target.files) add(event.target.files); event.target.value = '' }} /><input ref={imageInputRef} className="sr-only" type="file" accept="image/*" multiple onChange={event => { if (event.target.files) add(event.target.files); event.target.value = '' }} /></form></PromptInputContext.Provider>
 }
 
 export function PromptInputHeader({ className, ...props }: ComponentProps<'div'>) {
@@ -60,11 +60,11 @@ export function PromptInputTextarea({ className, onKeyDown, ...props }: Componen
     event.preventDefault()
     event.currentTarget.form?.requestSubmit()
   }
-  return <textarea ref={context?.textareaRef} name="message" rows={2} className={cn('max-h-48 min-h-14 w-full resize-none bg-transparent px-4 py-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60', className)} onKeyDown={handleKeyDown} {...props} />
+  return <textarea ref={context?.textareaRef} name="message" rows={2} className={cn('max-h-48 min-h-12 w-full resize-none bg-transparent px-3.5 py-3 text-sm leading-6 outline-none placeholder:text-muted-foreground/60 disabled:cursor-not-allowed disabled:opacity-60', className)} onKeyDown={handleKeyDown} {...props} />
 }
 
 export function PromptInputFooter({ className, ...props }: ComponentProps<'div'>) {
-  return <div className={cn('flex min-h-12 items-center gap-2 border-t border-border/70 px-3 py-2', className)} {...props} />
+  return <div className={cn('flex min-h-10 items-center gap-2 border-t border-border/55 px-2.5 py-1.5', className)} {...props} />
 }
 
 export function PromptInputTools({ className, ...props }: ComponentProps<'div'>) {
@@ -73,7 +73,7 @@ export function PromptInputTools({ className, ...props }: ComponentProps<'div'>)
 
 export function PromptInputSubmit({ className, status = 'ready', onStop, children, ...props }: ComponentProps<typeof Button> & { status?: PromptInputStatus; onStop?: () => void }) {
   const busy = status === 'submitted' || status === 'streaming'
-  return <Button className={cn('rounded-xl', className)} iconOnly size="sm" type={busy && onStop ? 'button' : 'submit'} aria-label={busy && onStop ? '停止当前回合' : busy ? '正在发送' : '发送消息'} onClick={busy && onStop ? onStop : props.onClick} {...props}>{children ?? (busy ? onStop ? <Square className="size-4 fill-current" /> : <LoaderCircle className="size-4 animate-spin" /> : <ArrowUp className="size-4" />)}</Button>
+  return <Button className={cn('size-8 rounded-lg', className)} iconOnly size="icon-sm" type={busy && onStop ? 'button' : 'submit'} aria-label={busy && onStop ? '停止当前回合' : busy ? '正在发送' : '发送消息'} onClick={busy && onStop ? onStop : props.onClick} {...props}>{children ?? (busy ? onStop ? <Square className="size-3.5 fill-current" /> : <LoaderCircle className="size-3.5 animate-spin" /> : <ArrowUp className="size-3.5" />)}</Button>
 }
 
 export const PromptInputActionMenu = DropdownMenu
