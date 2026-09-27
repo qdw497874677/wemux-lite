@@ -19,6 +19,7 @@ import { randomId } from '../../lib/random.ts'
 import { useCompactAction } from './cluster-controls.tsx'
 import { SubmissionController } from './submission.ts'
 import { normalizeWorkLogEntry, type WorkLogEntry } from './work-log.ts'
+import { terminalContextText, useTerminalContext } from '../terminal/terminal-context.ts'
 
 const formatUsageNumber = (value: number | undefined) => value === undefined ? null : new Intl.NumberFormat('zh-CN').format(value)
 const formatToolValue = (value: unknown) => {
@@ -103,6 +104,7 @@ export function Composer({ api, controller, session, activeTurnId = null, canSen
   const [notice, setNotice] = useState<ComposerNotice>(null)
   const [commandPending, setCommandPending] = useState<'stop' | null>(null)
   const compactAction = useCompactAction(api, session.id)
+  const terminalContext = useTerminalContext(session.id)
   useEffect(() => { controller.confirm(confirmedIds) }, [controller, confirmedIds.join(',')])
   canSend = canSend && session.access?.canWrite !== false && session.sendCapability?.allowed === true
   blockedReason = session.access?.canWrite === false ? '当前账号只有查看权限' : session.sendCapability?.allowed === false ? session.sendCapability.reason : !session.sendCapability ? '暂时无法确认发送权限' : blockedReason
@@ -147,11 +149,11 @@ export function Composer({ api, controller, session, activeTurnId = null, canSen
     else setNotice({ tone: 'info', text: '可用命令：/compact 压缩上下文；/stop 停止当前回合；/help 显示本帮助。Enter 发送，Shift+Enter 换行。' })
   }
   return <div className="conversation-composer shrink-0 px-3 py-3 sm:px-6 sm:py-4"><div className="conversation-content mx-auto max-w-4xl"><ContextWindowMeter usage={contextUsage} onCompact={() => void compact()} compactDisabled={!api || !canControl || running || Boolean(commandPending)} /><PromptInput className="relative" onSubmit={message => submitRef.current(message)}>
-    <ComposerContents session={session} controller={controller} state={state} canSend={canSend} blockedReason={blockedReason} running={running} canControl={canControl} retry={retry} hint={hint} notice={notice} setNotice={setNotice} commandPending={commandPending} stop={stop} visibleCommands={visibleCommands} executeCommand={executeCommand} submitRef={submitRef} sendWithAttachmentsRef={sendWithAttachmentsRef} />
+    <ComposerContents session={session} controller={controller} state={state} canSend={canSend} blockedReason={blockedReason} running={running} canControl={canControl} retry={retry} hint={hint} notice={notice} setNotice={setNotice} commandPending={commandPending} stop={stop} visibleCommands={visibleCommands} executeCommand={executeCommand} submitRef={submitRef} sendWithAttachmentsRef={sendWithAttachmentsRef} terminalContext={terminalContext} />
   </PromptInput></div></div>
 }
 
-function ComposerContents({ session, controller, state, canSend, blockedReason, running, canControl, retry, hint, notice, setNotice, commandPending, stop, visibleCommands, executeCommand, submitRef, sendWithAttachmentsRef }: { session: SessionDTO; controller: SubmissionController; state: ReturnType<SubmissionController['snapshot']>; canSend: boolean; blockedReason: string; running: boolean; canControl: boolean; retry: boolean; hint: string; notice: ComposerNotice; setNotice: (notice: ComposerNotice) => void; commandPending: 'stop' | null; stop: () => Promise<void>; visibleCommands: readonly typeof slashCommands[number][]; executeCommand: (name: typeof slashCommands[number]['name']) => void; submitRef: MutableRefObject<(message: PromptInputMessage) => void>; sendWithAttachmentsRef: MutableRefObject<boolean> }) {
+function ComposerContents({ session, controller, state, canSend, blockedReason, running, canControl, retry, hint, notice, setNotice, commandPending, stop, visibleCommands, executeCommand, submitRef, sendWithAttachmentsRef, terminalContext }: { session: SessionDTO; controller: SubmissionController; state: ReturnType<SubmissionController['snapshot']>; canSend: boolean; blockedReason: string; running: boolean; canControl: boolean; retry: boolean; hint: string; notice: ComposerNotice; setNotice: (notice: ComposerNotice) => void; commandPending: 'stop' | null; stop: () => Promise<void>; visibleCommands: readonly typeof slashCommands[number][]; executeCommand: (name: typeof slashCommands[number]['name']) => void; submitRef: MutableRefObject<(message: PromptInputMessage) => void>; sendWithAttachmentsRef: MutableRefObject<boolean>; terminalContext: ReturnType<typeof useTerminalContext> }) {
   const attachments = usePromptInputAttachments()
   const submit = async (message: PromptInputMessage) => {
     if (!canSend || state.pending || state.draft.startsWith('/')) return
@@ -163,7 +165,8 @@ function ComposerContents({ session, controller, state, canSend, blockedReason, 
         textParts.push(`附件：${attachment.name}\n\n\`\`\`${attachmentLanguage(attachment.name)}\n${content}\n\`\`\``)
       } else skipped++
     }
-    const content = [message.text.trim(), ...textParts].filter(Boolean).join('\n\n')
+    const terminalText = terminalContext.active ? terminalContextText(terminalContext, 20) : ''
+    const content = [message.text.trim(), ...textParts, terminalText].filter(Boolean).join('\n\n')
     if (skipped) setNotice({ tone: 'info', text: '附件将随后支持上传到工作区；本次仅发送文本和小于 10KB 的文本附件。' })
     if (!content) return
     controller.edit(content)
@@ -175,7 +178,7 @@ function ComposerContents({ session, controller, state, canSend, blockedReason, 
   submitRef.current = message => { void submit(message) }
   return <>
     {visibleCommands.length > 0 && <div className="absolute inset-x-0 bottom-full z-20 mb-2 overflow-hidden rounded-xl border border-border bg-popover p-1.5 shadow-lg" role="listbox" aria-label="斜杠命令">{visibleCommands.map(command => <button key={command.name} type="button" role="option" className="flex w-full items-start gap-3 rounded-lg px-3 py-2 text-left hover:bg-accent focus:bg-accent focus:outline-none" onClick={() => executeCommand(command.name)}><code className="text-sm text-violet-300">{command.name}</code><span><strong className="block text-sm font-medium">{command.label}</strong><small className="text-muted-foreground">{command.description}</small></span></button>)}</div>}
-    {attachments.files.length > 0 && <PromptInputHeader><Attachments variant="inline">{attachments.files.map(attachment => <Attachment key={attachment.id} data={attachment} onRemove={() => attachments.remove(attachment.id)}><AttachmentPreview /><AttachmentInfo /><AttachmentRemove /></Attachment>)}</Attachments></PromptInputHeader>}
+    {(attachments.files.length > 0 || terminalContext.active) && <PromptInputHeader>{terminalContext.active && <details className="rounded-lg border border-violet-400/20 bg-violet-500/10 px-3 py-2 text-xs"><summary className="cursor-pointer font-medium text-violet-200">终端上下文 · 最近 {Math.min(20, terminalContext.lines.length)} 行</summary><pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap text-[11px] text-muted-foreground">{terminalContext.lines.slice(-20).join('\n') || '等待终端输出…'}</pre></details>}{attachments.files.length > 0 && <Attachments variant="inline">{attachments.files.map(attachment => <Attachment key={attachment.id} data={attachment} onRemove={() => attachments.remove(attachment.id)}><AttachmentPreview /><AttachmentInfo /><AttachmentRemove /></Attachment>)}</Attachments>}</PromptInputHeader>}
     <PromptInputBody><label className="sr-only" htmlFor={`session-prompt-${session.id}`}>消息内容</label><PromptInputTextarea id={`session-prompt-${session.id}`} value={sendWithAttachmentsRef.current ? '' : state.draft} onChange={event => { controller.edit(event.target.value); setNotice(null) }} maxLength={16_000} aria-invalid={Boolean(state.error) || undefined} placeholder={canSend ? '给 Agent 发送消息，输入 / 查看命令…' : `${blockedReason}，可以先编辑草稿`} /></PromptInputBody>
     <PromptInputFooter><PromptInputTools className="flex-wrap">
       <PromptInputActionMenu><PromptInputActionMenuTrigger asChild><PromptInputActionMenuButton /></PromptInputActionMenuTrigger><PromptInputActionMenuContent align="start"><PromptInputActionAddAttachments kind="file" /><PromptInputActionAddAttachments kind="image" /></PromptInputActionMenuContent></PromptInputActionMenu>

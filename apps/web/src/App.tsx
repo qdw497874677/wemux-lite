@@ -22,13 +22,15 @@ import { TimelineEntry, Composer, OptimisticMessages } from './features/sessions
 import { Conversation, ConversationContent, ConversationEmptyState, ConversationScrollButton } from './components/ai-elements/conversation.tsx'
 import { SessionInfoPanel } from './features/panels/session-info-panel.tsx'
 import { SessionCanvasPanel } from './features/panels/session-canvas-panel.tsx'
+import { FilesPanel } from './features/files/files-panel.tsx'
+import { TerminalPanel } from './features/terminal/terminal-panel.tsx'
 import { RightPanelSheet } from './features/panels/right-panel-sheet.tsx'
 import { RightPanelTabs } from './features/panels/right-panel-tabs.tsx'
 import type { PanelDescriptor } from './features/panels/panel-registry.ts'
 import { SessionCanvas } from './features/session-canvas/session-canvas.tsx'
 import { Sidebar, ContextPanel } from './features/sessions/navigation'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { Bot, ChevronDown, ChevronRight, CircleCheck, CircleX, FolderGit2, Info, Layers, LoaderCircle, Menu, MessageSquarePlus, MoreHorizontal, Network, PanelRight, Plus, RefreshCw, Search, Send, Server, ServerCog, Settings2, Workflow, Wrench, WifiOff } from 'lucide-react'
+import { Bot, ChevronDown, ChevronRight, CircleCheck, CircleX, Files, FolderGit2, Info, Layers, LoaderCircle, Menu, MessageSquarePlus, MoreHorizontal, Network, PanelRight, Plus, RefreshCw, Search, Send, Server, ServerCog, Settings2, TerminalSquare, Workflow, Wrench, WifiOff } from 'lucide-react'
 import { ApiError, anonymousSession, createApi, isSignedIn, type AccountSession, type Api } from './api/client'
 import { retireLegacyCredentials } from './lib/device-scope'
 import type { ProjectDTO, SendMessageDTO, SessionDTO, WorkerDTO, WorkspaceDTO } from './api/dto'
@@ -307,7 +309,9 @@ function Workbench({ config, onSettings, onUnauthorized, onSignOut }: { config: 
   const panelDescriptors = useMemo<PanelDescriptor[]>(() => selected ? [
     { id: 'session-info', icon: Info, title: '会话信息', render: () => <SessionInfoPanel api={api} session={selected} workspace={workspace} worker={worker} project={project} onChanged={refresh} /> },
     { id: 'session-canvas', icon: Workflow, title: '画布', render: () => <SessionCanvasPanel session={selected} onOpenCanvas={() => go(`${projectBase}/overview?session=${encodeURIComponent(selected.id)}&view=canvas`)} /> },
-  ] : [], [api, project, refresh, selected, worker, workspace])
+    { id: 'files', icon: Files, title: '文件', keepAlive: true, render: () => <FilesPanel api={api} sessionId={selected.id} /> },
+    { id: 'terminal', icon: TerminalSquare, title: '终端', keepAlive: true, render: () => <TerminalPanel api={api} sessionId={selected.id} active={activePanelId === 'terminal'} /> },
+  ] : [], [activePanelId, api, project, refresh, selected, worker, workspace])
   const rightPanel = selected && panelDescriptors.length ? <RightPanelTabs descriptors={panelDescriptors} activeId={activePanelId} context={{ sessionId: selected.id }} onActivate={setActivePanelId} onClose={() => setRightPanelOpen(false)} /> : null
 
   const openResource = (kind: CreateKind | 'session', workspaceId = '') => {
