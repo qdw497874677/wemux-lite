@@ -1,5 +1,6 @@
 import { QuickConversation, QuickStartRecovery } from './components/quick-conversation.tsx'
 import { ClusterControls } from './features/sessions/cluster-controls.tsx'
+import { PendingApprovalPanel } from './features/sessions/pending-approval-panel.tsx'
 import { QuickStartController, fillQuickChoices, initialQuickConfig, quickKey, readPreference } from './features/sessions/quick-start.ts'
 import { ProjectQuickNav } from './components/project-quick-nav'
 import { ProjectResources } from './components/project-resources'
@@ -170,7 +171,7 @@ function AuthScope() {
   </QueryClientProvider>
 }
 
-function LeasedSessionSurface({ api, session, revision, controller, connected, browserOnline, workerOnline, active, onOpenPanel }: { api: Api; session: SessionDTO; revision: number; controller: SubmissionController; connected: boolean; browserOnline: boolean; workerOnline: boolean; active: boolean; onOpenPanel: () => void }) {
+function LeasedSessionSurface({ api, session, agent, revision, controller, connected, browserOnline, workerOnline, active, onOpenPanel }: { api: Api; session: SessionDTO; agent?: WorkerDTO['capabilities'][number]; revision: number; controller: SubmissionController; connected: boolean; browserOnline: boolean; workerOnline: boolean; active: boolean; onOpenPanel: () => void }) {
   const history = useSession(api, session.id, revision)
   const confirmed = history.messages.map(item => item.id)
   const canSend = Boolean(connected && browserOnline && session.access?.canWrite !== false && session.sendCapability?.allowed)
@@ -178,8 +179,9 @@ function LeasedSessionSurface({ api, session, revision, controller, connected, b
   return <section hidden={!active} data-session-surface={session.id} className="absolute inset-0 flex min-h-0 min-w-0 flex-col">
     {history.error && <p role="alert" className="px-4 py-3 text-sm text-red-300">{history.error} 当前历史可能不完整。</p>}
     <Conversation className="conversation-timeline" aria-live="polite" aria-relevant="additions text"><ConversationContent className="conversation-content mx-auto w-full max-w-[var(--chat-max-width)]">{!history.timeline.length && <ConversationEmptyState title={history.checkedAt ? canSend ? '暂无消息，可以开始对话。' : blockedReason : '正在加载会话历史…'} />}{history.timeline.map(entry => <TimelineEntry key={entry.id} entry={entry} onOpenContext={onOpenPanel} />)}<OptimisticMessages controller={controller} confirmedIds={confirmed} /></ConversationContent><ConversationScrollButton /></Conversation>
-    <ClusterControls api={api} session={session} queuedItems={history.queuedItems} pendingApprovals={history.pendingApprovals} enabled={connected && browserOnline && workerOnline && history.freshness?.status === 'synced' && !history.error} />
-    <Composer api={api} controller={controller} session={session} activeTurnId={history.activeTurnId} canSend={canSend} blockedReason={blockedReason} confirmedIds={confirmed} />
+    <ClusterControls api={api} session={session} queuedItems={history.queuedItems} enabled={connected && browserOnline && workerOnline && history.freshness?.status === 'synced' && !history.error} />
+    <PendingApprovalPanel api={api} session={session} pendingApprovals={history.pendingApprovals} enabled={connected && browserOnline && workerOnline && history.freshness?.status === 'synced' && !history.error} />
+    <Composer api={api} controller={controller} session={session} agent={agent} activeTurnId={history.activeTurnId} canSend={canSend} blockedReason={blockedReason} confirmedIds={confirmed} />
   </section>
 }
 
@@ -374,7 +376,7 @@ function Workbench({ config, onSettings, onUnauthorized, onSignOut }: { config: 
         {projectId && <QuickStartRecovery controller={quickController()} sessionId={sessionId} />}
         <div className="flex min-h-0 flex-1">
           <div className="relative min-h-0 min-w-0 flex-1">
-            {retainedSessions.map(item => <LeasedSessionSurface key={item.id} api={api} session={item} revision={revision} controller={submission(item.id)} connected={connected} browserOnline={browserOnline} workerOnline={workers.find(candidate => candidate.id === item.workerId)?.connectionState === 'online'} active={item.id === sessionId} onOpenPanel={() => { setActivePanelId('session-info'); setRightPanelOpen(true) }} />)}
+            {retainedSessions.map(item => <LeasedSessionSurface key={item.id} api={api} session={item} agent={workers.find(candidate => candidate.id === item.workerId)?.capabilities.find(candidate => candidate.agentKey === item.agentKey)} revision={revision} controller={submission(item.id)} connected={connected} browserOnline={browserOnline} workerOnline={workers.find(candidate => candidate.id === item.workerId)?.connectionState === 'online'} active={item.id === sessionId} onOpenPanel={() => { setActivePanelId('session-info'); setRightPanelOpen(true) }} />)}
           </div>
           {rightPanelOpen && wideRightPanel && <div className="w-80 shrink-0 bg-card/55">{rightPanel}</div>}
         </div>

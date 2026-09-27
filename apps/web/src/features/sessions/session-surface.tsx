@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import type { Api } from '../../api/client.ts'
-import type { SessionDTO } from '../../api/dto.ts'
+import type { AgentDTO, SessionDTO } from '../../api/dto.ts'
 import { useSession } from '../../api/use-session.ts'
 import { TimelineEntry, Composer, OptimisticMessages } from './conversation.tsx'
 import { Conversation, ConversationContent, ConversationEmptyState, ConversationScrollButton } from '../../components/ai-elements/conversation.tsx'
 import { Suggestion, Suggestions } from '../../components/ai-elements/suggestion.tsx'
 import { ClusterControls } from './cluster-controls.tsx'
+import { PendingApprovalPanel } from './pending-approval-panel.tsx'
 import { SubmissionController } from './submission.ts'
 import { applySessionSuggestion, emptySessionSuggestions } from './suggestions.ts'
 import { Badge } from '../../components/ui/badge.tsx'
@@ -22,10 +23,11 @@ type Props = {
   presentation: SessionPresentation
   projectPath: string
   workerLabel: string
+  agent?: AgentDTO
   onOpenFocus?: () => void
 }
 
-export function SessionSurface({ api, session, presentation, projectPath, workerLabel, onOpenFocus }: Props) {
+export function SessionSurface({ api, session, presentation, projectPath, workerLabel, agent, onOpenFocus }: Props) {
   const [revision, setRevision] = useState(0)
   const history = useSession(api, session.id, revision)
   const controller = useMemo(() => new SubmissionController(api, session.id, () => { setRevision(value => value + 1); return randomId() }), [api, session.id])
@@ -49,8 +51,8 @@ export function SessionSurface({ api, session, presentation, projectPath, worker
       <OptimisticMessages controller={controller} confirmedIds={confirmedIds} />
     </ConversationContent><ConversationScrollButton className="nodrag nopan" /></Conversation>
     {history.stream !== 'live' && <p className="session-surface-signal">实时更新正在重连，历史仍会继续补传。</p>}
-    {interactive && <div className="session-surface-composer nodrag nopan nowheel"><Composer api={api} controller={controller} session={currentSession} activeTurnId={history.activeTurnId} canSend={canSend} blockedReason={blockedReason} confirmedIds={confirmedIds} /></div>}
-    {controls && <ClusterControls api={api} session={currentSession} queuedItems={history.queuedItems} pendingApprovals={history.pendingApprovals} enabled={canSend} />}
+    {controls && <ClusterControls api={api} session={currentSession} queuedItems={history.queuedItems} enabled={canSend} />}
+    {interactive && <div className="session-surface-composer nodrag nopan nowheel"><PendingApprovalPanel api={api} session={currentSession} pendingApprovals={history.pendingApprovals} enabled={canSend} /><Composer api={api} controller={controller} session={currentSession} agent={agent} activeTurnId={history.activeTurnId} canSend={canSend} blockedReason={blockedReason} confirmedIds={confirmedIds} /></div>}
     {controls && <footer className="session-surface-footer">{projectPath}</footer>}
   </section>
 }
