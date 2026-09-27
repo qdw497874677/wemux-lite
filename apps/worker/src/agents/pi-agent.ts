@@ -40,12 +40,12 @@ export class PiAgent implements Extract<AgentAdapter, { mode: 'execution' }> {
         authorization: models.length
           ? { state: 'authorized', accountLabel: `${models.length} configured model${models.length === 1 ? '' : 's'}` }
           : { state: 'unauthorized', instructions: 'Authenticate a provider in the local Pi CLI, then restart or refresh the Worker.' },
-        runtime: { resume: true, tools: true, approvals: true, usage: false, cancel: true, structuredOutput: false, commands: ['compact', 'set_model', 'set_thinking_level'] },
+        runtime: { resume: true, tools: true, approvals: true, usage: false, cancel: true, structuredOutput: false, commands: ['compact', 'set_model', 'set_thinking_level'] }, modelSwap: true,
         agentCommands, compactMode: 'slash-command',
         models: models.map(model => ({ modelId: modelId(model.provider, model.id), displayName: `${model.name ?? model.id} (${model.provider})`, source: 'configured' })) }
     } catch (cause) {
       const reason = errorText(cause)
-      return { agentKey: this.agentKey, displayName: 'Pi', version, mode: this.mode, executablePath, diagnostics: [reason], availability: { status: 'unavailable', reason }, authorization: { state: 'unknown', instructions: 'Install or repair the local Pi CLI before checking credentials.' }, runtime: { resume: true, tools: true, approvals: true, usage: false, cancel: true, structuredOutput: false, commands: ['compact', 'set_model', 'set_thinking_level'] }, agentCommands, compactMode: 'slash-command', models: [] }
+      return { agentKey: this.agentKey, displayName: 'Pi', version, mode: this.mode, executablePath, diagnostics: [reason], availability: { status: 'unavailable', reason }, authorization: { state: 'unknown', instructions: 'Install or repair the local Pi CLI before checking credentials.' }, runtime: { resume: true, tools: true, approvals: true, usage: false, cancel: true, structuredOutput: false, commands: ['compact', 'set_model', 'set_thinking_level'] }, modelSwap: true, agentCommands, compactMode: 'slash-command', models: [] }
     } finally { await rpc?.close() }
   }
 

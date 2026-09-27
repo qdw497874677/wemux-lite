@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type MutableRefObject } from 'react'
-import { Bot, Check, ChevronRight, Copy, FilePenLine, FileSearch, Globe, Search, Terminal } from 'lucide-react'
+import { Bot, Check, ChevronDown, ChevronRight, Copy, FilePenLine, FileSearch, Globe, Search, Terminal } from 'lucide-react'
 import type { Api } from '../../api/client.ts'
 import type { AgentDTO, SessionDTO } from '../../api/dto.ts'
 import type { ChatTimelineItem, TimelineTool } from '../../api/journal.ts'
@@ -12,6 +12,7 @@ import { PromptInput, PromptInputActionAddAttachments, PromptInputActionMenu, Pr
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '../../components/ai-elements/reasoning.tsx'
 import { Response } from '../../components/ai-elements/response.tsx'
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput, type ToolState } from '../../components/ai-elements/tool.tsx'
+import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/popover.tsx'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../../components/ui/tooltip.tsx'
 import { ContextWindowMeter, type ContextWindowUsage } from '../../components/context-window-meter.tsx'
 import { cn, copyText, selectElementText } from '../../lib/utils.ts'
@@ -152,11 +153,11 @@ export function Composer({ api, controller, session, agent, activeTurnId = null,
     else setNotice({ tone: 'info', text: '平台命令：/compact 压缩上下文；/stop 停止当前回合；/help 显示本帮助。Agent 原生命令会作为普通消息发送。Enter 发送，Shift+Enter 换行。' })
   }
   return <div className="conversation-composer shrink-0 px-3 py-3 sm:px-4 sm:py-4"><div className="conversation-content mx-auto max-w-[var(--chat-max-width)]"><PromptInput className="relative" onSubmit={message => submitRef.current(message)}>
-    <ComposerContents session={session} agent={agent} controller={controller} state={state} canSend={canSend} blockedReason={blockedReason} running={running} canControl={canControl} retry={retry} hint={hint} notice={notice} setNotice={setNotice} commandPending={commandPending} stop={stop} visibleCommandGroups={visibleCommandGroups} executeCommand={executeCommand} submitRef={submitRef} sendWithAttachmentsRef={sendWithAttachmentsRef} terminalContext={terminalContext} contextUsage={contextUsage} compact={compact} compactDisabled={!api || !canControl || running || Boolean(commandPending)} />
+    <ComposerContents api={api} session={session} agent={agent} controller={controller} state={state} canSend={canSend} blockedReason={blockedReason} running={running} canControl={canControl} retry={retry} hint={hint} notice={notice} setNotice={setNotice} commandPending={commandPending} stop={stop} visibleCommandGroups={visibleCommandGroups} executeCommand={executeCommand} submitRef={submitRef} sendWithAttachmentsRef={sendWithAttachmentsRef} terminalContext={terminalContext} contextUsage={contextUsage} compact={compact} compactDisabled={!api || !canControl || running || Boolean(commandPending)} />
   </PromptInput></div></div>
 }
 
-function ComposerContents({ session, agent, controller, state, canSend, blockedReason, running, canControl, retry, hint, notice, setNotice, commandPending, stop, visibleCommandGroups, executeCommand, submitRef, sendWithAttachmentsRef, terminalContext, contextUsage, compact, compactDisabled }: { session: SessionDTO; agent?: AgentDTO; controller: SubmissionController; state: ReturnType<SubmissionController['snapshot']>; canSend: boolean; blockedReason: string; running: boolean; canControl: boolean; retry: boolean; hint: string; notice: ComposerNotice; setNotice: (notice: ComposerNotice) => void; commandPending: 'stop' | null; stop: () => Promise<void>; visibleCommandGroups: ReturnType<typeof commandGroups>; executeCommand: (command: SlashCommand) => void; submitRef: MutableRefObject<(message: PromptInputMessage) => void>; sendWithAttachmentsRef: MutableRefObject<boolean>; terminalContext: ReturnType<typeof useTerminalContext>; contextUsage: ContextWindowUsage | null; compact: () => Promise<void>; compactDisabled: boolean }) {
+function ComposerContents({ api, session, agent, controller, state, canSend, blockedReason, running, canControl, retry, hint, notice, setNotice, commandPending, stop, visibleCommandGroups, executeCommand, submitRef, sendWithAttachmentsRef, terminalContext, contextUsage, compact, compactDisabled }: { api?: Api; session: SessionDTO; agent?: AgentDTO; controller: SubmissionController; state: ReturnType<SubmissionController['snapshot']>; canSend: boolean; blockedReason: string; running: boolean; canControl: boolean; retry: boolean; hint: string; notice: ComposerNotice; setNotice: (notice: ComposerNotice) => void; commandPending: 'stop' | null; stop: () => Promise<void>; visibleCommandGroups: ReturnType<typeof commandGroups>; executeCommand: (command: SlashCommand) => void; submitRef: MutableRefObject<(message: PromptInputMessage) => void>; sendWithAttachmentsRef: MutableRefObject<boolean>; terminalContext: ReturnType<typeof useTerminalContext>; contextUsage: ContextWindowUsage | null; compact: () => Promise<void>; compactDisabled: boolean }) {
   const attachments = usePromptInputAttachments()
   const submit = async (message: PromptInputMessage) => {
     if (!canSend || state.pending || (state.draft.startsWith('/') && !isAgentCommandInput(agent, state.draft))) return
@@ -185,10 +186,41 @@ function ComposerContents({ session, agent, controller, state, canSend, blockedR
     <PromptInputBody><label className="sr-only" htmlFor={`session-prompt-${session.id}`}>消息内容</label><PromptInputTextarea id={`session-prompt-${session.id}`} value={sendWithAttachmentsRef.current ? '' : state.draft} onChange={event => { controller.edit(event.target.value); setNotice(null) }} maxLength={16_000} aria-invalid={Boolean(state.error) || undefined} placeholder={canSend ? '给 Agent 发送消息，输入 / 查看命令…' : `${blockedReason}，可以先编辑草稿`} /></PromptInputBody>
     <PromptInputFooter><PromptInputTools className="flex-wrap">
       <PromptInputActionMenu><PromptInputActionMenuTrigger asChild><PromptInputActionMenuButton /></PromptInputActionMenuTrigger><PromptInputActionMenuContent align="start"><PromptInputActionAddAttachments kind="file" /><PromptInputActionAddAttachments kind="image" /></PromptInputActionMenuContent></PromptInputActionMenu>
-      <span className="middle-truncate rounded-md bg-muted/70 px-2 py-1 font-mono text-xs text-muted-foreground/60" title="会话创建后，智能体与模型保持固定">{session.agentKey} · {session.modelId || 'Agent 默认模型'}</span><ContextWindowMeter usage={contextUsage} onCompact={() => void compact()} compactDisabled={compactDisabled} /><span role={state.error || notice?.tone === 'error' ? 'alert' : 'status'} className={cn('min-w-0 flex-1 truncate text-xs text-muted-foreground/60', (state.error || notice?.tone === 'error') && 'text-red-300')}>{state.error || notice?.text || hint}</span></PromptInputTools>
+      <SessionModelChip api={api} session={session} agent={agent} disabled={running || !canControl} onNotice={setNotice} /><ContextWindowMeter usage={contextUsage} onCompact={() => void compact()} compactDisabled={compactDisabled} /><span role={state.error || notice?.tone === 'error' ? 'alert' : 'status'} className={cn('min-w-0 flex-1 truncate text-xs text-muted-foreground/60', (state.error || notice?.tone === 'error') && 'text-red-300')}>{state.error || notice?.text || hint}</span></PromptInputTools>
       <PromptInputSubmit status={running || commandPending === 'stop' ? 'streaming' : state.pending ? 'submitted' : state.error ? 'error' : 'ready'} onStop={running ? () => void stop() : undefined} disabled={running ? !canControl || commandPending === 'stop' : !canSend || state.pending || (!state.draft.trim() && !attachments.files.length) || (state.draft.startsWith('/') && !isAgentCommandInput(agent, state.draft))} title={running ? '停止当前回合' : retry ? '重试发送' : '发送消息'} />
     </PromptInputFooter>
   </>
+}
+
+function SessionModelChip({ api, session, agent, disabled, onNotice }: { api?: Api; session: SessionDTO; agent?: AgentDTO; disabled: boolean; onNotice: (notice: ComposerNotice) => void }) {
+  const [open, setOpen] = useState(false)
+  const [pending, setPending] = useState(false)
+  const [modelId, setModelId] = useState(session.modelId)
+  useEffect(() => setModelId(session.modelId), [session.modelId])
+  const supported = agent?.modelSwap === true
+  const label = `${session.agentKey} · ${modelId || 'Agent 默认模型'}`
+  const select = async (nextModelId: string) => {
+    if (!api || pending || nextModelId === modelId) { setOpen(false); return }
+    const previous = modelId
+    setModelId(nextModelId); setPending(true); setOpen(false); onNotice({ tone: 'info', text: `正在切换模型为 ${nextModelId}…` })
+    try {
+      const commandId = randomId()
+      await api.invokeRuntimeCommand(session.id, { commandId, operationId: commandId, name: 'set_model', arguments: { modelId: nextModelId } })
+      const deadline = Date.now() + 15_000
+      while (Date.now() < deadline) {
+        const command = await api.command(commandId)
+        if (command.status === 'accepted') { onNotice({ tone: 'info', text: `模型已切换为 ${nextModelId}` }); return }
+        if (command.status === 'rejected') throw new Error(command.receipt?.error?.message || '智能体拒绝了模型切换请求。')
+        await new Promise(resolve => setTimeout(resolve, 500))
+      }
+      throw new Error('模型切换确认超时，请重试。')
+    } catch (error) {
+      setModelId(previous)
+      onNotice({ tone: 'error', text: error instanceof Error ? error.message : '模型切换失败，请重试。' })
+    } finally { setPending(false) }
+  }
+  if (!supported) return <TooltipProvider><Tooltip><TooltipTrigger asChild><span className="middle-truncate rounded-md bg-muted/70 px-2 py-1 font-mono text-xs text-muted-foreground/60">{label}</span></TooltipTrigger><TooltipContent>该智能体不支持运行中切换</TooltipContent></Tooltip></TooltipProvider>
+  return <Popover open={open} onOpenChange={setOpen}><PopoverTrigger asChild><button type="button" disabled={!api || disabled || pending} className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border bg-card/80 px-2.5 py-1 font-mono text-xs text-muted-foreground transition hover:border-primary/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60" aria-label="选择会话模型"><span className="middle-truncate">{label}</span><ChevronDown className="size-3 shrink-0" /></button></PopoverTrigger><PopoverContent side="top" align="start" aria-label="选择会话模型" className="w-80"><p className="px-2 pb-1.5 pt-1 text-xs font-medium text-muted-foreground">选择 {session.agentKey} 模型</p>{agent.models.map(model => <button key={model.modelId} type="button" className="flex w-full items-start gap-2 rounded-lg px-2 py-2 text-left text-sm hover:bg-accent" onClick={() => void select(model.modelId)}><Check className={cn('mt-0.5 size-4 shrink-0', model.modelId === modelId ? 'opacity-100' : 'opacity-0')} /><span className="min-w-0"><span className="block truncate text-foreground">{model.displayName}</span><span className="mt-0.5 block truncate text-xs text-muted-foreground">{model.modelId}</span></span></button>)}</PopoverContent></Popover>
 }
 
 const textAttachmentExtensions = new Set(['txt', 'md', 'markdown', 'json', 'js', 'jsx', 'ts', 'tsx', 'css', 'html', 'xml', 'yaml', 'yml', 'toml', 'ini', 'csv', 'sh', 'py', 'rb', 'go', 'rs', 'java', 'c', 'h', 'cpp', 'sql'])

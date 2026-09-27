@@ -62,7 +62,7 @@ export class ServerService {
       const current = requireValue(await tx.commands.get(id))
       if (await tx.tasks.runByCommand(id)) throw new AppError(409, 'protected_command: Run commands cannot be cancelled; Run cancellation is not implemented')
       if (['pending', 'accepted'].includes(current.status)) {
-        const protectedWorkspace = (await tx.resources.listWorkspaces()).find(workspace => workspace.placements.some(placement => placement.provisioning?.commandId === id && ['pending', 'provisioning'].includes(placement.status)))
+        const protectedWorkspace = (await tx.resources.listWorkspaces()).find(workspace => workspace.placements.some(placement => placement.provisioning?.commandId === id && placement.status === 'stopped'))
         if (protectedWorkspace) throw new AppError(409, 'protected_command: current Workspace provision command cannot be cancelled')
       }
       if (!await tx.commands.cancelPending(id, now())) return false
@@ -112,7 +112,7 @@ export class ServerService {
     if (typeof requestId !== 'string' || !requestId.trim() || requestId.length > 200) throw new AppError(400, 'Invalid retry requestId')
     const workspace = await this.getWorkspace(id, tx.resources)
     const legacyWorkerId = (workspace as Workspace & { workerId?: WorkerId }).workerId
-    const workerId = requestedWorkerId ?? workspace.placements.find(placement => placement.status === 'failed' || placement.status === 'pending')?.workerId ?? legacyWorkerId
+    const workerId = requestedWorkerId ?? workspace.placements.find(placement => placement.status === 'failed' || placement.status === 'stopped')?.workerId ?? legacyWorkerId
     if (!workerId) throw new AppError(400, 'workerId is required when Workspace has no retryable placement')
     const worker = actor && this.workerAccess ? await this.workerAccess.requireInTx(tx, actor, workerId) : requireValue(await tx.resources.getWorker(workerId))
     if (actor && this.projectAccess) await this.projectAccess.requireInTx(tx, actor, workspace.projectId, 'contributor')
@@ -123,19 +123,19 @@ export class ServerService {
       const commandId = previous.requests[requestId]
       if (typeof commandId === 'string' && commandId.trim()) return { workspace, workerId: worker.id, commandId, created: false }
     }
-    if (placement && previous && (placement.status === 'pending' || placement.status === 'provisioning')) {
+    if (placement && ['stopped', 'pending', 'provisioning'].includes(placement.status) && previous) {
       const nextPlacement = { ...placement, provisioning: { ...previous, requests: { ...previous.requests, [requestId]: previous.commandId } } }
       const next = this.replacePlacement(workspace, nextPlacement)
       await tx.resources.saveWorkspace(next)
       return { workspace: next, workerId: worker.id, commandId: previous.commandId, created: false }
     }
-    if (placement && placement.status !== 'failed' && placement.status !== 'pending') throw new AppError(409, 'Only absent, pending or failed Workspace placements can be provisioned')
+    if (placement && placement.status !== 'failed' && !['stopped', 'pending', 'provisioning'].includes(placement.status)) throw new AppError(409, 'Only absent, stopped or failed Workspace placements can be provisioned')
     const repositories = workspace.spec.kind === 'repository'
       ? [requireValue(await tx.resources.getRepository(workspace.spec.repositoryId))].map(repository => ({ repositoryId: repository.id, gitUrl: repository.gitUrl, revision: repository.defaultBranch })) : []
     if (workspace.spec.kind === 'composite' && workspace.spec.memberWorkspaceIds.length) throw new AppError(409, 'Composite workspace is not reprovisionable')
     const replacedAttempt = previous !== undefined || await tx.commands.hasProvisionAttempt(id)
     const commandId = await this.command(tx, worker.id, { kind: 'workspace.provision', workspace: { workspace: this.workspaceDefinition(workspace), repositories } })
-    const nextPlacement: WorkspacePlacement = { workerId: worker.id, status: 'pending', failureReason: null, location: null, provisioning: { commandId, startedAt: now(), replacedAttempt, requests: { ...previous?.requests, [requestId]: commandId } } }
+    const nextPlacement: WorkspacePlacement = { workerId: worker.id, status: 'stopped', failureReason: null, location: null, provisioning: { commandId, startedAt: now(), replacedAttempt, requests: { ...previous?.requests, [requestId]: commandId } } }
     const next = this.replacePlacement(workspace, nextPlacement)
     await tx.resources.saveWorkspace(next)
     await this.audit(tx, 'workspace.reprovision', { kind: 'workspace', id })
@@ -225,6 +225,20 @@ export class ServerService {
     const w = requireValue(await resources.getWorkspace(id)); await this.getProject(w.projectId, resources)
     if (w.deletedAt) throw new AppError(404, 'Workspace deleted')
     return w
+  }
+  private async placementHealthView(workspace: Workspace): Promise<Workspace> {
+    const workers = new Map((await this.store.resources.listWorkers()).map(worker => [worker.id, worker]))
+    const placements = workspace.placements.map(placement => {
+      const worker = workers.get(placement.workerId)
+      if (worker?.connectionState === 'online') return placement
+      const connectivityReason = worker?.connectionState === 'revoked' ? '工作节点已撤销' : '工作节点离线'
+      return { ...placement, status: 'unhealthy' as const, failureReason: placement.failureReason ? `${connectivityReason}；${placement.failureReason}` : connectivityReason }
+    })
+    const primary = workspace.workerId ? placements.find(placement => placement.workerId === workspace.workerId) : placements.length === 1 ? placements[0] : undefined
+    return { ...workspace, placements, ...(primary ? { status: primary.status, failureReason: primary.failureReason, location: primary.location } : {}) }
+  }
+  async workspaceView(id: WorkspaceId): Promise<Workspace> {
+    return this.placementHealthView(await this.getWorkspace(id))
   }
   sessionView(id: SessionId, actor?: UserId) {
     return this.store.transaction(async tx => {
@@ -320,10 +334,10 @@ export class ServerService {
     }
     const repositories = repository ? [{ repositoryId: repository.id, gitUrl: repository.gitUrl, revision: repository.defaultBranch }] : []
     const commandId = await this.command(tx, worker.id, { kind: 'workspace.provision', workspace: { workspace: this.workspaceDefinition(workspace), repositories } })
-    const pending = this.replacePlacement(workspace, { workerId: worker.id, status: 'pending', failureReason: null, location: null, provisioning: { commandId, startedAt: now(), replacedAttempt: false, requests: {} } })
-    await tx.resources.saveWorkspace(pending)
+    const stopped = this.replacePlacement(workspace, { workerId: worker.id, status: 'stopped', failureReason: null, location: null, provisioning: { commandId, startedAt: now(), replacedAttempt: false, requests: {} } })
+    await tx.resources.saveWorkspace(stopped)
     await this.audit(tx, 'workspace.create', { kind: 'workspace', id: workspace.id })
-    return { workspace: { ...pending, workerId: worker.id, status: 'pending' as const, failureReason: null, provisioning: pending.placements[0].provisioning, location: null }, workerId: worker.id, commandId }
+    return { workspace: { ...stopped, workerId: worker.id, status: 'stopped' as const, failureReason: null, provisioning: stopped.placements[0].provisioning, location: null }, workerId: worker.id, commandId }
   }
   async createSession(input: unknown, actor?: UserId) {
     const result = await this.store.transaction(tx => this.createSessionInTx(tx, input, actor ? { ownerId: actor } : undefined))
@@ -457,9 +471,23 @@ export class ServerService {
     const operationId = (b.operationId === undefined ? commandId : text(b.operationId, 'operationId', 200)) as RuntimeOperationId
     const name = text(b.name, 'name', 200)
     if (name !== 'compact' && name !== 'set_model' && name !== 'set_thinking_level') throw new AppError(400, 'Unsupported runtime command')
-    const args = b.arguments === undefined ? {} : object(b.arguments)
+    let args = b.arguments === undefined ? {} : object(b.arguments)
     const runtimeName = name as Extract<WorkerCommand, { kind: 'runtime.command' }>['name']
-    return this.sessionControl(id, commandId, actor, async () => ({ kind: 'runtime.command', sessionId: id, operationId, name: runtimeName, arguments: args }))
+    return this.sessionControl(id, commandId, actor, async tx => {
+      if (runtimeName === 'set_model') {
+        const modelId = text(args.modelId, 'modelId', 200) as ModelId
+        const session = await this.getSession(id, tx.resources)
+        if (session.runtimeState === 'running' || session.runtimeState === 'stopping') throw new AppError(409, 'Model cannot be changed while a turn is active')
+        const worker = await tx.resources.getWorker(session.binding.agent.workerId)
+        if (!worker) throw new AppError(404, 'Worker not found')
+        const capability = worker.capabilities.find(item => item.agentKey === session.binding.agent.agentKey)
+        if (!capability?.modelSwap) throw new AppError(409, 'This Agent does not support model swapping')
+        if (!capability.models.some(model => model.modelId === modelId)) throw new AppError(409, 'Model unavailable')
+        await tx.resources.saveSession({ ...session, binding: { ...session.binding, modelId } })
+        args = { ...args, previousModelId: session.binding.modelId }
+      }
+      return { kind: 'runtime.command', sessionId: id, operationId, name: runtimeName, arguments: args }
+    })
   }
   async resolveRuntimeApproval(id: SessionId, approvalId: ApprovalId, input: unknown, actor?: UserId) {
     const b = object(input), decision = text(b.decision, 'decision')
@@ -535,6 +563,9 @@ export class ServerService {
     return (await this.store.resources.listWorkspaces()).filter(
       workspace => projectIds.has(workspace.projectId) && !workspace.deletedAt,
     )
+  }
+  async listWorkspaceViews(): Promise<Workspace[]> {
+    return Promise.all((await this.listWorkspaces()).map(workspace => this.placementHealthView(workspace)))
   }
   async listSessions(filter: { archived?: boolean } = {}): Promise<Session[]> {
     const projectIds = new Set((await this.listProjects()).map(project => project.id))

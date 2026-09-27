@@ -63,7 +63,8 @@ CREATE TRIGGER session_creation_provenance BEFORE UPDATE ON records WHEN OLD.kin
  (NEW.kind IS NOT OLD.kind OR NEW.id IS NOT OLD.id
  OR json_extract(NEW.data,'$.taskId') IS NOT json_extract(OLD.data,'$.taskId')
  OR json_extract(NEW.data,'$.runId') IS NOT json_extract(OLD.data,'$.runId')
- OR json_extract(NEW.data,'$.binding') IS NOT json_extract(OLD.data,'$.binding'))
+ OR json_extract(NEW.data,'$.binding.workspaceId') IS NOT json_extract(OLD.data,'$.binding.workspaceId')
+ OR json_extract(NEW.data,'$.binding.agent') IS NOT json_extract(OLD.data,'$.binding.agent'))
  BEGIN SELECT RAISE(ABORT,'Session creation provenance is immutable'); END;
 CREATE TRIGGER run_identity_immutable BEFORE UPDATE ON task_runs WHEN
  NEW.id IS NOT OLD.id OR NEW.task_id IS NOT OLD.task_id OR NEW.request_id IS NOT OLD.request_id
@@ -109,7 +110,9 @@ CREATE TRIGGER cancel_command_delete BEFORE DELETE ON commands
  BEGIN SELECT RAISE(ABORT,'Run cancellation dispatch is referenced'); END;
 CREATE TRIGGER session_source_replace BEFORE INSERT ON records WHEN NEW.kind='session' AND EXISTS
  (SELECT 1 FROM records s WHERE s.kind=NEW.kind AND s.id=NEW.id AND
- (json_extract(s.data,'$.taskId') IS NOT json_extract(NEW.data,'$.taskId') OR json_extract(s.data,'$.runId') IS NOT json_extract(NEW.data,'$.runId') OR json_extract(s.data,'$.binding') IS NOT json_extract(NEW.data,'$.binding')))
+ (json_extract(s.data,'$.taskId') IS NOT json_extract(NEW.data,'$.taskId') OR json_extract(s.data,'$.runId') IS NOT json_extract(NEW.data,'$.runId')
+ OR json_extract(s.data,'$.binding.workspaceId') IS NOT json_extract(NEW.data,'$.binding.workspaceId')
+ OR json_extract(s.data,'$.binding.agent') IS NOT json_extract(NEW.data,'$.binding.agent')))
  BEGIN SELECT RAISE(ABORT,'Session creation provenance is immutable'); END;
 CREATE TRIGGER run_identity_replace BEFORE INSERT ON task_runs WHEN EXISTS(SELECT 1 FROM task_runs WHERE id=NEW.id AND
  (task_id IS NOT NEW.task_id OR session_id IS NOT NEW.session_id OR request_id IS NOT NEW.request_id OR attempt IS NOT NEW.attempt

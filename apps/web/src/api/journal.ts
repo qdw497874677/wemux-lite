@@ -249,6 +249,9 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
       case 'compaction.finished':
         timeline.push({ kind: 'notice', id: `compaction:${payload.turnId}:${event.seq}`, text: `上下文压缩完成${payload.summary ? `：${payload.summary}` : ''}`, tone: 'info' })
         break
+      case 'model.changed':
+        timeline.push({ kind: 'notice', id: `model-changed:${event.seq}`, text: `模型已切换为 ${payload.modelId}`, tone: 'info' })
+        break
       case 'runtime.notice': {
         const retry = payload.retry
         const attempt = retry ? (retry.maxAttempts ? `第 ${retry.attempt}/${retry.maxAttempts} 次重试` : `第 ${retry.attempt} 次重试`) : ''

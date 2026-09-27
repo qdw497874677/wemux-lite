@@ -1,7 +1,7 @@
 import { isActiveRun, projectRuns, saveRunProjection } from './run-projection.js'
-import type { CommandId, EventSeq, SessionId, WorkerId } from '@wemux/domain'
+import type { CommandId, EventSeq, ModelId, SessionId, WorkerId } from '@wemux/domain'
 import type { ProjectEvent } from '@wemux/web-contract/task-platform'
-import type { ServerToWorker, WorkerToServer } from '@wemux/wire-protocol'
+import type { FileResponsePayload, ServerToWorker, TerminalResponsePayload, WorkerToServer } from '@wemux/wire-protocol'
 import type { ServerStore } from './ports/server-store.js'
 import { AppError, requireValue } from './errors.js'
 import { Notifications } from './notifications.js'
@@ -11,7 +11,23 @@ import { newId, now } from './server-service.js'
 export const envelope = (): { readonly messageId: import('@wemux/domain').MessageId } => ({ messageId: newId<'MessageId'>() })
 
 export class WorkerService {
+  private readonly fileRequests = new Map<string, { readonly workerId: WorkerId; readonly resolve: (response: FileResponsePayload) => void }>()
+  private readonly terminalRequests = new Map<string, { readonly workerId: WorkerId; readonly resolve: (response: TerminalResponsePayload) => void }>()
   constructor(private readonly store: ServerStore, private readonly notifications: Notifications) {}
+  registerFileRequest(requestId: string, workerId: WorkerId): { readonly promise: Promise<FileResponsePayload>; readonly cancel: () => void } {
+    if (this.fileRequests.has(requestId)) throw new AppError(409, 'Duplicate file request')
+    let resolve!: (response: FileResponsePayload) => void
+    const promise = new Promise<FileResponsePayload>(done => { resolve = done })
+    this.fileRequests.set(requestId, { workerId, resolve })
+    return { promise, cancel: () => this.fileRequests.delete(requestId) }
+  }
+  registerTerminalRequest(requestId: string, workerId: WorkerId): { readonly promise: Promise<TerminalResponsePayload>; readonly cancel: () => void } {
+    if (this.terminalRequests.has(requestId)) throw new AppError(409, 'Duplicate terminal request')
+    let resolve!: (response: TerminalResponsePayload) => void
+    const promise = new Promise<TerminalResponsePayload>(done => { resolve = done })
+    this.terminalRequests.set(requestId, { workerId, resolve })
+    return { promise, cancel: () => this.terminalRequests.delete(requestId) }
+  }
   async recoverRuns() {
     const changes = await this.store.transaction(async tx => {
       const changed: { workerId: WorkerId; projectId: string; taskId: string; runId: string }[] = []
@@ -80,6 +96,29 @@ export class WorkerService {
           if (message.workerId !== workerId) throw new AppError(403, 'Worker identity mismatch')
           await tx.resources.saveWorker({ ...worker, capabilities: message.capabilities, lastSeenAt: now() })
           break
+        case 'fs.response': {
+          const pending = this.fileRequests.get(message.requestId)
+          if (!pending) break
+          if (pending.workerId !== workerId) throw new AppError(403, 'File request belongs to another worker')
+          this.fileRequests.delete(message.requestId)
+          pending.resolve(message)
+          break
+        }
+        case 'terminal.response': {
+          const pending = this.terminalRequests.get(message.requestId)
+          if (!pending) break
+          if (pending.workerId !== workerId) throw new AppError(403, 'Terminal request belongs to another worker')
+          this.terminalRequests.delete(message.requestId)
+          pending.resolve(message)
+          break
+        }
+        case 'terminal.output':
+        case 'terminal.exit': {
+          const owner = await this.ownSession(workerId, message.sessionId, tx.resources)
+          if (!owner || owner.deletedAt) break
+          this.notifications.terminal(message)
+          break
+        }
         case 'ack': {
           const command = await tx.commands.get(message.receipt.commandId)
           // 服务器数据被重置后，Worker 持久化的 outbox 仍会重放旧 commandId 的 receipt。
@@ -89,6 +128,15 @@ export class WorkerService {
           await tx.commands.recordReceipt(message.receipt, now())
           if (command.status === message.receipt.status) break
           commandsChanged = true
+          const pendingCommand = await tx.commands.getPendingCommand(message.receipt.commandId)
+          if (message.receipt.status === 'rejected' && pendingCommand?.command.kind === 'runtime.command' && pendingCommand.command.name === 'set_model') {
+            const session = await tx.resources.getSession(pendingCommand.command.sessionId)
+            const previousModelId = pendingCommand.command.arguments.previousModelId
+            if (session && (typeof previousModelId === 'string' || previousModelId === null)) {
+              await tx.resources.saveSession({ ...session, binding: { ...session.binding, modelId: previousModelId as ModelId | null } })
+              changed.add(session.id)
+            }
+          }
           const run = await tx.tasks.runByCommand(message.receipt.commandId)
           if (run && message.receipt.status === 'rejected' && isActiveRun(run) && run.cancelCommandIds.at(-1) === message.receipt.commandId) {
             await saveRunProjection(tx, { ...run, failure: { code: 'cancel_rejected', message: message.receipt.error.message } })
@@ -200,14 +248,17 @@ export class WorkerService {
       async function projectRuntime(sessionId: SessionId, start: number, through: EventSeq) {
         const session = await tx.resources.getSession(sessionId)
         if (!session) return
-        let from = start as EventSeq, runtimeState = session.runtimeState
+        let from = start as EventSeq, runtimeState = session.runtimeState, modelId = session.binding.modelId
         while (from <= through) {
           const page = await tx.cache.readEvents(sessionId, from, 500)
-          for (const event of page.events) if (event.payload.kind === 'session.runtime.changed') runtimeState = event.payload.state
+          for (const event of page.events) {
+            if (event.payload.kind === 'session.runtime.changed') runtimeState = event.payload.state
+            if (event.payload.kind === 'model.changed') modelId = event.payload.modelId
+          }
           if (!page.nextSeq) break
           from = page.nextSeq
         }
-        await tx.resources.saveSession({ ...session, runtimeState })
+        await tx.resources.saveSession({ ...session, runtimeState, binding: { ...session.binding, modelId } })
         const tasks = await tx.tasks.list(session.projectId)
         const before = new Map<string, string>()
         for (const task of tasks) for (const run of await tx.tasks.runs(task.id)) if (run.sessionId === sessionId) before.set(run.id, JSON.stringify(run))

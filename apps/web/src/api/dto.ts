@@ -7,6 +7,7 @@ export interface AgentDTO {
   availability: { status: 'available' | 'unavailable' | 'authentication-required'; reason?: string }
   agentCommands?: string[]
   compactMode?: 'native' | 'slash-command'
+  modelSwap?: boolean
   models: { modelId: string; displayName: string; source: 'detected' | 'configured' }[]
 }
 export interface WorkerDTO {
@@ -120,6 +121,7 @@ export type EventPayloadDTO =
   | { kind: 'usage.updated'; turnId: string; usage: RuntimeUsageDTO }
   | { kind: 'compaction.started'; turnId: string; reason?: string }
   | { kind: 'compaction.finished'; turnId: string; summary?: string }
+  | { kind: 'model.changed'; previousModelId: string | null; modelId: string }
   | { kind: 'runtime.notice'; level: 'info' | 'warning'; code: string; message: string; retry?: { attempt: number; maxAttempts: number | null; delayMs: number | null } }
 export interface JournalEventDTO { sessionId: string; seq: number; occurredAt: string; payload: EventPayloadDTO }
 export interface EventsPageDTO { events: JournalEventDTO[]; throughSeq: number; hasMore: boolean }

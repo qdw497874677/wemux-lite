@@ -22,10 +22,10 @@ export class ClaudeAgent implements Extract<AgentAdapter, { mode: 'execution' }>
         diagnostics: authorization.state === 'unknown' ? ['Claude authentication could not be verified non-interactively.'] : [],
         availability: authenticated ? { status: 'available' } : { status: 'authentication-required', reason: 'Claude Code is not authenticated' },
         authorization,
-        runtime: { resume: true, tools: true, approvals: false, usage: false, cancel: true, structuredOutput: false, commands: [] },
+        runtime: { resume: true, tools: true, approvals: false, usage: false, cancel: true, structuredOutput: false, commands: [] }, modelSwap: false,
         agentCommands, compactMode: 'slash-command',
         models: authenticated ? ['sonnet', 'opus', 'haiku'].map(id => ({ modelId: id as ModelId, displayName: id, source: 'detected' as const })) : [] }
-    } catch (cause) { const reason = cause instanceof Error ? cause.message : String(cause); return { agentKey: this.agentKey, displayName: 'Claude Code', version: null, mode: this.mode, executablePath: this.command, diagnostics: [reason], availability: { status: 'unavailable', reason }, authorization: { state: 'unknown', instructions: 'Install or repair the local Claude Code CLI before checking credentials.' }, runtime: { resume: true, tools: true, approvals: false, usage: false, cancel: true, structuredOutput: false, commands: [] }, agentCommands, compactMode: 'slash-command', models: [] } }
+    } catch (cause) { const reason = cause instanceof Error ? cause.message : String(cause); return { agentKey: this.agentKey, displayName: 'Claude Code', version: null, mode: this.mode, executablePath: this.command, diagnostics: [reason], availability: { status: 'unavailable', reason }, authorization: { state: 'unknown', instructions: 'Install or repair the local Claude Code CLI before checking credentials.' }, runtime: { resume: true, tools: true, approvals: false, usage: false, cancel: true, structuredOutput: false, commands: [] }, modelSwap: false, agentCommands, compactMode: 'slash-command', models: [] } }
   }
 
   async startTurn(input: AgentTurnInput) {
