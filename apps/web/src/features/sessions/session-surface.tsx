@@ -14,6 +14,7 @@ import { Badge } from '../../components/ui/badge.tsx'
 import { Button } from '../../components/ui/button.tsx'
 import { runtimeStateLabel } from '../../lib/display.ts'
 import { randomId } from '../../lib/random.ts'
+import { timelineDateLabel } from '../../lib/conversation-timeline.ts'
 
 export type SessionPresentation = 'canvas-summary' | 'canvas-interactive' | 'focus' | 'run'
 
@@ -40,6 +41,8 @@ export function SessionSurface({ api, session, presentation, projectPath, worker
   const controls = presentation === 'focus' || presentation === 'run'
   const chooseSuggestion = (suggestion: string) => applySessionSuggestion(controller, document.getElementById(`session-prompt-${session.id}`), suggestion)
   const { hiddenMessageIds, localNotice, messageActions } = useMessageActions(controller, session.id, canSend)
+  const visibleTimeline = history.timeline.filter(entry => !hiddenMessageIds.has(entry.id))
+  const datedTimeline = visibleTimeline.map(entry => ({ timestamp: entry.kind === 'message' || entry.kind === 'tool' ? entry.timestamp : undefined }))
 
   return <section className={`session-surface session-surface-${presentation}`} data-session-id={session.id}>
     <header className="session-surface-header">
@@ -48,7 +51,10 @@ export function SessionSurface({ api, session, presentation, projectPath, worker
     </header>
     <Conversation className="session-surface-timeline conversation-timeline" aria-live="polite"><ConversationContent className="conversation-content gap-3 px-3 py-3 sm:px-4 sm:py-4">
       {!history.timeline.length && <ConversationEmptyState title={history.checkedAt ? canSend ? '暂无消息，可以开始对话。' : blockedReason : '正在加载会话历史…'}>{history.checkedAt && canSend ? <div className="flex max-w-[var(--chat-max-width)] flex-col items-center gap-3"><div className="space-y-1"><h3 className="text-sm font-medium">暂无消息，可以开始对话。</h3><p className="text-xs leading-5 text-muted-foreground/60">选择一个建议，或在下方输入你的问题。</p></div><Suggestions className="justify-center">{emptySessionSuggestions.map(suggestion => <Suggestion key={suggestion} suggestion={suggestion} onClick={() => chooseSuggestion(suggestion)}>{suggestion}</Suggestion>)}</Suggestions></div> : <h3 className="text-sm font-medium">{history.checkedAt ? blockedReason : '正在加载会话历史…'}</h3>}</ConversationEmptyState>}
-      {history.timeline.filter(entry => !hiddenMessageIds.has(entry.id)).map(entry => <TimelineEntry key={entry.id} entry={entry} messageActions={messageActions} />)}
+      {visibleTimeline.map((entry, index) => {
+        const dateLabel = timelineDateLabel(datedTimeline, index)
+        return <div key={entry.id} className="contents">{dateLabel && <div className="flex items-center gap-3 py-2" role="separator" aria-label={dateLabel}><span className="h-px flex-1 bg-border/60" /><span className="shrink-0 text-xs text-muted-foreground/60">{dateLabel}</span><span className="h-px flex-1 bg-border/60" /></div>}<TimelineEntry entry={entry} messageActions={messageActions} /></div>
+      })}
       {localNotice && <p role="status" className="text-center text-xs text-muted-foreground">{localNotice}</p>}
       <OptimisticMessages controller={controller} confirmedIds={confirmedIds} hiddenMessageIds={hiddenMessageIds} messageActions={messageActions} />
     </ConversationContent><ConversationScrollButton className="nodrag nopan" /></Conversation>

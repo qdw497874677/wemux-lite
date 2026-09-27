@@ -16,6 +16,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/pop
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../../components/ui/tooltip.tsx'
 import { ContextWindowMeter, type ContextWindowUsage } from '../../components/context-window-meter.tsx'
 import { cn, copyText, selectElementText } from '../../lib/utils.ts'
+import { formatTimelineTime, formatTimelineTimestampTitle } from '../../lib/conversation-timeline.ts'
 import { randomId } from '../../lib/random.ts'
 import { useCompactAction } from './cluster-controls.tsx'
 import { SubmissionController } from './submission.ts'
@@ -33,6 +34,13 @@ const toolState = (tool: TimelineTool): ToolState => tool.status === 'running' ?
 const workLogIcons: Record<NonNullable<WorkLogEntry['action']>, typeof Terminal> = { command: Terminal, read: FileSearch, edit: FilePenLine, browser: Globe, search: Search }
 
 export type MessageActions = { onEdit?: (text: string) => void; onRetry?: (text: string, messageId: string) => void; onHide?: (messageId: string) => void }
+
+export function TimelineTimestamp({ timestamp, className }: { timestamp?: string; className?: string }) {
+  const time = formatTimelineTime(timestamp)
+  const title = formatTimelineTimestampTitle(timestamp)
+  if (!time || !title) return null
+  return <time dateTime={timestamp} title={title} className={cn('text-xs text-muted-foreground/60 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100', className)}>{time}</time>
+}
 
 export function useMessageActions(controller: SubmissionController, sessionId: string, enabled = true) {
   const [hiddenMessageIds, setHiddenMessageIds] = useState<Set<string>>(() => new Set())
@@ -76,7 +84,7 @@ export function TimelineEntry({ entry, onOpenContext, messageActions }: { entry:
     const Icon = presentation.action ? workLogIcons[presentation.action] : Terminal
     const input = formatToolValue(entry.input)
     const output = entry.output || (!input ? '等待工具输出…' : '')
-    return <div className={cn('rounded-xl', presentation.tone === 'error' && 'border border-red-500/30 bg-red-500/10')}><Tool defaultOpen={entry.status === 'running'}><ToolHeader title={presentation.toolTitle} state={toolState(entry)} icon={<Icon className={cn('size-4', presentation.tone === 'error' && 'text-red-300')} />} />
+    return <div className={cn('group rounded-xl', presentation.tone === 'error' && 'border border-red-500/30 bg-red-500/10')} tabIndex={entry.timestamp ? 0 : undefined}><Tool defaultOpen={entry.status === 'running'}><div className="flex items-center gap-2"><div className="min-w-0 flex-1"><ToolHeader title={presentation.toolTitle} state={toolState(entry)} icon={<Icon className={cn('size-4', presentation.tone === 'error' && 'text-red-300')} />} /></div><TimelineTimestamp timestamp={entry.timestamp} className="mr-3 shrink-0" /></div>
       <ToolContent>{presentation.detail && <p className={cn('mb-2 whitespace-pre-wrap break-all text-xs text-muted-foreground', presentation.tone === 'error' && 'text-red-200')}>{presentation.detail}</p>}{presentation.changedFiles?.length ? <ul className="mb-2 space-y-1 text-xs text-muted-foreground" aria-label="变更文件">{presentation.changedFiles.map(file => <li key={file} className="rounded-md bg-muted/60 px-2 py-1 font-mono">{file}</li>)}</ul> : null}{input && <ToolInput input={entry.input} />}<ToolOutput output={output} errorText={presentation.tone === 'error' ? output || '工具执行失败' : undefined} /></ToolContent>
     </Tool></div>
   }
@@ -98,13 +106,14 @@ function TimelineMessage({ entry, onOpenContext, messageActions }: { entry: Extr
     if (contentRef.current) selectElementText(contentRef.current)
     setCopyState('manual')
   }
-  return <Message from={message.role} data-message-id={message.id} className="animate-fade-up">
+  return <Message from={message.role} data-message-id={message.id} className="group animate-fade-up" tabIndex={entry.timestamp ? 0 : undefined}>
     <div className={cn('flex max-w-full items-start gap-2.5', message.role === 'user' && 'flex-row-reverse')}>
       {message.role === 'assistant' && <span className="mt-1 grid size-7 shrink-0 place-items-center rounded-lg bg-accent/70 text-muted-foreground"><Bot className="size-3.5" /></span>}
       <div className={cn('flex min-w-0 max-w-full flex-1 flex-col gap-1', message.role === 'user' && 'items-end')}>
         <MessageContent><div ref={contentRef}>{text ? <Response>{text}</Response> : <span className="flex items-center gap-2 text-muted-foreground"><Loader />等待输出…</span>}</div>
           <div className={cn('mt-1.5 flex items-center gap-1.5', message.role === 'user' && 'justify-end')}><MessageStatus status={entry.status} />{message.role === 'user' && onOpenContext && <button type="button" onClick={onOpenContext} className="rounded-lg p-1 text-muted-foreground/50 transition-all hover:bg-white/10 hover:text-foreground" aria-label="查看会话信息"><ChevronRight className="size-3.5" /></button>}</div>
         </MessageContent>
+        <TimelineTimestamp timestamp={entry.timestamp} className={message.role === 'user' ? 'self-end' : 'self-start'} />
         {text && <ActionsBar aria-label="">
           {message.role === 'user' && !retryable && messageActions?.onEdit && <Action onClick={() => messageActions.onEdit?.(text)} aria-label="" title=""><Pencil className="size-3.5" /></Action>}
           {retryable && messageActions?.onRetry && <Action onClick={() => messageActions.onRetry?.(text, entry.id)} aria-label="" title=""><RotateCcw className="size-3.5" /></Action>}
