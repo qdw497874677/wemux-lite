@@ -41,6 +41,9 @@ export interface WorkspaceDTO {
   failureReason: string | null
   location: { rootPath: string } | null
 }
+export interface FileEntryDTO { name: string; type: 'file' | 'directory'; size: number; mtime: string }
+export interface FileListDTO { operation: 'list'; entries: FileEntryDTO[] }
+export interface FileReadDTO { operation: 'read'; content: string | null; size: number; truncated: boolean; binary: boolean }
 export type CommandStatus = 'pending' | 'accepted' | 'rejected' | 'completed' | 'failed' | 'cancelled'
 export interface CommandDTO {
   commandId: string
@@ -78,6 +81,7 @@ export interface SessionDTO {
   canRead: boolean
   canSend: boolean
   canManage: boolean
+  customMetadata?: { wemux?: { usage?: { usedTokens?: number; totalTokens?: number; maxTokens?: number; contextWindow?: number; compactThreshold?: number } } }
 }
 export interface RuntimeUsageDTO {
   scope?: 'message' | 'operation' | 'native-session'

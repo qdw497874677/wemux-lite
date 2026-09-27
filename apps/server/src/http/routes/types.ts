@@ -16,6 +16,7 @@ import type { ProjectAccessService } from '../../application/project-access-serv
 import type { ServerService } from '../../application/server-service.js'
 import type { SessionAccessService } from '../../application/session-access-service.js'
 import type { SessionLineageService } from '../../application/session-lineage-service.js'
+import type { SessionFileService } from '../../application/session-file-service.js'
 import type { TaskService } from '../../application/task-service.js'
 import type { TeamService } from '../../application/team-service.js'
 import type { WorkerAccessService } from '../../application/worker-access-service.js'
@@ -52,6 +53,7 @@ export interface HttpHandlerOptions {
   readonly projects?: ProjectAccessService | null
   readonly workerAccess?: WorkerAccessService | null
   readonly sessionAccess?: SessionAccessService | null
+  readonly sessionFiles?: SessionFileService | null
   readonly personalAccessTokens?: PersonalAccessTokenService | null
   readonly lifecycle?: AccountLifecycleService | null
   readonly canvasCollaboration?: CanvasCollaborationService | null

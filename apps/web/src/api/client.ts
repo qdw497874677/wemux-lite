@@ -1,12 +1,12 @@
 import type { Run, LaunchRequest, LaunchResponse, TaskSummary, TaskDetail, TaskCreate, TaskPatch, TaskActivity, AssignmentRequest, CreateTaskWorkspaceRequest, UnbindWorkspaceRequest } from '@wemux/web-contract/task-platform'
-import type { SessionGraphResponse } from '@wemux/web-contract/session-graph'
+import type { CanvasLayoutResponse, CanvasLayoutSaveRequest, CanvasLayoutSaveResponse, CanvasLayoutScope, SessionGraphResponse } from '@wemux/web-contract/session-graph'
 import { randomId } from '../lib/random.ts'
 import { readDeviceId } from '../lib/device-scope.ts'
 import type {
   ApprovalDecisionDTO, RuntimeCommandDTO, PatchSessionDTO, CommandResultDTO,
   AccountPayloadDTO, AccountViewDTO, AcceptedEmailDTO, AccountSecurityViewDTO, AuthOptionsDTO, CommandDTO, CreateEnrollmentTokenDTO, CreateProjectDTO,
   CreateSessionDTO, CreateWorkspaceDTO, EmailChangeAcceptedDTO, EmailChangeConfirmedDTO, EnrollmentTokenDTO, EventsPageDTO, GoogleLinkStartDTO, IssuedPersonalAccessTokenDTO, LoginMethodUnboundDTO, LoginSessionDTO, PasswordChangeDTO, PasswordResetDTO, PersonalAccessTokenDTO, PersonalAccessTokenScopeDTO, ProjectDTO,
-  AccountLifecycleDTO, AuditPageDTO, AuditQueryDTO, ManagedAccountDTO, RegistrationPolicyDTO, RegistrationPolicyViewDTO, SendMessageDTO, SendResultDTO, SessionDTO, SessionResourceDTO, ServerEventsPageDTO, TailnetInfoDTO, VerifiedEmailDTO, WorkerDTO, WorkspaceDTO,
+  AccountLifecycleDTO, AuditPageDTO, AuditQueryDTO, ManagedAccountDTO, RegistrationPolicyDTO, RegistrationPolicyViewDTO, SendMessageDTO, SendResultDTO, SessionDTO, SessionResourceDTO, ServerEventsPageDTO, TailnetInfoDTO, VerifiedEmailDTO, WorkerDTO, WorkspaceDTO, FileListDTO, FileReadDTO,
 } from './dto'
 
 /**
@@ -77,12 +77,15 @@ export const routes = {
   sessionGrants: (sessionId: string) => `/api/sessions/${id(sessionId)}/grants`,
   sessionGrant: (sessionId: string, userId: string) => `/api/sessions/${id(sessionId)}/grants/${id(userId)}`,
   sessionGraph: (projectId: string) => `/api/projects/${id(projectId)}/session-graph`,
+  canvasLayout: (projectId: string) => `/api/projects/${id(projectId)}/canvas-layout`,
   deleteSession: (sessionId: string) => `/api/sessions/${id(sessionId)}`,
   messages: (sessionId: string) => `/api/sessions/${id(sessionId)}/messages`,
   stopTurn: (sessionId: string) => `/api/sessions/${id(sessionId)}/turn/stop`,
   cancelQueued: (sessionId: string, submissionCommandId: string) => `/api/sessions/${id(sessionId)}/messages/${id(submissionCommandId)}/cancel`,
   runtimeCommands: (sessionId: string) => `/api/sessions/${id(sessionId)}/runtime/commands`,
   runtimeApproval: (sessionId: string, approvalId: string) => `/api/sessions/${id(sessionId)}/runtime/approvals/${id(approvalId)}`,
+  sessionFilesList: (sessionId: string) => `/api/sessions/${id(sessionId)}/fs/list`,
+  sessionFilesRead: (sessionId: string) => `/api/sessions/${id(sessionId)}/fs/read`,
   commands: '/api/commands',
   command: (commandId: string) => `/api/commands/${id(commandId)}`,
   events: (sessionId: string) => `/api/sessions/${id(sessionId)}/events`,
@@ -168,6 +171,10 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
   return {
     launchScope: JSON.stringify([window.location.origin, readDeviceId(), config.teamId]),
     sessionGraph: (projectId: string, signal?: AbortSignal) => request<SessionGraphResponse>(routes.sessionGraph(projectId), undefined, signal),
+    canvasLayout: (projectId: string, scope: CanvasLayoutScope, signal?: AbortSignal) => request<CanvasLayoutResponse>(`${routes.canvasLayout(projectId)}?scope=${scope}`, undefined, signal),
+    saveCanvasLayout: (projectId: string, body: CanvasLayoutSaveRequest) => request<CanvasLayoutSaveResponse>(routes.canvasLayout(projectId), body, undefined, 'PUT'),
+    canvasCollaboration: (projectId: string, signal?: AbortSignal) => request<{ projectId: string; revision: number; presence: Array<{ userId: string; displayName: string; activeSessionId: string | null; typing: boolean; expiresAt: string }> }>(`/api/projects/${id(projectId)}/canvas/collaboration`, undefined, signal),
+    updateCanvasPresence: (projectId: string, body: { displayName: string; activeSessionId: string | null; typing: boolean }) => request<{ projectId: string; revision: number; presence: Array<{ userId: string; displayName: string; activeSessionId: string | null; typing: boolean; expiresAt: string }> }>(`/api/projects/${id(projectId)}/canvas/collaboration/presence`, body, undefined, 'PUT'),
     pendingReviews: (p: string, signal?: AbortSignal) => list<import('@wemux/web-contract/task-platform').ReviewRequest>(`/api/projects/${id(p)}/reviews`, signal),
     projectActivity: (p: string, after = 0, signal?: AbortSignal) => list<import('@wemux/web-contract/task-platform').ProjectActivityItem>(`/api/projects/${id(p)}/activity?after=${after}`, signal),
     review: (p: string, t: string, runId: string, signal?: AbortSignal) => request<{ review: import('@wemux/web-contract/task-platform').ReviewRequest | null }>(`/api/projects/${id(p)}/tasks/${id(t)}/runs/${id(runId)}/review`, undefined, signal),
@@ -277,6 +284,8 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     cancelQueued: (sessionId: string, submissionCommandId: string, commandId: string) => request<CommandResultDTO>(routes.cancelQueued(sessionId, submissionCommandId), { commandId }, undefined, 'POST'),
     invokeRuntimeCommand: (sessionId: string, body: RuntimeCommandDTO) => request<CommandResultDTO>(routes.runtimeCommands(sessionId), body),
     resolveApproval: (sessionId: string, approvalId: string, body: ApprovalDecisionDTO) => request<CommandResultDTO>(routes.runtimeApproval(sessionId, approvalId), body),
+    listSessionFiles: (sessionId: string, subpath = '', signal?: AbortSignal) => request<FileListDTO>(routes.sessionFilesList(sessionId), { subpath }, signal),
+    readSessionFile: (sessionId: string, subpath: string, maxBytes = 1024 * 1024, signal?: AbortSignal) => request<FileReadDTO>(routes.sessionFilesRead(sessionId), { subpath, maxBytes }, signal),
     patchSession: async (sessionId: string, body: PatchSessionDTO) => toSummary(await request<SessionResourceDTO>(routes.session(sessionId), body, undefined, 'PATCH')),
     renameSession: async (sessionId: string, title: string) => toSummary(await request<SessionResourceDTO>(routes.session(sessionId), { title }, undefined, 'PATCH')),
     deleteSession: (sessionId: string) => request<unknown>(routes.deleteSession(sessionId), undefined, undefined, 'DELETE'),

@@ -1,6 +1,6 @@
 import type { ApprovalId, CommandId, SessionForkId, SessionId } from '@wemux/domain'
 import { AppError } from '../../application/errors.js'
-import { integer } from '../../application/validation.js'
+import { integer, object } from '../../application/validation.js'
 import type { RouteDescriptor, RouteRequestContext } from './types.js'
 
 const eventCursor = (context: RouteRequestContext): number => {
@@ -49,6 +49,23 @@ export const sessionRoutes: readonly RouteDescriptor[] = [
   { method: 'DELETE', pattern: '/sessions/:sessionId/grants/:grantId', auth: 'authenticated', handler: async context => {
     if (!context.sessionAccess) { await context.operator(); throw new AppError(404, 'Not found') }
     await context.sessionAccess.revoke(await context.actor(), context.params.sessionId as SessionId, context.params.grantId as never); context.noContent()
+  } },
+  { method: 'POST', pattern: '/sessions/:sessionId/fs/list', auth: 'authenticated', handler: async context => {
+    if (!context.sessionFiles) throw new AppError(404, 'Not found')
+    const id = context.params.sessionId as SessionId
+    if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.operator()
+    const body = object(await context.readBody()), subpath = body.subpath === undefined ? '' : body.subpath
+    if (typeof subpath !== 'string' || subpath.length > 4096 || subpath.includes('\0')) throw new AppError(400, 'Invalid subpath')
+    context.json(200, await context.sessionFiles.list(id, subpath))
+  } },
+  { method: 'POST', pattern: '/sessions/:sessionId/fs/read', auth: 'authenticated', handler: async context => {
+    if (!context.sessionFiles) throw new AppError(404, 'Not found')
+    const id = context.params.sessionId as SessionId
+    if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.operator()
+    const body = object(await context.readBody()), subpath = body.subpath
+    if (typeof subpath !== 'string' || !subpath || subpath.length > 4096 || subpath.includes('\0')) throw new AppError(400, 'Invalid subpath')
+    const maxBytes = body.maxBytes === undefined ? 1024 * 1024 : integer(body.maxBytes, 'maxBytes', 1, 1024 * 1024)
+    context.json(200, await context.sessionFiles.read(id, subpath, maxBytes))
   } },
   { method: 'POST', pattern: '/sessions/:sessionId/messages', auth: 'authenticated', handler: async context => {
     const actor = context.sessionAccess ? await context.actor() : (await context.operator(), undefined)

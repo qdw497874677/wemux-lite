@@ -27,6 +27,7 @@ import { SessionAccessService } from './application/session-access-service.js'
 import { PersonalAccessTokenService } from './application/personal-access-token-service.js'
 import { AccountLifecycleService } from './application/account-lifecycle-service.js'
 import { WorkerService } from './application/worker-service.js'
+import { SessionFileService } from './application/session-file-service.js'
 import { httpHandler } from './http/handler.js'
 import { SessionStreams } from './http/sse.js'
 import { ProjectStreams } from './http/project-sse.js'
@@ -118,6 +119,11 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const canvasLayouts = new CanvasLayoutService(store, new SqliteCanvasLayoutRepository(store), projects, lineage)
   const projectStreams = new ProjectStreams(notifications)
   let gateway: WorkerGateway | undefined
+  const workers = new WorkerService(store, notifications)
+  const sessionFiles = new SessionFileService(service, workers, { send: (workerId, payload) => {
+    if (!gateway) throw new Error('Worker gateway is not ready')
+    return gateway.send(workerId, payload)
+  } })
   const server = createServer(httpHandler({
     service,
     auth,
@@ -139,13 +145,13 @@ export function createWemuxServer(options: WemuxServerOptions) {
     projects,
     workerAccess,
     sessionAccess,
+    sessionFiles,
     personalAccessTokens,
     lifecycle,
     canvasCollaboration,
     canvasCollaborationStreams,
     canvasLayouts,
   }))
-  const workers = new WorkerService(store, notifications)
   gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))
   let closed = false
   return {
