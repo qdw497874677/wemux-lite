@@ -11,6 +11,7 @@ export interface ChatMessage {
 export interface TimelineMessage extends ChatMessage {
   kind: 'message'
   turnId?: string
+  timestamp?: string
 }
 
 export interface TimelineTool {
@@ -24,6 +25,7 @@ export interface TimelineTool {
   status: 'running' | 'completed' | 'failed' | 'cancelled'
   exitCode: number | null
   streamKind?: 'command_output' | 'file_change_output'
+  timestamp?: string
 }
 
 export interface TimelineNotice {
@@ -50,11 +52,30 @@ export interface TimelineReasoning {
   running: boolean
 }
 
+export interface ProposedPlan {
+  kind: 'plan'
+  id: string
+  turnId: string
+  text: string
+  steps?: string[]
+  status: 'pending' | 'approved' | 'modified'
+}
+
 export interface QueuedItem { commandId: string; messageId: string; content: string; position: number }
 export interface PendingApproval { approvalId: string; turnId: string; action: unknown; reason?: string }
 export interface ApprovalHistoryEntry extends PendingApproval { decision: 'approve' | 'deny' }
 
-export type ChatTimelineItem = TimelineMessage | TimelineTool | TimelineNotice | TimelineUsage | TimelineReasoning
+export type ChatTimelineItem = TimelineMessage | TimelineTool | TimelineNotice | TimelineUsage | TimelineReasoning | ProposedPlan
+
+const planStepPattern = /^\s*(?:\d+[.)]|[-*+]\s+\[[ xX]\])\s+(.+?)\s*$/
+
+export function parseProposedPlanSteps(text: string): string[] | undefined {
+  const steps = text.split(/\r?\n/).flatMap(line => {
+    const match = line.match(planStepPattern)
+    return match?.[1] ? [match[1]] : []
+  })
+  return steps.length ? steps : undefined
+}
 
 const abortReasonLabels: Record<AbortReasonDTO, string> = {
   user_stop: '用户已停止本轮',
@@ -100,6 +121,7 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
   const approvalHistory: ApprovalHistoryEntry[] = []
   const turnMessages = new Map<string, string>()
   const turnStartedAt = new Map<string, number>()
+  const planTexts = new Map<string, string>()
 
   const assistantMessage = (turnId: string) => {
     let message = messages.find(item => item.id === `assistant:${turnId}`)
@@ -114,10 +136,13 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
     const payload = event.payload
     switch (payload.kind) {
       case 'message.queued': {
+        for (const entry of timeline) {
+          if (entry.kind === 'plan' && entry.status === 'pending') entry.status = payload.content.trim() === '批准执行上述计划' ? 'approved' : 'modified'
+        }
         queued.set(payload.messageId, { commandId: payload.commandId, messageId: payload.messageId, content: payload.content, position: payload.position })
         const message: ChatMessage = { id: payload.messageId, role: 'user', text: payload.content, status: 'queued' }
         messages.push(message)
-        timeline.push({ kind: 'message', ...message })
+        timeline.push({ kind: 'message', ...message, ...(event.occurredAt ? { timestamp: event.occurredAt } : {}) })
         break
       }
       case 'message.cancelled': {
@@ -152,7 +177,11 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
         break
       }
       case 'assistant.text.delta': {
-        if (payload.streamKind === 'reasoning_text' || payload.streamKind === 'plan_text') {
+        if (payload.streamKind === 'plan_text') {
+          planTexts.set(payload.turnId, (planTexts.get(payload.turnId) ?? '') + payload.text)
+          break
+        }
+        if (payload.streamKind === 'reasoning_text') {
           const previous = timeline.at(-1)
           if (previous?.kind === 'reasoning' && previous.turnId === payload.turnId && previous.running) previous.text += payload.text
           else timeline.push({ kind: 'reasoning', id: `reasoning:${payload.turnId}:${event.seq}`, turnId: payload.turnId, text: payload.text, duration: 1, running: true })
@@ -163,7 +192,7 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
         if (previous?.kind === 'message' && previous.role === 'assistant' && previous.turnId === payload.turnId && previous.status === 'running') {
           previous.text += payload.text
         } else {
-          timeline.push({ kind: 'message', id: `assistant:${payload.turnId}:${event.seq}`, turnId: payload.turnId, role: 'assistant', text: payload.text, status: 'running' })
+          timeline.push({ kind: 'message', id: `assistant:${payload.turnId}:${event.seq}`, turnId: payload.turnId, role: 'assistant', text: payload.text, status: 'running', ...(event.occurredAt ? { timestamp: event.occurredAt } : {}) })
         }
         break
       }
@@ -179,6 +208,9 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
           if (entry.kind === 'message' && entry.role === 'user' && entry.id === completedUserMessage?.id) entry.status = payload.outcome
           if (entry.kind === 'tool' && entry.turnId === payload.turnId && entry.status === 'running') entry.status = payload.outcome === 'cancelled' ? 'cancelled' : 'failed'
         }
+        const planText = planTexts.get(payload.turnId)?.trim()
+        if (planText && payload.outcome === 'completed') timeline.push({ kind: 'plan', id: `plan:${payload.turnId}`, turnId: payload.turnId, text: planText, steps: parseProposedPlanSteps(planText), status: 'pending' })
+        planTexts.delete(payload.turnId)
         if (payload.failure) {
           const category = payload.failure.failureReason ? failureReasonLabels[payload.failure.failureReason] : payload.failure.abortReason ? abortReasonLabels[payload.failure.abortReason] : ''
           const failureText = category && !payload.failure.message.includes(category) ? `${category}：${payload.failure.message}` : payload.failure.message
@@ -203,13 +235,13 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
         const elapsed = occurredAt - (startedAt ?? occurredAt)
         const duration = Number.isFinite(elapsed) ? Math.max(1, Math.round(elapsed / 1000)) : 1
         timeline.push({ kind: 'reasoning', id: `reasoning:${payload.toolCallId}`, turnId: payload.turnId, text: `准备调用工具：${payload.toolName}`, duration, running: false })
-        timeline.push({ kind: 'tool', id: `tool:${payload.toolCallId}`, turnId: payload.turnId, toolCallId: payload.toolCallId, toolName: payload.toolName, input: payload.input, output: '', status: 'running', exitCode: null, ...(payload.streamKind ? { streamKind: payload.streamKind } : {}) })
+        timeline.push({ kind: 'tool', id: `tool:${payload.toolCallId}`, turnId: payload.turnId, toolCallId: payload.toolCallId, toolName: payload.toolName, input: payload.input, output: '', status: 'running', exitCode: null, ...(payload.streamKind ? { streamKind: payload.streamKind } : {}), ...(event.occurredAt ? { timestamp: event.occurredAt } : {}) })
         break
       }
       case 'tool.output.delta': {
         let tool = timeline.find(item => item.kind === 'tool' && item.toolCallId === payload.toolCallId)
         if (!tool || tool.kind !== 'tool') {
-          tool = { kind: 'tool', id: `tool:${payload.toolCallId}`, turnId: payload.turnId, toolCallId: payload.toolCallId, toolName: '工具', input: null, output: '', status: 'running', exitCode: null, ...(payload.streamKind ? { streamKind: payload.streamKind } : {}) }
+          tool = { kind: 'tool', id: `tool:${payload.toolCallId}`, turnId: payload.turnId, toolCallId: payload.toolCallId, toolName: '工具', input: null, output: '', status: 'running', exitCode: null, ...(payload.streamKind ? { streamKind: payload.streamKind } : {}), ...(event.occurredAt ? { timestamp: event.occurredAt } : {}) }
           timeline.push(tool)
         }
         if (payload.streamKind) tool.streamKind = payload.streamKind
@@ -219,7 +251,7 @@ export function projectJournal(events: readonly JournalEventDTO[]) {
       case 'tool.finished': {
         let tool = timeline.find(item => item.kind === 'tool' && item.toolCallId === payload.toolCallId)
         if (!tool || tool.kind !== 'tool') {
-          tool = { kind: 'tool', id: `tool:${payload.toolCallId}`, turnId: payload.turnId, toolCallId: payload.toolCallId, toolName: '工具', input: null, output: '', status: 'running', exitCode: null }
+          tool = { kind: 'tool', id: `tool:${payload.toolCallId}`, turnId: payload.turnId, toolCallId: payload.toolCallId, toolName: '工具', input: null, output: '', status: 'running', exitCode: null, ...(event.occurredAt ? { timestamp: event.occurredAt } : {}) }
           timeline.push(tool)
         }
         tool.exitCode = payload.exitCode

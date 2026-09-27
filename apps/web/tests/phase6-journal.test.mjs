@@ -17,12 +17,21 @@ test('journal projects approval requested/resolved lifecycle for replay', () => 
   assert.equal(journal.timeline.filter(item => item.kind === 'notice').at(-1)?.text, '审批已拒绝')
 })
 
+test('journal replays model changes as visible notices', () => {
+  const journal = projectJournal([
+    event(1, { kind: 'model.changed', previousModelId: 'provider::old', modelId: 'provider::new' }),
+  ])
+  assert.equal(journal.timeline.at(-1)?.kind, 'notice')
+  assert.equal(journal.timeline.at(-1)?.text, '模型已切换为 provider::new')
+})
+
 test('streamKind controls reasoning timeline and work-log action', () => {
   const journal = projectJournal([
     event(1, { kind: 'assistant.text.delta', turnId: 'turn-1', text: 'Inspect files', streamKind: 'plan_text' }),
     event(2, { kind: 'tool.started', turnId: 'turn-1', toolCallId: 'tool-1', toolName: 'opaque-provider-tool', input: { path: 'src/a.ts' }, streamKind: 'file_change_output' }),
   ])
-  assert.equal(journal.timeline[0]?.kind, 'reasoning')
+  assert.equal(journal.timeline.some(item => item.kind === 'reasoning' && item.text === 'Inspect files'), false)
+  assert.equal(journal.timeline.some(item => item.kind === 'plan'), false)
   const tool = journal.timeline.find(item => item.kind === 'tool')
   assert.ok(tool)
   assert.equal(normalizeWorkLogEntry(tool).action, 'edit')

@@ -41,6 +41,12 @@ export function SessionSurface({ api, session, presentation, projectPath, worker
   const controls = presentation === 'focus' || presentation === 'run'
   const chooseSuggestion = (suggestion: string) => applySessionSuggestion(controller, document.getElementById(`session-prompt-${session.id}`), suggestion)
   const { hiddenMessageIds, localNotice, messageActions } = useMessageActions(controller, session.id, canSend)
+  const focusComposer = () => window.requestAnimationFrame(() => document.getElementById(`session-prompt-${session.id}`)?.focus())
+  const planActions = {
+    canAct: canSend,
+    onApprove: () => { void controller.resendAsNew('批准执行上述计划'); focusComposer() },
+    onModify: (text: string) => { controller.prefillForEdit(text); focusComposer() },
+  }
   const visibleTimeline = history.timeline.filter(entry => !hiddenMessageIds.has(entry.id))
   const datedTimeline = visibleTimeline.map(entry => ({ timestamp: entry.kind === 'message' || entry.kind === 'tool' ? entry.timestamp : undefined }))
 
@@ -53,7 +59,7 @@ export function SessionSurface({ api, session, presentation, projectPath, worker
       {!history.timeline.length && <ConversationEmptyState title={history.checkedAt ? canSend ? '暂无消息，可以开始对话。' : blockedReason : '正在加载会话历史…'}>{history.checkedAt && canSend ? <div className="flex max-w-[var(--chat-max-width)] flex-col items-center gap-3"><div className="space-y-1"><h3 className="text-sm font-medium">暂无消息，可以开始对话。</h3><p className="text-xs leading-5 text-muted-foreground/60">选择一个建议，或在下方输入你的问题。</p></div><Suggestions className="justify-center">{emptySessionSuggestions.map(suggestion => <Suggestion key={suggestion} suggestion={suggestion} onClick={() => chooseSuggestion(suggestion)}>{suggestion}</Suggestion>)}</Suggestions></div> : <h3 className="text-sm font-medium">{history.checkedAt ? blockedReason : '正在加载会话历史…'}</h3>}</ConversationEmptyState>}
       {visibleTimeline.map((entry, index) => {
         const dateLabel = timelineDateLabel(datedTimeline, index)
-        return <div key={entry.id} className="contents">{dateLabel && <div className="flex items-center gap-3 py-2" role="separator" aria-label={dateLabel}><span className="h-px flex-1 bg-border/60" /><span className="shrink-0 text-xs text-muted-foreground/60">{dateLabel}</span><span className="h-px flex-1 bg-border/60" /></div>}<TimelineEntry entry={entry} api={api} sessionId={session.id} messageActions={messageActions} /></div>
+        return <div key={entry.id} className="contents">{dateLabel && <div className="flex items-center gap-3 py-2" role="separator" aria-label={dateLabel}><span className="h-px flex-1 bg-border/60" /><span className="shrink-0 text-xs text-muted-foreground/60">{dateLabel}</span><span className="h-px flex-1 bg-border/60" /></div>}<TimelineEntry entry={entry} api={api} sessionId={session.id} messageActions={messageActions} planActions={planActions} /></div>
       })}
       {localNotice && <p role="status" className="text-center text-xs text-muted-foreground">{localNotice}</p>}
       <OptimisticMessages controller={controller} confirmedIds={confirmedIds} hiddenMessageIds={hiddenMessageIds} messageActions={messageActions} />

@@ -22,6 +22,7 @@ import { PromptHistory } from '../../lib/prompt-history.ts'
 import { useCompactAction } from './cluster-controls.tsx'
 import { SubmissionController } from './submission.ts'
 import { normalizeWorkLogEntry, type WorkLogEntry } from './work-log.ts'
+import { ProposedPlanCard } from './plan-card.tsx'
 import { terminalContextText, useTerminalContext } from '../terminal/terminal-context.ts'
 import { commandGroups, commandsForAgent, compactRoute, isAgentCommandInput, type SlashCommand } from './slash-commands.ts'
 import { DiffBlock, DiffFileToggle } from '../files/diff-block.tsx'
@@ -66,7 +67,7 @@ export function useMessageActions(controller: SubmissionController, sessionId: s
   return { hiddenMessageIds, localNotice, messageActions }
 }
 
-export function TimelineEntry({ entry, api, sessionId, onOpenContext, messageActions }: { entry: ChatTimelineItem; api?: Api; sessionId?: string; onOpenContext?: () => void; messageActions?: MessageActions }) {
+export function TimelineEntry({ entry, api, sessionId, onOpenContext, messageActions, planActions }: { entry: ChatTimelineItem; api?: Api; sessionId?: string; onOpenContext?: () => void; messageActions?: MessageActions; planActions?: { canAct: boolean; onApprove: () => void; onModify: (text: string) => void } }) {
   if (entry.kind === 'usage') {
     const parts = [
       entry.usage.completeness === 'partial' ? '部分统计' : null,
@@ -81,6 +82,7 @@ export function TimelineEntry({ entry, api, sessionId, onOpenContext, messageAct
   }
   if (entry.kind === 'notice') return <div role={entry.tone === 'error' ? 'alert' : 'status'} className={cn('rounded-xl px-3 py-2.5 text-sm', entry.tone === 'error' ? 'border border-red-500/30 bg-red-500/10 text-red-200' : 'border border-border/70 bg-card/55 text-muted-foreground')}><p className="whitespace-pre-wrap break-words leading-6">{entry.text}</p></div>
   if (entry.kind === 'reasoning') return <div><Reasoning duration={entry.duration}><ReasoningTrigger duration={entry.duration} running={entry.running} /><ReasoningContent>{entry.text}</ReasoningContent></Reasoning></div>
+  if (entry.kind === 'plan') return <ProposedPlanCard plan={entry} canAct={planActions?.canAct === true} onApprove={() => planActions?.onApprove()} onModify={() => planActions?.onModify(entry.text)} />
   if (entry.kind === 'tool') {
     const presentation = normalizeWorkLogEntry(entry)
     const Icon = presentation.action ? workLogIcons[presentation.action] : Terminal
