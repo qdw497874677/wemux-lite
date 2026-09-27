@@ -18,6 +18,7 @@ import { ContextWindowMeter, type ContextWindowUsage } from '../../components/co
 import { cn, copyText, selectElementText } from '../../lib/utils.ts'
 import { formatTimelineTime, formatTimelineTimestampTitle } from '../../lib/conversation-timeline.ts'
 import { randomId } from '../../lib/random.ts'
+import { PromptHistory } from '../../lib/prompt-history.ts'
 import { useCompactAction } from './cluster-controls.tsx'
 import { SubmissionController } from './submission.ts'
 import { normalizeWorkLogEntry, type WorkLogEntry } from './work-log.ts'
@@ -137,6 +138,9 @@ export function Composer({ api, controller, session, agent, activeTurnId = null,
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot)
   const submitRef = useRef<(message: PromptInputMessage) => void>(() => undefined)
   const sendWithAttachmentsRef = useRef(false)
+  const promptHistoryRef = useRef<{ sessionId: string; history: PromptHistory } | null>(null)
+  if (promptHistoryRef.current?.sessionId !== session.id) promptHistoryRef.current = { sessionId: session.id, history: new PromptHistory(session.id) }
+  const promptHistory = promptHistoryRef.current.history
   const [notice, setNotice] = useState<ComposerNotice>(null)
   const [commandPending, setCommandPending] = useState<'stop' | null>(null)
   const compactAction = useCompactAction(api, session.id)
@@ -147,7 +151,7 @@ export function Composer({ api, controller, session, agent, activeTurnId = null,
   const running = session.runtimeState === 'running' || Boolean(activeTurnId)
   const canControl = session.access?.canControl ?? session.canManage
   const retry = state.attempt?.content === state.draft.trim()
-  const defaultHint = state.pending ? '正在发送…' : state.receipt ? '消息已送达，等待 Agent 回复' : canSend ? running ? 'Agent 正在运行，新消息将进入队列' : 'Enter 发送，Shift+Enter 换行' : `${blockedReason}，草稿仍会保留`
+  const defaultHint = state.pending ? '正在发送…' : state.receipt ? '消息已送达，等待 Agent 回复' : canSend ? running ? 'Agent 正在运行，新消息将进入队列 · ↑ 翻阅历史' : 'Enter 发送，Shift+Enter 换行 · ↑ 翻阅历史' : `${blockedReason}，草稿仍会保留`
   const hint = compactAction.action?.status === 'pending' ? '正在压缩上下文…' : compactAction.action?.status === 'error' ? '压缩失败，输入 /compact 重试' : defaultHint
   const commandQuery = state.draft.startsWith('/') ? state.draft.trim().toLowerCase() : ''
   const visibleCommandGroups = commandGroups(commandsForAgent(agent), commandQuery)
@@ -178,26 +182,29 @@ export function Composer({ api, controller, session, agent, activeTurnId = null,
     setNotice(null)
     await compactAction.compact()
   }
-  const sendNativeCommand = (content: string) => {
+  const sendNativeCommand = async (content: string) => {
     if (!canSend || state.pending) return
     controller.edit(content)
-    void controller.send()
+    await controller.send()
+    const result = controller.snapshot()
+    if (result.draft === '' && !result.error) promptHistory.push(content)
   }
   const executeCommand = (command: SlashCommand) => {
-    if (command.group === 'agent') { sendNativeCommand(command.name); return }
+    if (command.group === 'agent') { void sendNativeCommand(command.name); return }
+    promptHistory.push(command.name)
     controller.edit('')
     if (command.name === '/compact') {
-      if (compactRoute(agent) === 'slash-command') sendNativeCommand('/compact')
+      if (compactRoute(agent) === 'slash-command') void sendNativeCommand('/compact')
       else void compact()
     } else if (command.name === '/stop') void stop()
     else setNotice({ tone: 'info', text: '平台命令：/compact 压缩上下文；/stop 停止当前回合；/help 显示本帮助。Agent 原生命令会作为普通消息发送。Enter 发送，Shift+Enter 换行。' })
   }
   return <div className="conversation-composer shrink-0 px-3 py-3 sm:px-4 sm:py-4"><div className="conversation-content mx-auto max-w-[var(--chat-max-width)]"><PromptInput className="relative" onSubmit={message => submitRef.current(message)}>
-    <ComposerContents api={api} session={session} agent={agent} controller={controller} state={state} canSend={canSend} blockedReason={blockedReason} running={running} canControl={canControl} retry={retry} hint={hint} notice={notice} setNotice={setNotice} commandPending={commandPending} stop={stop} visibleCommandGroups={visibleCommandGroups} executeCommand={executeCommand} submitRef={submitRef} sendWithAttachmentsRef={sendWithAttachmentsRef} terminalContext={terminalContext} contextUsage={contextUsage} compact={compact} compactDisabled={!api || !canControl || running || Boolean(commandPending)} />
+    <ComposerContents api={api} session={session} agent={agent} controller={controller} state={state} canSend={canSend} blockedReason={blockedReason} running={running} canControl={canControl} retry={retry} hint={hint} notice={notice} setNotice={setNotice} commandPending={commandPending} stop={stop} visibleCommandGroups={visibleCommandGroups} executeCommand={executeCommand} submitRef={submitRef} sendWithAttachmentsRef={sendWithAttachmentsRef} promptHistory={promptHistory} terminalContext={terminalContext} contextUsage={contextUsage} compact={compact} compactDisabled={!api || !canControl || running || Boolean(commandPending)} />
   </PromptInput></div></div>
 }
 
-function ComposerContents({ api, session, agent, controller, state, canSend, blockedReason, running, canControl, retry, hint, notice, setNotice, commandPending, stop, visibleCommandGroups, executeCommand, submitRef, sendWithAttachmentsRef, terminalContext, contextUsage, compact, compactDisabled }: { api?: Api; session: SessionDTO; agent?: AgentDTO; controller: SubmissionController; state: ReturnType<SubmissionController['snapshot']>; canSend: boolean; blockedReason: string; running: boolean; canControl: boolean; retry: boolean; hint: string; notice: ComposerNotice; setNotice: (notice: ComposerNotice) => void; commandPending: 'stop' | null; stop: () => Promise<void>; visibleCommandGroups: ReturnType<typeof commandGroups>; executeCommand: (command: SlashCommand) => void; submitRef: MutableRefObject<(message: PromptInputMessage) => void>; sendWithAttachmentsRef: MutableRefObject<boolean>; terminalContext: ReturnType<typeof useTerminalContext>; contextUsage: ContextWindowUsage | null; compact: () => Promise<void>; compactDisabled: boolean }) {
+function ComposerContents({ api, session, agent, controller, state, canSend, blockedReason, running, canControl, retry, hint, notice, setNotice, commandPending, stop, visibleCommandGroups, executeCommand, submitRef, sendWithAttachmentsRef, promptHistory, terminalContext, contextUsage, compact, compactDisabled }: { api?: Api; session: SessionDTO; agent?: AgentDTO; controller: SubmissionController; state: ReturnType<SubmissionController['snapshot']>; canSend: boolean; blockedReason: string; running: boolean; canControl: boolean; retry: boolean; hint: string; notice: ComposerNotice; setNotice: (notice: ComposerNotice) => void; commandPending: 'stop' | null; stop: () => Promise<void>; visibleCommandGroups: ReturnType<typeof commandGroups>; executeCommand: (command: SlashCommand) => void; submitRef: MutableRefObject<(message: PromptInputMessage) => void>; sendWithAttachmentsRef: MutableRefObject<boolean>; promptHistory: PromptHistory; terminalContext: ReturnType<typeof useTerminalContext>; contextUsage: ContextWindowUsage | null; compact: () => Promise<void>; compactDisabled: boolean }) {
   const attachments = usePromptInputAttachments()
   const submit = async (message: PromptInputMessage) => {
     if (!canSend || state.pending || (state.draft.startsWith('/') && !isAgentCommandInput(agent, state.draft))) return
@@ -215,15 +222,27 @@ function ComposerContents({ api, session, agent, controller, state, canSend, blo
     if (!content) return
     controller.edit(content)
     sendWithAttachmentsRef.current = true
-    try { await controller.send() }
-    finally { sendWithAttachmentsRef.current = false }
+    try {
+      await controller.send()
+      const result = controller.snapshot()
+      if (message.text.trim() && result.draft === '' && !result.error) promptHistory.push(message.text)
+    } finally { sendWithAttachmentsRef.current = false }
     if (controller.snapshot().draft === '') attachments.clear()
   }
   submitRef.current = message => { void submit(message) }
   return <>
     {visibleCommandGroups.length > 0 && <div className="absolute inset-x-0 bottom-full z-20 mb-2 overflow-hidden rounded-xl border border-border bg-popover p-1.5 shadow-lg" role="listbox" aria-label="斜杠命令">{visibleCommandGroups.map(group => <section key={group.key} aria-label={group.label}><p className="px-3 pb-1 pt-2 text-xs font-medium text-muted-foreground">{group.label}</p>{group.commands.map(command => <button key={`${command.group}:${command.name}`} type="button" role="option" className="flex w-full items-start gap-3 rounded-lg px-3 py-2 text-left hover:bg-accent focus:bg-accent focus:outline-none" onClick={() => executeCommand(command)}><code className="text-sm text-primary">{command.name}</code><span><strong className="block text-sm font-medium">{command.label}</strong><small className="text-muted-foreground">{command.description}</small></span></button>)}</section>)}</div>}
     {(attachments.files.length > 0 || terminalContext.active) && <PromptInputHeader>{terminalContext.active && <details className="rounded-lg border border-primary/20 bg-primary/10 px-3 py-2 text-xs"><summary className="cursor-pointer font-medium text-primary">终端上下文 · 最近 {Math.min(20, terminalContext.lines.length)} 行</summary><pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap text-[11px] text-muted-foreground">{terminalContext.lines.slice(-20).join('\n') || '等待终端输出…'}</pre></details>}{attachments.files.length > 0 && <Attachments variant="inline">{attachments.files.map(attachment => <Attachment key={attachment.id} data={attachment} onRemove={() => attachments.remove(attachment.id)}><AttachmentPreview /><AttachmentInfo /><AttachmentRemove /></Attachment>)}</Attachments>}</PromptInputHeader>}
-    <PromptInputBody><label className="sr-only" htmlFor={`session-prompt-${session.id}`}>消息内容</label><PromptInputTextarea id={`session-prompt-${session.id}`} value={sendWithAttachmentsRef.current ? '' : state.draft} onChange={event => { controller.edit(event.target.value); setNotice(null) }} maxLength={16_000} aria-invalid={Boolean(state.error) || undefined} placeholder={canSend ? '给 Agent 发送消息，输入 / 查看命令…' : `${blockedReason}，可以先编辑草稿`} /></PromptInputBody>
+    <PromptInputBody><label className="sr-only" htmlFor={`session-prompt-${session.id}`}>消息内容</label><PromptInputTextarea id={`session-prompt-${session.id}`} value={sendWithAttachmentsRef.current ? '' : state.draft} onChange={event => { controller.edit(event.target.value); setNotice(null) }} onKeyDown={event => {
+      if (event.nativeEvent.isComposing || (event.key !== 'ArrowUp' && event.key !== 'ArrowDown')) return
+      const step = promptHistory.step(event.key === 'ArrowUp' ? 'backward' : 'forward', state.draft)
+      if (!step) return
+      event.preventDefault()
+      const textarea = event.currentTarget
+      controller.edit(step.value)
+      setNotice(null)
+      window.requestAnimationFrame(() => textarea.setSelectionRange(step.value.length, step.value.length))
+    }} maxLength={16_000} aria-invalid={Boolean(state.error) || undefined} placeholder={canSend ? '给 Agent 发送消息，输入 / 查看命令…' : `${blockedReason}，可以先编辑草稿`} /></PromptInputBody>
     <PromptInputFooter><PromptInputTools className="flex-wrap">
       <PromptInputActionMenu><PromptInputActionMenuTrigger asChild><PromptInputActionMenuButton /></PromptInputActionMenuTrigger><PromptInputActionMenuContent align="start"><PromptInputActionAddAttachments kind="file" /><PromptInputActionAddAttachments kind="image" /></PromptInputActionMenuContent></PromptInputActionMenu>
       <SessionModelChip api={api} session={session} agent={agent} disabled={running || !canControl} onNotice={setNotice} /><ContextWindowMeter usage={contextUsage} onCompact={() => void compact()} compactDisabled={compactDisabled} /><span role={state.error || notice?.tone === 'error' ? 'alert' : 'status'} className={cn('min-w-0 flex-1 truncate text-xs text-muted-foreground/60', (state.error || notice?.tone === 'error') && 'text-red-300')}>{state.error || notice?.text || state.draftNotice || hint}</span></PromptInputTools>
