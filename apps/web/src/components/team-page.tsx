@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react'
-import { Crown, LoaderCircle, MailPlus, ShieldCheck, Trash2, Users } from 'lucide-react'
+import { ArrowLeft, Crown, LoaderCircle, MailPlus, ShieldCheck, Trash2, Users } from 'lucide-react'
 import type { ReturnTypeOfCreateApi } from '../api/team-types.ts'
 import { Button } from './ui/button.tsx'
 import { Input } from './ui/input.tsx'
+import { useConfirmDialog } from './ui/confirm-dialog.tsx'
 
-export function TeamPage({ api }: { api: ReturnTypeOfCreateApi }) {
+export function TeamPage({ api, onBack }: { api: ReturnTypeOfCreateApi; onBack: () => void }) {
+  const confirm = useConfirmDialog()
   const [teams, setTeams] = useState<Awaited<ReturnType<typeof api.teams>>>([])
   const [members, setMembers] = useState<Awaited<ReturnType<typeof api.teamMembers>>>([])
   const [invitations, setInvitations] = useState<Awaited<ReturnType<typeof api.teamInvitations>>>([])
@@ -22,13 +24,13 @@ export function TeamPage({ api }: { api: ReturnTypeOfCreateApi }) {
   const create = async () => { if (!teamName.trim()) return; await run('create', async () => { const team = await api.createTeam(teamName.trim()); setTeamName(''); await loadTeams(); setSelected(team.id) }, '创建失败') }
   const invite = async () => { if (!selected || !email.trim()) return; await run('invite', async () => { await api.inviteTeamMember(selected, email.trim()); setEmail(''); await loadTeam(selected) }, '邀请失败') }
   const changeRole = async (userId: string, role: 'admin' | 'member') => run(`role:${userId}`, async () => { await api.updateTeamMemberRole(selected, userId, role); await loadTeam(selected); setNotice(`成员角色已调整为 ${role}`) }, '调整角色失败')
-  const remove = async (userId: string, username: string) => { if (!window.confirm(`确认将 ${username} 移出团队？其 Project、Worker、Session 授权会立即撤销；活跃任务会请求停止，离线 Worker 下命令将保持待送达。`)) return; await run(`remove:${userId}`, async () => { await api.removeTeamMember(selected, userId); await loadTeam(selected); await loadTeams(); setNotice('成员已移除。授权已立即撤销；活跃任务的停止命令可能仍在等待 Worker 上线送达。') }, '移除成员失败') }
-  const transfer = async (userId: string, username: string) => { const name = selectedTeam?.name ?? ''; if (!window.confirm(`确认把 ${name} 的所有权转移给 ${username}？你将降为 admin。`)) return; await run(`owner:${userId}`, async () => { await api.transferTeamOwnership(selected, userId, name); await loadTeam(selected); await loadTeams(); setNotice(`团队所有权已转移给 ${username}`) }, '转移所有权失败') }
+  const remove = async (userId: string, username: string) => { if (!await confirm({ title: '移除团队成员', description: `确认将 ${username} 移出团队？其 Project、Worker、Session 授权会立即撤销；活跃任务会请求停止，离线 Worker 下命令将保持待送达。`, confirmLabel: '移除', danger: true })) return; await run(`remove:${userId}`, async () => { await api.removeTeamMember(selected, userId); await loadTeam(selected); await loadTeams(); setNotice('成员已移除。授权已立即撤销；活跃任务的停止命令可能仍在等待 Worker 上线送达。') }, '移除成员失败') }
+  const transfer = async (userId: string, username: string) => { const name = selectedTeam?.name ?? ''; if (!await confirm({ title: '转移团队所有权', description: `确认把 ${name} 的所有权转移给 ${username}？你将降为 admin。`, confirmLabel: '转移所有权', danger: true })) return; await run(`owner:${userId}`, async () => { await api.transferTeamOwnership(selected, userId, name); await loadTeam(selected); await loadTeams(); setNotice(`团队所有权已转移给 ${username}`) }, '转移所有权失败') }
   const selectedTeam = teams.find(team => team.id === selected)
   const canManage = selectedTeam?.role === 'owner' || selectedTeam?.role === 'admin'
   const isOwner = selectedTeam?.role === 'owner'
   return <main className="mx-auto grid w-full max-w-5xl gap-6 p-4 sm:p-8">
-    <header className="grid gap-2"><p className="text-xs font-semibold uppercase tracking-[.18em] text-muted-foreground">Team network</p><h1 className="text-3xl font-semibold">团队与成员</h1><p className="text-sm text-muted-foreground">管理协作边界、成员角色和实时访问权限。</p></header>
+    <header className="grid gap-3"><Button variant="ghost" size="sm" className="w-fit -ml-2" onClick={onBack}><ArrowLeft className="size-4" />返回工作台</Button><div className="grid gap-2"><p className="text-xs font-semibold uppercase tracking-[.18em] text-muted-foreground">Team network</p><h1 className="text-3xl font-semibold">团队与成员</h1><p className="text-sm text-muted-foreground">管理协作边界、成员角色和实时访问权限。</p></div></header>
     {error && <p role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">{error}</p>}
     {notice && <p role="status" className="rounded-xl border border-primary/25 bg-primary/5 p-3 text-sm">{notice}</p>}
     <section className="grid gap-3 rounded-2xl border bg-card p-5"><h2 className="font-semibold">创建团队</h2><div className="flex gap-2"><Input value={teamName} placeholder="团队名称" onChange={event => setTeamName(event.target.value)} /><Button disabled={busy !== '' || !teamName.trim()} onClick={() => void create()}>{busy === 'create' && <LoaderCircle className="size-4 animate-spin" />}创建</Button></div></section>

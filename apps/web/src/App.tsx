@@ -35,6 +35,7 @@ import type { ProjectDTO, SendMessageDTO, SessionDTO, WorkerDTO, WorkspaceDTO } 
 import { useSession } from './api/use-session'
 import type { TimelineTool } from './api/journal'
 import { Button } from './components/ui/button'
+import { ConfirmDialogProvider } from './components/ui/confirm-dialog.tsx'
 import { Badge } from './components/ui/badge'
 import { Input } from './components/ui/input'
 import { Textarea } from './components/ui/textarea'
@@ -85,7 +86,7 @@ export function App() {
 }
 function RouterApp() {
   const [router] = useState(() => makeRouter(AuthScope, RoutedWorkbench))
-  return <RouterProvider router={router} />
+  return <ConfirmDialogProvider><RouterProvider router={router} /></ConfirmDialogProvider>
 }
 type BootState = 'checking' | 'ready' | 'signed-out' | 'unreachable'
 const ConnectionContext = createContext<{ config: AccountSession; onSettings: () => void; onUnauthorized: () => void; onSignOut: () => void } | null>(null)

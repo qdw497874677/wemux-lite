@@ -12,11 +12,13 @@ import { Button } from '../../components/ui/button'
 import { Textarea } from '../../components/ui/textarea'
 import { Composer, TimelineEntry } from '../sessions/conversation'
 import { SubmissionController } from '../sessions/submission'
+import { useConfirmDialog } from '../../components/ui/confirm-dialog.tsx'
 
 const active = (run: Run) => ['pending', 'running', 'cancelling'].includes(run.status)
 
 export function TaskRuns({ task, api, refresh, search: query, selectRun, onDirty }: { task: TaskDetail; api: Api; refresh: () => void; search: string; selectRun: (id: string) => void; onDirty: (dirty: boolean) => void }) {
   const online = useBrowserOnline()
+  const confirm = useConfirmDialog()
   const search = new URLSearchParams(query)
   const draft = useMemo(() => new LaunchIdentity(window.sessionStorage, `wemux.launch:${JSON.stringify([api.launchScope, task.projectId, task.id])}`, taskPrompt(task)), [api, task.projectId, task.id])
   const [independentSession, setIndependentSession] = useState<string | null>(null)
@@ -91,7 +93,7 @@ export function TaskRuns({ task, api, refresh, search: query, selectRun, onDirty
       {frozen && <p className="break-all text-xs">已冻结完整请求 {frozen.requestId}；网络失败后重试不会新建尝试。</p>}
       {error && <p role="alert">{error}。草稿及请求身份已保留。</p>}
       <Button disabled={pending || !prompt.trim() || (!frozen && !launchCapability.allowed)} onClick={() => void launch()}>{pending ? '正在启动…' : frozen ? '重试原请求' : `确认并启动 ${reuseSessionId ? 'reuse' : 'new'}`}</Button>
-      {frozen && <Button variant="outline" disabled={pending || draft.value.status === 'unknown'} onClick={() => { if (window.confirm('已核对原请求结果。保留 Prompt，重新确认当前 Assignment？')) { draft.reconfirm(); identity.current = null; setFrozen(null); setError('') } }}>显式重新确认</Button>}
+      {frozen && <Button variant="outline" disabled={pending || draft.value.status === 'unknown'} onClick={() => { void confirm({ title: '显式重新确认', description: '已核对原请求结果。保留 Prompt，重新确认当前 Assignment？', confirmLabel: '重新确认', danger: true }).then(ok => { if (ok) { draft.reconfirm(); identity.current = null; setFrozen(null); setError('') } }) }}>显式重新确认</Button>}
       <p className="text-xs">结果未知时须重试原请求核对；刷新保留完整身份。仅明确结果后显式重新确认才替换身份；关闭标签页会清除此标签页记录。</p>
       <p className="text-xs">reuse 须通过归属、绑定与空闲检查；拒绝时不会自动切换 new。取消 Run 仅针对初始消息，不清空独立消息，不自动改变任务状态。</p>
     </fieldset>
@@ -100,6 +102,7 @@ export function TaskRuns({ task, api, refresh, search: query, selectRun, onDirty
   </section>
 }
 function RunInspector({ run, api }: { run: Run; api: Api }) {
+  const confirm = useConfirmDialog()
   const session = useQuery({ queryKey: projectKeys.session(run.projectId, run.sessionId), queryFn: ({ signal }) => api.session(run.sessionId, signal).catch(error => { if (error instanceof ApiError && error.status === 404) return null; throw error }) })
   const journal = useSession(api, session.data ? run.sessionId : '', 0)
   const controller = useMemo(() => new SubmissionController(api, run.sessionId), [api, run.sessionId])
@@ -123,7 +126,7 @@ function RunInspector({ run, api }: { run: Run; api: Api }) {
     {run.status === 'succeeded' && <p>执行成功；建议人工审查。Task 状态未自动改变。</p>}
     <p className="text-sm">以下为本次运行的会话记录；初始消息以外的追加消息不属于本 Run、不延长生命周期。</p>{session.data && <a className="inline-flex items-center rounded-md border border-border px-3 py-2 text-sm underline" href={`/projects/${encodeURIComponent(run.projectId)}/sessions/${encodeURIComponent(run.sessionId)}`}>打开完整对话</a>}
     {session.data && !active(run) && <Button variant="outline" onClick={async () => {
-      if (!window.confirm('删除此会话及其对话历史？Run 快照仍保留。')) return
+      if (!await confirm({ title: '删除 Session 历史', description: '删除此会话及其对话历史？Run 快照仍保留。', confirmLabel: '删除', danger: true })) return
       try { await api.deleteSession(run.sessionId); await session.refetch(); setDeleteError('') }
       catch (error) { setDeleteError(error instanceof Error ? error.message : '删除失败') }
     }}>删除 Session 历史</Button>}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type MutableRefObject } from 'react'
-import { Bot, Check, ChevronRight, Copy } from 'lucide-react'
+import { Bot, Check, ChevronRight, Copy, FilePenLine, FileSearch, Globe, Search, Terminal } from 'lucide-react'
 import type { Api } from '../../api/client.ts'
 import type { SessionDTO } from '../../api/dto.ts'
 import type { ChatTimelineItem, TimelineTool } from '../../api/journal.ts'
@@ -13,10 +13,12 @@ import { Reasoning, ReasoningContent, ReasoningTrigger } from '../../components/
 import { Response } from '../../components/ai-elements/response.tsx'
 import { Tool, ToolContent, ToolHeader, ToolInput, ToolOutput, type ToolState } from '../../components/ai-elements/tool.tsx'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../../components/ui/tooltip.tsx'
+import { ContextWindowMeter, type ContextWindowUsage } from '../../components/context-window-meter.tsx'
 import { cn, copyText, selectElementText } from '../../lib/utils.ts'
 import { randomId } from '../../lib/random.ts'
 import { useCompactAction } from './cluster-controls.tsx'
 import { SubmissionController } from './submission.ts'
+import { normalizeWorkLogEntry, type WorkLogEntry } from './work-log.ts'
 
 const formatUsageNumber = (value: number | undefined) => value === undefined ? null : new Intl.NumberFormat('zh-CN').format(value)
 const formatToolValue = (value: unknown) => {
@@ -25,6 +27,7 @@ const formatToolValue = (value: unknown) => {
   try { return JSON.stringify(value, null, 2) } catch { return String(value) }
 }
 const toolState = (tool: TimelineTool): ToolState => tool.status === 'running' ? 'input-available' : tool.status === 'completed' ? 'output-available' : tool.status === 'cancelled' ? 'output-denied' : 'output-error'
+const workLogIcons: Record<NonNullable<WorkLogEntry['action']>, typeof Terminal> = { command: Terminal, read: FileSearch, edit: FilePenLine, browser: Globe, search: Search }
 
 export function TimelineEntry({ entry, onOpenContext }: { entry: ChatTimelineItem; onOpenContext?: () => void }) {
   if (entry.kind === 'usage') {
@@ -42,10 +45,12 @@ export function TimelineEntry({ entry, onOpenContext }: { entry: ChatTimelineIte
   if (entry.kind === 'notice') return <div role={entry.tone === 'error' ? 'alert' : 'status'} className={cn('ml-12 rounded-2xl px-4 py-3 text-sm shadow-sm', entry.tone === 'error' ? 'border border-red-500/30 bg-red-500/15 text-red-200' : 'border border-border bg-card/70 text-muted-foreground')}><p className="whitespace-pre-wrap break-words leading-6">{entry.text}</p></div>
   if (entry.kind === 'reasoning') return <div className="ml-12"><Reasoning duration={entry.duration}><ReasoningTrigger duration={entry.duration} running={entry.running} /><ReasoningContent>{entry.text}</ReasoningContent></Reasoning></div>
   if (entry.kind === 'tool') {
+    const presentation = normalizeWorkLogEntry(entry)
+    const Icon = presentation.action ? workLogIcons[presentation.action] : Terminal
     const input = formatToolValue(entry.input)
     const output = entry.output || (!input ? '等待工具输出…' : '')
-    return <div className="ml-12"><Tool defaultOpen={entry.status === 'running'}><ToolHeader title={entry.exitCode == null ? entry.toolName : `${entry.toolName} · exit ${entry.exitCode}`} state={toolState(entry)} />
-      <ToolContent>{input && <ToolInput input={entry.input} />}<ToolOutput output={output} errorText={entry.status === 'failed' ? output || '工具执行失败' : undefined} /></ToolContent>
+    return <div className={cn('ml-12 rounded-2xl', presentation.tone === 'error' && 'border border-red-500/30 bg-red-500/10')}><Tool defaultOpen={entry.status === 'running'}><ToolHeader title={presentation.toolTitle} state={toolState(entry)} icon={<Icon className={cn('size-4', presentation.tone === 'error' && 'text-red-300')} />} />
+      <ToolContent>{presentation.detail && <p className={cn('mb-2 whitespace-pre-wrap break-all text-xs text-muted-foreground', presentation.tone === 'error' && 'text-red-200')}>{presentation.detail}</p>}{presentation.changedFiles?.length ? <ul className="mb-2 space-y-1 text-xs text-muted-foreground" aria-label="变更文件">{presentation.changedFiles.map(file => <li key={file} className="rounded-md bg-muted/60 px-2 py-1 font-mono">{file}</li>)}</ul> : null}{input && <ToolInput input={entry.input} />}<ToolOutput output={output} errorText={presentation.tone === 'error' ? output || '工具执行失败' : undefined} /></ToolContent>
     </Tool></div>
   }
   return <TimelineMessage entry={entry} onOpenContext={onOpenContext} />
@@ -121,6 +126,12 @@ export function Composer({ api, controller, session, activeTurnId = null, canSen
     } catch (error) { setNotice({ tone: 'error', text: error instanceof Error ? error.message : '停止请求失败，请重试。' }) }
     finally { setCommandPending(null) }
   }
+  const metadataUsage = session.customMetadata?.wemux?.usage
+  const contextUsage: ContextWindowUsage | null = metadataUsage && (metadataUsage.usedTokens ?? metadataUsage.totalTokens) !== undefined && (metadataUsage.maxTokens ?? metadataUsage.contextWindow) !== undefined ? {
+    usedTokens: metadataUsage.usedTokens ?? metadataUsage.totalTokens!,
+    maxTokens: metadataUsage.maxTokens ?? metadataUsage.contextWindow!,
+    ...(metadataUsage.compactThreshold !== undefined ? { compactThreshold: metadataUsage.compactThreshold } : {}),
+  } : null
   const compact = async () => {
     if (!api || !canControl || running || commandPending) {
       setNotice({ tone: 'error', text: running ? '请先停止当前回合，再压缩上下文。' : '当前无法压缩上下文，请检查连接或权限。' })
@@ -135,7 +146,7 @@ export function Composer({ api, controller, session, activeTurnId = null, canSen
     else if (name === '/stop') void stop()
     else setNotice({ tone: 'info', text: '可用命令：/compact 压缩上下文；/stop 停止当前回合；/help 显示本帮助。Enter 发送，Shift+Enter 换行。' })
   }
-  return <div className="conversation-composer shrink-0 px-3 py-3 sm:px-6 sm:py-4"><div className="conversation-content mx-auto max-w-4xl"><PromptInput className="relative" onSubmit={message => submitRef.current(message)}>
+  return <div className="conversation-composer shrink-0 px-3 py-3 sm:px-6 sm:py-4"><div className="conversation-content mx-auto max-w-4xl"><ContextWindowMeter usage={contextUsage} onCompact={() => void compact()} compactDisabled={!api || !canControl || running || Boolean(commandPending)} /><PromptInput className="relative" onSubmit={message => submitRef.current(message)}>
     <ComposerContents session={session} controller={controller} state={state} canSend={canSend} blockedReason={blockedReason} running={running} canControl={canControl} retry={retry} hint={hint} notice={notice} setNotice={setNotice} commandPending={commandPending} stop={stop} visibleCommands={visibleCommands} executeCommand={executeCommand} submitRef={submitRef} sendWithAttachmentsRef={sendWithAttachmentsRef} />
   </PromptInput></div></div>
 }

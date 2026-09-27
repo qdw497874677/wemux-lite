@@ -15,6 +15,8 @@ import { CreateDialog, type CreateKind } from '../../components/create-dialog'
 import { WorkerEnrollmentDialog } from '../../components/worker-enrollment-dialog'
 import { ClusterPage } from '../../components/cluster-page'
 import { cn } from '../../lib/utils'
+import { useConfirmDialog } from '../../components/ui/confirm-dialog.tsx'
+import { Skeleton } from '../../components/ui/skeleton.tsx'
 import { projectNavigationItems } from '../../components/navigation-items.ts'
 import { formatChineseTime, formatRelativeTime, runtimeStateLabel, workerStateLabel, workspaceStateLabel } from '../../lib/display'
 
@@ -37,6 +39,14 @@ export function Sidebar({ projects, projectId, section, workspaces, sessions, se
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   const currentSection = section === 'tasks' ? 'board' : section
   const workspaceName = (workspaceId: string) => workspaces.find(item => item.id === workspaceId)?.name ?? workspaceId
+  const confirm = useConfirmDialog()
+  const [editingSessionId, setEditingSessionId] = useState('')
+  const [editingTitle, setEditingTitle] = useState('')
+  const finishRename = (session: SessionDTO) => {
+    const title = editingTitle.trim()
+    setEditingSessionId('')
+    if (title && title !== session.title) void onManageSession(session.id, { title })
+  }
   return <aside className="flex h-full min-h-0 flex-col border-r border-border bg-card/40">
     <div className="shrink-0 border-b border-border p-2.5">
       <DropdownMenu>
@@ -69,14 +79,14 @@ export function Sidebar({ projects, projectId, section, workspaces, sessions, se
         <Button variant="ghost" iconOnly size="icon-xs" className="size-7 rounded-md" aria-label="新建会话" disabled={!connected || !projectId} onClick={() => onCreate('session')}><Plus className="size-3.5" /></Button>
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-        {projectLoading ? <p className="px-2 py-3 text-xs text-muted-foreground">正在加载会话…</p> : visibleSessions.map(session => {
+        {projectLoading ? <div className="space-y-2 px-2 py-3" role="status" aria-label="正在加载会话"><Skeleton className="h-12 w-full" /><Skeleton className="h-12 w-5/6" /><Skeleton className="h-12 w-full" /></div> : visibleSessions.map(session => {
           const fullDetails = `${session.title}\n工作区：${workspaceName(session.workspaceId)}\n智能体 / 模型：${session.agentKey} / ${session.modelId || '默认模型'}\n状态：${runtimeStateLabel[session.runtimeState]}\n更新：${formatChineseTime(session.updatedAt)}`
           return <div key={session.id} className="group flex items-center gap-1">
             <button type="button" title={fullDetails} aria-current={session.id === sessionId ? 'true' : undefined} className={cn('min-w-0 flex-1 rounded-md px-2.5 py-2 text-left text-muted-foreground hover:bg-accent hover:text-foreground', session.id === sessionId && 'bg-accent text-foreground')} onClick={() => onSession(session.id)}>
-              <span className="block truncate text-sm font-medium">{session.title}</span>
+              {editingSessionId === session.id ? <Input autoFocus aria-label="会话标题" className="h-7 px-2 text-sm" value={editingTitle} onClick={event => event.stopPropagation()} onChange={event => setEditingTitle(event.target.value)} onBlur={() => finishRename(session)} onKeyDown={event => { event.stopPropagation(); if (event.key === 'Enter') finishRename(session); if (event.key === 'Escape') setEditingSessionId('') }} /> : <span className="block truncate text-sm font-medium" onDoubleClick={event => { event.stopPropagation(); setEditingSessionId(session.id); setEditingTitle(session.title) }}>{session.title}</span>}
               <span className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground"><span className={cn('size-1.5 shrink-0 rounded-full', runtimeDotClass[session.runtimeState])} aria-label={runtimeStateLabel[session.runtimeState]} role="img" /><span>{formatRelativeTime(session.updatedAt)}</span></span>
             </button>
-            <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" iconOnly size="icon-xs" className="size-7 shrink-0 rounded-md opacity-0 group-hover:opacity-100 focus:opacity-100" aria-label={`会话操作 ${session.title}`}><MoreHorizontal className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => { const title = window.prompt('重命名会话', session.title)?.trim(); if (title && title !== session.title) void onManageSession(session.id, { title }) }}>重命名</DropdownMenuItem><DropdownMenuItem onSelect={() => { if (window.confirm(`归档会话「${session.title}」？归档后将不再显示在会话列表中。`)) void onManageSession(session.id, { archived: true }) }}>归档</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
+            <DropdownMenu><DropdownMenuTrigger asChild><Button variant="ghost" iconOnly size="icon-xs" className="size-7 shrink-0 rounded-md opacity-0 group-hover:opacity-100 focus:opacity-100" aria-label={`会话操作 ${session.title}`}><MoreHorizontal className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end"><DropdownMenuItem onSelect={() => { setEditingSessionId(session.id); setEditingTitle(session.title) }}>重命名</DropdownMenuItem><DropdownMenuItem onSelect={() => { void confirm({ title: '归档会话', description: `归档会话「${session.title}」？归档后将不再显示在会话列表中。`, confirmLabel: '归档', danger: true }).then(confirmed => { if (confirmed) void onManageSession(session.id, { archived: true }) }) }}>归档</DropdownMenuItem></DropdownMenuContent></DropdownMenu>
           </div>
         })}
         {!projectLoading && !visibleSessions.length && <p className="px-2 py-3 text-xs leading-5 text-muted-foreground">{normalizedQuery ? '没有匹配的会话' : projectId ? '暂无会话，从上方开始新对话。' : connected ? '请先选择项目。' : '连接服务端后显示会话。'}</p>}

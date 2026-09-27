@@ -7,6 +7,7 @@ import { workerStateLabel } from '@/lib/display'
 
 export const selectClass = 'h-10 w-full rounded-lg border border-input bg-card px-3 text-sm text-foreground shadow-sm transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/25 focus-visible:outline-none'
 import { CreationDialog } from './creation-dialog'
+import { useConfirmDialog } from './ui/confirm-dialog.tsx'
 
 export type CreateKind = 'project' | 'workspace'
 const titles: Record<CreateKind, string> = { project: '新建项目', workspace: '新建工作区' }
@@ -16,6 +17,7 @@ export function CreateDialog({ kind, api, teamId, projectId, defaultWorkspaceId 
   workers: WorkerDTO[]; workspaces: WorkspaceDTO[]
   onClose: () => void; onCreated: (kind: CreateKind, id: string) => void
 }) {
+  const confirm = useConfirmDialog()
   const [name, setName] = useState('')
   const defaultWorkspace = workspaces.find(item => item.id === defaultWorkspaceId)
   const [workerId, setWorkerId] = useState(defaultWorkspace?.workerId ?? '')
@@ -25,7 +27,7 @@ export function CreateDialog({ kind, api, teamId, projectId, defaultWorkspaceId 
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const dirty = name !== '' || (kind !== 'project' && (workerId !== (defaultWorkspace?.workerId ?? '') || workspaceSource !== 'empty' || gitUrl !== '' || branch !== 'main'))
-  const requestClose = () => { if (!busy && (!dirty || window.confirm('放弃未保存的内容？'))) onClose() }
+  const requestClose = () => { if (busy) return; if (!dirty) { onClose(); return } void confirm({ title: '放弃未保存的内容', description: '确认关闭并放弃当前内容？', confirmLabel: '放弃', danger: true }).then(ok => { if (ok) onClose() }) }
   const selectedWorkerId = workerId || workers[0]?.id || ''
   const worker = workers.find(item => item.id === selectedWorkerId)
   const valid = Boolean(name.trim() && (kind === 'project' ? teamId : projectId) && (

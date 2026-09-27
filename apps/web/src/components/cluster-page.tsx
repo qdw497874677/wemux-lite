@@ -14,6 +14,7 @@ import { Button } from './ui/button'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 import { cn } from '../lib/utils'
 import { WorkerAccessPanel } from './worker-access.tsx'
+import { useConfirmDialog } from './ui/confirm-dialog.tsx'
 
 const heartbeatFreshMs = 120_000
 
@@ -69,6 +70,7 @@ function StageTable({ headers, rows, empty }: { headers: string[]; rows: React.R
 
 export function ClusterPage({ api, connected, canEnrollWorkers, onAddWorker, onRefresh }: { api: Api; connected: boolean; canEnrollWorkers: boolean; onAddWorker: () => void; onRefresh: () => void }) {
   const resources = useResources(api, true)
+  const confirm = useConfirmDialog()
   const client = useQueryClient()
   const workers = resources.workers.data ?? []
   const projects = resources.projects.data ?? []
@@ -158,7 +160,7 @@ export function ClusterPage({ api, connected, canEnrollWorkers, onAddWorker, onR
                     <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{shortId(worker.id)}</p>
                   </div>
                 </div>
-                {(worker.accessRole === 'owner' || worker.accessRole === 'manage') && worker.connectionState !== 'revoked' && <Button variant="ghost" size="sm" className="h-7 text-[11px] text-red-400 hover:text-red-300" disabled={Boolean(busy)} onClick={() => { if (window.confirm(`撤销 Worker「${worker.name}」？撤销后将断开连接，无法再用当前凭据接入。`)) void act(`revoke:${worker.id}`, () => api.revokeWorker(worker.id)) }}><Ban className="size-3.5" />撤销</Button>}
+                {(worker.accessRole === 'owner' || worker.accessRole === 'manage') && worker.connectionState !== 'revoked' && <Button variant="ghost" size="sm" className="h-7 text-[11px] text-red-400 hover:text-red-300" disabled={Boolean(busy)} onClick={() => { void confirm({ title: '撤销工作节点', description: `撤销 Worker「${worker.name}」？撤销后将断开连接，无法再用当前凭据接入。`, confirmLabel: '撤销', danger: true }).then(ok => { if (ok) void act(`revoke:${worker.id}`, () => api.revokeWorker(worker.id)) }) }}><Ban className="size-3.5" />撤销</Button>}
               </div>
               <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] sm:grid-cols-4">
                 <div className="rounded-md bg-muted/40 px-2.5 py-1.5"><p className="text-muted-foreground">心跳</p><p className={cn('mt-0.5 font-medium', fresh ? 'text-emerald-400' : 'text-amber-300')}>{worker.connectionState === 'online' ? heartbeatAge ?? '未知' : '离线'}</p></div>
@@ -190,7 +192,7 @@ export function ClusterPage({ api, connected, canEnrollWorkers, onAddWorker, onR
               <Badge key="status" variant={commandTone(command.status)}>{commandStateLabel[command.status]}</Badge>,
               <span key="age" className="text-muted-foreground">{formatAge(command.createdAt) ?? '未知'} 前</span>,
               command.status === 'pending'
-                ? <Button key="cancel" variant="ghost" size="sm" className="h-7 text-[11px] text-red-400 hover:text-red-300" disabled={busy === `cancel:${command.commandId}`} onClick={() => { if (window.confirm('取消该命令？仅尚未交付给工作节点的“等待下发”命令可取消。')) void act(`cancel:${command.commandId}`, () => api.cancelCommand(command.commandId)) }}><Ban className="size-3.5" />取消</Button>
+                ? <Button key="cancel" variant="ghost" size="sm" className="h-7 text-[11px] text-red-400 hover:text-red-300" disabled={busy === `cancel:${command.commandId}`} onClick={() => { void confirm({ title: '取消命令', description: '取消该命令？仅尚未交付给工作节点的“等待下发”命令可取消。', confirmLabel: '取消命令', danger: true }).then(ok => { if (ok) void act(`cancel:${command.commandId}`, () => api.cancelCommand(command.commandId)) }) }}><Ban className="size-3.5" />取消</Button>
                 : <span key="none" className="text-muted-foreground">—</span>,
             ])}
           />
@@ -223,7 +225,7 @@ export function ClusterPage({ api, connected, canEnrollWorkers, onAddWorker, onR
               <span key="worker">{workerName.get(session.workerId) ?? shortId(session.workerId)}</span>,
               <span key="agent" className="text-muted-foreground">{session.agentKey} / {session.modelId}</span>,
               <Badge key="state" variant={runtimeTone(session.runtimeState)}>{runtimeStateLabel[session.runtimeState]}</Badge>,
-              <Button key="delete" variant="ghost" size="sm" className="h-7 text-[11px] text-red-400 hover:text-red-300" disabled={busy === `delete:${session.id}`} onClick={() => { if (window.confirm(`删除会话「${session.title}」？该操作不可恢复。`)) void act(`delete:${session.id}`, () => api.deleteSession(session.id)) }}><TriangleAlert className="size-3.5" />删除</Button>,
+              <Button key="delete" variant="ghost" size="sm" className="h-7 text-[11px] text-red-400 hover:text-red-300" disabled={busy === `delete:${session.id}`} onClick={() => { void confirm({ title: '删除会话', description: `删除会话「${session.title}」？该操作不可恢复。`, confirmLabel: '删除', danger: true }).then(ok => { if (ok) void act(`delete:${session.id}`, () => api.deleteSession(session.id)) }) }}><TriangleAlert className="size-3.5" />删除</Button>,
             ])}
           />
         </TabsContent>
