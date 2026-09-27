@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { JournalEvent, SessionId, Timestamp, TurnId } from '@wemux/domain'
 import { createGuardedFetch } from '@wemux/connector'
 import type { OutboundDelivery } from '@wemux/server-domain'
+import type { ChannelAdapter } from '../channels/channel-adapter.ts'
 import type { ChannelRepository } from './ports/channel-repository.ts'
 import type { ProjectAccessService } from './project-access-service.ts'
 import type { SessionAccessService } from './session-access-service.ts'
@@ -17,6 +18,7 @@ export class ChannelOutbox {
   private readonly sessions: SessionAccessService
   private readonly workers: WorkerAccessService
   private readonly store: ServerStore
+  private readonly adapterFor?: (kind: import('@wemux/connector').Channel['kind']) => ChannelAdapter
 constructor(
     repository: ChannelRepository,
     projects: ProjectAccessService,
@@ -24,9 +26,10 @@ constructor(
     workers: WorkerAccessService,
     store: ServerStore,
     fetchOptions: Parameters<typeof createGuardedFetch>[0] = {},
-    guardedFetch?: typeof fetch
+    guardedFetch?: typeof fetch,
+    adapterFor?: (kind: import('@wemux/connector').Channel['kind']) => ChannelAdapter
   ) {
-    this.repository = repository; this.projects = projects; this.sessions = sessions; this.workers = workers; this.store = store; this.guardedFetch = guardedFetch ?? createGuardedFetch(fetchOptions) }
+    this.repository = repository; this.projects = projects; this.sessions = sessions; this.workers = workers; this.store = store; this.guardedFetch = guardedFetch ?? createGuardedFetch(fetchOptions); this.adapterFor = adapterFor }
 
   async projectJournal(sessionId: SessionId, events: readonly JournalEvent[]): Promise<number> {
     const bindings = (await this.bindingsForSession(sessionId)).filter(value => value.binding.enabled)
@@ -80,10 +83,17 @@ constructor(
       await this.workers.require(binding.createdBy, binding.binding.workerId, 'use')
       if (session.binding.agent.workerId !== binding.binding.workerId) return this.dead(delivery, 'Session Worker 绑定已变化', null, at)
     } catch (error) { return this.dead(delivery, error instanceof Error ? error.message : '授权已撤销', null, at) }
+    const adapter = this.adapterFor?.(channel.kind)
+    if (adapter) {
+      let result: Awaited<ReturnType<ChannelAdapter['pushReply']>>
+      try { result = await adapter.pushReply(delivery) } catch (error) { return this.retry(delivery, error instanceof Error ? error.message : '网络错误', null, at) }
+      if (result.kind === 'delivered') { await this.repository.updateOutbound({ ...delivery, status: 'delivered', leaseExpiresAt: null, responseStatus: result.status, diagnostic: null, deliveredAt: at, updatedAt: at }); return }
+      if (result.kind === 'retry') return this.retry(delivery, result.diagnostic ?? '投递暂时失败', result.status, at, result.retryAfterMs ?? 0)
+      return this.dead(delivery, result.diagnostic ?? '投递永久失败', result.status, at)
+    }
     let response: Response
-    try {
-      response = await this.guardedFetch(delivery.callbackUrl, { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': providerId(delivery.id) }, body: JSON.stringify({ deliveryId: delivery.id, channelId: delivery.channelId, bindingId: delivery.bindingId, sessionId: delivery.sessionId, text: delivery.content }) })
-    } catch (error) { return this.retry(delivery, error instanceof Error ? error.message : '网络错误', null, at) }
+    try { response = await this.guardedFetch(delivery.callbackUrl, { method: 'POST', headers: { 'content-type': 'application/json', 'idempotency-key': providerId(delivery.id) }, body: JSON.stringify({ deliveryId: delivery.id, channelId: delivery.channelId, bindingId: delivery.bindingId, sessionId: delivery.sessionId, text: delivery.content }) }) }
+    catch (error) { return this.retry(delivery, error instanceof Error ? error.message : '网络错误', null, at) }
     await response.body?.cancel().catch(() => undefined)
     if (response.ok) { await this.repository.updateOutbound({ ...delivery, status: 'delivered', leaseExpiresAt: null, responseStatus: response.status, diagnostic: null, deliveredAt: at, updatedAt: at }); return }
     if (response.status === 429 || response.status >= 500) return this.retry(delivery, `回调返回 HTTP ${response.status}`, response.status, at, retryAfter(response))

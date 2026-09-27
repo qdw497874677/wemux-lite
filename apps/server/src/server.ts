@@ -26,6 +26,9 @@ import { ChannelService } from './application/channel-service.ts'
 import { ChannelRouter } from './application/channel-router.ts'
 import { ChannelOutbox } from './application/channel-outbox.ts'
 import { GenericWebhookAdapter } from './channels/generic-webhook-adapter.ts'
+import { FeishuAdapter } from './channels/feishu/adapter.ts'
+import { FeishuTokenProvider } from './channels/feishu/token-provider.ts'
+import type { ChannelAdapter } from './channels/channel-adapter.ts'
 import { AesGcmSecretCodec } from '@wemux/connector'
 import { SqliteCanvasLayoutRepository } from './storage/sqlite/canvas-layout-repository.ts'
 import { SqliteConnectorRepository } from './storage/sqlite/connector-repository.ts'
@@ -66,8 +69,10 @@ export interface WemuxServerOptions {
   googleVerifier?: GoogleTokenVerifier
   /** Channel token encryption key; defaults to WEMUX_CONNECTOR_ENCRYPTION_KEY. */
   channelEncryptionKey?: string
-  /** Test/deployment guarded-fetch override for Channel callbacks. */
+  /** Test/deployment guarded-fetch override for Channel callbacks and Feishu OpenAPI. */
   channelFetch?: typeof fetch
+  /** Override Feishu OpenAPI root for local protocol fixtures. */
+  feishuApiBaseUrl?: string
 }
 
 /** 邮件配置错误不阻断控制面启动：降级为“不可用 + 原因”，由 /auth/options 公开。 */
@@ -141,8 +146,11 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const channelCodec = encryptionKey ? new AesGcmSecretCodec({ currentKey: encryptionKey, previousKeys: process.env.WEMUX_CONNECTOR_ENCRYPTION_PREVIOUS_KEYS?.split(',').map(value => value.trim()).filter(Boolean) }) : null
   const channels = new ChannelService(channelRepository, channelCodec, projects, sessionAccess, workerAccess)
   const channelRouter = new ChannelRouter(channelRepository, sessionAccess, projects, workerAccess, service)
-  const channelOutbox = new ChannelOutbox(channelRepository, projects, sessionAccess, workerAccess, store, { deploymentAllowsPrivateNetwork: process.env.WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK === 'true', connectorAllowsPrivateNetwork: true }, options.channelFetch)
-  const genericWebhook = new GenericWebhookAdapter(channelRepository, channelCodec)
+  const genericWebhook = new GenericWebhookAdapter(channelRepository, channelCodec, options.channelFetch)
+  const feishuApiBaseUrl = options.feishuApiBaseUrl ?? 'https://open.feishu.cn/open-apis'
+  const feishu = new FeishuAdapter(channelRepository, channelCodec, new FeishuTokenProvider(options.channelFetch ?? fetch, Date.now, undefined, feishuApiBaseUrl), feishuApiBaseUrl)
+  const adapters = new Map<string, ChannelAdapter>([['generic_webhook', genericWebhook], ['feishu', feishu]])
+  const channelOutbox = new ChannelOutbox(channelRepository, projects, sessionAccess, workerAccess, store, { deploymentAllowsPrivateNetwork: process.env.WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK === 'true', connectorAllowsPrivateNetwork: true }, options.channelFetch, kind => adapters.get(kind)!)
   const workers = new WorkerService(store, notifications, (workerId, report) => connectors.report(workerId, report), async (sessionId, events) => { await channelOutbox.projectJournal(sessionId, events); setImmediate(() => void channelOutbox.drain().catch(() => undefined)) })
   const workerGateway = { send: (workerId: import('@wemux/domain').WorkerId, payload: import('@wemux/wire-protocol').ServerPayload) => {
     if (!gateway) throw new Error('Worker gateway is not ready')
@@ -184,6 +192,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
     channelRouter,
     channelOutbox,
     genericWebhook,
+    feishu,
   }))
   gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))
   let closed = false

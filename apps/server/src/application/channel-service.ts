@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import type { ProjectId, Timestamp, UserId } from '@wemux/domain'
-import type { Channel, ChannelBinding, ChannelBindingId, ChannelId, ConnectorCredentialId, GenericWebhookChannel } from '@wemux/connector'
+import type { Channel, ChannelBinding, ChannelBindingId, ChannelId, ConnectorCredentialId, FeishuChannel, GenericWebhookChannel } from '@wemux/connector'
 import { stableFingerprint, type SecretCodec } from '@wemux/connector'
 import type { ChannelBindingMutationResult, ChannelBindingView, ChannelMutationResult, OutboundDelivery } from '@wemux/server-domain'
 import { AppError } from './errors.ts'
@@ -30,13 +30,24 @@ constructor(
   async bindings(actorId: UserId, projectId: ProjectId, channelId?: ChannelId): Promise<readonly ChannelBindingView[]> { await this.projects.require(actorId, projectId, 'viewer'); return this.repository.listBindings(projectId, channelId) }
   async deliveries(actorId: UserId, projectId: ProjectId): Promise<{ inbound: readonly import('@wemux/server-domain').InboundDelivery[]; outbound: readonly OutboundDelivery[] }> { await this.projects.require(actorId, projectId, 'viewer'); return { inbound: await this.repository.listInbound(projectId, 100), outbound: await this.repository.listOutbound(projectId, 100) } }
 
-  async create(actorId: UserId, input: WriteInput & { readonly name: string; readonly callbackUrl: string | null; readonly sourceCidrs: readonly string[] }): Promise<ChannelMutationResult> {
+  async create(actorId: UserId, input: WriteInput & ({ readonly kind?: 'generic_webhook'; readonly name: string; readonly callbackUrl: string | null; readonly sourceCidrs: readonly string[] } | { readonly kind: 'feishu'; readonly name: string; readonly appId: string; readonly appSecret: string; readonly verificationToken: string; readonly encryptKey: string | null })): Promise<ChannelMutationResult> {
     await this.projects.require(actorId, input.projectId, 'manager')
-    const name = required(input.name, 200, 'name'), callbackUrl = input.callbackUrl === null ? null : httpUrl(input.callbackUrl), sourceCidrs = input.sourceCidrs.map(value => required(value, 100, 'sourceCidrs'))
-    const fingerprint = this.identity(input, { operation: 'create', name, callbackUrl, sourceCidrs })
-    const replay = await this.replayExisting<ChannelMutationResult>(input, fingerprint)
-    if (replay) return replay
     if (!this.codec?.encrypted) throw new AppError(503, 'Channel credential encryption is unavailable', 'credential_unavailable')
+    const name = required(input.name, 200, 'name')
+    if (input.kind === 'feishu') {
+      const appId = required(input.appId, 200, 'appId'), appSecret = required(input.appSecret, 500, 'appSecret'), verificationToken = required(input.verificationToken, 500, 'verificationToken'), encryptKey = input.encryptKey === null || !input.encryptKey.trim() ? null : required(input.encryptKey, 500, 'encryptKey')
+      const fingerprint = this.identity(input, { operation: 'create', kind: 'feishu', name, appId, appSecret, verificationToken, encryptKey })
+      const replay = await this.replayExisting<ChannelMutationResult>(input, fingerprint); if (replay) return replay
+      const at = now(), id = randomUUID() as ChannelId, credentialId = randomUUID() as ConnectorCredentialId
+      const channel: FeishuChannel = { id, projectId: input.projectId, name, kind: 'feishu', credentialRef: credentialId, credentialAvailability: 'available', enabled: true, revision: 1, config: { appIdHint: appId.length > 8 ? `${appId.slice(0, 4)}…${appId.slice(-4)}` : appId, verificationMode: encryptKey ? 'encrypted' : 'verification_token', acceptEventSchema: '2.0', tenantKey: null }, createdAt: at, updatedAt: at }
+      const ciphertext = await this.codec.encode(JSON.stringify({ appId, appSecret, verificationToken, encryptKey }), { owner: { kind: 'channel', id }, credentialId, authType: 'custom_credential', revision: 1 })
+      const result: ChannelMutationResult = { channel, replayed: false }
+      await this.repository.createChannel(channel, { credentialId, channelId: id, ciphertext, revision: 1, createdAt: at, updatedAt: at }, null, request(input, fingerprint, 'create', result))
+      return result
+    }
+    const callbackUrl = input.callbackUrl === null ? null : httpUrl(input.callbackUrl), sourceCidrs = input.sourceCidrs.map(value => required(value, 100, 'sourceCidrs'))
+    const fingerprint = this.identity(input, { operation: 'create', name, callbackUrl, sourceCidrs })
+    const replay = await this.replayExisting<ChannelMutationResult>(input, fingerprint); if (replay) return replay
     const at = now(), id = randomUUID() as ChannelId, credentialId = randomUUID() as ConnectorCredentialId, token = randomBytes(32).toString('base64url')
     const channel: GenericWebhookChannel = { id, projectId: input.projectId, name, kind: 'generic_webhook', credentialRef: credentialId, credentialAvailability: 'available', enabled: true, revision: 1, config: { tokenVersion: 1, previousTokenValidUntil: null, replayWindowSeconds: 300, sourceCidrs }, createdAt: at, updatedAt: at }
     const ciphertext = await this.codec.encode(token, { owner: { kind: 'channel', id }, credentialId, authType: 'api_key', revision: 1 })
@@ -63,11 +74,11 @@ constructor(
     const session = await this.sessions.require(actorId, input.sessionId, 'control')
     if (session.projectId !== channel.projectId) throw new AppError(409, 'Channel and Session Project mismatch', 'scope_denied')
     await this.workers.require(actorId, session.binding.agent.workerId, 'use')
-    const externalConversationKey = required(input.externalConversationKey, 500, 'externalConversationKey'), callbackUrl = httpUrl(input.callbackUrl), senderAllowlist = input.senderAllowlist.map(value => required(value, 200, 'senderAllowlist'))
-    const fingerprint = this.identity(input, { operation: 'binding.create', channelId: input.channelId, externalConversationKey, sessionId: input.sessionId, callbackUrl, senderAllowlist })
+    const externalConversationKey = required(input.externalConversationKey, 500, 'externalConversationKey'), requestedCallbackUrl = channel.kind === 'feishu' ? input.callbackUrl : httpUrl(input.callbackUrl), callbackUrl = channel.kind === 'feishu' ? externalConversationKey : requestedCallbackUrl, senderAllowlist = input.senderAllowlist.map(value => required(value, 200, 'senderAllowlist'))
+    const fingerprint = this.identity(input, { operation: 'binding.create', channelId: input.channelId, externalConversationKey, sessionId: input.sessionId, callbackUrl: requestedCallbackUrl, senderAllowlist })
     const replay = await this.replayExisting<ChannelBindingMutationResult>(input, fingerprint); if (replay) return replay
     const at = now(), id = randomUUID() as ChannelBindingId
-    const binding: ChannelBinding = { id, projectId: input.projectId, channelId: input.channelId, externalConversationKey, sessionId: input.sessionId, workerId: session.binding.agent.workerId, triggerPolicy: { kind: 'always' }, senderAllowlist, revision: 1, enabled: true, createdAt: at, updatedAt: at }
+    const binding: ChannelBinding = { id, projectId: input.projectId, channelId: input.channelId, externalConversationKey, sessionId: input.sessionId, workerId: session.binding.agent.workerId, triggerPolicy: channel.kind === 'feishu' ? { kind: 'private_chat_or_mention' } : { kind: 'always' }, senderAllowlist, revision: 1, enabled: true, createdAt: at, updatedAt: at }
     const result = { binding, callbackUrl, replayed: false }
     await this.repository.createBinding({ binding, callbackUrl, createdBy: actorId }, request(input, fingerprint, 'binding.create', result))
     return result

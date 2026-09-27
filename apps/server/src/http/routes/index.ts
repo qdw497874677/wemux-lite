@@ -3,6 +3,7 @@ import { authRoutes } from './auth-routes.ts'
 import { canvasRoutes } from './canvas-routes.ts'
 import { channelRoutes } from './channel-routes.ts'
 import { genericWebhookRoutes } from './generic-webhook-routes.ts'
+import { feishuRoutes } from './feishu-routes.ts'
 import { connectorRoutes } from './connector-routes.ts'
 import { projectRoutes } from './project-routes.ts'
 import { publicRoutes } from './public-routes.ts'
@@ -17,6 +18,7 @@ import { workspaceRoutes } from './workspace-routes.ts'
 export const routes: readonly RouteDescriptor[] = [
   ...publicRoutes,
   ...genericWebhookRoutes,
+  ...feishuRoutes,
   ...authRoutes,
   ...teamRoutes,
   ...canvasRoutes,

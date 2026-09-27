@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, statSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createWemuxServer } from './server.js'
+import { createWemuxServer } from './server.ts'
 
 const administratorEmails = process.env.WEMUX_ADMIN_EMAILS?.trim()
 if (!administratorEmails) {

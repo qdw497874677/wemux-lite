@@ -21,7 +21,7 @@ export interface ChannelRequestRecord {
   readonly projectId: ProjectId
   readonly requestId: string
   readonly fingerprint: string
-  readonly operation: 'create' | 'enable' | 'disable' | 'binding.create' | 'binding.enable' | 'binding.disable' | 'outbound.replay'
+  readonly operation: 'create' | 'enable' | 'disable' | 'binding.create' | 'binding.enable' | 'binding.disable' | 'outbound.replay' | 'test'
   readonly result: unknown
   readonly createdAt: Timestamp
 }
@@ -51,6 +51,7 @@ export interface ChannelRepository {
   updateBinding(record: ChannelBindingRecord, expectedRevision: number, request: ChannelRequestRecord): Promise<boolean>
 
   acceptInbound(input: AcceptInboundInput): Promise<AcceptInboundResult>
+  purgeInboundBefore(before: Timestamp): Promise<number>
   claimAcceptedInbound(limit: number): Promise<readonly InboundDelivery[]>
   updateInbound(delivery: InboundDelivery): Promise<void>
   listInbound(projectId: ProjectId, limit: number): Promise<readonly InboundDelivery[]>
