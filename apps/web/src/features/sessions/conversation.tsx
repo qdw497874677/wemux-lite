@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type MutableRefObject } from 'react'
 import { Bot, Check, ChevronDown, ChevronRight, Copy, FilePenLine, FileSearch, Globe, Pencil, RotateCcw, Search, Terminal, Trash2 } from 'lucide-react'
 import type { Api } from '../../api/client.ts'
-import type { AgentDTO, SessionDTO } from '../../api/dto.ts'
+import type { AgentDTO, FileDiffDTO, SessionDTO } from '../../api/dto.ts'
 import type { ChatTimelineItem, TimelineTool } from '../../api/journal.ts'
 import { timelineMessageToUIMessage } from '../../api/journal.ts'
 import { Action, ActionsBar } from '../../components/ai-elements/actions.tsx'
@@ -24,6 +24,7 @@ import { SubmissionController } from './submission.ts'
 import { normalizeWorkLogEntry, type WorkLogEntry } from './work-log.ts'
 import { terminalContextText, useTerminalContext } from '../terminal/terminal-context.ts'
 import { commandGroups, commandsForAgent, compactRoute, isAgentCommandInput, type SlashCommand } from './slash-commands.ts'
+import { DiffBlock, DiffFileToggle } from '../files/diff-block.tsx'
 
 const formatUsageNumber = (value: number | undefined) => value === undefined ? null : new Intl.NumberFormat('zh-CN').format(value)
 const formatToolValue = (value: unknown) => {
@@ -65,7 +66,7 @@ export function useMessageActions(controller: SubmissionController, sessionId: s
   return { hiddenMessageIds, localNotice, messageActions }
 }
 
-export function TimelineEntry({ entry, onOpenContext, messageActions }: { entry: ChatTimelineItem; onOpenContext?: () => void; messageActions?: MessageActions }) {
+export function TimelineEntry({ entry, api, sessionId, onOpenContext, messageActions }: { entry: ChatTimelineItem; api?: Api; sessionId?: string; onOpenContext?: () => void; messageActions?: MessageActions }) {
   if (entry.kind === 'usage') {
     const parts = [
       entry.usage.completeness === 'partial' ? '部分统计' : null,
@@ -86,10 +87,31 @@ export function TimelineEntry({ entry, onOpenContext, messageActions }: { entry:
     const input = formatToolValue(entry.input)
     const output = entry.output || (!input ? '等待工具输出…' : '')
     return <div className={cn('group rounded-xl', presentation.tone === 'error' && 'border border-red-500/30 bg-red-500/10')} tabIndex={entry.timestamp ? 0 : undefined}><Tool defaultOpen={entry.status === 'running'}><div className="flex items-center gap-2"><div className="min-w-0 flex-1"><ToolHeader title={presentation.toolTitle} state={toolState(entry)} icon={<Icon className={cn('size-4', presentation.tone === 'error' && 'text-red-300')} />} /></div><TimelineTimestamp timestamp={entry.timestamp} className="mr-3 shrink-0" /></div>
-      <ToolContent>{presentation.detail && <p className={cn('mb-2 whitespace-pre-wrap break-all text-xs text-muted-foreground', presentation.tone === 'error' && 'text-red-200')}>{presentation.detail}</p>}{presentation.changedFiles?.length ? <ul className="mb-2 space-y-1 text-xs text-muted-foreground" aria-label="变更文件">{presentation.changedFiles.map(file => <li key={file} className="rounded-md bg-muted/60 px-2 py-1 font-mono">{file}</li>)}</ul> : null}{input && <ToolInput input={entry.input} />}<ToolOutput output={output} errorText={presentation.tone === 'error' ? output || '工具执行失败' : undefined} /></ToolContent>
+      <ToolContent>{presentation.detail && <p className={cn('mb-2 whitespace-pre-wrap break-all text-xs text-muted-foreground', presentation.tone === 'error' && 'text-red-200')}>{presentation.detail}</p>}{presentation.changedFiles?.length ? <ChangedFiles api={api} sessionId={sessionId} files={presentation.changedFiles} /> : null}{input && <ToolInput input={entry.input} />}<ToolOutput output={output} errorText={presentation.tone === 'error' ? output || '工具执行失败' : undefined} /></ToolContent>
     </Tool></div>
   }
   return <TimelineMessage entry={entry} onOpenContext={onOpenContext} messageActions={messageActions} />
+}
+
+type DiffLoad = { state: 'loading' } | { state: 'ready'; diff: FileDiffDTO } | { state: 'error'; message: string }
+function ChangedFiles({ api, sessionId, files }: { api?: Api; sessionId?: string; files: readonly string[] }) {
+  const [open, setOpen] = useState<Set<string>>(() => new Set())
+  const [loads, setLoads] = useState<Record<string, DiffLoad>>({})
+  const toggle = (file: string) => {
+    const nextOpen = !open.has(file)
+    setOpen(current => { const next = new Set(current); if (nextOpen) next.add(file); else next.delete(file); return next })
+    if (!nextOpen || loads[file] || !api || !sessionId) return
+    setLoads(current => ({ ...current, [file]: { state: 'loading' } }))
+    void api.diffSessionFile(sessionId, file).then(
+      diff => setLoads(current => ({ ...current, [file]: { state: 'ready', diff } })),
+      error => setLoads(current => ({ ...current, [file]: { state: 'error', message: error instanceof Error ? error.message : 'diff 加载失败' } })),
+    )
+  }
+  return <ul className="mb-2 space-y-1.5 text-xs text-muted-foreground" aria-label="变更文件">{files.map(file => {
+    const expanded = open.has(file)
+    const load = loads[file]
+    return <li key={file} className="space-y-1.5"><DiffFileToggle open={expanded} onClick={() => toggle(file)}>{file}</DiffFileToggle>{expanded && <div className="ml-2">{!api || !sessionId ? <p className="rounded-md border border-border/70 px-3 py-2">当前视图无法请求文件 diff</p> : !load || load.state === 'loading' ? <p role="status" className="rounded-md border border-border/70 px-3 py-2">正在加载 diff…</p> : load.state === 'error' ? <p role="alert" className="rounded-md border border-error-border bg-error-surface px-3 py-2 text-error-foreground">{load.message}</p> : <DiffBlock path={file} diff={load.diff} />}</div>}</li>
+  })}</ul>
 }
 
 function TimelineMessage({ entry, onOpenContext, messageActions }: { entry: Extract<ChatTimelineItem, { kind: 'message' }>; onOpenContext?: () => void; messageActions?: MessageActions }) {

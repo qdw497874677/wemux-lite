@@ -67,6 +67,48 @@ export const sessionRoutes: readonly RouteDescriptor[] = [
     const maxBytes = body.maxBytes === undefined ? 1024 * 1024 : integer(body.maxBytes, 'maxBytes', 1, 1024 * 1024)
     context.json(200, await context.sessionFiles.read(id, subpath, maxBytes))
   } },
+  { method: 'POST', pattern: '/sessions/:sessionId/fs/diff', auth: 'authenticated', handler: async context => {
+    if (!context.sessionFiles) throw new AppError(404, 'Not found')
+    const id = context.params.sessionId as SessionId
+    if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.operator()
+    const body = object(await context.readBody()), subpath = body.subpath
+    if (typeof subpath !== 'string' || !subpath || subpath.length > 4096 || subpath.includes('\0')) throw new AppError(400, 'Invalid subpath')
+    context.json(200, await context.sessionFiles.diff(id, subpath))
+  } },
+  { method: 'POST', pattern: '/sessions/:sessionId/terminal', auth: 'authenticated', handler: async context => {
+    if (!context.sessionTerminals) throw new AppError(404, 'Not found')
+    const id = context.params.sessionId as SessionId
+    if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.operator()
+    const body = object(await context.readBody())
+    context.json(201, await context.sessionTerminals.request(id, { operation: 'create', cols: integer(body.cols ?? 80, 'cols', 2, 500), rows: integer(body.rows ?? 24, 'rows', 2, 300) }))
+  } },
+  { method: 'POST', pattern: '/sessions/:sessionId/terminal/:terminalId/write', auth: 'authenticated', handler: async context => {
+    if (!context.sessionTerminals) throw new AppError(404, 'Not found')
+    const id = context.params.sessionId as SessionId
+    if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.operator()
+    const body = object(await context.readBody())
+    if (typeof body.data !== 'string' || body.data.length > 65536) throw new AppError(400, 'Invalid terminal input')
+    context.json(200, await context.sessionTerminals.request(id, { operation: 'write', terminalId: context.params.terminalId!, data: body.data }))
+  } },
+  { method: 'POST', pattern: '/sessions/:sessionId/terminal/:terminalId/resize', auth: 'authenticated', handler: async context => {
+    if (!context.sessionTerminals) throw new AppError(404, 'Not found')
+    const id = context.params.sessionId as SessionId
+    if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.operator()
+    const body = object(await context.readBody())
+    context.json(200, await context.sessionTerminals.request(id, { operation: 'resize', terminalId: context.params.terminalId!, cols: integer(body.cols, 'cols', 2, 500), rows: integer(body.rows, 'rows', 2, 300) }))
+  } },
+  { method: 'POST', pattern: '/sessions/:sessionId/terminal/:terminalId/dispose', auth: 'authenticated', handler: async context => {
+    if (!context.sessionTerminals) throw new AppError(404, 'Not found')
+    const id = context.params.sessionId as SessionId
+    if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.operator()
+    context.json(200, await context.sessionTerminals.request(id, { operation: 'dispose', terminalId: context.params.terminalId! }))
+  } },
+  { method: 'GET', pattern: '/sessions/:sessionId/terminal/stream', auth: 'authenticated', handler: async context => {
+    if (!context.terminalStreams) throw new AppError(404, 'Not found')
+    const id = context.params.sessionId as SessionId
+    if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.service.getSession(id)
+    context.terminalStreams.open(context.response, id)
+  } },
   { method: 'POST', pattern: '/sessions/:sessionId/messages', auth: 'authenticated', handler: async context => {
     const actor = context.sessionAccess ? await context.actor() : (await context.operator(), undefined)
     context.json(202, await context.service.enqueue(context.params.sessionId as SessionId, await context.readBody(), actor))

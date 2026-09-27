@@ -6,7 +6,7 @@ import type {
   ApprovalDecisionDTO, RuntimeCommandDTO, PatchSessionDTO, CommandResultDTO,
   AccountPayloadDTO, AccountViewDTO, AcceptedEmailDTO, AccountSecurityViewDTO, AuthOptionsDTO, CommandDTO, CreateEnrollmentTokenDTO, CreateProjectDTO,
   CreateSessionDTO, CreateWorkspaceDTO, EmailChangeAcceptedDTO, EmailChangeConfirmedDTO, EnrollmentTokenDTO, EventsPageDTO, GoogleLinkStartDTO, IssuedPersonalAccessTokenDTO, LoginMethodUnboundDTO, LoginSessionDTO, PasswordChangeDTO, PasswordResetDTO, PersonalAccessTokenDTO, PersonalAccessTokenScopeDTO, ProjectDTO,
-  AccountLifecycleDTO, AuditPageDTO, AuditQueryDTO, ManagedAccountDTO, RegistrationPolicyDTO, RegistrationPolicyViewDTO, SendMessageDTO, SendResultDTO, SessionDTO, SessionResourceDTO, ServerEventsPageDTO, TailnetInfoDTO, VerifiedEmailDTO, WorkerDTO, WorkspaceDTO, FileListDTO, FileReadDTO,
+  AccountLifecycleDTO, AuditPageDTO, AuditQueryDTO, ManagedAccountDTO, RegistrationPolicyDTO, RegistrationPolicyViewDTO, SendMessageDTO, SendResultDTO, SessionDTO, SessionResourceDTO, ServerEventsPageDTO, TailnetInfoDTO, VerifiedEmailDTO, WorkerDTO, WorkspaceDTO, FileDiffDTO, FileListDTO, FileReadDTO,
 } from './dto'
 
 /**
@@ -86,6 +86,7 @@ export const routes = {
   runtimeApproval: (sessionId: string, approvalId: string) => `/api/sessions/${id(sessionId)}/runtime/approvals/${id(approvalId)}`,
   sessionFilesList: (sessionId: string) => `/api/sessions/${id(sessionId)}/fs/list`,
   sessionFilesRead: (sessionId: string) => `/api/sessions/${id(sessionId)}/fs/read`,
+  sessionFilesDiff: (sessionId: string) => `/api/sessions/${id(sessionId)}/fs/diff`,
   sessionTerminal: (sessionId: string) => `/api/sessions/${id(sessionId)}/terminal`,
   sessionTerminalAction: (sessionId: string, terminalId: string, action: 'write' | 'resize' | 'dispose') => `/api/sessions/${id(sessionId)}/terminal/${id(terminalId)}/${action}`,
   sessionTerminalStream: (sessionId: string) => `/api/sessions/${id(sessionId)}/terminal/stream`,
@@ -289,6 +290,7 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     resolveApproval: (sessionId: string, approvalId: string, body: ApprovalDecisionDTO) => request<CommandResultDTO>(routes.runtimeApproval(sessionId, approvalId), body),
     listSessionFiles: (sessionId: string, subpath = '', signal?: AbortSignal) => request<FileListDTO>(routes.sessionFilesList(sessionId), { subpath }, signal),
     readSessionFile: (sessionId: string, subpath: string, maxBytes = 1024 * 1024, signal?: AbortSignal) => request<FileReadDTO>(routes.sessionFilesRead(sessionId), { subpath, maxBytes }, signal),
+    diffSessionFile: (sessionId: string, subpath: string, signal?: AbortSignal) => request<FileDiffDTO>(routes.sessionFilesDiff(sessionId), { subpath }, signal),
     createTerminal: (sessionId: string, cols = 80, rows = 24) => request<{ terminalId: string; pid: number }>(routes.sessionTerminal(sessionId), { cols, rows }),
     writeTerminal: (sessionId: string, terminalId: string, data: string) => request<unknown>(routes.sessionTerminalAction(sessionId, terminalId, 'write'), { data }),
     resizeTerminal: (sessionId: string, terminalId: string, cols: number, rows: number) => request<unknown>(routes.sessionTerminalAction(sessionId, terminalId, 'resize'), { cols, rows }),

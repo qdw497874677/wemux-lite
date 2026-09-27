@@ -47,6 +47,8 @@ export interface WorkspaceDTO {
 export interface FileEntryDTO { name: string; type: 'file' | 'directory'; size: number; mtime: string }
 export interface FileListDTO { operation: 'list'; entries: FileEntryDTO[] }
 export interface FileReadDTO { operation: 'read'; content: string | null; size: number; truncated: boolean; binary: boolean }
+export interface DiffLineDTO { type: 'add' | 'del' | 'ctx'; oldLine?: number; newLine?: number; text: string }
+export interface FileDiffDTO { operation: 'diff'; supported: boolean; reason?: 'not-git'; lines: DiffLineDTO[] }
 export type CommandStatus = 'pending' | 'accepted' | 'rejected' | 'completed' | 'failed' | 'cancelled'
 export interface CommandDTO {
   commandId: string

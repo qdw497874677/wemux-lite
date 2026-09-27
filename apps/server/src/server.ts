@@ -28,8 +28,10 @@ import { PersonalAccessTokenService } from './application/personal-access-token-
 import { AccountLifecycleService } from './application/account-lifecycle-service.js'
 import { WorkerService } from './application/worker-service.js'
 import { SessionFileService } from './application/session-file-service.js'
+import { SessionTerminalService } from './application/session-terminal-service.js'
 import { httpHandler } from './http/handler.js'
 import { SessionStreams } from './http/sse.js'
+import { TerminalStreams } from './http/terminal-sse.js'
 import { ProjectStreams } from './http/project-sse.js'
 import { CanvasCollaborationStreams } from './http/canvas-collaboration-sse.js'
 import type { StaticSite } from './http/static.js'
@@ -114,16 +116,19 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const capabilities = new CapabilityService(store, now, new CapabilityTokenService(capabilitySecret, now))
   const service = new ServerService(store, notifications, capabilities, workerAccess, projects, sessionAccess)
   const streams = new SessionStreams(service)
+  const terminalStreams = new TerminalStreams(notifications)
   // 血缘服务与画布渲染无关：它只读写领域事实，查询端点不在 handler 里拼装边。
   const lineage = new SessionLineageService(store, service, administrators, undefined, notifications)
   const canvasLayouts = new CanvasLayoutService(store, new SqliteCanvasLayoutRepository(store), projects, lineage)
   const projectStreams = new ProjectStreams(notifications)
   let gateway: WorkerGateway | undefined
   const workers = new WorkerService(store, notifications)
-  const sessionFiles = new SessionFileService(service, workers, { send: (workerId, payload) => {
+  const workerGateway = { send: (workerId: import('@wemux/domain').WorkerId, payload: import('@wemux/wire-protocol').ServerPayload) => {
     if (!gateway) throw new Error('Worker gateway is not ready')
     return gateway.send(workerId, payload)
-  } })
+  } }
+  const sessionFiles = new SessionFileService(service, workers, workerGateway)
+  const sessionTerminals = new SessionTerminalService(service, workers, workerGateway)
   const server = createServer(httpHandler({
     service,
     auth,
@@ -146,6 +151,8 @@ export function createWemuxServer(options: WemuxServerOptions) {
     workerAccess,
     sessionAccess,
     sessionFiles,
+    sessionTerminals,
+    terminalStreams,
     personalAccessTokens,
     lifecycle,
     canvasCollaboration,
@@ -174,6 +181,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
       if (closed) return
       closed = true
       streams.close()
+      terminalStreams.close()
       projectStreams.close()
       await gateway.close()
       if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))

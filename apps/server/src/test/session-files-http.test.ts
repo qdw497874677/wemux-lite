@@ -15,7 +15,7 @@ const request = async (base: string, token: string, path: string, body: unknown)
   return { status: response.status, data: await response.json() }
 }
 
-test('session file routes authorize the session and proxy list/read responses through the owning Worker', async t => {
+test('session file routes authorize the session and proxy list/read/diff responses through the owning Worker', async t => {
   const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail] })
   await seedOperator(app.store, app.service)
   const base = await app.listen(0)
@@ -53,5 +53,14 @@ test('session file routes authorize the session and proxy list/read responses th
   assert.equal(read.status, 200)
   assert.equal(read.data.content, 'export {}\n')
 
+  const diffRequest = request(base, token, `/sessions/${session.id}/fs/diff`, { subpath: 'src/index.ts' })
+  const diffMessage = await peer.wait(message => message.type === 'fs.request' && message.operation === 'diff')
+  assert.equal(diffMessage.type, 'fs.request')
+  peer.send({ type: 'fs.response', requestId: diffMessage.requestId, ok: true, operation: 'diff', supported: true, lines: [{ type: 'del', oldLine: 1, text: 'export {}' }, { type: 'add', newLine: 1, text: 'export const value = 1' }] })
+  const diff = await diffRequest
+  assert.equal(diff.status, 200)
+  assert.deepEqual(diff.data.lines, [{ type: 'del', oldLine: 1, text: 'export {}' }, { type: 'add', newLine: 1, text: 'export const value = 1' }])
+
   assert.equal((await request(base, token, `/sessions/${session.id}/fs/read`, { subpath: 'x', maxBytes: 1024 * 1024 + 1 })).status, 400)
+  assert.equal((await request(base, token, `/sessions/${session.id}/fs/diff`, { subpath: '' })).status, 400)
 })
