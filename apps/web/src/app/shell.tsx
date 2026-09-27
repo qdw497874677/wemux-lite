@@ -1,9 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import { Button } from '../components/ui/button'
-export function AppShell({ children }: { children: ReactNode }) { return <div className="flex h-[100dvh] min-w-80 flex-col overflow-hidden bg-background text-foreground">{children}</div> }
-export function GlobalRail({ children }: { children: ReactNode }) { return <nav aria-label="全局导航" className="global-rail">{children}</nav> }
+export function AppShell({ children }: { children: ReactNode }) { return <div className="flex h-[100dvh] w-full min-w-80 flex-1 flex-col overflow-hidden bg-background text-foreground">{children}</div> }
 export function ProjectNavigation({ children }: { children: ReactNode }) { return <nav aria-label="项目页面" className="flex flex-col gap-1 border-b border-border/70 p-2">{children}</nav> }
-export function MainCanvas({ children }: { children: ReactNode }) { return <main className="flex min-h-0 min-w-0 flex-col">{children}</main> }
+export function MainCanvas({ children }: { children: ReactNode }) { return <main className="flex min-h-0 min-w-0 flex-1 flex-col">{children}</main> }
 /** The host and its subtree never remount on resize: form state, selection and focus survive. */
 export function InspectorHost({ children, open, onOpenChange }: { children: ReactNode; open: boolean; onOpenChange: (open: boolean) => void }) {
   const [wide, setWide] = useState(() => matchMedia('(min-width: 1280px)').matches)

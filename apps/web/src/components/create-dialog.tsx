@@ -5,7 +5,7 @@ import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { workerStateLabel } from '@/lib/display'
 
-export const selectClass = 'h-10 w-full rounded-lg border border-input bg-card px-3 text-sm text-foreground shadow-sm transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/25 focus-visible:outline-none'
+export const selectClass = 'h-8 w-full rounded-lg border border-input bg-card px-2.5 text-sm text-foreground shadow-sm transition-colors focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/25 focus-visible:outline-none'
 import { CreationDialog } from './creation-dialog'
 import { useConfirmDialog } from './ui/confirm-dialog.tsx'
 
@@ -58,7 +58,7 @@ export function CreateDialog({ kind, api, teamId, projectId, defaultWorkspaceId 
     finally { setBusy(false) }
   }
 
-  return <CreationDialog title={titles[kind]} busy={busy} onClose={requestClose} description={kind === 'project' ? '项目用来组织相关的工作区和会话。' : '工作区会固定到所选工作节点，可创建空白目录或克隆 Git 仓库。'} footer={<><Button type="button" variant="outline" disabled={busy} onClick={requestClose}>取消</Button><Button type="submit" form="create-form" disabled={!valid || busy}>{busy ? '正在创建…' : '创建'}</Button></>}>
+  return <CreationDialog title={titles[kind]} busy={busy} onClose={requestClose} description={kind === 'project' ? '项目用来组织相关的工作区和会话。' : '工作区会固定到所选工作节点，可创建空白目录或克隆 Git 仓库。'} footer={<><Button type="button" variant="outline" size="sm" disabled={busy} onClick={requestClose}>取消</Button><Button type="submit" size="sm" form="create-form" disabled={!valid || busy}>{busy ? '正在创建…' : '创建'}</Button></>}>
     <form id="create-form" onSubmit={submit} className="space-y-4">
       <label className="grid gap-2 text-xs">名称<Input autoFocus required value={name} onChange={event => setName(event.target.value)} /></label>
       {kind === 'project' && <p className="rounded-lg bg-muted/30 p-3 text-xs text-muted-foreground">项目将创建在当前默认团队中。</p>}

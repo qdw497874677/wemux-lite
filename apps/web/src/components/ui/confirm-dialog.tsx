@@ -53,6 +53,6 @@ export function ConfirmDialog({ open, onOpenChange, title, description, confirmL
   }
   return <Dialog open={open} onOpenChange={value => { if (!pending) onOpenChange(value) }}><DialogContent>
     <DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>{description}</DialogDescription></DialogHeader>
-    <DialogFooter><Button type="button" variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>{cancelLabel}</Button><Button type="button" variant={danger ? 'destructive' : 'default'} disabled={pending} onClick={() => void confirm()}>{pending ? '处理中…' : confirmLabel}</Button></DialogFooter>
+    <DialogFooter><Button type="button" variant="outline" size="sm" disabled={pending} onClick={() => onOpenChange(false)}>{cancelLabel}</Button><Button type="button" size="sm" variant={danger ? 'destructive' : 'default'} disabled={pending} onClick={() => void confirm()}>{pending ? '处理中…' : confirmLabel}</Button></DialogFooter>
   </DialogContent></Dialog>
 }

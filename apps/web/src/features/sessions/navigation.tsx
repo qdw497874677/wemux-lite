@@ -17,6 +17,7 @@ import { ClusterPage } from '../../components/cluster-page'
 import { cn } from '../../lib/utils'
 import { useConfirmDialog } from '../../components/ui/confirm-dialog.tsx'
 import { Skeleton } from '../../components/ui/skeleton.tsx'
+import { SidebarContent, SidebarGroup, SidebarGroupLabel, SidebarHeader, SidebarText } from '../../components/ui/sidebar.tsx'
 import { projectNavigationItems } from '../../components/navigation-items.ts'
 import { formatChineseTime, formatRelativeTime, runtimeStateLabel, workerStateLabel, workspaceStateLabel } from '../../lib/display'
 
@@ -47,14 +48,14 @@ export function Sidebar({ projects, projectId, section, workspaces, sessions, se
     setEditingSessionId('')
     if (title && title !== session.title) void onManageSession(session.id, { title })
   }
-  return <aside className="flex h-full min-h-0 flex-col border-r border-border bg-card/40">
-    <div className="shrink-0 border-b border-border p-2.5">
+  return <>
+    <SidebarHeader>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <button type="button" className="flex min-h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-sm font-medium text-foreground hover:bg-accent" aria-label="切换项目">
-            <FolderGit2 className="size-4 shrink-0 text-muted-foreground" />
-            <span className="min-w-0 flex-1 truncate" title={project?.name}>{project?.name ?? (loading ? '正在加载项目…' : '选择项目')}</span>
-            <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground" />
+          <button type="button" className="flex h-10 w-full items-center gap-2 rounded-lg px-2 text-left text-sm font-medium text-foreground hover:bg-accent group-data-[state=collapsed]/sidebar-wrapper:size-10 group-data-[state=collapsed]/sidebar-wrapper:justify-center group-data-[state=collapsed]/sidebar-wrapper:px-0" aria-label="切换项目">
+            <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-primary/15 text-primary"><FolderGit2 className="size-4" /></span>
+            <SidebarText title={project?.name}>{project?.name ?? (loading ? '正在加载项目…' : '选择项目')}</SidebarText>
+            <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground group-data-[state=collapsed]/sidebar-wrapper:hidden" />
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-52">
@@ -64,16 +65,19 @@ export function Sidebar({ projects, projectId, section, workspaces, sessions, se
           <DropdownMenuItem disabled={!connected} onSelect={() => onCreate('project')}><Plus />新建项目</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
-    </div>
+    </SidebarHeader>
 
-    {projectId && <nav aria-label="项目页面" className="shrink-0 border-b border-border px-2 py-3">
-      <p className={cn(sectionLabelClass, 'mb-1.5 px-2')}>导航</p>
+    <SidebarContent>
+    {projectId && <nav aria-label="项目页面" className="shrink-0 border-b border-sidebar-border">
+      <SidebarGroup>
+      <SidebarGroupLabel>项目</SidebarGroupLabel>
       <div className="space-y-0.5">
-        {projectNavigationItems.map(({ path, label, icon: Icon }) => <a key={path} href={`/projects/${encodeURIComponent(projectId)}/${path}`} aria-current={currentSection === path ? 'page' : undefined} onClick={event => { event.preventDefault(); onNavigate(path) }} className={cn('flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground', currentSection === path && 'bg-accent text-foreground')}><Icon className="size-4 shrink-0" /><span className="truncate">{label}</span></a>)}
+        {projectNavigationItems.map(({ path, label, icon: Icon }) => <a key={path} href={`/projects/${encodeURIComponent(projectId)}/${path}`} aria-current={currentSection === path ? 'page' : undefined} title={label} onClick={event => { event.preventDefault(); onNavigate(path) }} className={cn('flex h-8 items-center gap-2 rounded-lg px-2 text-sm font-medium text-sidebar-muted-foreground transition-colors hover:bg-accent hover:text-sidebar-foreground group-data-[state=collapsed]/sidebar-wrapper:size-10 group-data-[state=collapsed]/sidebar-wrapper:justify-center group-data-[state=collapsed]/sidebar-wrapper:px-0', currentSection === path && 'bg-accent text-sidebar-foreground')}><Icon className="size-4 shrink-0" /><SidebarText>{label}</SidebarText></a>)}
       </div>
+      </SidebarGroup>
     </nav>}
 
-    <section className="flex min-h-0 flex-1 flex-col" aria-label="最近会话">
+    <section className="flex min-h-0 flex-1 flex-col group-data-[state=collapsed]/sidebar-wrapper:hidden" aria-label="最近会话">
       <div className="flex shrink-0 items-center justify-between px-4 pb-1.5 pt-3">
         <p className={sectionLabelClass}>最近会话</p>
         <Button variant="ghost" iconOnly size="icon-xs" className="size-7 rounded-md" aria-label="新建会话" disabled={!connected || !projectId} onClick={() => onCreate('session')}><Plus className="size-3.5" /></Button>
@@ -92,7 +96,8 @@ export function Sidebar({ projects, projectId, section, workspaces, sessions, se
         {!projectLoading && !visibleSessions.length && <p className="px-2 py-3 text-xs leading-5 text-muted-foreground">{normalizedQuery ? '没有匹配的会话' : projectId ? '暂无会话，从上方开始新对话。' : connected ? '请先选择项目。' : '连接服务端后显示会话。'}</p>}
       </div>
     </section>
-  </aside>
+    </SidebarContent>
+  </>
 }
 
 export function ContextPanel({ selected, workspace, workers, connected, onAddWorker, onOpenCluster }: { selected?: SessionDTO; workspace?: WorkspaceDTO; workers: WorkerDTO[]; connected: boolean; onAddWorker: () => void; onOpenCluster: () => void }) {

@@ -2,13 +2,23 @@ import * as React from 'react'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
 import { Close } from './tailgrids-icons.tsx'
 import { cn } from '../../lib/utils.ts'
+import { registerShortcut } from '../../lib/shortcuts.ts'
 
 /**
  * Dialog ported from TailGrids (MIT, `modal`/`dialog`): 35rem panel（`max-w-140`），
  * 1.5rem 面板内边距，header/body/footer 自带间距，footer 右对齐。
  * radix owns focus trapping; the surfaces use the TailGrids colour tokens.
  */
-function Dialog(props: DialogPrimitive.DialogProps) { return <DialogPrimitive.Root data-slot="dialog" {...props} /> }
+function Dialog({ open, defaultOpen, onOpenChange, ...props }: DialogPrimitive.DialogProps) {
+  const controlled = open !== undefined
+  const [internalOpen, setInternalOpen] = React.useState(defaultOpen ?? false)
+  const visible = controlled ? open : internalOpen
+  React.useEffect(() => {
+    if (!visible) return
+    return registerShortcut({ combo: 'Escape', scope: 'dialog', description: '关闭对话框', priority: 100, allowInEditable: true, handler: () => { if (!controlled) setInternalOpen(false); onOpenChange?.(false) } })
+  }, [controlled, onOpenChange, visible])
+  return <DialogPrimitive.Root data-slot="dialog" open={visible} onOpenChange={next => { if (!controlled) setInternalOpen(next); onOpenChange?.(next) }} {...props} />
+}
 function DialogTrigger(props: DialogPrimitive.DialogTriggerProps) { return <DialogPrimitive.Trigger data-slot="dialog-trigger" {...props} /> }
 function DialogPortal(props: DialogPrimitive.DialogPortalProps) { return <DialogPrimitive.Portal data-slot="dialog-portal" {...props} /> }
 function DialogClose(props: DialogPrimitive.DialogCloseProps) { return <DialogPrimitive.Close data-slot="dialog-close" {...props} /> }

@@ -31,8 +31,8 @@ const statusIcons: Record<ToolState, ReactNode> = {
   'output-error': <XCircle className="size-3.5 text-red-400" />,
 }
 
-export function ToolHeader({ className, title, state, ...props }: ComponentProps<typeof Collapsible.Trigger> & { title: string; state: ToolState }) {
-  return <Collapsible.Trigger className={cn('flex w-full items-center justify-between gap-4 p-3 text-left', className)} {...props}><span className="flex min-w-0 items-center gap-2"><Wrench className="size-4 shrink-0 text-violet-300" /><strong className="truncate font-mono text-sm">{title}</strong><Badge className="gap-1.5 rounded-full text-xs" variant="secondary">{statusIcons[state]}{statusLabels[state]}</Badge></span><ChevronDown className="size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]/tool:rotate-180" /></Collapsible.Trigger>
+export function ToolHeader({ className, title, state, icon, ...props }: ComponentProps<typeof Collapsible.Trigger> & { title: string; state: ToolState; icon?: ReactNode }) {
+  return <Collapsible.Trigger className={cn('flex w-full items-center justify-between gap-4 p-3 text-left', className)} {...props}><span className="flex min-w-0 items-center gap-2">{icon ?? <Wrench className="size-4 shrink-0 text-violet-300" />}<strong className="truncate font-mono text-sm">{title}</strong><Badge className="gap-1.5 rounded-full text-xs" variant="secondary">{statusIcons[state]}{statusLabels[state]}</Badge></span><ChevronDown className="size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]/tool:rotate-180" /></Collapsible.Trigger>
 }
 
 export function ToolContent({ className, ...props }: ComponentProps<typeof Collapsible.Content>) {

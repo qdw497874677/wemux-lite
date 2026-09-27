@@ -14,11 +14,10 @@ test('project sidebar separates navigation from contextual sessions and omits wo
   assert.doesNotMatch(appSource, /项目 → Workspace → Worker → Session/)
 })
 
-test('creating a session from a workspace branch preselects that workspace and its worker', () => {
-  assert.match(createDialogSource, /defaultWorkspaceId = ''/)
-  assert.match(createDialogSource, /const defaultWorkspace = workspaces\.find\(item => item\.id === defaultWorkspaceId\)/)
-  assert.match(createDialogSource, /useState\(defaultWorkspace\?\.workerId \?\? ''\)/)
-  assert.match(createDialogSource, /useState\(defaultWorkspace\?\.id \?\? ''\)/)
+test('CreateDialog no longer owns session creation; QuickConversation is the only session entry', () => {
+  assert.doesNotMatch(createDialogSource, /kind === 'session'|case 'session'|createSession/)
+  assert.match(appSource, /if \(kind === 'session'\)/)
+  assert.match(appSource, /setQuickSetup\(true\)/)
 })
 
 test('Inspector viewport styles reset margins and use the approved full-screen breakpoint', async () => {

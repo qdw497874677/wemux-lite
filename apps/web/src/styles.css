@@ -1020,28 +1020,12 @@ h1 { font-size: .875rem; font-weight: 500; }
 
 @layer utilities {
 
-/* Workbench geometry is explicit: rail + project column form navigation, canvas,
-   and optional push inspector. Portaled sheets never participate in the grid. */
-.workbench-layout { display: grid; grid-template-columns: 56px 232px minmax(0, 1fr) auto; flex: 1; min-height: 0; background: var(--color-background); }
-.global-rail,
-.project-column { position: relative; isolation: isolate; background: color-mix(in srgb, var(--sidebar) var(--glass-opacity), transparent); backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation)); -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation)); }
-.global-rail::before,
-.project-column::before { position: absolute; inset: 0; z-index: -1; pointer-events: none; content: ''; background-image: radial-gradient(circle at 18% 8%, color-mix(in srgb, var(--color-primary) 12%, transparent), transparent 36%), radial-gradient(circle at 1px 1px, color-mix(in srgb, var(--contrast-foreground) 7%, transparent) .65px, transparent .75px); background-size: auto, 8px 8px; opacity: .55; }
-.global-rail { display: flex; flex-direction: column; gap: 4px; padding: 8px 4px; border-right: 1px solid color-mix(in srgb, var(--sidebar-border) 78%, transparent); }
-.global-rail a { display: grid; min-height: 32px; place-items: center; padding-inline: 2px; color: var(--sidebar-muted-foreground); font-size: 11px; border-radius: var(--control-radius); transition: background-color var(--duration-fast) var(--ease-out-expo), color var(--duration-fast) var(--ease-out-expo), transform var(--duration-fast) var(--ease-spring); }
-.global-rail a:hover { background: color-mix(in srgb, var(--color-accent) 78%, transparent); color: var(--sidebar-foreground); }
-.global-rail a[aria-current="page"] { background: var(--color-accent); color: var(--color-foreground); }
-.global-rail a:active { transform: scale(.93); }
-.project-column { display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; border-right: 1px solid color-mix(in srgb, var(--sidebar-border) 68%, transparent); }
-.canvas-toolbar { display: flex; justify-content: flex-end; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--color-border); }
+/* Unified t3code-style sidebar plus a single flexible canvas. */
+.workbench-layout { display: flex; flex: 1; min-height: 0; min-width: 0; background: var(--color-background); }
+.canvas-toolbar { display: flex; min-height: 3rem; align-items: center; justify-content: flex-end; gap: .5rem; padding: .5rem 1rem; border-bottom: 1px solid var(--color-border); background: color-mix(in srgb, var(--color-background) 88%, transparent); }
 .inspector-sheet { margin: 0 !important; box-sizing: border-box; position: fixed !important; inset: 0 0 0 auto !important; max-width: 100vw !important; height: 100dvh; z-index: 50; }
-@media (max-width: 1279px) { .workbench-layout { grid-template-columns: 56px minmax(0, 1fr); } .project-column { display: none; } }
 @media (max-width: 1023px) { .inspector-sheet { inset: 0 !important; width: 100vw !important; height: 100dvh !important; max-width: 100vw !important; margin: 0 !important; } }
-@media (max-width: 767px) { .workbench-layout { grid-template-columns: minmax(0, 1fr); } .workbench-layout > .global-rail { display: none; } .inspector-sheet, .navigation-sheet { width: 100vw !important; max-width: 100vw !important; } }
-@media (min-width: 1280px) {
-  .workbench-layout.conversation-focus { grid-template-columns: 56px minmax(0, 1fr) auto; }
-  .conversation-focus > .project-column { display: none; }
-}
+@media (max-width: 767px) { .inspector-sheet, .navigation-sheet { width: 100vw !important; max-width: 100vw !important; } }
 .conversation-content { width: 100%; max-width: var(--chat-max-width); margin-inline: auto; }
 .conversation-timeline { background: var(--color-background); }
 .conversation-timeline::before { position: absolute; inset: 0 0 auto; z-index: 8; height: var(--workspace-titlebar-scroll-fade-height); pointer-events: none; content: ''; background: linear-gradient(to bottom, var(--color-background) 8%, color-mix(in srgb, var(--color-background) 76%, transparent) 58%, transparent); }
@@ -1156,12 +1140,11 @@ h1 { font-size: .875rem; font-weight: 500; }
 @media (prefers-reduced-transparency: reduce) {
   .ai-prompt-input { background: var(--color-card); }
   .ai-prompt-input::before { display: none; }
-  .global-rail, .project-column { background: var(--sidebar); backdrop-filter: none; -webkit-backdrop-filter: none; }
-  .global-rail::before, .project-column::before { display: none; }
+  [data-slot="sidebar"] { background: var(--sidebar); backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
 
 /* Sidebar interactive items — smooth state transitions. */
-.project-column button,
+[data-slot="sidebar"] button,
 aside button[aria-current],
 aside a {
   transition: background-color var(--duration-fast) var(--ease-out-expo),
@@ -1169,7 +1152,7 @@ aside a {
               border-color var(--duration-fast) var(--ease-out-expo),
               transform var(--duration-fast) var(--ease-spring);
 }
-.project-column button:active:not(:disabled),
+[data-slot="sidebar"] button:active:not(:disabled),
 aside button[aria-current]:active:not(:disabled) {
   transform: scale(.98);
 }
@@ -1209,7 +1192,6 @@ aside button[aria-current]:active:not(:disabled) {
   .creation-dialog input, .creation-dialog textarea, .creation-dialog select { font-size: 16px; }
   .conversation-timeline article.ml-11, .conversation-timeline div.ml-11 { margin-left: 0; }
 }
-.navigation-sheet .global-rail { flex-direction: row; justify-content: space-around; }
 
 input::placeholder, textarea::placeholder { color: var(--color-muted-foreground); opacity: 1; }
 [aria-current="true"] { box-shadow: inset 3px 0 var(--color-primary); font-weight: 600; transition: box-shadow var(--duration-normal) var(--ease-out-expo); }

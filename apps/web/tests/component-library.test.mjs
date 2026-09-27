@@ -10,7 +10,7 @@ test('component library has a routed production entry', () => {
   assert.match(router, /'\/components'/)
   assert.match(app, /location\.pathname === '\/components'/)
   assert.match(app, /publicComponents/)
-  assert.match(app, /go\('\/components'\)/)
+  assert.match(app, /path: '\/components'/)
 })
 
 test('component library imports real production primitives and task components', () => {

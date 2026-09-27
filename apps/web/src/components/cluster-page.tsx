@@ -4,7 +4,7 @@ import { useResources } from '../app/resources'
 // 映射到 wemux-lite 的三条阶段线：命令交付（pending→accepted/rejected/failed/cancelled）、
 // 工作区供给（pending→provisioning→ready/failed）、会话运行（idle/queued/running/…）。
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Ban, Bot, Clock, RefreshCw, Server, ServerCog, TriangleAlert, UploadCloud } from 'lucide-react'
+import { Ban, Bot, ChevronDown, Clock, RefreshCw, Server, ServerCog, TriangleAlert, UploadCloud } from 'lucide-react'
 import type { ApiError } from '../api/client'
 import type { Api } from '../api/client'
 import type { CommandDTO, CommandStatus, ProjectDTO, SessionDTO, WorkerDTO, WorkspaceDTO } from '../api/dto'
@@ -15,8 +15,6 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 import { cn } from '../lib/utils'
 import { WorkerAccessPanel } from './worker-access.tsx'
 import { useConfirmDialog } from './ui/confirm-dialog.tsx'
-
-const heartbeatFreshMs = 120_000
 
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : '请求失败'
 
@@ -47,7 +45,7 @@ const runtimeTone = (state: SessionDTO['runtimeState']) =>
     : state === 'queued' || state === 'stopping' ? 'warning' : 'outline'
 
 function Stat({ label, value, hint, tone }: { label: string; value: string; hint?: string; tone?: 'success' | 'warning' | 'danger' }) {
-  return <div className="rounded-xl border border-border bg-card p-3 sm:p-4">
+  return <div className="rounded-lg border border-border bg-card p-3">
     <p className="truncate text-[11px] text-muted-foreground">{label}</p>
     <p className={cn('mt-1 text-xl font-semibold sm:text-2xl', tone === 'success' && 'text-emerald-400', tone === 'warning' && 'text-amber-300', tone === 'danger' && 'text-red-400')}>{value}</p>
     {hint && <p className="mt-1 text-[11px] text-muted-foreground">{hint}</p>}
@@ -118,15 +116,15 @@ export function ClusterPage({ api, connected, canEnrollWorkers, onAddWorker, onR
   }
 
   return <div className="min-h-0 flex-1 overflow-y-auto">
-    <div className="mx-auto max-w-[1500px] space-y-5 px-3 py-4 sm:px-5 sm:py-6">
-      <header className="flex flex-wrap items-center justify-between gap-3">
+    <div className="mx-auto max-w-6xl space-y-4 px-3 py-3 sm:px-5 sm:py-4">
+      <header className="flex min-h-10 flex-wrap items-center justify-between gap-3 border-b border-border pb-2">
         <div>
-          <h1 className="text-base font-semibold">集群运行状态</h1>
+          <h1 className="text-sm font-medium">集群运行状态</h1>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">工作节点连接 · 命令交付 · 工作区初始化 · 会话运行{loadedAt ? ` · 更新于 ${loadedAt}` : ''}</p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => { onRefresh() }}><RefreshCw className="size-4" />刷新</Button>
-          {canEnrollWorkers && <Button variant="outline" size="sm" disabled={!connected} onClick={onAddWorker}><ServerCog className="size-4" />添加工作节点</Button>}
+        <div className="flex gap-1">
+          <Button variant="ghost" size="icon-sm" aria-label="刷新集群" title="刷新" onClick={() => { onRefresh() }}><RefreshCw className="size-4" /></Button>
+          {canEnrollWorkers && <Button variant="outline" size="sm" disabled={!connected} onClick={onAddWorker}><ServerCog className="size-4" />添加节点</Button>}
         </div>
       </header>
 
@@ -143,38 +141,31 @@ export function ClusterPage({ api, connected, canEnrollWorkers, onAddWorker, onR
       <section className="space-y-3">
         <h2 className="text-sm font-semibold">工作节点</h2>
         {!workers.length && <p className="rounded-xl border border-border bg-card p-6 text-center text-xs text-muted-foreground">{canEnrollWorkers ? '尚未注册任何工作节点。点击「添加工作节点」生成注册命令。' : '当前账号没有可使用的工作节点。请联系节点 owner 或 manager 授予 use 权限。'}</p>}
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="space-y-1 rounded-lg border border-border bg-card p-2">
           {workers.map(worker => {
             const heartbeatAge = formatAge(worker.lastSeenAt)
-            const fresh = worker.connectionState === 'online' && heartbeatAge !== null && (Date.now() - new Date(worker.lastSeenAt!).getTime()) <= heartbeatFreshMs
             const executionAgents = worker.capabilities.filter(agent => agent.mode === 'execution' && agent.availability.status === 'available')
-            return <article key={worker.id} className={cn('rounded-xl border border-border bg-card p-4', worker.connectionState === 'revoked' && 'opacity-70')}>
+            return <article key={worker.id} className={cn('group rounded-lg px-2.5 py-2 transition-colors hover:bg-muted', worker.connectionState === 'revoked' && 'opacity-70')}>
               <div className="flex items-start justify-between gap-3">
                 <div className="flex min-w-0 items-center gap-3">
                   <span className={cn('grid size-9 shrink-0 place-items-center rounded-lg', worker.connectionState === 'online' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-muted text-muted-foreground')}><Server className="size-4" /></span>
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <strong className="truncate text-xs">{worker.name}</strong>
+                      <strong className="truncate text-sm font-medium">{worker.name}</strong>
                       <Badge variant={worker.connectionState === 'online' ? 'success' : worker.connectionState === 'revoked' ? 'danger' : 'warning'}>{workerStateLabel[worker.connectionState]}</Badge>
                     </div>
                     <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{shortId(worker.id)}</p>
                   </div>
                 </div>
-                {(worker.accessRole === 'owner' || worker.accessRole === 'manage') && worker.connectionState !== 'revoked' && <Button variant="ghost" size="sm" className="h-7 text-[11px] text-red-400 hover:text-red-300" disabled={Boolean(busy)} onClick={() => { void confirm({ title: '撤销工作节点', description: `撤销 Worker「${worker.name}」？撤销后将断开连接，无法再用当前凭据接入。`, confirmLabel: '撤销', danger: true }).then(ok => { if (ok) void act(`revoke:${worker.id}`, () => api.revokeWorker(worker.id)) }) }}><Ban className="size-3.5" />撤销</Button>}
+                {(worker.accessRole === 'owner' || worker.accessRole === 'manage') && worker.connectionState !== 'revoked' && <Button variant="ghost" size="icon-sm" className="text-red-400 opacity-0 hover:text-red-300 group-hover:opacity-100" aria-label={`撤销 ${worker.name}`} title="撤销节点" disabled={Boolean(busy)} onClick={() => { void confirm({ title: '撤销工作节点', description: `撤销 Worker「${worker.name}」？撤销后将断开连接，无法再用当前凭据接入。`, confirmLabel: '撤销', danger: true }).then(ok => { if (ok) void act(`revoke:${worker.id}`, () => api.revokeWorker(worker.id)) }) }}><Ban className="size-3.5" /></Button>}
               </div>
-              <div className="mt-3 grid grid-cols-2 gap-2 text-[11px] sm:grid-cols-4">
-                <div className="rounded-md bg-muted/40 px-2.5 py-1.5"><p className="text-muted-foreground">心跳</p><p className={cn('mt-0.5 font-medium', fresh ? 'text-emerald-400' : 'text-amber-300')}>{worker.connectionState === 'online' ? heartbeatAge ?? '未知' : '离线'}</p></div>
-                <div className="rounded-md bg-muted/40 px-2.5 py-1.5"><p className="text-muted-foreground">可用智能体</p><p className="mt-0.5 font-medium">{executionAgents.length} / {worker.capabilities.length}</p></div>
-                <div className="rounded-md bg-muted/40 px-2.5 py-1.5"><p className="text-muted-foreground">会话</p><p className="mt-0.5 font-medium">{sessionCountByWorker.get(worker.id) ?? 0}</p></div>
-                <div className="rounded-md bg-muted/40 px-2.5 py-1.5"><p className="text-muted-foreground">工作区</p><p className="mt-0.5 font-medium">{workspaceCountByWorker.get(worker.id) ?? 0}</p></div>
-              </div>
-              <p className="mt-2 truncate text-[10px] text-muted-foreground"><Clock className="mr-1 inline size-3" />{worker.version ? `v${worker.version}` : '版本未知'}{worker.platform ? ` · ${worker.platform}` : ''} · 最后在线 {worker.lastSeenAt ? formatChineseTime(worker.lastSeenAt) : '从未'} · 权限 {worker.accessRole}</p>
-              <details className="mt-3 rounded-lg border border-border bg-background/35 px-3 py-2 text-xs">
-                <summary className="cursor-pointer text-violet-200">查看智能体与模型</summary>
-                <div className="mt-2 space-y-3">{worker.capabilities.map(agent => <section key={agent.agentKey} className="border-t border-border pt-2 first:border-t-0 first:pt-0">
+              <p className="mt-1 truncate pl-12 text-xs text-muted-foreground"><Clock className="mr-1 inline size-3" />心跳 {worker.connectionState === 'online' ? heartbeatAge ?? '未知' : '离线'} · {executionAgents.length}/{worker.capabilities.length} 智能体 · {sessionCountByWorker.get(worker.id) ?? 0} 会话 · {workspaceCountByWorker.get(worker.id) ?? 0} 工作区 · {worker.version ? `v${worker.version}` : '版本未知'}{worker.platform ? ` · ${worker.platform}` : ''} · 权限 {worker.accessRole}</p>
+              <details className="mt-2 ml-12 rounded-lg border border-border bg-background/35 text-xs">
+                <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-muted-foreground hover:text-foreground"><ChevronDown className="size-3.5" />智能体与模型</summary>
+                <div className="space-y-1 border-t border-border p-2">{worker.capabilities.map(agent => <section key={agent.agentKey} className="rounded-md px-2 py-1.5 font-mono hover:bg-muted/70">
                   <div className="flex items-center justify-between gap-2"><strong>{agent.displayName}</strong><Badge variant={agent.availability.status === 'available' ? 'success' : 'outline'}>{agent.availability.status === 'available' ? '可用' : '不可用'}</Badge></div>
                   {agent.availability.reason && <p className="mt-1 text-amber-200">{agent.availability.reason}</p>}
-                  {agent.models.length ? <ul className="mt-2 space-y-1 font-mono text-[11px] text-muted-foreground">{agent.models.map(model => <li key={model.modelId}><span className="text-foreground">{model.displayName}</span> · {model.modelId}</li>)}</ul> : <p className="mt-2 text-muted-foreground">未报告模型</p>}
+                  {agent.models.length ? <ul className="mt-1 space-y-1 pl-4 text-[11px] text-muted-foreground">{agent.models.map(model => <li key={model.modelId}><span className="text-foreground">{model.displayName}</span> · {model.modelId}</li>)}</ul> : <p className="mt-2 text-muted-foreground">未报告模型</p>}
                 </section>)}</div>
               </details>
               <WorkerAccessPanel api={api} worker={worker} onChanged={() => void client.invalidateQueries({ queryKey: ['workers'] })} />
