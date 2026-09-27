@@ -30,6 +30,7 @@ import type { AgentPanelEntry } from './features/agents/model.ts'
 import { RightPanelSheet } from './features/panels/right-panel-sheet.tsx'
 import { RightPanelTabs } from './features/panels/right-panel-tabs.tsx'
 import type { PanelDescriptor } from './features/panels/panel-registry.ts'
+import { CommandPalette } from './features/command-palette/command-palette.tsx'
 import { SessionCanvas } from './features/session-canvas/session-canvas.tsx'
 import { Sidebar, ContextPanel } from './features/sessions/navigation'
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
@@ -44,7 +45,7 @@ import { ConfirmDialogProvider } from './components/ui/confirm-dialog.tsx'
 import { Badge } from './components/ui/badge'
 import { Input } from './components/ui/input'
 import { Textarea } from './components/ui/textarea'
-import { Sidebar as AppSidebar, SidebarGroup, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuItem, SidebarMenuLink, SidebarProvider, SidebarRail, SidebarText, SidebarTrigger } from './components/ui/sidebar.tsx'
+import { Sidebar as AppSidebar, SidebarGroup, SidebarGroupLabel, SidebarHeader, SidebarInset, SidebarMenu, SidebarMenuItem, SidebarMenuLink, SidebarProvider, SidebarRail, SidebarText, SidebarTrigger, useSidebar } from './components/ui/sidebar.tsx'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from './components/ui/dropdown-menu'
 import { ConnectionDialog } from './components/connection-dialog'
 import { LandingScreen } from './components/landing'
@@ -187,6 +188,10 @@ function LeasedSessionSurface({ api, session, agent, revision, controller, conne
 }
 
 function Workbench({ config, onSettings, onUnauthorized, onSignOut }: { config: AccountSession; onSettings: () => void; onUnauthorized: () => void; onSignOut: () => void }) {
+  return <SidebarProvider><WorkbenchContent config={config} onSettings={onSettings} onUnauthorized={onUnauthorized} onSignOut={onSignOut} /></SidebarProvider>
+}
+
+function WorkbenchContent({ config, onSettings, onUnauthorized, onSignOut }: { config: AccountSession; onSettings: () => void; onUnauthorized: () => void; onSignOut: () => void }) {
   const api = useMemo(() => createApi(config, onUnauthorized), [config, onUnauthorized])
   useEffect(() => () => api.dispose(), [api])
   const location = useRouterState({ select: state => state.location })
@@ -202,7 +207,9 @@ function Workbench({ config, onSettings, onUnauthorized, onSignOut }: { config: 
   const canvasSearch = new URLSearchParams(searchText)
   const canvasSelection = section === 'overview' ? canvasSearch.get('session') ?? '' : ''
   const canvasInteractiveSession = canvasMode ? canvasSelection : ''
+  const { toggleSidebar } = useSidebar()
   const [rightPanelOpen, setRightPanelOpen] = useState(false)
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
   const [activePanelId, setActivePanelId] = useState('session-info')
   const [wideRightPanel, setWideRightPanel] = useState(() => matchMedia('(min-width: 1280px)').matches)
   const workspaceId = section === 'workspaces' ? parts[3] ?? '' : ''
@@ -276,6 +283,7 @@ function Workbench({ config, onSettings, onUnauthorized, onSignOut }: { config: 
     return () => media.removeEventListener('change', update)
   }, [])
   useEffect(() => installShortcutListener(), [])
+  useEffect(() => registerShortcut({ combo: 'Mod+K', scope: 'global', description: '打开命令面板', priority: 400, allowInEditable: true, handler: () => setCommandPaletteOpen(value => !value) }), [])
   useEffect(() => registerShortcut({ combo: 'Mod+B', scope: 'panel', description: '切换右侧面板', allowInEditable: true, handler: () => setRightPanelOpen(value => !value) }), [])
   useEffect(() => {
     if (!rightPanelOpen) return
@@ -340,6 +348,18 @@ function Workbench({ config, onSettings, onUnauthorized, onSignOut }: { config: 
     setCreateWorkspaceId(workspaceId); setCreateKind(kind)
   }
   const closeCreate = () => { setCreateKind(null); setCreateWorkspaceId('') }
+  const paletteCommands = [
+    { id: 'new-session', label: '新会话', description: projectId ? '在当前项目开始新对话' : '请先选择项目', disabled: !projectId || !connected, run: () => openResource('session') },
+    ...[
+      ['session-info', '会话信息'],
+      ['session-canvas', '画布'],
+      ['files', '文件'],
+      ['terminal', '终端'],
+      ['agents', '智能体'],
+    ].map(([id, title]) => ({ id: `panel:${id}`, label: `切换面板：${title}`, description: selected ? `打开右侧${title}面板` : '请先打开一个会话', disabled: !selected, run: () => { setActivePanelId(id); setRightPanelOpen(true) } })),
+    { id: 'toggle-right-panel', label: rightPanelOpen ? '折叠右侧面板' : '打开右侧面板', description: selected ? '切换当前会话的辅助面板' : '请先打开一个会话', disabled: !selected, run: () => setRightPanelOpen(value => !value) },
+    { id: 'toggle-sidebar', label: '折叠或展开侧栏', description: '切换项目与会话导航侧栏', run: toggleSidebar },
+  ]
   const manageSession = async (id: string, patch: { title?: string; archived?: boolean }) => {
     await api.patchSession(id, patch)
     refresh()
@@ -360,7 +380,7 @@ function Workbench({ config, onSettings, onUnauthorized, onSignOut }: { config: 
     { path: '/components', label: '组件', icon: Blocks, active: parts[0] === 'components' },
     { path: '/settings', label: '设置', icon: Settings2, active: parts[0] === 'settings' },
   ].map(item => <SidebarMenuItem key={item.path}><SidebarMenuLink href={item.path} aria-current={item.active ? 'page' : undefined} isActive={item.active} tooltip={item.label} onClick={event => { event.preventDefault(); go(item.path) }}><item.icon /><SidebarText>{item.label}</SidebarText></SidebarMenuLink></SidebarMenuItem>)}</SidebarMenu></SidebarGroup></nav>
-  return <RunLayerContext.Provider value={setRunLayers}><SidebarProvider><AppShell>
+  return <RunLayerContext.Provider value={setRunLayers}><AppShell>
     <header className="flex min-h-14 shrink-0 items-center gap-2 border-b border-border px-2 sm:gap-3 sm:px-4">
       <SidebarTrigger className="md:hidden" />
       <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-primary font-black text-white">W</span><strong className="hidden text-sm sm:block">Wemux Lite</strong>
@@ -386,7 +406,8 @@ function Workbench({ config, onSettings, onUnauthorized, onSignOut }: { config: 
       <InspectorHost open={validSelection && Boolean(projectId) && contextOpen && !['board', 'tasks'].includes(section)} onOpenChange={open => { setContextOpen(open); if (!open && workspaceId) go(`${projectBase}/workspaces`) }}>{!workspace && project && <section className="space-y-3 pb-5"><h2>{project.name}</h2><p className="break-all">项目 ID：{project.id}</p><p>{workspaces.length} 个工作区 · {sessions.length} 个会话</p></section>}{workspace && <section className="space-y-3 pb-5"><h2>{workspace.name}</h2><p>{workspaceStateLabel[workspace.status]}</p><code className="block whitespace-pre-wrap break-all">{workspace.location?.rootPath ?? '等待报告路径'}</code>{workspace.failureReason && <p role="alert">{workspace.failureReason}</p>}<Button disabled={!connected || workspace.status !== 'ready'} onClick={() => openResource('session', workspace.id)}>新建会话</Button></section>}<ContextPanel selected={selected} workspace={workspace} workers={validSelection ? workers.filter(item => item.id === workspace?.workerId) : []} connected={connected} onAddWorker={() => setAddingWorker(true)} onOpenCluster={() => go('/cluster')} /></InspectorHost>
     </div>
 
+    <CommandPalette open={commandPaletteOpen} onOpenChange={setCommandPaletteOpen} projectId={projectId} sessions={visibleSessions} commands={paletteCommands} onOpenSession={id => go(`/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(id)}`)} />
     {addingWorker && <WorkerEnrollmentDialog api={api} workers={workers} onRefreshWorkers={refreshWorkers} onClose={() => { setAddingWorker(false); if (quickSetup) openResource('workspace') }} />}
     {createKind && <CreateDialog key={`${createKind}:${projectId}:${createWorkspaceId}`} kind={createKind} api={api} teamId={config.teamId} projectId={projectId} defaultWorkspaceId={createWorkspaceId} workers={workers} workspaces={workspaces} onClose={() => { setQuickSetup(false); closeCreate() }} onCreated={(kind, id) => { closeCreate(); refresh(); if (kind === 'project') go(`/projects/${encodeURIComponent(id)}/sessions`); else if (quickSetup) { setQuickSetup(false); void api.workspaces(projectId).then(items => { const ws = items.find(item => item.id === id); if (ws) quickController().configure(fillQuickChoices({ workspaceId: ws.id, workerId: '', agentKey: '', modelId: '' }, projectId, items, workers)) }).catch(() => { /* Keep the draft; workspace selection remains explicit after refresh. */ }); go(`${projectBase}/sessions`) } else go(`/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(id)}`) }} />}
-  </AppShell></SidebarProvider></RunLayerContext.Provider>
+  </AppShell></RunLayerContext.Provider>
 }
