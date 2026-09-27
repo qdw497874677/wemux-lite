@@ -1030,6 +1030,7 @@ h1 { font-size: .875rem; font-weight: 500; }
 .global-rail { display: flex; flex-direction: column; gap: 4px; padding: 8px 4px; border-right: 1px solid color-mix(in srgb, var(--sidebar-border) 78%, transparent); }
 .global-rail a { display: grid; min-height: 32px; place-items: center; padding-inline: 2px; color: var(--sidebar-muted-foreground); font-size: 11px; border-radius: var(--control-radius); transition: background-color var(--duration-fast) var(--ease-out-expo), color var(--duration-fast) var(--ease-out-expo), transform var(--duration-fast) var(--ease-spring); }
 .global-rail a:hover { background: color-mix(in srgb, var(--color-accent) 78%, transparent); color: var(--sidebar-foreground); }
+.global-rail a[aria-current="page"] { background: var(--color-accent); color: var(--color-foreground); }
 .global-rail a:active { transform: scale(.93); }
 .project-column { display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; border-right: 1px solid color-mix(in srgb, var(--sidebar-border) 68%, transparent); }
 .canvas-toolbar { display: flex; justify-content: flex-end; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--color-border); }
