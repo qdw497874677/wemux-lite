@@ -473,4 +473,25 @@ Channel binding 不是新的独立 Grant。创建/修改 binding 需要 Project 
 | 阶段 5 G45 飞书 | 24-34h |
 | **合计** | **102-150h** |
 
-该估时高于批次七原 58-80h，原因不是增加平台化范围，而是把原计划隐含但不可省略的生产要求显式计入：统一工具执行网关尚不存在、Worker Secret 不能经 Server Web 中转、MCP 子进程完整生命周期、HTTP 流式响应上限、持久防重放/outbox、密钥轮换、A3 撤权，以及本仓要求的真实浏览器验收。若必须压缩首发工期，只能明确删减 transport 或 UI 范围，例如 G43 首发只做 stdio，不能删减凭证隔离、SSRF、防重放、幂等和生命周期清理。
+### 5.3 实施状态(2026-09-27 收口)
+
+| 阶段 | 提交 | 状态 |
+|---|---|---|
+| 0 G42 契约冻结 | d7b3c07 | 完成 |
+| 1 共享内核 | 266b135 | 完成(测试 22/22) |
+| 2 G43 Worker MCP | 636056c | 完成(worker 测试 191 项,fixture 双 transport) |
+| 3 H1+G44 集群 HTTP | 3ea854e | 完成(e2e 1/0;浏览器 UI 验收用自包含 fixture 页策略) |
+| 4 H4+G46 webhook | b8e189e | 完成(e2e 2/0) |
+| 5 G45 飞书+G46 收口 | eb5a12e | 完成(e2e 3/3;协议 fixture 已验证,真实飞书阻塞待公网 HTTPS 回调) |
+
+实施中沉淀的偏差与遗留(后续批次消化,不阻塞连接器模块可用性):
+
+1. 真实飞书验收未执行:需要部署者提供测试应用与公网 HTTPS 回调;协议层由版本化 fixture(v2024-11)+本地 HTTP fixture 全链路覆盖。
+2. Channel token 轮换的旧 token 15 分钟并存窗口未实现;当前轮换方式是新建 Channel→迁移 binding→challenge 验证→停用旧 Channel。
+3. Channel 完整删除生命周期(停用→60s 租约→30 天诊断保留)未实现,当前只有启停。
+4. OPEN-1 地址 pinning transport 维持推迟;高风险部署在实现前禁用出站连接器。
+5. e2e 直跑源码模式暴露 server 应用层 30+ 文件参数属性不兼容 strip-only,已全部改显式字段;新增代码须保持该风格(worker/server 源码可能被 apps/e2e 以 node --experimental-strip-types 直跑)。
+6. 根 typecheck 在并行功能(canvas/终端/文件写入等)合入期间可能被其接口不一致阻塞;连接器相关文件在阶段 5 提交时点 0 类型错误。
+
+
+该估时高于批次七原 58-80h,原因不是增加平台化范围,而是把原计划隐含但不可省略的生产要求显式计入:统一工具执行网关尚不存在、Worker Secret 不能经 Server Web 中转、MCP 子进程完整生命周期、HTTP 流式响应上限、持久防重放/outbox、密钥轮换、A3 撤权,以及本仓要求的真实浏览器验收。若必须压缩首发工期,只能明确删减 transport 或 UI 范围,例如 G43 首发只做 stdio,不能删减凭证隔离、SSRF、防重放、幂等和生命周期清理。
