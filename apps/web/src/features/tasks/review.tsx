@@ -4,8 +4,10 @@ import { unavailableCapability, type Run, type TaskDetail, type ReviewStatus } f
 import type { Api } from '../../api/client'
 import { projectKeys } from '../../app/project-query'
 import { Button } from '../../components/ui/button'
+import { useConfirmDialog } from '../../components/ui/confirm-dialog.tsx'
 
 export function RunReview({ api, task, run, refresh }: { api: Api; task: TaskDetail; run: Run; refresh: () => void }) {
+  const confirm = useConfirmDialog()
   const review = useQuery({ queryKey: projectKeys.review(task.projectId, task.id, run.id), queryFn: ({ signal }) => api.review(task.projectId, task.id, run.id, signal) })
   const [pending, setPending] = useState(false), [error, setError] = useState('')
   const [intent, setIntent] = useState<ReviewStatus | null>(null)
@@ -16,7 +18,7 @@ export function RunReview({ api, task, run, refresh }: { api: Api; task: TaskDet
   ]
   async function act(status: ReviewStatus) {
     if (pending || !navigator.onLine || !(actions.find(a => a.status === status)?.capability ?? unavailableCapability).allowed) return
-    if (!window.confirm(`确认${actions.find(a => a.status === status)?.label}？当前任务版本 v${task.version}。`)) return
+    if (!await confirm({ title: '确认审查操作', description: `确认${actions.find(a => a.status === status)?.label}？当前任务版本 v${task.version}。`, confirmLabel: '确认', danger: true })) return
     setPending(true); setIntent(status); setError('')
     try { await api.reviewAction(task.projectId, task.id, run.id, { status, version: task.version }); setIntent(null); refresh() }
     catch (cause) { setError(cause instanceof Error ? cause.message : '审查失败'); refresh() }

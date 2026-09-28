@@ -33,7 +33,10 @@ test('journal projects tool lifecycle into the ordered conversation timeline', (
     event(7, { kind: 'assistant.text.delta', turnId: 't1', text: '完成' }),
     event(8, { kind: 'turn.finished', turnId: 't1', outcome: 'completed', failure: null }),
   ])
-  assert.deepEqual(result.timeline.map(item => item.kind), ['message', 'tool', 'message'])
+  assert.deepEqual(result.timeline.map(item => item.kind), ['message', 'reasoning', 'tool', 'message'])
+  const reasoning = result.timeline.find(item => item.kind === 'reasoning')
+  assert.match(reasoning.text, /bash$/)
+  assert.equal(reasoning.duration, 1)
   const tool = result.timeline.find(item => item.kind === 'tool')
   assert.equal(tool.toolName, 'bash')
   assert.deepEqual(tool.input, { command: 'pwd' })
@@ -53,12 +56,13 @@ test('journal keeps assistant text segments ordered around tool calls and expose
     event(6, { kind: 'assistant.text.delta', turnId: 't1', text: '读取失败。' }),
     event(7, { kind: 'turn.finished', turnId: 't1', outcome: 'failed', failure: { code: 'READ_FAILED', message: '无法读取文件' } }),
   ])
-  assert.deepEqual(result.timeline.map(item => item.kind), ['message', 'message', 'tool', 'message', 'notice'])
+  assert.deepEqual(result.timeline.map(item => item.kind), ['message', 'message', 'reasoning', 'tool', 'message', 'notice'])
   assert.equal(result.timeline[1].text, '先检查。')
-  assert.equal(result.timeline[2].status, 'failed')
-  assert.equal(result.timeline[3].text, '读取失败。')
-  assert.equal(result.timeline[4].text, '无法读取文件')
-  assert.equal(result.timeline[4].tone, 'error')
+  assert.match(result.timeline[2].text, /read$/)
+  assert.equal(result.timeline[3].status, 'failed')
+  assert.equal(result.timeline[4].text, '读取失败。')
+  assert.equal(result.timeline[5].text, '无法读取文件')
+  assert.equal(result.timeline[5].tone, 'error')
 })
 
 test('journal exposes message rejection beside the rejected user message', () => {

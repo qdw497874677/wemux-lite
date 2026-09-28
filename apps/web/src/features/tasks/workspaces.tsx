@@ -10,9 +10,11 @@ import { Input } from '../../components/ui/input'
 import { CreationDialog } from '../../components/creation-dialog'
 import { DialogFooter } from '../../components/ui/dialog'
 import { workerStateLabel, workspaceStateLabel } from '../../lib/display'
+import { useConfirmDialog } from '../../components/ui/confirm-dialog.tsx'
 
 export function TaskWorkspaces({ task, api, refresh, onDirty }: { task: TaskDetail; api: Api; refresh: () => void; onDirty: (dirty: boolean) => void }) {
   const client = useQueryClient()
+  const confirm = useConfirmDialog()
   const workers = useQuery({ queryKey: ['workers'], queryFn: ({ signal }) => api.workers(signal) })
   const workspaces = useQuery({ queryKey: projectKeys.workspaces(task.projectId), queryFn: ({ signal }) => api.workspaces(task.projectId, signal) })
   const [workerId, workerSet] = useState(task.assignee?.workerId ?? ''), [workspaceId, workspaceSet] = useState(task.assignee?.workspaceId ?? '')
@@ -21,7 +23,7 @@ export function TaskWorkspaces({ task, api, refresh, onDirty }: { task: TaskDeta
   const [pending, setPending] = useState<Record<string, boolean>>({})
   const pendingRef = useRef(new Set<string>())
   const [creating, setCreating] = useState(false)
-  const closeCreate = () => { if (!pendingRef.current.has('create') && (!createDirty || window.confirm('放弃未保存的工作区？'))) { setCreating(false); setCreateDirty(false); createWorkerSet(''); setName(task.title); setSource('empty'); setGitUrl(''); setRevision('main') } }
+  const closeCreate = () => { if (pendingRef.current.has('create')) return; const close = () => { setCreating(false); setCreateDirty(false); createWorkerSet(''); setName(task.title); setSource('empty'); setGitUrl(''); setRevision('main') }; if (!createDirty) { close(); return } void confirm({ title: '放弃未保存的工作区', description: '确认关闭并放弃当前工作区草稿？', confirmLabel: '放弃', danger: true }).then(ok => { if (ok) close() }) }
   const [createWorkerId, createWorkerSet] = useState(''), [createDirty, setCreateDirty] = useState(false)
   const busy = pending.assignment === true
   const [name, setName] = useState(task.title), [source, setSource] = useState<'empty' | 'git'>('empty'), [gitUrl, setGitUrl] = useState(''), [revision, setRevision] = useState('main')

@@ -12,6 +12,7 @@ interface ToolEventView {
   output: string
   status: 'running' | 'completed' | 'failed' | 'cancelled'
   exitCode: number | null
+  streamKind?: 'command_output' | 'file_change_output'
 }
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
@@ -44,7 +45,8 @@ function detailForTool(action: WorkLogEntry['action'], inputValue: unknown, outp
 }
 
 export function normalizeWorkLogEntry(tool: ToolEventView): WorkLogEntry {
-  const presentation = classifyTool(tool.toolName)
+  const semantic = tool.streamKind === 'file_change_output' ? { action: 'edit' as const, title: '文件变更' } : tool.streamKind === 'command_output' ? { action: 'command' as const, title: '运行命令' } : undefined
+  const presentation = semantic ?? classifyTool(tool.toolName)
   const failed = tool.status === 'failed' || (tool.exitCode !== null && tool.exitCode !== 0)
   const file = presentation.action === 'edit' ? extractFile(asRecord(tool.input)) : undefined
   return {

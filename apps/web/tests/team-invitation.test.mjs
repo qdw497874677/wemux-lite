@@ -29,12 +29,15 @@ test('团队管理页包含创建、邀请、成员与待处理邀请能力', as
   assert.match(source, /api\.updateTeamMemberRole/)
   assert.match(source, /api\.removeTeamMember/)
   assert.match(source, /api\.transferTeamOwnership/)
-  assert.match(source, /访问会立即失效/)
-  assert.match(source, /停止命令在 Worker 离线时显示为待送达/)
+  assert.match(source, /访问权限立即失效/)
+  assert.match(source, /停止命令可能仍在等待 Worker 上线送达/)
   assert.match(source, /api\.teamMembers/)
   assert.match(source, /api\.teamInvitations/)
   assert.match(source, /创建团队/)
   assert.match(source, /邀请成员/)
+  assert.match(source, /onBack: \(\) => void/)
+  assert.match(source, /返回项目/)
+  assert.match(source, /ArrowLeft/)
 })
 
 test('join 与 teams 是正式 Web 路由并进入对应页面', async () => {

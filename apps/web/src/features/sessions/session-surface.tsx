@@ -62,7 +62,7 @@ export function SessionSurface({ api, session, presentation, projectPath, worker
         return <div key={entry.id} className="contents">{dateLabel && <div className="flex items-center gap-3 py-2" role="separator" aria-label={dateLabel}><span className="h-px flex-1 bg-border/60" /><span className="shrink-0 text-xs text-muted-foreground/60">{dateLabel}</span><span className="h-px flex-1 bg-border/60" /></div>}<TimelineEntry entry={entry} api={api} sessionId={session.id} messageActions={messageActions} planActions={planActions} /></div>
       })}
       {localNotice && <p role="status" className="text-center text-xs text-muted-foreground">{localNotice}</p>}
-      <OptimisticMessages controller={controller} confirmedIds={confirmedIds} hiddenMessageIds={hiddenMessageIds} messageActions={messageActions} />
+      <OptimisticMessages api={api} sessionId={session.id} controller={controller} confirmedIds={confirmedIds} hiddenMessageIds={hiddenMessageIds} messageActions={messageActions} />
     </ConversationContent><ConversationScrollButton className="nodrag nopan" /></Conversation>
     {history.stream !== 'live' && <p className="session-surface-signal">实时更新正在重连，历史仍会继续补传。</p>}
     {controls && <ClusterControls api={api} session={currentSession} queuedItems={history.queuedItems} enabled={canSend} />}

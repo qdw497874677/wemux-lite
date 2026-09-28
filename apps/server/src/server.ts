@@ -226,6 +226,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
       streams.close()
       terminalStreams.close()
       projectStreams.close()
+      canvasCollaborationStreams.close()
       await gateway.close()
       await dingTalk.stopAll()
       if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))

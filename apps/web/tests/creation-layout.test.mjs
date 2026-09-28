@@ -19,11 +19,14 @@ test('resource and task creation share a guarded, scrollable dialog', () => {
   assert.doesNotMatch(source('../src/components/create-dialog.tsx'), /window.confirm/)
   assert.match(source('../src/features/tasks/board.tsx'), /onBusy=\{setCreateBusy\}/)
 })
-test('conversation focus retains return, searchable navigation and touch newline', () => {
+test('unified sidebar replaces conversation focus while retaining return and touch newline', () => {
   const app = source('../src/App.tsx')
-  assert.match(app, /conversation-focus/)
-  assert.match(app, /展开导航/)
-  assert.match(app, /onFocus=.*setConversationFocus\(false\)/)
+  assert.match(app, /<SidebarProvider>/)
+  assert.match(app, /<AppSidebar collapsible="icon">/)
+  assert.match(app, /<SidebarRail \/>/)
+  assert.doesNotMatch(app, /conversation-focus/)
+  assert.doesNotMatch(app, /展开导航/)
+  assert.doesNotMatch(app, /onFocus=.*setConversationFocus\(false\)/)
   assert.match(app, /projectId && !sessionId/)
   assert.match(source('../src/styles.css'), /--chat-max-width: 45rem/)
   assert.match(source('../src/styles.css'), /max-width: var\(--chat-max-width\)/)

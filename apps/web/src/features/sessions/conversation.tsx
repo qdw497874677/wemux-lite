@@ -26,6 +26,7 @@ import { ProposedPlanCard } from './plan-card.tsx'
 import { terminalContextText, useTerminalContext } from '../terminal/terminal-context.ts'
 import { commandGroups, commandsForAgent, compactRoute, isAgentCommandInput, type SlashCommand } from './slash-commands.ts'
 import { DiffBlock, DiffFileToggle } from '../files/diff-block.tsx'
+import { isImageAttachment, uploadImageAttachments } from './image-attachments.ts'
 
 const formatUsageNumber = (value: number | undefined) => value === undefined ? null : new Intl.NumberFormat('zh-CN').format(value)
 const formatToolValue = (value: unknown) => {
@@ -92,7 +93,7 @@ export function TimelineEntry({ entry, api, sessionId, onOpenContext, messageAct
       <ToolContent>{presentation.detail && <p className={cn('mb-2 whitespace-pre-wrap break-all text-xs text-muted-foreground', presentation.tone === 'error' && 'text-red-200')}>{presentation.detail}</p>}{presentation.changedFiles?.length ? <ChangedFiles api={api} sessionId={sessionId} files={presentation.changedFiles} /> : null}{input && <ToolInput input={entry.input} />}<ToolOutput output={output} errorText={presentation.tone === 'error' ? output || '工具执行失败' : undefined} /></ToolContent>
     </Tool></div>
   }
-  return <TimelineMessage entry={entry} onOpenContext={onOpenContext} messageActions={messageActions} />
+  return <TimelineMessage entry={entry} api={api} sessionId={sessionId} onOpenContext={onOpenContext} messageActions={messageActions} />
 }
 
 type DiffLoad = { state: 'loading' } | { state: 'ready'; diff: FileDiffDTO } | { state: 'error'; message: string }
@@ -116,7 +117,7 @@ function ChangedFiles({ api, sessionId, files }: { api?: Api; sessionId?: string
   })}</ul>
 }
 
-function TimelineMessage({ entry, onOpenContext, messageActions }: { entry: Extract<ChatTimelineItem, { kind: 'message' }>; onOpenContext?: () => void; messageActions?: MessageActions }) {
+function TimelineMessage({ entry, api, sessionId, onOpenContext, messageActions }: { entry: Extract<ChatTimelineItem, { kind: 'message' }>; api?: Api; sessionId?: string; onOpenContext?: () => void; messageActions?: MessageActions }) {
   const message = timelineMessageToUIMessage(entry)
   const text = message.parts.filter(part => part.type === 'text').map(part => part.text).join('')
   const contentRef = useRef<HTMLDivElement>(null)
@@ -135,7 +136,7 @@ function TimelineMessage({ entry, onOpenContext, messageActions }: { entry: Extr
     <div className={cn('flex max-w-full items-start gap-2.5', message.role === 'user' && 'flex-row-reverse')}>
       {message.role === 'assistant' && <span className="mt-1 grid size-7 shrink-0 place-items-center rounded-lg bg-accent/70 text-muted-foreground"><Bot className="size-3.5" /></span>}
       <div className={cn('flex min-w-0 max-w-full flex-1 flex-col gap-1', message.role === 'user' && 'items-end')}>
-        <MessageContent><div ref={contentRef}>{text ? <Response partial={entry.status === 'running' || entry.status === 'started'}>{text}</Response> : <span className="flex items-center gap-2 text-muted-foreground"><Loader />等待输出…</span>}</div>
+        <MessageContent><div ref={contentRef}>{text ? <Response partial={entry.status === 'running' || entry.status === 'started'} api={api} sessionId={sessionId}>{text}</Response> : <span className="flex items-center gap-2 text-muted-foreground"><Loader />等待输出…</span>}</div>
           <div className={cn('mt-1.5 flex items-center gap-1.5', message.role === 'user' && 'justify-end')}><MessageStatus status={entry.status} />{message.role === 'user' && onOpenContext && <button type="button" onClick={onOpenContext} className="rounded-lg p-1 text-muted-foreground/50 transition-all hover:bg-white/10 hover:text-foreground" aria-label="查看会话信息"><ChevronRight className="size-3.5" /></button>}</div>
         </MessageContent>
         <TimelineTimestamp timestamp={entry.timestamp} className={message.role === 'user' ? 'self-end' : 'self-start'} />
@@ -233,25 +234,36 @@ function ComposerContents({ api, session, agent, controller, state, canSend, blo
   const submit = async (message: PromptInputMessage) => {
     if (!canSend || state.pending || (state.draft.startsWith('/') && !isAgentCommandInput(agent, state.draft))) return
     const textParts: string[] = []
-    let skipped = 0
-    for (const attachment of message.files ?? []) {
-      if (isInlineTextAttachment(attachment.file) && attachment.size < 10 * 1024) {
-        const content = await attachment.file.text()
-        textParts.push(`附件：${attachment.name}\n\n\`\`\`${attachmentLanguage(attachment.name)}\n${content}\n\`\`\``)
-      } else skipped++
-    }
-    const terminalText = terminalContext.active ? terminalContextText(terminalContext, 20) : ''
-    const content = [message.text.trim(), ...textParts, terminalText].filter(Boolean).join('\n\n')
-    if (skipped) setNotice({ tone: 'info', text: '附件将随后支持上传到工作区；本次仅发送文本和小于 10KB 的文本附件。' })
-    if (!content) return
-    controller.edit(content)
-    sendWithAttachmentsRef.current = true
+    const messageAttachments = message.files ?? []
+    const images = messageAttachments.filter(isImageAttachment)
+    const unsupported = messageAttachments.filter(attachment => !isImageAttachment(attachment) && !(isInlineTextAttachment(attachment.file) && attachment.size < 10 * 1024))
+    if (images.length && !api) { setNotice({ tone: 'error', text: '当前无法连接文件服务，图片仍保留，请恢复连接后重试。' }); return }
+    if (unsupported.length) { setNotice({ tone: 'error', text: '仅支持图片和小于 10KB 的文本附件；请移除其他附件后重试。' }); return }
     try {
+      for (const attachment of messageAttachments) {
+        if (!isImageAttachment(attachment)) {
+          const content = await attachment.file.text()
+          textParts.push(`附件：${attachment.name}\n\n\`\`\`${attachmentLanguage(attachment.name)}\n${content}\n\`\`\``)
+        }
+      }
+      if (images.length) {
+        setNotice({ tone: 'info', text: `正在上传 ${images.length} 张图片…` })
+        textParts.push(...await uploadImageAttachments(api!, session.id, images))
+      }
+      const terminalText = terminalContext.active ? terminalContextText(terminalContext, 20) : ''
+      const content = [message.text.trim(), ...textParts, terminalText].filter(Boolean).join('\n\n')
+      if (!content) return
+      controller.edit(content)
+      sendWithAttachmentsRef.current = true
       await controller.send()
       const result = controller.snapshot()
-      if (message.text.trim() && result.draft === '' && !result.error) promptHistory.push(message.text)
+      if (result.error || result.draft !== '') throw new Error(result.error || '消息发送未确认，图片附件仍保留，请重试。')
+      if (message.text.trim()) promptHistory.push(message.text)
+      attachments.clear()
+      setNotice(null)
+    } catch (error) {
+      setNotice({ tone: 'error', text: error instanceof Error ? error.message : '图片上传失败，附件仍保留，请重试。' })
     } finally { sendWithAttachmentsRef.current = false }
-    if (controller.snapshot().draft === '') attachments.clear()
   }
   submitRef.current = message => { void submit(message) }
   return <>
@@ -311,10 +323,10 @@ function attachmentExtension(name: string) { return name.includes('.') ? name.sp
 function isInlineTextAttachment(file: File) { return file.type.startsWith('text/') || ['application/json', 'application/xml', 'application/javascript'].includes(file.type) || textAttachmentExtensions.has(attachmentExtension(file.name)) }
 function attachmentLanguage(name: string) { const extension = attachmentExtension(name); return extension === 'markdown' ? 'md' : extension }
 
-export function OptimisticMessages({ controller, confirmedIds, hiddenMessageIds = new Set(), messageActions }: { controller: SubmissionController; confirmedIds: string[]; hiddenMessageIds?: Set<string>; messageActions?: MessageActions }) {
+export function OptimisticMessages({ api, sessionId, controller, confirmedIds, hiddenMessageIds = new Set(), messageActions }: { api?: Api; sessionId?: string; controller: SubmissionController; confirmedIds: string[]; hiddenMessageIds?: Set<string>; messageActions?: MessageActions }) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot)
   return <>{state.echoes.filter(item => !confirmedIds.includes(item.messageId) && !hiddenMessageIds.has(item.messageId)).map(item => {
     const failed = Boolean(state.error && state.attempt?.messageId === item.messageId)
-    return <Message key={item.messageId} from="user" data-message-id={item.messageId}><MessageContent><Response>{item.content}</Response><small role={failed ? 'alert' : 'status'} className={failed ? 'text-red-300' : undefined}>{failed ? '' : state.pending && state.attempt?.messageId === item.messageId ? '…' : ''}</small></MessageContent><ActionsBar aria-label="">{failed && messageActions?.onRetry && <Action onClick={() => messageActions.onRetry?.(item.content, item.messageId)} aria-label="" title=""><RotateCcw className="size-3.5" /></Action>}<Action onClick={() => void copyText(item.content)} aria-label="" title=""><Copy className="size-3.5" /></Action>{messageActions?.onHide && <Action onClick={() => messageActions.onHide?.(item.messageId)} aria-label="" title="， Journal"><Trash2 className="size-3.5" /></Action>}</ActionsBar></Message>
+    return <Message key={item.messageId} from="user" data-message-id={item.messageId}><MessageContent><Response api={api} sessionId={sessionId}>{item.content}</Response><small role={failed ? 'alert' : 'status'} className={failed ? 'text-red-300' : undefined}>{failed ? '' : state.pending && state.attempt?.messageId === item.messageId ? '…' : ''}</small></MessageContent><ActionsBar aria-label="">{failed && messageActions?.onRetry && <Action onClick={() => messageActions.onRetry?.(item.content, item.messageId)} aria-label="" title=""><RotateCcw className="size-3.5" /></Action>}<Action onClick={() => void copyText(item.content)} aria-label="" title=""><Copy className="size-3.5" /></Action>{messageActions?.onHide && <Action onClick={() => messageActions.onHide?.(item.messageId)} aria-label="" title="， Journal"><Trash2 className="size-3.5" /></Action>}</ActionsBar></Message>
   })}</>
 }

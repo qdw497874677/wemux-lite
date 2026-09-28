@@ -1,6 +1,6 @@
 import type { ProjectId } from '@wemux/domain'
-import { AppError } from '../../application/errors.js'
-import type { RouteDescriptor } from './types.js'
+import { AppError } from '../../application/errors.ts'
+import type { RouteDescriptor } from './types.ts'
 
 export const canvasRoutes: readonly RouteDescriptor[] = [
   { method: 'GET', pattern: '/projects/:projectId/canvas-layout', auth: 'authenticated', handler: async context => {

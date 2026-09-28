@@ -392,7 +392,17 @@ export class SessionLineageService {
     return [...seen].sort().map(id => requireValue(byId.get(id)))
   }
 
-  /** 操作者视角下的 Project revision：与图快照用同一指纹规则，客户端可比较新旧。 */
+  /** 操作者视角下的 Project revision：先校验 Project 可读性，再复用权威图指纹。 */
+  async graphRevisionFor(operator: UserId, projectId: ProjectId): Promise<string> {
+    return await this.store.transaction(async tx => {
+      const teamId = await this.effectiveTeamId(tx, operator)
+      const project = await this.requireTeamProject(tx, projectId, teamId)
+      if (!await this.canReadProject(tx, operator, teamId, project)) throw new AppError(404, 'Project not found')
+      return this.revision(tx, projectId)
+    })
+  }
+
+  /** Project revision 的事务内实现：与图快照用同一指纹规则，客户端可比较新旧。 */
   private async revision(tx: ServerStoreTx, projectId: ProjectId): Promise<string> {
     const sessions = (await tx.resources.listSessions()).filter(session => session.projectId === projectId)
     const live = new Set(sessions.filter(session => session.deletedAt === null).map(session => session.id))
