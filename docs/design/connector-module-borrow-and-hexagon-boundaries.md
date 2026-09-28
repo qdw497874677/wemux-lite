@@ -474,6 +474,7 @@ Channel binding 不是新的独立 Grant。创建/修改 binding 需要 Project 
 | **合计** | **102-150h** |
 
 ### 5.3 实施状态(2026-09-27 收口)
+| G47 | 已完成 | 增加 `apps/server/src/channels/dingtalk/` 的 Stream client、inbound、reply-pusher 与 adapter；adapter 生命周期扩展为可选 `start/stop`，HTTP adapter 不受影响。Server 启停、Channel 启停与凭证 revision 共同管理单 Channel 单连接，断线指数退避并刷新短期 ticket。入站复用 H4 7 天幂等日志，出口复用六态 outbox；钉钉无 HTTP 入站 route。fixture 固定为 `apps/server/src/test/fixtures/dingtalk/v2026-09/`。协议 fixture + 本地 fake WebSocket 全链路已验证，真实钉钉待部署者凭证。 | 暂仅接收机器人文本 topic `/v1.0/im/bot/messages/get`；回复仅走入站 `sessionWebhook`，缺失时死信；未实现自定义机器人 webhook、附件、卡片与服务端主动消息 API。 |
 
 | 阶段 | 提交 | 状态 |
 |---|---|---|

@@ -95,7 +95,8 @@ export interface HttpOperationDefinition {
   readonly operationTypeOverride: OperationType | null
 }
 
-export type Channel = GenericWebhookChannel | FeishuChannel
+/** Supported channel transports: signed HTTP webhook, Feishu HTTP events, and DingTalk Stream. */
+export type Channel = GenericWebhookChannel | FeishuChannel | DingTalkChannel
 
 export interface ChannelBase {
   readonly id: ChannelId
@@ -126,6 +127,16 @@ export interface FeishuChannel extends ChannelBase {
     readonly verificationMode: 'verification_token' | 'signature' | 'encrypted'
     readonly acceptEventSchema: '2.0'
     readonly tenantKey: string | null
+  }
+}
+
+export interface DingTalkChannel extends ChannelBase {
+  readonly kind: 'dingtalk'
+  readonly config: {
+    readonly clientIdHint: string
+    readonly robotCode: string
+    readonly streamMode: true
+    readonly messageTopic: '/v1.0/im/bot/messages/get'
   }
 }
 

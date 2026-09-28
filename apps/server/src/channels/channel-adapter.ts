@@ -33,3 +33,14 @@ export interface ChannelAdapter {
   enable(channelId: ChannelId): Promise<void>
   disable(channelId: ChannelId): Promise<void>
 }
+
+/** Adapters with a self-initiated inbound source, such as DingTalk Stream WebSocket, implement this. */
+export interface ActiveInboundAdapter extends ChannelAdapter {
+  start(channelId: ChannelId): Promise<void>
+  stop(channelId: ChannelId): Promise<void>
+}
+
+export function isActiveInboundAdapter(adapter: ChannelAdapter): adapter is ActiveInboundAdapter {
+  const candidate = adapter as Partial<ActiveInboundAdapter>
+  return typeof candidate.start === 'function' && typeof candidate.stop === 'function'
+}

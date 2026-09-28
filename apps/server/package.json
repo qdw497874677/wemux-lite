@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@wemux/domain": "0.1.0",
+    "@wemux/connector": "0.1.0",
     "@wemux/server-domain": "0.1.0",
     "@wemux/web-contract": "0.1.0",
     "@wemux/wire-protocol": "0.1.0",

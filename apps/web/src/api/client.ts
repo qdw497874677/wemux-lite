@@ -292,7 +292,7 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     testConnector: (projectId: string, connectorId: string, body: ConnectorTestDTO) => request<{ requestId: string; connectorId: string; workerId: string; revision: number; status: string }>(routes.connectorState(projectId, connectorId, 'test'), body),
     channels: (projectId: string, signal?: AbortSignal) => request<ChannelListDTO>(routes.channels(projectId), undefined, signal),
     createChannel: (projectId: string, body: CreateChannelDTO) => request<CreatedChannelDTO>(routes.channels(projectId), body),
-    testFeishuChannel: (projectId: string, channelId: string) => request<{ ok: true; appIdHint: string }>(routes.channelTest(projectId, channelId), {}),
+    testChannel: (projectId: string, channelId: string) => request<{ ok: true; appIdHint?: string; clientIdHint?: string; endpoint?: string }>(routes.channelTest(projectId, channelId), {}),
     setChannelEnabled: (projectId: string, channelId: string, body: { requestId: string; expectedRevision: number; enabled: boolean }) => request<unknown>(routes.channelState(projectId, channelId), body),
     createChannelBinding: (projectId: string, body: CreateChannelBindingDTO) => request<unknown>(routes.channelBindings(projectId), body),
     setChannelBindingEnabled: (projectId: string, bindingId: string, body: { requestId: string; expectedRevision: number; enabled: boolean }) => request<unknown>(routes.channelBindingState(projectId, bindingId), body),

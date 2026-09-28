@@ -1,0 +1,10 @@
+{
+  "specVersion": "1.0",
+  "type": "CALLBACK",
+  "headers": {
+    "messageId": "frame-private-001",
+    "time": "1788220800000",
+    "topic": "/v1.0/im/bot/messages/get"
+  },
+  "data": "{\"msgId\":\"dt-private-001\",\"conversationId\":\"cid-private-001\",\"conversationType\":\"1\",\"senderStaffId\":\"staff-alice\",\"text\":{\"content\":\"  请总结今天的变更  \"},\"isInAtList\":false,\"sessionWebhook\":\"http://127.0.0.1:19091/session-webhook\",\"robotCode\":\"ding-robot-fixture\",\"msgtype\":\"text\",\"createAt\":1788220800000}"
+}

@@ -38,6 +38,7 @@ export type AcceptInboundResult =
 export interface ChannelRepository {
   getChannel(id: ChannelId): Promise<Channel | null>
   listChannels(projectId: ProjectId): Promise<readonly Channel[]>
+  listEnabledChannels(): Promise<readonly Channel[]>
   getSecret(channelId: ChannelId): Promise<ChannelSecretRecord | null>
   getRequest(projectId: ProjectId, requestId: string): Promise<ChannelRequestRecord | null>
   createChannel(channel: Channel, secret: ChannelSecretRecord, callbackUrl: string | null, request: ChannelRequestRecord): Promise<void>
@@ -49,6 +50,7 @@ export interface ChannelRepository {
   listBindings(projectId: ProjectId, channelId?: ChannelId): Promise<readonly ChannelBindingRecord[]>
   createBinding(record: ChannelBindingRecord, request: ChannelRequestRecord): Promise<void>
   updateBinding(record: ChannelBindingRecord, expectedRevision: number, request: ChannelRequestRecord): Promise<boolean>
+  updateBindingCallback(channelId: ChannelId, externalConversationKey: string, callbackUrl: string): Promise<boolean>
 
   acceptInbound(input: AcceptInboundInput): Promise<AcceptInboundResult>
   purgeInboundBefore(before: Timestamp): Promise<number>

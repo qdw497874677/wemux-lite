@@ -1,0 +1,6 @@
+{
+  "specVersion": "1.0",
+  "type": "CALLBACK",
+  "headers": { "messageId": "frame-image-001", "time": "1788220802000", "topic": "/v1.0/im/bot/messages/get" },
+  "data": "{\"msgId\":\"dt-image-001\",\"conversationId\":\"cid-private-001\",\"conversationType\":\"1\",\"senderStaffId\":\"staff-alice\",\"robotCode\":\"ding-robot-fixture\",\"msgtype\":\"picture\",\"createAt\":1788220802000}"
+}

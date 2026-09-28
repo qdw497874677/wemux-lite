@@ -813,6 +813,10 @@ OPEN-2，非 G43-G46 阻塞项：仓库当前未保存飞书官方测试向量�
 4. 若发送方提供 `X-Wemux-Timestamp`，允许偏差为正负 5 分钟；缺失不拒绝，但诊断标记较弱防重放。稳定 delivery id 仍是主要身份。[设计 §4.4.21][新增裁定]
 5. 来源 IP/CIDR 仅作可选附加收窄。代理链只信任部署显式配置的 trusted proxy 数量，默认 0。[新增裁定]
 
+### 12.7 G47 钉钉 Stream 记录
+
+G47 未偏离 H4 六态投递、入站幂等持久化与 7 天保留契约。主动型入站源仅为 `ChannelAdapter` 增加可选 `start/stop` 生命周期：HTTP 型 adapter 不实现；Server 启停、Channel 启停与凭证 revision 驱动钉钉单 Channel 单连接。钉钉 Stream 无本地 HTTP 入站 route，回复仅使用会话级 `sessionWebhook`；缺失地址按不可恢复错误进入死信。ACK 在耗时领域处理前发出，领域幂等由持久化事件身份承担。
+
 ## 13. 22 问逐项冻结索引
 
 | 问题 | 冻结结论 | 主要章节 |

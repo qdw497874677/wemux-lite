@@ -28,6 +28,7 @@ import { ChannelOutbox } from './application/channel-outbox.ts'
 import { GenericWebhookAdapter } from './channels/generic-webhook-adapter.ts'
 import { FeishuAdapter } from './channels/feishu/adapter.ts'
 import { FeishuTokenProvider } from './channels/feishu/token-provider.ts'
+import { DingTalkAdapter, type DingTalkAdapterOptions } from './channels/dingtalk/adapter.ts'
 import type { ChannelAdapter } from './channels/channel-adapter.ts'
 import { AesGcmSecretCodec } from '@wemux/connector'
 import { SqliteCanvasLayoutRepository } from './storage/sqlite/canvas-layout-repository.ts'
@@ -73,6 +74,8 @@ export interface WemuxServerOptions {
   channelFetch?: typeof fetch
   /** Override Feishu OpenAPI root for local protocol fixtures. */
   feishuApiBaseUrl?: string
+  /** DingTalk Stream transport overrides for local protocol fixtures. */
+  dingTalk?: DingTalkAdapterOptions
 }
 
 /** 邮件配置错误不阻断控制面启动：降级为“不可用 + 原因”，由 /auth/options 公开。 */
@@ -144,12 +147,13 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const channelRepository = new SqliteChannelRepository(options.databasePath)
   const encryptionKey = options.channelEncryptionKey?.trim() || process.env.WEMUX_CONNECTOR_ENCRYPTION_KEY?.trim()
   const channelCodec = encryptionKey ? new AesGcmSecretCodec({ currentKey: encryptionKey, previousKeys: process.env.WEMUX_CONNECTOR_ENCRYPTION_PREVIOUS_KEYS?.split(',').map(value => value.trim()).filter(Boolean) }) : null
-  const channels = new ChannelService(channelRepository, channelCodec, projects, sessionAccess, workerAccess)
   const channelRouter = new ChannelRouter(channelRepository, sessionAccess, projects, workerAccess, service)
   const genericWebhook = new GenericWebhookAdapter(channelRepository, channelCodec, options.channelFetch)
   const feishuApiBaseUrl = options.feishuApiBaseUrl ?? 'https://open.feishu.cn/open-apis'
   const feishu = new FeishuAdapter(channelRepository, channelCodec, new FeishuTokenProvider(options.channelFetch ?? fetch, Date.now, undefined, feishuApiBaseUrl), feishuApiBaseUrl)
-  const adapters = new Map<string, ChannelAdapter>([['generic_webhook', genericWebhook], ['feishu', feishu]])
+  const dingTalk = new DingTalkAdapter(channelRepository, channelCodec, { ...options.dingTalk, fetch: options.dingTalk?.fetch ?? options.channelFetch })
+  const adapters = new Map<string, ChannelAdapter>([['generic_webhook', genericWebhook], ['feishu', feishu], ['dingtalk', dingTalk]])
+  const channels = new ChannelService(channelRepository, channelCodec, projects, sessionAccess, workerAccess, kind => adapters.get(kind))
   const channelOutbox = new ChannelOutbox(channelRepository, projects, sessionAccess, workerAccess, store, { deploymentAllowsPrivateNetwork: process.env.WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK === 'true', connectorAllowsPrivateNetwork: true }, options.channelFetch, kind => adapters.get(kind)!)
   const workers = new WorkerService(store, notifications, (workerId, report) => connectors.report(workerId, report), async (sessionId, events) => { await channelOutbox.projectJournal(sessionId, events); setImmediate(() => void channelOutbox.drain().catch(() => undefined)) })
   const workerGateway = { send: (workerId: import('@wemux/domain').WorkerId, payload: import('@wemux/wire-protocol').ServerPayload) => {
@@ -193,6 +197,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
     channelOutbox,
     genericWebhook,
     feishu,
+    dingTalk,
   }))
   gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))
   let closed = false
@@ -204,6 +209,9 @@ export function createWemuxServer(options: WemuxServerOptions) {
     service,
     async listen(port = 3001, host = '127.0.0.1') {
       await workers.recoverRuns()
+      for (const channel of await channelRepository.listEnabledChannels()) {
+        if (channel.kind === 'dingtalk' && channel.enabled) await dingTalk.start(channel.id)
+      }
       await new Promise<void>((resolve, reject) => {
         server.once('error', reject)
         server.listen(port, host, () => { server.off('error', reject); resolve() })
@@ -219,6 +227,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
       terminalStreams.close()
       projectStreams.close()
       await gateway.close()
+      await dingTalk.stopAll()
       if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
       connectorRepository.close()
       channelRepository.close()

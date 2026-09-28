@@ -21,6 +21,12 @@ test('飞书 Channel 表单展示凭证、事件订阅 URL、binding 与诊断',
   assert.doesNotMatch(page, /crypto\.randomUUID/)
 })
 
+test('钉钉 Stream Channel 表单展示凭证、连接说明与在线诊断', () => {
+  for (const label of ['钉钉 Stream 机器人', 'Client ID', 'Client Secret', '机器人 Code', '启用 Stream 模式', '无需公网回调地址', '保存钉钉配置', '连接中', '离线']) assert.match(page, new RegExp(label))
+  assert.match(page, /kind === 'dingtalk'/)
+  assert.match(page, /testChannel/)
+})
+
 test('Channel 路由接入应用并使用 typed API', () => {
   assert.match(app, /section === 'channels'/)
   assert.match(client, /createChannelBinding/)

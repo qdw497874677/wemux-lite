@@ -1,0 +1,6 @@
+{
+  "specVersion": "1.0",
+  "type": "CALLBACK",
+  "headers": { "messageId": "frame-group-001", "time": "1788220801000", "topic": "/v1.0/im/bot/messages/get" },
+  "data": "{\"msgId\":\"dt-group-001\",\"conversationId\":\"cid-group-001\",\"conversationType\":\"2\",\"conversationTitle\":\"研发群\",\"senderStaffId\":\"staff-bob\",\"text\":{\"content\":\" @机器人 检查构建状态 \"},\"isInAtList\":true,\"sessionWebhook\":\"http://127.0.0.1:19091/session-webhook\",\"robotCode\":\"ding-robot-fixture\",\"msgtype\":\"text\",\"createAt\":1788220801000}"
+}

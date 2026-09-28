@@ -11,6 +11,7 @@ import type { ChannelRouter } from '../../application/channel-router.ts'
 import type { ChannelOutbox } from '../../application/channel-outbox.ts'
 import type { GenericWebhookAdapter } from '../../channels/generic-webhook-adapter.ts'
 import type { FeishuAdapter } from '../../channels/feishu/adapter.ts'
+import type { DingTalkAdapter } from '../../channels/dingtalk/adapter.ts'
 import type { CapabilityService } from '../../application/capability-service.ts'
 import type { EmailRegistrationService } from '../../application/email-registration.ts'
 import type { GoogleAuthenticationService } from '../../application/google-authentication.ts'
@@ -75,6 +76,7 @@ export interface HttpHandlerOptions {
   readonly channelOutbox?: ChannelOutbox | null
   readonly genericWebhook?: GenericWebhookAdapter | null
   readonly feishu?: FeishuAdapter | null
+  readonly dingTalk?: DingTalkAdapter | null
 }
 
 export interface RouteRequestContext extends HttpHandlerOptions {
