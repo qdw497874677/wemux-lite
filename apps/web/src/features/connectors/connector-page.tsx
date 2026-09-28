@@ -14,7 +14,7 @@ const initial = (): ConnectorWriteDTO['definition'] => ({ name: '', description:
 export function ConnectorPage({ api, projectId, workers, canManage }: { api: ReturnType<typeof createApi>; projectId: string; workers: WorkerDTO[]; canManage: boolean }) {
   const [items, setItems] = useState<ConnectorDTO[]>([]), [statuses, setStatuses] = useState<ConnectorStatusDTO[]>([]), [draft, setDraft] = useState(initial), [editing, setEditing] = useState<ConnectorDTO | null>(null)
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [notice, setNotice] = useState('')
-  const load = async () => { setError(''); try { const result = await api.connectors(projectId); setItems(result.items); setStatuses(result.statuses) } catch (cause) { setError(message(cause, '加载连接器失败')) } }
+  const load = async () => { setError(''); try { const result = await api.connectors(projectId); setItems(result.items); setStatuses(result.statuses ?? []) } catch (cause) { setError(message(cause, '加载连接器失败')) } }
   useEffect(() => { void load() }, [projectId])
   const selectedWorkers = useMemo(() => new Set(draft.allowedWorkerIds), [draft.allowedWorkerIds])
   const save = async () => { if (!draft.name.trim() || !draft.config.baseUrl.trim()) { setError('请填写名称和 Base URL。'); return } setBusy('save'); setError(''); setNotice(''); try { const body = { requestId: randomId(), expectedRevision: editing?.revision ?? null, definition: draft }; editing ? await api.updateConnector(projectId, editing.id, body) : await api.createConnector(projectId, body); setDraft(initial()); setEditing(null); setNotice('连接器已保存并开始分发 revision。'); await load() } catch (cause) { setError(message(cause, '保存连接器失败')) } finally { setBusy('') } }
