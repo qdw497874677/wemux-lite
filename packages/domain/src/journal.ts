@@ -1,7 +1,7 @@
 import type { CommandId, MessageId, SessionId, ToolCallId, TurnId, UserId } from './ids.js'
 import type { ApprovalId, RuntimeUsage } from './agent-profile.js'
 import type { SessionRuntimeState, TurnFailure } from './session.js'
-import type { EventSeq, Timestamp } from './values.js'
+import type { EventSeq, ModelId, Timestamp } from './values.js'
 
 export type AgentStreamKind = 'assistant_text' | 'reasoning_text' | 'plan_text' | 'command_output' | 'file_change_output'
 
@@ -89,6 +89,11 @@ export type SessionEventPayload =
       readonly failure: TurnFailure | null
     }
   | {
+      readonly kind: 'model.changed'
+      readonly previousModelId: ModelId | null
+      readonly modelId: ModelId
+    }
+  | {
       /** 运行时非致命提示（自动重试、额度冷却等）：让用户看到「为什么还没回复」。 */
       readonly kind: 'runtime.notice'
       readonly level: 'info' | 'warning'
@@ -125,6 +130,7 @@ export const SESSION_EVENT_KINDS = [
   'usage.updated',
   'compaction.started',
   'compaction.finished',
+  'model.changed',
   'runtime.notice',
   'turn.finished',
   'session.runtime.changed',

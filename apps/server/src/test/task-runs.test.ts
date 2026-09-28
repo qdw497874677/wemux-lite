@@ -222,7 +222,7 @@ test('current review isolates historical Runs and concurrent HTTP decisions surv
   const dir = await mkdtemp(join(tmpdir(), 'current-review-')), path = join(dir, 'db')
   const f = await reviewFixture(path), events: unknown[] = [], db = new DatabaseSync(path)
   const tasks = new TaskService(f.store, e => events.push(e), f.server)
-  const http = createServer(httpHandler(f.server, new AuthenticationService(f.store, administratorDirectory(f.store)), new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, tasks))
+  const http = createServer(httpHandler({ service: f.server, auth: new AuthenticationService(f.store, administratorDirectory(f.store)), streams: new SessionStreams(f.server), tasks }))
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const address = http.address(); assert.ok(address && typeof address !== 'string')
   try {
@@ -253,7 +253,7 @@ for (const corruption of ['run', 'review'] as const) test(`HTTP rejects corrupt 
   const f = await reviewFixture(path), db = new DatabaseSync(path), events: unknown[] = []
   const task = await f.tasks.patch(f.task.projectId, f.task.id, { version: f.task.version, status: 'in_review' }, context)
   const tasks = new TaskService(f.store, e => events.push(e), f.server), token = administratorToken
-  const http = createServer(httpHandler(f.server, new AuthenticationService(f.store, administratorDirectory(f.store)), new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, tasks))
+  const http = createServer(httpHandler({ service: f.server, auth: new AuthenticationService(f.store, administratorDirectory(f.store)), streams: new SessionStreams(f.server), tasks }))
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const address = http.address(); assert.ok(address && typeof address !== 'string')
   try {
@@ -371,7 +371,7 @@ test('review HTTP endpoints: malformed JSON, relationship/auth matrix, actions a
   const f = await reviewFixture()
   const auth = new AuthenticationService(f.store, administratorDirectory(f.store))
   const streams = new SessionStreams(f.server)
-  const http = createServer(httpHandler(f.server, auth, streams, undefined, undefined, undefined, undefined, undefined, f.tasks))
+  const http = createServer(httpHandler({ service: f.server, auth, streams, tasks: f.tasks }))
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const address = http.address() as import('node:net').AddressInfo
   const base = `http://127.0.0.1:${address.port}/api/projects/${f.task.projectId}`
@@ -838,7 +838,7 @@ for (const rollback of [false, true]) test(`paused launch public Task/Run/delive
   const f = await fixture()
   let release!: () => void, entered!: () => void, runId = ''
   const gate = new Promise<void>(resolve => { release = resolve }), paused = new Promise<void>(resolve => { entered = resolve })
-  const http = createServer(httpHandler(f.server, new AuthenticationService(f.store, administratorDirectory(f.store)), new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, f.tasks))
+  const http = createServer(httpHandler({ service: f.server, auth: new AuthenticationService(f.store, administratorDirectory(f.store)), streams: new SessionStreams(f.server), tasks: f.tasks }))
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const address = http.address(); assert.ok(address && typeof address !== 'string')
   try {
@@ -1190,7 +1190,7 @@ test('Run HTTP ownership/resource/raw JSON matrix has exact envelopes and zero f
   const signals = new Notifications(); signals.commands = () => { notifications++ }
   const service = new ServerService(f.store, signals)
   const tasks = new TaskService(f.store, () => { notifications++ }, service)
-  const http = createServer(httpHandler(service, auth, new SessionStreams(service), undefined, undefined, undefined, undefined, undefined, tasks))
+  const http = createServer(httpHandler({ service, auth, streams: new SessionStreams(service), tasks }))
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const address = http.address(); assert.ok(address && typeof address !== 'string')
   const db = new DatabaseSync(dbPath)
@@ -1238,7 +1238,7 @@ test('real HTTP Run launch rejection envelopes leave all launch resources unchan
   f.server.notifications.commands = () => { notifications++ }
   const observedTasks = new TaskService(f.store, () => { notifications++ }, f.server)
   const auth = new AuthenticationService(f.store, administratorDirectory(f.store))
-  const http = createServer(httpHandler(f.server, auth, new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, observedTasks))
+  const http = createServer(httpHandler({ service: f.server, auth, streams: new SessionStreams(f.server), tasks: observedTasks }))
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const address = http.address(); assert.ok(address && typeof address !== 'string')
   const path = `/projects/${f.task.projectId}/tasks/${f.task.id}`
@@ -1286,7 +1286,7 @@ test('real HTTP Run launch rejection envelopes leave all launch resources unchan
 
 for (const phase of ['pending', 'running'] as const) for (const outcome of ['completed', 'cancelled'] as const) test(`HTTP ${phase}/${outcome} management protects Run snapshot and Session; terminal releases Task restrictions`, async () => {
   const f = await fixture(), token = administratorToken
-  const http = createServer(httpHandler(f.server, new AuthenticationService(f.store, administratorDirectory(f.store)), new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, f.tasks))
+  const http = createServer(httpHandler({ service: f.server, auth: new AuthenticationService(f.store, administratorDirectory(f.store)), streams: new SessionStreams(f.server), tasks: f.tasks }))
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const address = http.address(); assert.ok(address && typeof address !== 'string')
   const path = `/projects/${f.task.projectId}/tasks/${f.task.id}`
@@ -1398,7 +1398,7 @@ for (const corrupt of ['metadata', 'restore', 'snapshot'] as const) test(`corrup
 
 test('capability HTTP readers equal service values and transition rejection has no activity', async () => {
   const f = await fixture()
-  const http = createServer(httpHandler(f.server, new AuthenticationService(f.store, administratorDirectory(f.store)), new SessionStreams(f.server), undefined, undefined, undefined, undefined, undefined, f.tasks))
+  const http = createServer(httpHandler({ service: f.server, auth: new AuthenticationService(f.store, administratorDirectory(f.store)), streams: new SessionStreams(f.server), tasks: f.tasks }))
   http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const address = http.address(); assert.ok(address && typeof address !== 'string')
   const headers = { Authorization: `Bearer ${administratorToken}`, 'Content-Type': 'application/json' }

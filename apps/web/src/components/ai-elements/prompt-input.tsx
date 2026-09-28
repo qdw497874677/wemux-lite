@@ -20,7 +20,11 @@ type PromptInputContextValue = {
 }
 const PromptInputContext = createContext<PromptInputContextValue | null>(null)
 
-export function PromptInput({ className, onSubmit, children, ...props }: Omit<ComponentProps<'form'>, 'onSubmit'> & { onSubmit: (message: PromptInputMessage, event: FormEvent<HTMLFormElement>) => void; children: ReactNode }) {
+const imageFileExtensions = new Set(['avif', 'gif', 'heic', 'heif', 'jpeg', 'jpg', 'png', 'svg', 'webp'])
+const isImageFile = (file: File) => file.type.startsWith('image/') || imageFileExtensions.has(file.name.split('.').pop()?.toLowerCase() ?? '')
+const pastedOrDroppedImages = (files: FileList | null): File[] => files ? Array.from(files).filter(isImageFile) : []
+
+export function PromptInput({ className, onSubmit, children, onPaste, onDragOver, onDrop, ...props }: Omit<ComponentProps<'form'>, 'onSubmit'> & { onSubmit: (message: PromptInputMessage, event: FormEvent<HTMLFormElement>) => void; children: ReactNode }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const imageInputRef = useRef<HTMLInputElement>(null)
@@ -41,7 +45,7 @@ export function PromptInput({ className, onSubmit, children, ...props }: Omit<Co
     onSubmit({ text: String(data.get('message') ?? ''), files }, event)
   }
   const context = { textareaRef, files, add, remove, clear, fileInputRef, imageInputRef }
-  return <PromptInputContext.Provider value={context}><form className={cn('surface-glass overflow-hidden rounded-xl border border-border/70 bg-card/80 shadow-[0_12px_36px_-24px_rgb(0_0_0/.8)] transition-[border-color,box-shadow,background-color] focus-within:border-primary/45 focus-within:bg-card/90 focus-within:ring-2 focus-within:ring-primary/15', className)} onSubmit={submit} {...props}>{children}<input ref={fileInputRef} className="sr-only" type="file" multiple onChange={event => { if (event.target.files) add(event.target.files); event.target.value = '' }} /><input ref={imageInputRef} className="sr-only" type="file" accept="image/*" multiple onChange={event => { if (event.target.files) add(event.target.files); event.target.value = '' }} /></form></PromptInputContext.Provider>
+  return <PromptInputContext.Provider value={context}><form className={cn('surface-glass overflow-hidden rounded-xl border border-border/70 bg-card/80 shadow-[0_12px_36px_-24px_rgb(0_0_0/.8)] transition-[border-color,box-shadow,background-color] focus-within:border-primary/45 focus-within:bg-card/90 focus-within:ring-2 focus-within:ring-primary/15', className)} onSubmit={submit} onPaste={event => { onPaste?.(event); if (event.defaultPrevented) return; const images = pastedOrDroppedImages(event.clipboardData.files); if (images.length) { event.preventDefault(); add(images) } }} onDragOver={event => { onDragOver?.(event); if (!event.defaultPrevented && event.dataTransfer.types.includes('Files')) event.preventDefault() }} onDrop={event => { onDrop?.(event); if (event.defaultPrevented) return; const images = pastedOrDroppedImages(event.dataTransfer.files); if (images.length) { event.preventDefault(); add(images) } }} {...props}>{children}<input ref={fileInputRef} className="sr-only" type="file" multiple onChange={event => { if (event.target.files) add(event.target.files); event.target.value = '' }} /><input ref={imageInputRef} className="sr-only" type="file" accept="image/*" multiple onChange={event => { if (event.target.files) add(event.target.files); event.target.value = '' }} /></form></PromptInputContext.Provider>
 }
 
 export function PromptInputHeader({ className, ...props }: ComponentProps<'div'>) {

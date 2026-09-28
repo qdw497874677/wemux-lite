@@ -33,15 +33,23 @@ export type AgentAvailability =
   | { readonly status: 'unavailable'; readonly reason: string }
   | { readonly status: 'authentication-required'; readonly reason: string }
 
+export type AgentCompactMode = 'native' | 'slash-command'
+
 export interface AgentCapability {
   readonly agentKey: AgentKey
   readonly displayName: string
   readonly version: string | null
   readonly mode: 'detect-only' | 'execution'
   readonly availability: AgentAvailability
+  /** Slash commands accepted as ordinary user turns by this Agent runtime. */
+  readonly agentCommands?: readonly string[]
+  /** How the runtime expects conversation compaction to be invoked. */
+  readonly compactMode?: AgentCompactMode
   /** Credential state is independent from executable availability. Optional for v1 Workers. */
   readonly authorization?: RuntimeAuthorization
   /** Provider feature contract. Optional while older Workers upgrade. */
   readonly runtime?: AgentRuntimeCapabilities
+  /** Whether an existing Session can switch models without creating a new Session. */
+  readonly modelSwap?: boolean
   readonly models: readonly AgentModelCapability[]
 }

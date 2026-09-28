@@ -43,7 +43,7 @@ async function fixture(path = ':memory:') {
   const fork = (command: Record<string, unknown>) => lineage.fork({ operator: user!.id, projectId: project!.id, command: { sourceSessionId: source.id, targetWorkspaceId: workspace.id, targetWorkerId: worker.id, targetAgentKey: 'pi', targetModelId: 'pi-model', requestId: 'fork-1', ...command } })
   const sessions = async () => store.transaction(tx => tx.resources.listSessions())
   const streams = new SessionStreams(service)
-  const server = createServer(httpHandler(service, new AuthenticationService(store, administratorDirectory(store)), streams, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, lineage))
+  const server = createServer(httpHandler({ service, auth: new AuthenticationService(store, administratorDirectory(store)), streams, lineage }))
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
   assert.ok(address && typeof address !== 'string')

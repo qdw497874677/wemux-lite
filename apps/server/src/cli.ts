@@ -1,8 +1,8 @@
 import { resolve } from 'node:path'
-import { SqliteServerStore } from './storage/sqlite/store.js'
-import { AccountRecovery } from './application/recovery.js'
-import { AdministratorDirectory, parseAdministratorEmails } from './application/administrator-directory.js'
-import { AppError } from './application/errors.js'
+import { SqliteServerStore } from './storage/sqlite/store.ts'
+import { AccountRecovery } from './application/recovery.ts'
+import { AdministratorDirectory, parseAdministratorEmails } from './application/administrator-directory.ts'
+import { AppError } from './application/errors.ts'
 
 /**
  * Server 主机本地管理入口（Ticket 04 验收项 6）。

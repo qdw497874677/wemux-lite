@@ -354,7 +354,7 @@ test('Ticket06 exact notification recipient/type/count matrix with durable resta
     assert.deepEqual(await store.tasks.run(f.run.id), beforeRestart)
     assert.deepEqual(await store.tasks.activity(f.task.id, 0), finished)
     // All HTTP negatives snapshot every durable table, and observe every channel.
-    http = createServer(httpHandler(server, new AuthenticationService(store, administratorDirectory(store)), new SessionStreams(server), undefined, undefined, undefined, undefined, undefined, tasks))
+    http = createServer(httpHandler({ service: server, auth: new AuthenticationService(store, administratorDirectory(store)), streams: new SessionStreams(server), tasks }))
     http.listen(0, '127.0.0.1'); await once(http, 'listening')
     const address = http.address(); assert.ok(address && typeof address !== 'string'); assert.notEqual(address.port, 8004)
     const route = `/api/projects/${f.task.projectId}/tasks/${f.task.id}/runs/${f.run.id}/cancel`

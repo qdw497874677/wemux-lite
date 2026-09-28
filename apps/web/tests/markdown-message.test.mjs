@@ -22,11 +22,16 @@ test('untrusted HTML and unsafe URLs never become executable elements or links',
   assert.match(html, /rel="noopener noreferrer"/)
   for (const url of ['javascript:alert(1)', 'data:text/html,test', 'file:///tmp/a', '/api/session', '//evil.test', 'vbscript:test']) assert.equal(messageUrl(url), '')
 })
-test('images are explicit links, never automatic remote requests', () => {
-  const html = render('![结果](https://example.com/tracker.png)')
-  assert.doesNotMatch(html, /<img\b/)
-  assert.match(html, /图片：结果/)
-  assert.match(html, /referrerPolicy="no-referrer"/i)
+test('remote images never request automatically, while resolved workspace images render from trusted data URLs', () => {
+  const remote = render('![结果](https://example.com/tracker.png)')
+  assert.doesNotMatch(remote, /<img\b|tracker\.png/)
+  assert.match(remote, /图片加载中：结果/)
+  const local = renderToStaticMarkup(createElement(MarkdownMessage, { text: '![截图](uploads/test.png)', imageSources: { 'uploads/test.png': 'data:image/png;base64,AA==' } }))
+  assert.match(local, /<img[^>]+src="data:image\/png;base64,AA=="/)
+  assert.match(local, /aria-label="放大图片：截图"/)
+  assert.match(local, /data:image\/png;base64,AA==/)
+  assert.equal(messageUrl('uploads/test.png', 'src'), 'uploads/test.png')
+  assert.equal(messageUrl('uploads/../secret.png', 'src'), '')
 })
 test('incomplete streaming Markdown stays renderable until its final delimiters arrive', () => {
   const text = '## 回复\n\n**正在输出**\n\n```ts\nconsole.log("你好")\n```'
@@ -36,8 +41,8 @@ test('incomplete streaming Markdown stays renderable until its final delimiters 
 test('confirmed and optimistic messages use AI Elements Response, tools remain literal output', () => {
   const source = readFileSync(new URL('../src/features/sessions/conversation.tsx', import.meta.url), 'utf8')
   const response = readFileSync(new URL('../src/components/ai-elements/response.tsx', import.meta.url), 'utf8')
-  assert.match(source, /<Response partial=\{entry\.status === 'running' \|\| entry\.status === 'started'\}>\{text\}<\/Response>/)
-  assert.match(source, /<Response>\{item.content\}<\/Response>/)
-  assert.match(response, /<MarkdownMessage text=\{String\(children \?\? ''\)\} partial=\{partial\}/)
+  assert.match(source, /<Response partial=\{entry\.status === 'running' \|\| entry\.status === 'started'\} api=\{api\} sessionId=\{sessionId\}>\{text\}<\/Response>/)
+  assert.match(source, /<Response api=\{api\} sessionId=\{sessionId\}>\{item.content\}<\/Response>/)
+  assert.match(response, /<MarkdownMessage text=\{text\} partial=\{partial\} imageSources=\{imageSources\}/)
   assert.match(source, /<ToolOutput output=\{output\}/)
 })

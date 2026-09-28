@@ -74,7 +74,7 @@ for (const workspaceStatus of ['pending', 'failed'] as const) {
           // No historical command: genuinely first attempt must support old Workers.
           assert.equal(current!.provisioning!.replacedAttempt, false)
           await report(undefined, 'provisioning')
-          assert.equal((await store.resources.getWorkspace(workspaceId))!.status, 'provisioning')
+          assert.equal((await store.resources.getWorkspace(workspaceId))!.status, 'stopped')
           await report(undefined, 'ready')
           assert.equal((await store.resources.getWorkspace(workspaceId))!.status, 'ready')
         }

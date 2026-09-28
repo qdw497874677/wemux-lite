@@ -9,7 +9,7 @@ import { WebSocket } from 'ws'
 import { createWemuxServer } from '../server.js'
 import { TransportV2Peer } from './transport-v2-peer.js'
 
-const capability = { agentKey: 'pi', displayName: 'Pi', version: '1', mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'test-model', displayName: 'Test', source: 'configured' }] }
+const capability = { agentKey: 'pi', displayName: 'Pi', version: '1', mode: 'execution', availability: { status: 'available' }, agentCommands: ['/compact', '/model'], compactMode: 'slash-command', models: [{ modelId: 'test-model', displayName: 'Test', source: 'configured' }] }
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 async function eventually(check: () => Promise<boolean>) {
   for (let i = 0; i < 150; i++) { if (await check()) return; await delay(20) }
@@ -32,12 +32,14 @@ async function setup() {
   return { app, base, request, workerId, credential, projectId: project.id }
 }
 
-test('command stage list and protected provision cancellation: pending remains deliverable', { timeout: 15000 }, async t => {
+test('command stage list and protected provision cancellation: stopped placement remains deliverable', { timeout: 15000 }, async t => {
   const { app, base, request, workerId, credential, projectId } = await setup()
   t.after(() => app.close())
   // Workspace command stays pending while the worker is offline.
   const provision = await request('/workspaces', 'POST', { projectId, workerId, name: 'Repo', repository: { gitUrl: 'https://example.com/repo.git', revision: 'main' } })
   assert.equal(provision.status, 201)
+  assert.equal(provision.data.workspace.status, 'stopped')
+  assert.equal(provision.data.workspace.placements[0].status, 'stopped')
   const commandId = provision.data.commandId
   const listed = (await request('/commands')).data.items
   assert.equal(listed.length, 1)
@@ -69,7 +71,7 @@ test('command stage list and protected provision cancellation: pending remains d
   ws.close()
 })
 
-test('workspace reprovision: only pending/failed, re-issues provision command deliverable to the worker', { timeout: 15000 }, async t => {
+test('workspace reprovision: only stopped/failed, re-issues provision command deliverable to the worker', { timeout: 15000 }, async t => {
   const { app, base, request, workerId, credential, projectId } = await setup()
   t.after(() => app.close())
   const ws = new WebSocket(base.replace('http:', 'ws:') + '/worker/ws', { headers: { Authorization: `Bearer ${credential}` } })
@@ -78,6 +80,10 @@ test('workspace reprovision: only pending/failed, re-issues provision command de
   const messages = peer.messages
   const send = peer.send.bind(peer)
   send({ type: 'capability', workerId, detectedAt: new Date().toISOString(), capabilities: [capability] })
+  await eventually(async () => {
+    const worker = (await request(`/workers/${workerId}`)).data
+    return worker.capabilities[0]?.agentCommands?.join(',') === '/compact,/model' && worker.capabilities[0]?.compactMode === 'slash-command'
+  })
   const provision = await request('/workspaces', 'POST', { projectId, workerId, name: 'Repo', repository: { gitUrl: 'https://example.com/repo.git', revision: 'main' } })
   const workspace = provision.data.workspace
   await eventually(async () => messages.some(m => m.type === 'command' && m.commandId === provision.data.commandId))
@@ -89,7 +95,7 @@ test('workspace reprovision: only pending/failed, re-issues provision command de
   await eventually(async () => (await request(`/workspaces/${workspace.id}`)).data.status === 'failed')
   // ready workspaces cannot be reprovisioned — use a second workspace driven to ready.
   assert.equal((await request(`/workspaces/${workspace.id}/reprovision`, 'POST')).status, 200)
-  await eventually(async () => (await request(`/workspaces/${workspace.id}`)).data.status === 'pending')
+  await eventually(async () => (await request(`/workspaces/${workspace.id}`)).data.status === 'stopped')
   const reprovision = (await request('/commands?status=pending')).data.items
   assert.equal(reprovision.length, 1)
   const retryCommandId = reprovision[0].commandId
@@ -101,6 +107,48 @@ test('workspace reprovision: only pending/failed, re-issues provision command de
   assert.equal((await request(`/workspaces/${workspace.id}/reprovision`, 'POST')).status, 409)
   assert.equal((await request(`/commands/${retryCommandId}`, 'DELETE')).status, 409)
   ws.close()
+})
+
+test('workspace placement view is unhealthy while its worker is offline and recovers online', { timeout: 15000 }, async t => {
+  const { app, base, request, workerId, credential, projectId } = await setup()
+  t.after(() => app.close())
+  const provision = await request('/workspaces', 'POST', { projectId, workerId, name: 'Health', source: 'empty' })
+  assert.equal(provision.status, 201)
+  const workspaceId = provision.data.workspace.id
+  const offline = (await request(`/workspaces/${workspaceId}`)).data
+  assert.equal(offline.status, 'unhealthy')
+  assert.equal(offline.placements[0].status, 'unhealthy')
+  assert.equal(offline.placements[0].failureReason, '工作节点离线')
+
+  const ws = new WebSocket(base.replace('http:', 'ws:') + '/worker/ws', { headers: { Authorization: `Bearer ${credential}` } })
+  const peer = new TransportV2Peer(ws, workerId)
+  await peer.connect({ name: 'Cluster worker' })
+  await eventually(async () => {
+    const workers = (await request('/workers')).data.items
+    return workers.find((worker: any) => worker.id === workerId)?.connectionState === 'online'
+  })
+  await eventually(async () => (await request(`/workspaces/${workspaceId}`)).data.status === 'stopped')
+  ws.close()
+  await eventually(async () => (await request(`/workspaces/${workspaceId}`)).data.status === 'unhealthy')
+})
+
+test('workspace creation failure exposes failed placement with its reason', { timeout: 15000 }, async t => {
+  const { app, base, request, workerId, credential, projectId } = await setup()
+  t.after(() => app.close())
+  const ws = new WebSocket(base.replace('http:', 'ws:') + '/worker/ws', { headers: { Authorization: `Bearer ${credential}` } })
+  const peer = new TransportV2Peer(ws, workerId)
+  await peer.connect({ name: 'Cluster worker' })
+  const provision = await request('/workspaces', 'POST', { projectId, workerId, name: 'Broken', source: 'empty' })
+  await eventually(async () => peer.messages.some(message => message.type === 'command' && message.commandId === provision.data.commandId))
+  peer.send({ type: 'event', scope: 'workspace', report: { commandId: provision.data.commandId, workspaceId: provision.data.workspace.id, status: 'failed', reason: 'checkout failed', location: null, occurredAt: new Date().toISOString() } })
+  await eventually(async () => (await request(`/workspaces/${provision.data.workspace.id}`)).data.status === 'failed')
+  const failed = (await request(`/workspaces/${provision.data.workspace.id}`)).data
+  assert.equal(failed.placements[0].status, 'failed')
+  assert.equal(failed.placements[0].failureReason, 'checkout failed')
+  ws.close()
+  await eventually(async () => (await request(`/workspaces/${provision.data.workspace.id}`)).data.status === 'unhealthy')
+  const unhealthy = (await request(`/workspaces/${provision.data.workspace.id}`)).data
+  assert.match(unhealthy.placements[0].failureReason, /checkout failed/)
 })
 
 test('worker revoke: blocks reconnect, disconnects live socket, blocks new commands; idempotent', { timeout: 15000 }, async t => {

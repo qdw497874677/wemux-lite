@@ -31,7 +31,7 @@ test('task workspace binding is authoritative; A→B and clear preserve history;
   const f = await fixture()
   try {
     const a = await f.create(), b = await f.create()
-    assert.equal(a.workspace.status, 'pending')
+    assert.equal(a.workspace.status, 'stopped')
     assert.equal(b.task.version, 1)
     const assignment = (workspaceId: string) => ({ workspaceId, workerId: f.worker.id, agentKey: 'test', modelId: 'model' })
     const first = await f.tasks.assignment(f.task.projectId, f.task.id, { version: 1, assignee: assignment(a.workspace.id) }, false, context)
@@ -101,12 +101,12 @@ test('provision attempts: retry identities, coalescing, rejected, stale, duplica
     assert.equal((await retry('retry-concurrent')).commandId, next.commandId)
     for (const state of ['provisioning', 'failed', 'ready'] as const) await report(created.commandId, state)
     await report(undefined, 'ready')
-    assert.equal((await f.store.resources.getWorkspace(id))!.status, 'pending')
+    assert.equal((await f.store.resources.getWorkspace(id))!.status, 'stopped')
     await worker.receive(f.worker.id, { type: 'ack', receipt: { commandId: next.commandId as CommandId, status: 'rejected', error: { code: 'invalid-input', message: 'rejected without report', retryable: false } } })
     assert.equal((await f.store.resources.getWorkspace(id))!.failureReason, 'rejected without report')
     const third = await retry('retry-2')
     await report(next.commandId, 'ready')
-    assert.equal((await f.store.resources.getWorkspace(id))!.status, 'pending')
+    assert.equal((await f.store.resources.getWorkspace(id))!.status, 'stopped')
     const ready = await report(third.commandId, 'ready')
     const count = (await f.store.tasks.activity(f.task.id, 0)).length
     await worker.receive(f.worker.id, ready)
@@ -160,9 +160,9 @@ test('SQLite reopen retains attempt requests; reconnect current report converges
     const legacy = report(created.commandId)
     const { commandId: _commandId, ...uncorrelated } = legacy.report
     await worker.receive(f.worker.id, { ...legacy, report: uncorrelated })
-    assert.equal((await reopened.resources.getWorkspace(created.workspace.id))!.status, 'pending')
+    assert.equal((await reopened.resources.getWorkspace(created.workspace.id))!.status, 'stopped')
     await worker.receive(f.worker.id, report(created.commandId))
-    assert.equal((await reopened.resources.getWorkspace(created.workspace.id))!.status, 'pending')
+    assert.equal((await reopened.resources.getWorkspace(created.workspace.id))!.status, 'stopped')
     await worker.disconnected(f.worker.id)
     await worker.connected(f.worker.id, { name: 'reconnected', workerVersion: 'test', platform: 'linux' })
     const current = report(retry.commandId)
@@ -203,15 +203,20 @@ test('offline provision cancellation is rejected; retry and reconnect retain del
   } finally { f.store.close() }
 })
 
-for (const status of ['pending', 'provisioning'] as const) test(`initial ${status} coalescing still accepts legacy report after restart`, async () => {
+for (const status of ['pending', 'provisioning'] as const) test(`legacy initial ${status} coalescing still accepts legacy report after restart`, async () => {
   const directory = await mkdtemp('/tmp/t04-legacy-')
   const f = await fixture(`${directory}/server.sqlite`)
   let reopened: SqliteServerStore | undefined
   try {
     const created = await f.create()
-    await f.store.transaction(tx => tx.resources.saveWorkspace({ ...created.workspace, status }))
-    assert.equal((await f.server.reprovisionWorkspace(created.workspace.id, 'merged')).commandId, created.commandId)
+    const legacy = { ...created.workspace, status, placements: created.workspace.placements.map(placement => ({ ...placement, status })) }
+    const db = new DatabaseSync(`${directory}/server.sqlite`)
+    try {
+      db.prepare("UPDATE records SET data=? WHERE kind='workspace' AND id=?").run(JSON.stringify(legacy), created.workspace.id)
+    } finally { db.close() }
     f.store.close(); reopened = new SqliteServerStore(`${directory}/server.sqlite`)
+    const server = new ServerService(reopened, new Notifications())
+    assert.equal((await server.reprovisionWorkspace(created.workspace.id, 'merged')).commandId, created.commandId)
     await new WorkerService(reopened, new Notifications()).receive(f.worker.id, { type: 'event', scope: 'workspace', report: { workspaceId: created.workspace.id, status: 'ready', reason: null, location: null, occurredAt: new Date(Date.now() + 1000).toISOString() as Timestamp } })
     assert.equal((await reopened.resources.getWorkspace(created.workspace.id))!.status, 'ready')
   } finally { if (reopened) reopened.close(); else f.store.close(); await rm(directory, { recursive: true, force: true }) }
