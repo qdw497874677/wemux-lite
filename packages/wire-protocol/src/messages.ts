@@ -11,6 +11,49 @@ import type {
   WorkspaceStatus,
 } from '@wemux/domain'
 import type { CommandReceipt, WorkerCommand } from './commands.js'
+import type { ConnectorRevisionReport } from './connectors.js'
+
+export interface WorkspaceFileEntry {
+  readonly name: string
+  readonly type: 'file' | 'directory'
+  readonly size: number
+  readonly mtime: Timestamp
+}
+
+export interface WorkspaceDiffLine {
+  readonly type: 'add' | 'del' | 'ctx'
+  readonly oldLine?: number
+  readonly newLine?: number
+  readonly text: string
+}
+
+export type FileRequestPayload =
+  | { readonly type: 'fs.request'; readonly requestId: string; readonly sessionId: SessionId; readonly operation: 'list'; readonly subpath: string }
+  | { readonly type: 'fs.request'; readonly requestId: string; readonly sessionId: SessionId; readonly operation: 'read'; readonly subpath: string; readonly maxBytes: number }
+  | { readonly type: 'fs.request'; readonly requestId: string; readonly sessionId: SessionId; readonly operation: 'write'; readonly subpath: string; readonly base64Content: string }
+  | { readonly type: 'fs.request'; readonly requestId: string; readonly sessionId: SessionId; readonly operation: 'diff'; readonly subpath: string }
+
+export type FileResponsePayload =
+  | { readonly type: 'fs.response'; readonly requestId: string; readonly ok: true; readonly operation: 'list'; readonly entries: readonly WorkspaceFileEntry[] }
+  | { readonly type: 'fs.response'; readonly requestId: string; readonly ok: true; readonly operation: 'read'; readonly content: string | null; readonly base64Content?: string; readonly size: number; readonly truncated: boolean; readonly binary: boolean }
+  | { readonly type: 'fs.response'; readonly requestId: string; readonly ok: true; readonly operation: 'write'; readonly subpath: string; readonly size: number }
+  | { readonly type: 'fs.response'; readonly requestId: string; readonly ok: true; readonly operation: 'diff'; readonly supported: boolean; readonly reason?: 'not-git'; readonly lines: readonly WorkspaceDiffLine[] }
+  | { readonly type: 'fs.response'; readonly requestId: string; readonly ok: false; readonly error: string }
+
+export type TerminalRequestPayload =
+  | { readonly type: 'terminal.request'; readonly requestId: string; readonly sessionId: SessionId; readonly operation: 'create'; readonly cols: number; readonly rows: number }
+  | { readonly type: 'terminal.request'; readonly requestId: string; readonly sessionId: SessionId; readonly operation: 'write'; readonly terminalId: string; readonly data: string }
+  | { readonly type: 'terminal.request'; readonly requestId: string; readonly sessionId: SessionId; readonly operation: 'resize'; readonly terminalId: string; readonly cols: number; readonly rows: number }
+  | { readonly type: 'terminal.request'; readonly requestId: string; readonly sessionId: SessionId; readonly operation: 'dispose'; readonly terminalId: string }
+
+export type TerminalResponsePayload =
+  | { readonly type: 'terminal.response'; readonly requestId: string; readonly ok: true; readonly operation: 'create'; readonly terminalId: string; readonly pid: number }
+  | { readonly type: 'terminal.response'; readonly requestId: string; readonly ok: true; readonly operation: 'write' | 'resize' | 'dispose' }
+  | { readonly type: 'terminal.response'; readonly requestId: string; readonly ok: false; readonly error: string }
+
+export type TerminalEventPayload =
+  | { readonly type: 'terminal.output'; readonly sessionId: SessionId; readonly terminalId: string; readonly data: string }
+  | { readonly type: 'terminal.exit'; readonly sessionId: SessionId; readonly terminalId: string; readonly exitCode: number; readonly signal: number | null }
 
 /**
  * Application payloads carried by transport v2 data frames.
@@ -27,6 +70,7 @@ export interface CapabilityPayload {
   readonly workerId: WorkerId
   readonly capabilities: readonly AgentCapability[]
   readonly detectedAt: Timestamp
+  readonly terminal?: { readonly available: boolean; readonly reason?: string }
 }
 
 export interface CommandPayload {
@@ -52,6 +96,7 @@ export interface WorkspaceOperationReport {
 export type EventPayload =
   | { readonly type: 'event'; readonly scope: 'session'; readonly event: JournalEvent }
   | { readonly type: 'event'; readonly scope: 'workspace'; readonly report: WorkspaceOperationReport }
+  | { readonly type: 'event'; readonly scope: 'connector'; readonly report: ConnectorRevisionReport }
 
 export type SyncPayload =
   | { readonly type: 'sync'; readonly kind: 'heads'; readonly complete: boolean; readonly heads: readonly SessionJournalHead[] }
@@ -62,12 +107,17 @@ export type SyncPayload =
 export type ServerPayload =
   | HeartbeatPayload
   | CommandPayload
+  | FileRequestPayload
+  | TerminalRequestPayload
   | Extract<SyncPayload, { readonly kind: 'request' }>
 
 export type WorkerPayload =
   | HeartbeatPayload
   | CapabilityPayload
   | CommandReceiptPayload
+  | FileResponsePayload
+  | TerminalResponsePayload
+  | TerminalEventPayload
   | EventPayload
   | Exclude<SyncPayload, { readonly kind: 'request' }>
 

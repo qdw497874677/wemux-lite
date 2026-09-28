@@ -14,6 +14,10 @@
       "types": "./dist/connectors.d.ts",
       "import": "./dist/connectors.js"
     },
+    "./channels": {
+      "types": "./dist/channels.d.ts",
+      "import": "./dist/channels.js"
+    },
     "./task-platform": {
       "types": "./dist/task-platform.d.ts",
       "import": "./dist/task-platform.js"

@@ -12,6 +12,7 @@ import type {
   ApprovalId,
   RuntimeUsage,
   SessionNoticeRetry,
+  AgentStreamKind,
 } from '@wemux/domain'
 
 export interface LocalAgentDetection extends AgentCapability {
@@ -41,14 +42,15 @@ export interface AgentLaunchContext {
 }
 
 export type AgentTurnEvent =
-  | { readonly kind: 'assistant.text.delta'; readonly text: string }
+  | { readonly kind: 'assistant.text.delta'; readonly text: string; readonly streamKind: Extract<AgentStreamKind, 'assistant_text' | 'reasoning_text' | 'plan_text'> }
   | {
       readonly kind: 'tool.started'
       readonly toolCallId: ToolCallId
       readonly toolName: string
       readonly input: unknown
+      readonly streamKind: Extract<AgentStreamKind, 'command_output' | 'file_change_output'>
     }
-  | { readonly kind: 'tool.output.delta'; readonly toolCallId: ToolCallId; readonly text: string }
+  | { readonly kind: 'tool.output.delta'; readonly toolCallId: ToolCallId; readonly text: string; readonly streamKind: Extract<AgentStreamKind, 'command_output' | 'file_change_output'> }
   | {
       readonly kind: 'tool.finished'
       readonly toolCallId: ToolCallId

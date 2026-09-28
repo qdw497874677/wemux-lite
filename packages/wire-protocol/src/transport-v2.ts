@@ -151,12 +151,12 @@ function parseServerHello(value: Record<string, unknown>): ServerTransportHello 
 
 function workerPayload(value: unknown): value is WorkerPayload {
   const payload = record(value)
-  return Boolean(payload && ['heartbeat', 'hello', 'capability', 'ack', 'event', 'sync'].includes(String(payload.type)))
+  return Boolean(payload && ['heartbeat', 'hello', 'capability', 'ack', 'event', 'fs.response', 'terminal.response', 'terminal.output', 'terminal.exit', 'sync'].includes(String(payload.type)))
 }
 
 function serverPayload(value: unknown): value is ServerPayload {
   const payload = record(value)
-  return Boolean(payload && ['heartbeat', 'command', 'sync'].includes(String(payload.type)))
+  return Boolean(payload && ['heartbeat', 'command', 'fs.request', 'terminal.request', 'sync'].includes(String(payload.type)))
 }
 
 function parseData(value: Record<string, unknown>): DurableDataFrame | VolatileDataFrame | null {

@@ -61,6 +61,12 @@ class PiRuntimeSession implements AgentRuntimeSession {
   async command(command: RuntimeCommand): Promise<void> {
     const child = await this.ensureChild()
     const type = command.name === 'interrupt' ? 'abort' : command.name
+    if (command.name === 'set_model') {
+      const selected = typeof command.arguments.modelId === 'string' ? splitModelId(command.arguments.modelId as import('@wemux/domain').ModelId) : null
+      if (!selected) throw new Error('Pi set_model requires a provider-qualified modelId')
+      await writeLine(child, { type, id: command.operationId, provider: selected.provider, modelId: selected.id })
+      return
+    }
     await writeLine(child, { type, id: command.operationId, ...command.arguments })
   }
 

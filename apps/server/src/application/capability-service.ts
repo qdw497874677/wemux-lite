@@ -116,6 +116,7 @@ export class CapabilityService {
       version: 1,
       assets,
       allowedTools,
+      allowedConnectorIds: [],
       createdAt: now,
     }
     const issued = this.tokens.issue({
@@ -126,6 +127,7 @@ export class CapabilityService {
       projectId: session.projectId,
       workspaceId: session.workspaceId,
       allowedTools,
+      allowedConnectorIds: [],
     })
     return {
       token: issued.token,
@@ -140,6 +142,7 @@ export class CapabilityService {
           projectId: issued.claims.projectId,
           workspaceId: issued.claims.workspaceId,
           allowedTools: issued.claims.allowedTools,
+          allowedConnectorIds: issued.claims.allowedConnectorIds,
           issuedAt: issued.claims.issuedAt,
           expiresAt: issued.claims.expiresAt,
         },

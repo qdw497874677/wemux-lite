@@ -9,8 +9,12 @@ import type {
   UserId,
   WorkspaceId,
   WorkspaceProvisionSpec,
+  ProjectId,
+  WorkerId,
 } from '@wemux/domain'
+import type { ConnectorId } from '@wemux/connector'
 import type { CapabilityRuntimePayload } from './capabilities.js'
+import type { ConnectorWireSnapshot } from './connectors.js'
 
 export type WorkerCommand =
   | {
@@ -59,6 +63,26 @@ export type WorkerCommand =
       readonly decision: 'approve' | 'deny'
       /** Cluster account that made the approval decision; absent for Worker-local operation. */
       readonly decidedByAccountId?: UserId
+    }
+  | {
+      readonly kind: 'connector.definition.sync'
+      readonly requestId: string
+      readonly definition: ConnectorWireSnapshot
+    }
+  | {
+      readonly kind: 'connector.definition.revoke'
+      readonly requestId: string
+      readonly connectorId: ConnectorId
+      readonly projectId: ProjectId
+      readonly revision: number
+    }
+  | {
+      readonly kind: 'connector.test'
+      readonly requestId: string
+      readonly connectorId: ConnectorId
+      readonly projectId: ProjectId
+      readonly workerId: WorkerId
+      readonly connectorRevision: number
     }
 
 export interface CommandError {

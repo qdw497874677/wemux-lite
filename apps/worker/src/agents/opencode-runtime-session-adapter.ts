@@ -97,21 +97,21 @@ class OpenCodeRuntimeSession implements AgentRuntimeSession {
         queue.push({ kind: 'native-session', nativeSession: runtime.nativeSession })
       }
       const part = event.part
-      if (event.type === 'text' && part?.text) queue.push({ kind: 'event', event: { kind: 'assistant.text.delta', text: part.text } })
+      if (event.type === 'text' && part?.text) queue.push({ kind: 'event', event: { kind: 'assistant.text.delta', text: part.text, streamKind: 'assistant_text' } })
       else if (event.type === 'tool_use' && part) {
         const id = (part.callID ?? part.id ?? `${request.operationId}-tool`) as ToolCallId
         const state = part.state?.status ?? 'completed'
-        if (!toolStates.has(id)) queue.push({ kind: 'event', event: { kind: 'tool.started', toolCallId: id, toolName: part.tool ?? 'tool', input: part.state?.input ?? null } })
+        if (!toolStates.has(id)) queue.push({ kind: 'event', event: { kind: 'tool.started', toolCallId: id, toolName: part.tool ?? 'tool', input: part.state?.input ?? null, streamKind: 'command_output' } })
         if (state === 'running' && typeof part.state?.output === 'string') {
           const before = toolStates.get(id) ?? ''
           const delta = part.state.output.startsWith(before) ? part.state.output.slice(before.length) : part.state.output
-          if (delta) queue.push({ kind: 'event', event: { kind: 'tool.output.delta', toolCallId: id, text: delta } })
+          if (delta) queue.push({ kind: 'event', event: { kind: 'tool.output.delta', toolCallId: id, text: delta, streamKind: 'command_output' } })
         }
         if (state === 'completed' || state === 'error') {
           const output = typeof part.state?.output === 'string' ? part.state.output : part.state?.output == null ? '' : JSON.stringify(part.state.output)
           const before = toolStates.get(id) ?? ''
           const delta = output.startsWith(before) ? output.slice(before.length) : output
-          if (delta) queue.push({ kind: 'event', event: { kind: 'tool.output.delta', toolCallId: id, text: delta } })
+          if (delta) queue.push({ kind: 'event', event: { kind: 'tool.output.delta', toolCallId: id, text: delta, streamKind: 'command_output' } })
           queue.push({ kind: 'event', event: { kind: 'tool.finished', toolCallId: id, exitCode: state === 'error' ? 1 : number(part.state?.metadata?.exit) } })
         }
         toolStates.set(id, typeof part.state?.output === 'string' ? part.state.output : '')

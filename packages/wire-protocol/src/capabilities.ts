@@ -17,6 +17,7 @@ export interface CapabilityGrantPayload {
   readonly projectId: ProjectId
   readonly workspaceId: WorkspaceId
   readonly allowedTools: readonly CapabilityToolName[]
+  readonly allowedConnectorIds: readonly string[]
   readonly issuedAt: string
   readonly expiresAt: string
 }

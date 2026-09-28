@@ -28,11 +28,12 @@ export class OpenCodeAgent implements Extract<AgentAdapter, { mode: 'execution' 
         availability: models.length ? { status: 'available' } : { status: 'authentication-required', reason: 'No OpenCode model is available' },
         authorization,
         runtime: { resume: true, tools: true, approvals: false, usage: true, cancel: true, structuredOutput: false, commands: [] },
+        agentCommands: [],
         models,
       }
     } catch (cause) {
       const reason = cause instanceof Error ? cause.message : String(cause)
-      return { agentKey: this.agentKey, displayName: 'OpenCode', version, mode: this.mode, executablePath: this.command, diagnostics: [reason], availability: { status: 'unavailable', reason }, authorization: { state: 'unknown', instructions: 'Install or repair OpenCode, then run `opencode auth login` if the selected provider requires credentials.' }, runtime: { resume: true, tools: true, approvals: false, usage: true, cancel: true, structuredOutput: false, commands: [] }, models: [] }
+      return { agentKey: this.agentKey, displayName: 'OpenCode', version, mode: this.mode, executablePath: this.command, diagnostics: [reason], availability: { status: 'unavailable', reason }, authorization: { state: 'unknown', instructions: 'Install or repair OpenCode, then run `opencode auth login` if the selected provider requires credentials.' }, runtime: { resume: true, tools: true, approvals: false, usage: true, cancel: true, structuredOutput: false, commands: [] }, agentCommands: [], models: [] }
     }
   }
 }

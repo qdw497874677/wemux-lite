@@ -5,6 +5,8 @@
     "rootDir": "src",
     "noEmit": false,
     "declaration": false,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
     "types": ["node"]
   },
   "include": ["src"]

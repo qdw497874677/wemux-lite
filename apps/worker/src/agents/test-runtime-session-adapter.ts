@@ -47,13 +47,13 @@ class TestRuntimeSession implements AgentRuntimeSession {
         }
       }
       await wait()
-      yield { kind: 'event', event: { kind: 'tool.started', toolCallId, toolName: 'echo', input: { text: input.message.content } } }
+      yield { kind: 'event', event: { kind: 'tool.started', toolCallId, toolName: 'echo', input: { text: input.message.content }, streamKind: 'command_output' } }
       await wait()
-      yield { kind: 'event', event: { kind: 'tool.output.delta', toolCallId, text: input.message.content } }
+      yield { kind: 'event', event: { kind: 'tool.output.delta', toolCallId, text: input.message.content, streamKind: 'command_output' } }
       yield { kind: 'event', event: { kind: 'tool.finished', toolCallId, exitCode: 0 } }
       for (const text of [`Echo: `, ...input.message.content.match(/.{1,8}/gs) ?? []]) {
         await wait()
-        yield { kind: 'event', event: { kind: 'assistant.text.delta', text } }
+        yield { kind: 'event', event: { kind: 'assistant.text.delta', text, streamKind: 'assistant_text' } }
       }
       yield { kind: 'finished', outcome: { status: 'completed' } }
     } catch (error) {

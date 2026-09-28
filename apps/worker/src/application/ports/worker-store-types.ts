@@ -81,6 +81,7 @@ export interface SessionExecutionWriter {
   cancelQueued(sessionId: SessionId, submissionCommandId: CommandId): Promise<CancelQueuedResult>
   claimNext(sessionId: SessionId): Promise<Turn | null>
   bindNativeSession(binding: NativeSessionBinding): Promise<void>
+  setModel(sessionId: SessionId, modelId: import('@wemux/domain').ModelId): Promise<void>
   deleteSession(sessionId: SessionId): Promise<void>
   requestStop(sessionId: SessionId, turnId: TurnId): Promise<RequestStopResult>
   setRuntimeState(sessionId: SessionId, state: SessionRuntimeState): Promise<void>

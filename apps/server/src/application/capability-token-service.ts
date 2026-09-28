@@ -40,6 +40,7 @@ export class CapabilityTokenService {
       projectId: request.projectId,
       workspaceId: request.workspaceId,
       allowedTools: request.allowedTools,
+      allowedConnectorIds: request.allowedConnectorIds,
       issuedAt,
       expiresAt: new Date(Date.parse(issuedAt) + (request.ttlMs ?? this.defaultTtlMs)).toISOString(),
     }

@@ -46,5 +46,5 @@ test('gateway proxies bearer capability calls and CLI parses commands', async t 
 
 test('MCP exposes the minimal tool surface', async () => {
   const listed = await handleMcpRequest({ method: 'tools/list' })
-  assert.deepEqual(listed.tools.map((tool: any) => tool.name), ['wemux_session_info', 'wemux_agent_list', 'wemux_agent_send', 'wemux_inbox_list', 'wemux_inbox_read'])
+  assert.deepEqual(listed.tools.map((tool: any) => tool.name), ['wemux_session_info', 'wemux_agent_list', 'wemux_agent_send', 'wemux_inbox_list', 'wemux_inbox_read', 'mcp_list_tools', 'mcp_call'])
 })

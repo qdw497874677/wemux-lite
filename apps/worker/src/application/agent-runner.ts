@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { AgentContent, AgentEvent, AgentRunner, ApprovalDecision, CommandRequest, RunRequest, SessionStore } from '@wemux/agent-interchange'
-import type { AgentKey, RuntimeOperationId, SessionId, Timestamp } from '@wemux/domain'
+import { classifyAgentError, type AgentKey, type RuntimeOperationId, type SessionId, type Timestamp } from '@wemux/domain'
 import type { AgentAdapter, AgentLaunchContext, AgentSignal, AgentTurnEvent, AgentTurnOutcome } from './ports/agent-adapter.js'
 import type { RuntimeSessionAdapter } from './ports/runtime-session.js'
 import { RuntimeSessionManager } from './runtime-session-manager.js'
@@ -166,29 +166,37 @@ export class WorkerAgentRunner implements AgentRunner {
   }
 
   private turnEvent(request: RunRequest, event: AgentTurnEvent): AgentEvent {
-    if (event.kind === 'assistant.text.delta') return this.event(request, request.agentKey, { role: 'model', parts: [{ text: event.text }] }, { wemux: {}, provider: { kind: event.kind } }, true)
+    if (event.kind === 'assistant.text.delta') return this.event(request, request.agentKey, { role: 'model', parts: [{ text: event.text }] }, { wemux: {}, provider: { kind: event.kind } }, true, event.streamKind)
     return this.event(request, request.agentKey, undefined, { wemux: event.kind === 'usage.updated'
       ? { usage: event.usage }
       : event.kind === 'approval.requested'
-        ? { approvalId: event.approvalId }
-        : {}, provider: { ...event } })
+        ? { approvalId: event.approvalId, approval: { kind: 'requested', id: event.approvalId, action: event.action, ...(event.reason ? { reason: event.reason } : {}) } }
+        : {}, provider: { ...event } }, false, 'streamKind' in event ? event.streamKind : undefined)
   }
 
   private terminal(request: RunRequest, outcome: AgentTurnOutcome): AgentEvent {
     const terminal = outcome.status === 'completed' ? 'completed' : outcome.status
+    const failure = outcome.status === 'failed' ? classifyAgentError(outcome.failure.message) : null
     return this.event(request, request.agentKey, undefined, { wemux: {
       terminal,
-      ...(outcome.status === 'failed' ? { error: { code: outcome.failure.code, message: outcome.failure.message } } : {}),
+      ...(outcome.status === 'failed' ? { error: {
+        code: outcome.failure.code,
+        message: outcome.failure.message,
+        abortReason: outcome.failure.abortReason ?? 'provider_error',
+        failureReason: outcome.failure.failureReason ?? failure!.reason,
+        retryable: outcome.failure.retryable ?? failure!.retryable,
+      } } : {}),
     } })
   }
 
-  private event(request: RunRequest, author: string, content: AgentContent | undefined, customMetadata: NonNullable<AgentEvent['customMetadata']>, partial = false): AgentEvent {
+  private event(request: RunRequest, author: string, content: AgentContent | undefined, customMetadata: NonNullable<AgentEvent['customMetadata']>, partial = false, streamKind?: AgentEvent['streamKind']): AgentEvent {
     return {
       id: randomUUID(),
       invocationId: request.invocationId,
       author,
       ...(content ? { content } : {}),
       actions: {},
+      ...(streamKind ? { streamKind } : {}),
       ...(partial ? { partial: true } : {}),
       timestamp: occurredAt(),
       customMetadata,

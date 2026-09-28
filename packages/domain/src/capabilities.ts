@@ -7,6 +7,8 @@ export const capabilityToolNames = [
   'agent.send',
   'agent.inbox.list',
   'agent.inbox.read',
+  'mcp.list_tools',
+  'mcp.call',
 ] as const
 
 export type CapabilityToolName = (typeof capabilityToolNames)[number]
@@ -30,6 +32,7 @@ export interface CapabilitySnapshot {
   readonly version: number
   readonly assets: readonly CapabilityAsset[]
   readonly allowedTools: readonly CapabilityToolName[]
+  readonly allowedConnectorIds: readonly string[]
   readonly createdAt: string
 }
 
@@ -41,6 +44,7 @@ export interface CapabilityGrantClaims {
   readonly projectId: ProjectId
   readonly workspaceId: WorkspaceId
   readonly allowedTools: readonly CapabilityToolName[]
+  readonly allowedConnectorIds: readonly string[]
   readonly issuedAt: string
   readonly expiresAt: string
 }

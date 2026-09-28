@@ -16,8 +16,10 @@ test('pi and claude advertise native slash compaction even when unavailable', as
   const claude = await commandDetection('claude')
   assert.deepEqual(pi.agentCommands, ['/compact', '/model'])
   assert.equal(pi.compactMode, 'slash-command')
+  assert.equal(pi.modelSwap, true)
   assert.deepEqual(claude.agentCommands, ['/compact', '/model', '/clear'])
   assert.equal(claude.compactMode, 'slash-command')
+  assert.equal(claude.modelSwap, false)
 })
 
 test('opencode and deterministic test agent honestly advertise no native slash commands', async () => {
@@ -27,4 +29,5 @@ test('opencode and deterministic test agent honestly advertise no native slash c
   assert.deepEqual(echo.agentCommands, [])
   assert.equal(opencode.compactMode, undefined)
   assert.equal('compactMode' in echo ? echo.compactMode : undefined, undefined)
+  assert.notEqual('modelSwap' in echo && echo.modelSwap, true)
 })
