@@ -621,6 +621,26 @@ const accountMigrations = [
    DROP TABLE channel_outbound_deliveries;
    ALTER TABLE channel_outbound_deliveries_rebuilt RENAME TO channel_outbound_deliveries;
    CREATE INDEX channel_outbound_claim ON channel_outbound_deliveries(status,next_attempt_at,lease_expires_at,created_at);`,
+  `CREATE TABLE IF NOT EXISTS resources (
+     id TEXT PRIMARY KEY, kind TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL,
+     data TEXT NOT NULL CHECK(json_valid(data)), created_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+   CREATE TABLE IF NOT EXISTS resource_revisions (
+     id TEXT PRIMARY KEY, resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE RESTRICT,
+     kind TEXT NOT NULL, version INTEGER NOT NULL CHECK(version > 0), content_sha256 TEXT NOT NULL,
+     data TEXT NOT NULL CHECK(json_valid(data)), created_at TEXT NOT NULL, UNIQUE(resource_id,version));
+   CREATE TABLE IF NOT EXISTS resource_bindings (
+     id TEXT PRIMARY KEY, worker_id TEXT NOT NULL, resource_revision_id TEXT NOT NULL REFERENCES resource_revisions(id) ON DELETE RESTRICT,
+     resource_id TEXT NOT NULL REFERENCES resources(id) ON DELETE RESTRICT, kind TEXT NOT NULL,
+     status TEXT NOT NULL CHECK(status IN ('assigned','notified','installed','failed','pending-gc','gc''d')),
+     revision INTEGER NOT NULL CHECK(revision > 0), data TEXT NOT NULL CHECK(json_valid(data)), updated_at TEXT NOT NULL,
+     UNIQUE(worker_id,resource_revision_id));
+   CREATE INDEX IF NOT EXISTS resource_bindings_worker_index ON resource_bindings(worker_id,status);
+   CREATE TABLE IF NOT EXISTS resource_sets (
+     worker_id TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision > 0), fingerprint TEXT NOT NULL,
+     snapshot_json TEXT NOT NULL CHECK(json_valid(snapshot_json)), updated_at TEXT NOT NULL);
+   CREATE TABLE IF NOT EXISTS resource_reconcile_reports (
+     request_id TEXT PRIMARY KEY, worker_id TEXT NOT NULL, binding_id TEXT NOT NULL REFERENCES resource_bindings(id) ON DELETE RESTRICT,
+     resource_set_revision INTEGER NOT NULL CHECK(resource_set_revision > 0), report_json TEXT NOT NULL CHECK(json_valid(report_json)), occurred_at TEXT NOT NULL);`,
   `CREATE TABLE IF NOT EXISTS artifacts (
      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, task_id TEXT NOT NULL, run_id TEXT NOT NULL,
      session_id TEXT NOT NULL, workspace_id TEXT NOT NULL, worker_id TEXT NOT NULL,

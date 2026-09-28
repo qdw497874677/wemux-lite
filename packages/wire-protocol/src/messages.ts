@@ -12,6 +12,7 @@ import type {
 } from '@wemux/domain'
 import type { CommandReceipt, WorkerCommand } from './commands.js'
 import type { ConnectorRevisionReport } from './connectors.js'
+import type { ServerResourcePayload, WorkerResourcePayload } from './resources.js'
 
 export interface WorkspaceFileEntry {
   readonly name: string
@@ -110,6 +111,7 @@ export type ServerPayload =
   | FileRequestPayload
   | TerminalRequestPayload
   | Extract<SyncPayload, { readonly kind: 'request' }>
+  | ServerResourcePayload
 
 export type WorkerPayload =
   | HeartbeatPayload
@@ -120,6 +122,7 @@ export type WorkerPayload =
   | TerminalEventPayload
   | EventPayload
   | Exclude<SyncPayload, { readonly kind: 'request' }>
+  | WorkerResourcePayload
 
 export type ProtocolPayload = ServerPayload | WorkerPayload
 

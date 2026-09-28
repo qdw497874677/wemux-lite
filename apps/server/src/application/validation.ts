@@ -96,6 +96,7 @@ function capability(value: unknown): AgentCapability {
 }
 export function workerMessage(value: unknown): WorkerToServer {
   const m = object(value)
+  if (m.type === 'resource.set.pull' || m.type === 'resource.blob.fetch' || m.type === 'resource.reconcile.report') return value as WorkerToServer
   switch (m.type) {
     case 'heartbeat': text(m.nonce, 'nonce'); timestamp(m.sentAt); break
     case 'capability': text(m.workerId, 'workerId'); timestamp(m.detectedAt); array(m.capabilities).forEach(capability); break

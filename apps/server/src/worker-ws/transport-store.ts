@@ -84,7 +84,9 @@ export class ServerTransportStore {
 
   enqueue(workerId: WorkerId, payload: ServerPayload): void {
     const epoch = this.meta(workerId, 'outbound_epoch') ?? this.setMeta(workerId, 'outbound_epoch', randomUUID())
-    const dedupeKey = payload.type === 'command' ? `command:${payload.commandId}` : null
+    const dedupeKey = payload.type === 'command' ? `command:${payload.commandId}`
+      : payload.type === 'resource.set.notify' ? `resource-set:${payload.setRevision}:${payload.fingerprint}`
+        : null
     this.db.exec('BEGIN IMMEDIATE')
     try {
       // 去重只对「仍在 outbox 里等传输确认」的帧生效：帧被传输确认后必须允许按同一 commandId 重新入队，

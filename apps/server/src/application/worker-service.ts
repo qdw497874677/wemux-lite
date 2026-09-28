@@ -2,6 +2,8 @@ import { isActiveRun, projectRuns, saveRunProjection } from './run-projection.ts
 import type { CommandId, EventSeq, JournalEvent, ModelId, SessionId, WorkerId } from '@wemux/domain'
 import type { ProjectEvent } from '@wemux/web-contract/task-platform'
 import type { ConnectorRevisionReport, FileResponsePayload, ServerToWorker, TerminalResponsePayload, WorkerToServer } from '@wemux/wire-protocol'
+import type { ResourceService } from './resource-service.ts'
+import type { ResourceBlobStore } from '../storage/resource-blob-store.ts'
 import type { ServerStore } from './ports/server-store.ts'
 import { AppError, requireValue } from './errors.ts'
 import { Notifications } from './notifications.ts'
@@ -17,12 +19,17 @@ export class WorkerService {
   private readonly notifications: Notifications
   private readonly reportConnector: (workerId: WorkerId, report: ConnectorRevisionReport) => void | Promise<void>
   private readonly projectJournal: (sessionId: SessionId, events: readonly JournalEvent[]) => void | Promise<void>
+  private resources: ResourceService | null
+  private readonly resourceBlobs: ResourceBlobStore | null
   constructor(
     store: ServerStore,
     notifications: Notifications,
     reportConnector: (workerId: WorkerId, report: ConnectorRevisionReport) => void | Promise<void> = () => {},
     projectJournal: (sessionId: SessionId, events: readonly JournalEvent[]) => void | Promise<void> = () => {},
-  ) { this.store = store; this.notifications = notifications; this.reportConnector = reportConnector; this.projectJournal = projectJournal;}
+    resources: ResourceService | null = null,
+    resourceBlobs: ResourceBlobStore | null = null,
+  ) { this.store = store; this.notifications = notifications; this.reportConnector = reportConnector; this.projectJournal = projectJournal; this.resources = resources; this.resourceBlobs = resourceBlobs }
+  attachResources(resources: ResourceService): void { this.resources = resources }
   registerFileRequest(requestId: string, workerId: WorkerId): { readonly promise: Promise<FileResponsePayload>; readonly cancel: () => void } {
     if (this.fileRequests.has(requestId)) throw new AppError(409, 'Duplicate file request')
     let resolve!: (response: FileResponsePayload) => void
@@ -104,6 +111,22 @@ export class WorkerService {
         case 'capability':
           if (message.workerId !== workerId) throw new AppError(403, 'Worker identity mismatch')
           await tx.resources.saveWorker({ ...worker, capabilities: message.capabilities, lastSeenAt: now() })
+          break
+        case 'resource.set.pull':
+          if (!this.resources || message.workerId !== workerId) throw new AppError(403, 'Worker identity mismatch')
+          replies.push({ type: 'resource.set.pull', action: 'snapshot', requestId: message.requestId, resourceSet: this.resources.desiredSet(workerId) })
+          break
+        case 'resource.blob.fetch': {
+          if (!this.resourceBlobs) throw new AppError(404, 'Resource blob store unavailable')
+          const content = await this.resourceBlobs.get(message.sha256)
+          replies.push(content === null
+            ? { type: 'resource.blob.fetch', action: 'not-found', requestId: message.requestId, sha256: message.sha256 }
+            : { type: 'resource.blob.fetch', action: 'response', requestId: message.requestId, sha256: message.sha256, mediaType: 'application/octet-stream', size: content.length, base64Content: Buffer.from(content).toString('base64') })
+          break
+        }
+        case 'resource.reconcile.report':
+          if (!this.resources || message.report.workerId !== workerId) throw new AppError(403, 'Worker identity mismatch')
+          this.resources.reconcile(message.report)
           break
         case 'fs.response': {
           const pending = this.fileRequests.get(message.requestId)

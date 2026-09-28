@@ -1,6 +1,7 @@
 import { WEMUX_ADK_PROFILE_V1 } from '@wemux/domain'
 import type { MessageId, Timestamp, WorkerId } from '@wemux/domain'
 import type { ServerPayload, WorkerPayload } from './messages.js'
+import { isServerResourcePayload, isWorkerResourcePayload } from './resources.js'
 
 export const TRANSPORT_V2_MAJOR = 2 as const
 export const TRANSPORT_V2_MINOR = 0 as const
@@ -151,12 +152,12 @@ function parseServerHello(value: Record<string, unknown>): ServerTransportHello 
 
 function workerPayload(value: unknown): value is WorkerPayload {
   const payload = record(value)
-  return Boolean(payload && ['heartbeat', 'hello', 'capability', 'ack', 'event', 'fs.response', 'terminal.response', 'terminal.output', 'terminal.exit', 'sync'].includes(String(payload.type)))
+  return Boolean(payload && (['heartbeat', 'hello', 'capability', 'ack', 'event', 'fs.response', 'terminal.response', 'terminal.output', 'terminal.exit', 'sync'].includes(String(payload.type)) || isWorkerResourcePayload(payload)))
 }
 
 function serverPayload(value: unknown): value is ServerPayload {
   const payload = record(value)
-  return Boolean(payload && ['heartbeat', 'command', 'fs.request', 'terminal.request', 'sync'].includes(String(payload.type)))
+  return Boolean(payload && (['heartbeat', 'command', 'fs.request', 'terminal.request', 'sync'].includes(String(payload.type)) || isServerResourcePayload(payload)))
 }
 
 function parseData(value: Record<string, unknown>): DurableDataFrame | VolatileDataFrame | null {

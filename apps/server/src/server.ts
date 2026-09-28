@@ -1,6 +1,7 @@
 import { TaskService } from './application/task-service.ts'
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
+import { dirname, join } from 'node:path'
 import { SqliteServerStore } from './storage/sqlite/store.ts'
 import { SharedSqliteDatabase } from './storage/sqlite/shared-database.ts'
 import { AuthenticationService } from './application/auth.ts'
@@ -24,6 +25,7 @@ import { ProjectionService } from './application/projection-service.ts'
 import { ApprovalDecisionRouter } from './application/approval-decision-router.ts'
 import { AttentionService } from './application/attention-service.ts'
 import { ArtifactService } from './application/artifact-service.ts'
+import { ResourceService } from './application/resource-service.ts'
 import { CanvasCollaborationService } from './application/canvas-collaboration-service.ts'
 import { CanvasLayoutService } from './application/canvas-layout-service.ts'
 import { ConnectorService } from './application/connector-service.ts'
@@ -42,6 +44,8 @@ import { SqliteChannelRepository } from './storage/sqlite/channel-repository.ts'
 import { SqliteApprovalDecisionRepository } from './storage/sqlite/approval-decision-repository.ts'
 import { SqliteAttentionSource } from './storage/sqlite/attention-source.ts'
 import { SqliteArtifactRepository } from './storage/sqlite/artifact-repository.ts'
+import { SqliteResourceRepository } from './storage/sqlite-resource-repository.ts'
+import { ResourceBlobStore } from './storage/resource-blob-store.ts'
 import { SqliteDelegationRepository } from './storage/sqlite/delegation-repository.ts'
 import { DelegationApplicationService } from './application/delegation-service.ts'
 import { WorkerAccessService } from './application/worker-access-service.ts'
@@ -189,11 +193,16 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const adapters = new Map<string, ChannelAdapter>([['generic_webhook', genericWebhook], ['feishu', feishu], ['dingtalk', dingTalk]])
   const channels = new ChannelService(channelRepository, channelCodec, projects, sessionAccess, workerAccess, kind => adapters.get(kind))
   const channelOutbox = new ChannelOutbox(channelRepository, projects, sessionAccess, workerAccess, store, { deploymentAllowsPrivateNetwork: process.env.WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK === 'true', connectorAllowsPrivateNetwork: true }, options.channelFetch, kind => adapters.get(kind)!)
-  const workers = new WorkerService(store, notifications, (workerId, report) => connectors.report(workerId, report), async (sessionId, events) => { await channelOutbox.projectJournal(sessionId, events); setImmediate(() => void channelOutbox.drain().catch(() => undefined)) })
+  const resourceRepository = new SqliteResourceRepository(database)
+  const resourceBlobs = new ResourceBlobStore(options.databasePath === ':memory:' ? join(process.cwd(), 'data', 'resource-blobs') : join(dirname(options.databasePath), 'resource-blobs'))
+  let resources: ResourceService
+  const workers = new WorkerService(store, notifications, (workerId, report) => connectors.report(workerId, report), async (sessionId, events) => { await channelOutbox.projectJournal(sessionId, events); setImmediate(() => void channelOutbox.drain().catch(() => undefined)) }, null, resourceBlobs)
   const workerGateway = { send: (workerId: import('@wemux/domain').WorkerId, payload: import('@wemux/wire-protocol').ServerPayload) => {
     if (!gateway) throw new Error('Worker gateway is not ready')
     return gateway.send(workerId, payload)
   } }
+  resources = new ResourceService(resourceRepository, { send: (workerId, payload) => { void workerGateway.send(workerId, payload) } }, undefined, resourceBlobs)
+  workers.attachResources(resources)
   const sessionFiles = new SessionFileService(service, workers, workerGateway)
   const sessionTerminals = new SessionTerminalService(service, workers, workerGateway)
   const tasks = new TaskService(store, event => notifications.project(event), service)
@@ -240,6 +249,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
     approvalDecisions,
     attention,
     artifacts,
+    resources,
   }))
   gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))
   let closed = false
@@ -276,6 +286,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
       channelRepository.close()
       approvalDecisionRepository.close()
       artifactRepository.close()
+      resourceRepository.close()
       attentionSource.close()
       delegationRepository.close()
       store.close()
