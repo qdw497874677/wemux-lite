@@ -2,7 +2,7 @@
 
 ## 摘要
 
-本文设计统一的节点资源分发层：Server 以不可变 revision 管理 Skill、Agent 运行时、模型供应商和连接器配置，通过 ResourceBinding 分配，Worker 校验后原子物化。空服务器安装并注册 Worker 后，管理员只需在 Web 应用节点资源预设，即可观察下载、校验、安装、重启、凭证就绪与能力上线。方案复用连接器可靠推送管道和现有 Agent 安装器，坚持 BYOK，Server 只分发非秘密配置与凭证引用。连接器保留既有执行管道并纳入统一分配和状态投影。实施分三批：先吸收 G51 与 Skill，再闭合 Agent runtime 和 Preset 快速路径，最后落地模型供应商配置。
+本文设计统一的节点资源分发层：Server 以不可变 revision 管理 Skill、Agent 运行时、模型供应商和连接器配置，通过 ResourceBinding 分配，Worker 校验后原子物化。空服务器安装并注册 Worker 后，管理员只需在 Web 应用节点资源预设，即可观察下载、校验、安装、重启、凭证就绪与能力上线。方案复用连接器可靠推送管道和现有 Agent 安装器，坚持 BYOK，Server 只分发非秘密配置与凭证引用。连接器保留既有执行管道并纳入统一分配和状态投影。资源能力实施分三批：先吸收 G51 与 Skill，再闭合 Agent runtime 和 Preset 快速路径，最后落地模型供应商配置。Worker 本地 Web 的双宿主前端升级另设 R-web 批次，共用资源层的制品物化模式，但不混入普通节点资源绑定。
 
 ## 1. 目标、边界与依据
 
@@ -477,7 +477,103 @@ Preset 是 ResourceBinding 模板，不是第五种资源，也不复制 Resourc
 
 理由：G54 依赖不可变 Skill revision，R1 正好把 G51 的领域裁定升级为通用资源底座。若先按旧 G51 单独建设 `skill.revision.sync`，随后再引入 Resource 会产生两次 wire、repository 和 Worker cache 迁移。G54 的原估时 48 至 76 小时保持，不计入本设计三批估时。
 
-## 9. 风险与控制
+## 9. Worker 本地 Web 双宿主前端升级
+
+### 9.1 目标与宿主边界
+
+当前 `apps/worker/src/local-control/server.ts` 直接返回内联 HTML、CSS 和 JavaScript。它已经覆盖本机管理员登录、目录授权、本地 Session、Agent/模型选择、队列、审批、连接器配置和集群加入退出，后端也按 `docs/design/m2-dual-host-contract.md` 第 5 节复用同一 `WorkerRuntime`、持久队列和 Journal；缺口在于前端仍是独立实现。随着 `apps/web` 增加审批、时间线、连接器、运行详情和会话画布，两套前端的交互、可访问性与错误恢复会继续漂移。
+
+**裁定：`apps/web` 增加本地宿主路由分支，复用同一套 Session Surface、时间线、队列、审批和连接器组件；本地宿主通过显式 Host Adapter 调用 `local-control` API。** 本地模式只展示：
+
+- 本地 Session 工作台，包括最近会话、新建、时间线、队列、停止、审批和运行详情；
+- 本地设置，包括允许目录、Agent/模型、本机管理员与监听安全信息；
+- 集群接入，包括探测、加入、连接、暂停、重试和退出；
+- 对当前 Worker 有意义的本地连接器定义、凭证状态与审批。
+
+本地模式不渲染 Team、Project、Task、Run、集群 Worker 管理、Project 画布或集群级 Attention。不得为复用组件伪造 Project、Workspace Placement 或集群 Worker ID。本地目录继续使用本地工作环境语义；本地 Session 的执行所有者、队列和 Journal 仍只有 WorkerRuntime 一份。
+
+### 9.2 前端装配方案裁定
+
+| 方案 | 优点 | 主要问题 | 裁定 |
+|---|---|---|---|
+| TanStack Router 宿主路由分组 | 一个源码树和组件库；可按宿主懒加载；路由、导航和能力可由 Host Adapter 明确约束 | 需要重构当前平铺路由与部分直接依赖集群 `Api` 的组件 | 采用 |
+| 独立 Vite entry | 可生成较小的 Worker HTML/JS，启动配置直接 | 容易形成第二套 App shell、认证启动、错误边界和样式入口；跨 entry 回归矩阵扩大 | 不作为宿主边界；仅允许构建工具从同一路由树生成资产清单 |
+| 构建期 flag | 初始包可裁掉另一宿主代码 | 同一版本产生两种行为制品，运行时无法安全切换；测试、缓存和发布矩阵翻倍 | 拒绝 |
+
+具体结构建议：
+
+```text
+apps/web/src/hosts/
+  contract.ts              # HostKind、HostCapabilities、SessionSurfaceApi
+  cluster-host.ts          # 现有 Server API adapter
+  local-worker-host.ts     # /api/local/* adapter
+apps/web/src/routes/
+  shared-session/          # 对话、时间线、队列、审批、运行详情
+  cluster/                 # Project、Task、Worker、集群设置
+  local/                   # 本地目录、Agent/模型、集群接入、本机设置
+```
+
+两个宿主都提供一个有版本的 bootstrap 响应，前端在创建 Router 前取得 `hostKind: 'cluster' | 'local-worker'`、合同版本、登录状态和 capability 列表。Router 按宿主只挂载允许的路由组；未知或未授权路由返回本宿主的 404，不通过隐藏导航保留可达页面。共享 Session 组件只依赖 `SessionSurfaceApi` 与 capability，不直接读取 Project Query、Team 身份或 Server 专用 DTO。集群画布可继续作为 cluster-only 容器；将来若本地需要画布，必须先定义本地 lineage 合同，不能仅因组件存在就开放。
+
+采用动态 import 拆分 cluster-only 与 local-only 路由，避免 Worker 首屏下载任务看板、团队管理和集群画布代码，但发布物仍是同一个经过一次测试和签名的 Web artifact，不生成行为不同的 flag 变体。
+
+### 9.3 local-control API 契约对齐
+
+目标不是让 Worker 假装成 Server，而是让共享 Surface 获得同构的会话能力。`packages/web-contract` 应抽出宿主中立的 Session、Journal、Approval、Queue、Connector 和 Bootstrap DTO；Server 与 Worker HTTP adapter 都实现这些合同。可以直接复用值语义一致的 `JournalEventDTO`、事件 payload、队列项、审批决定、错误、游标和 requestId 类型；Project/Task/Team、A3、Workspace Placement、集群 freshness 等宿主专用类型不能硬塞给本地模式。
+
+现状差距与目标如下：
+
+| 能力 | local-control 现状 | 对齐要求 |
+|---|---|---|
+| Session journal 分页 | `journal?fromSeq&limit` 已能返回 `events/hasMore`，`fromSeq=0` 另有“最近一页”语义 | 与集群统一为明确的正向游标、`nextSeq`、`throughSeq`、`hasMore` 和 gap 规则；另设 `beforeSeq` 或 tail 查询表达加载旧记录，不能让 `0` 同时承担特殊语义；响应复用同一 Journal DTO |
+| SSE 事件形状 | `/events` 发送 `event: journal`，`data` 是裸 JournalEvent，并在会话过期时发送 `auth-expired` | 冻结共享 envelope、事件名、`id=seq`、合同版本、heartbeat、gap/resync、auth-expired 和未知事件处理；断线按 `Last-Event-ID` 恢复，REST 补页仍是权威，不能依赖 500 ms 轮询细节 |
+| 审批流 | 已有 Session 审批列表/resolve 和连接器审批列表/resolve，但 DTO、历史、能力原因与集群页面不一致 | 统一 pending/history、action 摘要、risk、requestedAt、resolvedAt、decision、resolver capability 与幂等 command receipt；Session 审批进入共享时间线和待审批面板，连接器审批保留本地 owner scope |
+| 队列和运行控制 | 已有 queue、逐条取消、stop、runtime command | 统一 QueueItem、activeTurn、supported operations、requestId/receipt、拒绝原因和并发状态；共享组件不得根据 URL 猜能力 |
+| 连接器管理 | 已有本地 list/save/delete、credential 和审批的最小 JSON API | 补齐 revision/CAS、enabled 状态、测试及测试结果、credential availability、诊断、审计摘要和安全错误；DTO 使用宿主中立 owner `{ kind: 'local-worker', installationId }`，不伪造 projectId，也不暴露 Secret |
+| 认证与 bootstrap | 本地登录返回 CSRF，状态接口分别读取；集群 Web 使用另一套启动流 | 统一前端可消费的 Auth/Bootstrap 外形，但 Cookie、CSRF header、管理员模型和后端授权继续由各宿主实现；Worker Credential、Enrollment Token 与 Web 登录凭据仍严格分离 |
+
+建议把 `SessionSurfaceApi` 设计为前端端口，方法覆盖 session list/create/delete、journal page/watch、enqueue/cancel/stop、approval resolve、runtime command 和 capability 查询。`cluster-host.ts` 与 `local-worker-host.ts` 只负责 URL、认证 header 和宿主 DTO 到共享合同的无损映射。任何映射若需要虚构 `projectId`、`workerId` 或 freshness，说明合同仍过度偏向集群，应继续拆分，而不是使用占位字符串。
+
+### 9.4 与 R2 的关系和估时
+
+**裁定：完整升级设为独立批次 R-web，不并入 R2 的 104 至 144 小时。** R2 的验收权威仍是“干净 Linux 安装并注册 Worker -> 集群 Web 应用 Preset -> runtime 安装、重启、探测 -> 创建真实 Session”；本地内联页当前已能承担 Agent/模型与集群接入的基础操作，不能以视觉复用为由扩大资源层关键路径。
+
+R-web 应在 R2 的 runtime/Preset 合同稳定后开始，可与 R2 后半段的裸机验收并行。R2 若新增必须在 Worker 信任域完成的操作，只能调用稳定的 local-control JSON API 并由现有页临时承接，不得提前复制一套新的 UI。R3 的 `worker-credential` 完整引导依赖 R-web 的本地设置体验，因此 R-web 最迟应在 R3 对外验收前完成。
+
+**R-web 估时：88 至 120 小时，11 至 15 人日。**
+
+- Host Adapter、bootstrap 与 TanStack Router 分组：16 至 24 小时；
+- Session/Journal/SSE/队列/审批合同对齐与 Worker API：24 至 32 小时；
+- 本地设置、集群接入和连接器共享界面：24 至 32 小时；
+- Worker 静态资产服务、打包、迁移、自动化和真实浏览器双宿主验收：24 至 32 小时。
+
+估时包含局域网 HTTP 非安全上下文、Worker 独立离线启动、集群宿主回归、断线补页、审批和连接器 Secret 不泄漏验证。它不包含新画布能力、多人本地角色或自动 NAT 穿透。
+
+### 9.5 安全与体验约束
+
+1. 继续深色优先、自动亮色，中文文案，零 em-dash 装饰，图标使用现有 lucide 与设计 token。
+2. `apps/web/src` 继续禁止直接调用 `crypto.randomUUID()`，统一使用 `src/lib/random.ts` 的 `randomId()`；本地 Worker 经 LAN/Tailnet 的 HTTP 访问必须可用。
+3. 复制继续使用 `copyText()`；非安全上下文失败时使用 `selectElementText()` 全选并提示 Ctrl+C 或长按复制，禁止 `execCommand` 假成功。
+4. 本地值 import 保留 `.ts` 扩展名，源码合同测试与真实浏览器验收同时保留。
+5. local-control 安全边界不变：本机管理员身份独立，默认 loopback，显式公网 HTTPS，Host/Origin/CSRF/限流/会话撤销继续由 Worker host 执行；目录授权不是文件系统沙箱。
+6. 不承诺自动 NAT 穿透，不因共享 `apps/web` 就共享 Server 登录、Team 权限、本地会话正文、Worker Credential 或 Enrollment Token。
+7. 前端 capability 只决定展示，后端仍逐请求授权。隐藏 cluster-only 页面不能替代路由和 API 拒绝。
+
+### 9.6 资产分发、包体与内联页下线
+
+**首版裁定：将 `apps/web` 的生产构建产物嵌入 Worker tgz，保证 Worker 未加入集群、Server 离线或内网隔离时仍可立即打开本地 IDE。** 构建流程生成一次带 hash 的资产目录，由 Worker 打包脚本复制到 npm 包，例如 `package/web/`；`apps/worker/package.json` 的 `files` 和 `pack:check` 必须验证 `index.html`、asset manifest、关键 chunk、hash 与 package version。local-control 以 no-cache 提供 `index.html` 和 bootstrap，以 `max-age=3600` 提供带 hash 的 assets，并保留 CSP、Host、Origin 与认证边界。
+
+按当前构建实测，`apps/web/dist` 约 3.7 MiB，单独压缩约 1,060,633 bytes；现有 Worker tgz 约 120 KiB。全量嵌入预计使 tgz 增加约 1.0 MiB，达到约 1.2 MiB。该增量相对 Agent runtime 很小，也不增加 Worker 生产运行依赖；发布流水线应设置压缩包和最大首屏 chunk 的 size budget，避免共享 Web 后无界增长。动态路由拆包用于降低浏览器首屏流量，不用于制造多个行为制品。
+
+Worker 前端可以在未来成为独立的 `worker-web` artifact revision，并复用本设计的 staging、SHA-256、不可变 revision、`current/previous`、健康检查和失败回滚机制，但有三条边界：
+
+1. 它不是 `agent-runtime` kind，也不进入普通 ResourceBinding/Preset；否则集群管理员可替换管理自身的本地安全 UI，形成权限环。
+2. 它的发布权威属于 Worker 发行/升级通道，必须与 Worker API contract 和兼容矩阵配对签名；Worker 只激活兼容 revision。
+3. 按需下载只能是未来的 delta 更新优化。安装包必须保留一个兼容的 bundled fallback，不能让独立模式首次启动依赖 Server 或 CDN。
+
+迁移顺序冻结为：先补共享合同和 Host Adapter；再让 Worker 从打包资产提供新 SPA，并保留内联页作为显式 fallback；完成本地与集群真实浏览器验收、离线安装验收和至少一个发布周期的回退演练后，删除 `page()`、`stylesheet` 与 `local-control/client.ts` 的旧 UI。内联页不得在“新首页能打开”时立即下线，验收必须覆盖登录、目录授权、Session 创建与恢复、长历史分页、SSE 重连、队列取消、停止、审批、Agent/模型、连接器凭证、加入/暂停/退出集群以及非安全上下文复制降级。
+
+## 10. 风险与控制
 
 | 风险 | 影响 | 控制与裁定 |
 |---|---|---|
@@ -493,10 +589,13 @@ Preset 是 ResourceBinding 模板，不是第五种资源，也不复制 Resourc
 | blob 与 SQLite 备份不一致 | revision 元数据存在但内容丢失 | DB 与 Server blob 目录同一恢复集；启动审计缺 blob 标 unavailable；不静默重建不同 hash |
 | 跨平台原子语义差异 | Windows symlink/rename 与 Unix 不同 | pointer manifest 与同卷 rename adapter；R2 首个生产验收明确 Linux，其他平台逐一验证后再标支持 |
 | 配置完成但模型不可用 | UI 把“文件已写”误报成 ready | ready 必须通过 Agent detect 和模型 inventory；credential_required、authentication-required、unavailable 分开显示 |
+| 双宿主前端能力漂移 | 集群页升级后本地页缺审批、队列或错误恢复，或共享组件误显示集群能力 | 共享 SessionSurfaceApi 与 web-contract；按 HostCapabilities 挂载路由；同一行为测试套件分别运行 cluster-host 和 local-worker-host |
+| Worker 与 Web artifact 不兼容 | 独立更新前端后调用 Worker 不支持的 API，导致本地管理入口不可用 | bootstrap 协商 contract version；Worker 只激活兼容且签名有效的 artifact；保留 bundled fallback 与 previous；不允许普通 ResourceBinding 更新本地管理 UI |
+| Worker 包体持续增长 | 全量 apps/web 进入 tgz 后拖慢安装或弱网络升级 | 动态路由拆包、压缩包与首屏 chunk size budget、发布报告；增长超过预算必须拆依赖或启用带 bundled fallback 的 delta 更新 |
 
-## 10. 不变量与明确不做
+## 11. 不变量与明确不做
 
-### 10.1 不变量
+### 11.1 不变量
 
 1. ResourceRevision 发布后不可变，修订必须生成新 revision。
 2. ResourceBinding 是资源分配唯一权威，更新必须 requestId + fingerprint + CAS。
@@ -508,11 +607,11 @@ Preset 是 ResourceBinding 模板，不是第五种资源，也不复制 Resourc
 8. Preset 只展开 binding，不绕过逐资源 A3、兼容性和供应链检查。
 9. ready 是能力事实，不是命令已接收或文件已下载。
 
-### 10.2 为了轻量而不做
+### 11.2 为了轻量而不做
 
 首版不做动态 ResourceKind 插件注册、任意 URL 下载、Skill marketplace、可执行 Skill、跨 Worker P2P 分发、Server 托管 Worker Secret、任意 Vault provider registry、运行中 Agent 热升级、跨平台同时首发、全局事务式多节点回滚，也不把 Worker 程序自身升级混成 `agent-runtime`。Worker 程序发布与节点资源分发共享 managed store 模式，但有独立权限、兼容矩阵和回滚生命周期。
 
-## 11. 验收矩阵
+## 12. 验收矩阵
 
 | 范围 | 必须证明 |
 |---|---|
@@ -523,16 +622,18 @@ Preset 是 ResourceBinding 模板，不是第五种资源，也不复制 Resourc
 | BYOK | Secret 不进 Server DB、wire、Audit、日志和 capability snapshot；缺 key fail closed；环境和本地加密凭证两条路径；轮换后新 Turn 生效 |
 | A3 | Preset 定义、应用、目标 Worker manage、执行 Worker use 与 Project/Session 权限求交；撤权后新 Invocation 不可用 |
 | 真实浏览器 | 新节点出现、应用 Preset、逐阶段进度、失败重试、credential_required 引导、回滚、ready 后创建 Session |
+| 双宿主前端 | 同一 Session 时间线、队列、停止和审批组件分别连接 Server 与 local-control；本地模式不可达 Project/Task/Worker 管理路由；LAN HTTP 下 randomId、复制降级、SSE 重连与长历史补页可用；离线安装可从 tgz 打开工作台 |
 | 真实裸机闭环 | 干净 Linux 安装 Worker并注册，控制面应用 Preset，Pi 安装并探测可用，固定 Skill 被实际注入，真实模型完成无副作用 Turn |
 | 恢复 | Server/Worker 在下载、安装、激活、重启各阶段崩溃；重启后状态收敛，不重复副作用，不丢 active |
 
 验收证据应包含固定 commit、Worker/Agent 版本、环境、命令、浏览器步骤、实际 report、失败注入和残余风险。模拟 Agent 可以覆盖故障矩阵，但不得替代“空 Worker 加入 -> Preset 应用 -> Pi 可用”的真实验收。
 
-## 12. 最终裁定汇总
+## 13. 最终裁定汇总
 
 1. **资源抽象**：以不可变 ResourceRevision 描述内容，以 ResourceBinding 唯一表达资源到 Worker/Agent/Project 的分配，以 kind adapter 在 Worker 物化。
 2. **连接器**：纳入统一 binding、Preset 和状态投影，保留现有 connector revision sync 作为执行 adapter，不重写成熟领域管道。
 3. **Agent runtime**：复用现有固定官方版本 `agent install` 安装器，资源层只增加控制面目录、分配、状态、重启和回滚。
 4. **凭证**：推荐引用式 locator，Worker 环境或 Vault 获取为标准路径，本地加密录入为 fallback，禁止 Server 保存后解密推送。
 5. **快速路径**：bootstrap 仍需一次节点命令，注册后不再要求 SSH；管理员应用 Preset，Worker 自动物化、重启、探测并上报 ready。
-6. **批次**：R1 10 至 14 人日，R2 13 至 18 人日，R3 8 至 12 人日，总计 31 至 44 人日；G51 并入 R1，G54 顺延。
+6. **资源批次**：R1 10 至 14 人日，R2 13 至 18 人日，R3 8 至 12 人日，共 31 至 44 人日；G51 并入 R1，G54 顺延。
+7. **Worker 本地 Web**：`apps/web` 采用运行时 Host Adapter 与 TanStack Router 路由分组复用 Session Surface，local-control API 对齐宿主中立 web-contract；独立 R-web 为 11 至 15 人日，首版 Web 资产嵌入 Worker tgz，验收后下线内联页。计入 R-web 后整体为 42 至 59 人日。
