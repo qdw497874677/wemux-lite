@@ -19,6 +19,8 @@ import { ServerService } from './application/server-service.ts'
 import { SessionLineageService } from './application/session-lineage-service.ts'
 import { TeamService } from './application/team-service.ts'
 import { ProjectAccessService } from './application/project-access-service.ts'
+import { ProjectionService } from './application/projection-service.ts'
+import { ApprovalDecisionRouter } from './application/approval-decision-router.ts'
 import { CanvasCollaborationService } from './application/canvas-collaboration-service.ts'
 import { CanvasLayoutService } from './application/canvas-layout-service.ts'
 import { ConnectorService } from './application/connector-service.ts'
@@ -135,6 +137,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const capabilitySecret = options.capabilitySecret ?? process.env.WEMUX_CAPABILITY_SECRET ?? randomCapabilitySecret()
   const capabilities = new CapabilityService(store, now, new CapabilityTokenService(capabilitySecret, now))
   const service = new ServerService(store, notifications, capabilities, workerAccess, projects, sessionAccess)
+  const projections = new ProjectionService(store, projects, sessionAccess)
   const streams = new SessionStreams(service)
   const terminalStreams = new TerminalStreams(notifications)
   // 血缘服务与画布渲染无关：它只读写领域事实，查询端点不在 handler 里拼装边。
@@ -162,6 +165,8 @@ export function createWemuxServer(options: WemuxServerOptions) {
   } }
   const sessionFiles = new SessionFileService(service, workers, workerGateway)
   const sessionTerminals = new SessionTerminalService(service, workers, workerGateway)
+  const tasks = new TaskService(store, event => notifications.project(event), service)
+  const approvalDecisions = new ApprovalDecisionRouter(projections, tasks, service)
   const server = createServer(httpHandler({
     service,
     auth,
@@ -170,7 +175,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
     downloads: options.workerPackagePath ? { tarballPath: options.workerPackagePath } : undefined,
     control: { disconnectWorker: id => gateway?.disconnect(id) },
     staticSite: options.webStaticPath ? { root: options.webStaticPath } : undefined,
-    tasks: new TaskService(store, event => notifications.project(event), service),
+    tasks,
     projectStreams,
     identity,
     registration,
@@ -198,6 +203,8 @@ export function createWemuxServer(options: WemuxServerOptions) {
     genericWebhook,
     feishu,
     dingTalk,
+    projections,
+    approvalDecisions,
   }))
   gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))
   let closed = false

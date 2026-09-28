@@ -19,6 +19,8 @@ import type { IdentityService } from '../../application/identity-service.ts'
 import type { InstanceSettingsService } from '../../application/instance-settings.ts'
 import type { MailSettings } from '../../application/mail/email-delivery.ts'
 import type { PersonalAccessTokenService } from '../../application/personal-access-token-service.ts'
+import type { ProjectionService } from '../../application/projection-service.ts'
+import type { ApprovalDecisionRouter } from '../../application/approval-decision-router.ts'
 import type { ProjectAccessService } from '../../application/project-access-service.ts'
 import type { ServerService } from '../../application/server-service.ts'
 import type { SessionAccessService } from '../../application/session-access-service.ts'
@@ -77,6 +79,8 @@ export interface HttpHandlerOptions {
   readonly genericWebhook?: GenericWebhookAdapter | null
   readonly feishu?: FeishuAdapter | null
   readonly dingTalk?: DingTalkAdapter | null
+  readonly projections?: ProjectionService | null
+  readonly approvalDecisions?: ApprovalDecisionRouter | null
 }
 
 export interface RouteRequestContext extends HttpHandlerOptions {
