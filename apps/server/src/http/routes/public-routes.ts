@@ -40,6 +40,9 @@ export const publicRoutes: readonly RouteDescriptor[] = [
         : operation === 'agent.send' ? await capabilities.sendAgentMessage(claims, input)
         : operation === 'agent.inbox.list' ? await capabilities.listInbox(claims, input)
         : operation === 'agent.inbox.read' ? await capabilities.readInbox(claims, input)
+        : operation === 'delegation.accept' ? await capabilities.acceptDelegation(claims, input)
+        : operation === 'delegation.reject' ? await capabilities.rejectDelegation(claims, input)
+        : operation === 'delegation.complete' ? await capabilities.completeDelegation(claims, input)
         : (() => { throw new AppError(404, 'Capability not found') })()
       json(200, result)
     },

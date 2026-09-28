@@ -20,10 +20,16 @@ import type {
   CapabilityInboxReadResult,
   CapabilityRuntimePayload,
   CapabilitySessionInfoResult,
+  CapabilityDelegationAcceptInput,
+  CapabilityDelegationRejectInput,
+  CapabilityDelegationCompleteInput,
+  CapabilityDelegationActionResult,
 } from '@wemux/wire-protocol'
 import type { ServerStore } from './ports/server-store.ts'
 import type { ConnectorRepository } from './ports/connector-repository.ts'
 import { CapabilityTokenService } from './capability-token-service.ts'
+import type { DelegationApplicationService } from './delegation-service.ts'
+import type { Delegation } from '@wemux/server-domain'
 
 export class CapabilityError extends Error {
     readonly code: 'forbidden' | 'not-found' | 'invalid-input'
@@ -54,12 +60,18 @@ export class CapabilityService {
   private readonly now: () => Timestamp
   private readonly tokens: CapabilityTokenService
   private readonly connectors?: Pick<ConnectorRepository, 'list'>
+  private delegations?: DelegationApplicationService
   constructor(
     store: ServerStore,
     now: () => Timestamp,
     tokens: CapabilityTokenService,
     connectors?: Pick<ConnectorRepository, 'list'>,
-  ) { this.store = store; this.now = now; this.tokens = tokens; this.connectors = connectors;}
+    delegations?: DelegationApplicationService,
+  ) { this.store = store; this.now = now; this.tokens = tokens; this.connectors = connectors; this.delegations = delegations;}
+
+  attachDelegations(delegations: DelegationApplicationService): void {
+    this.delegations = delegations
+  }
 
   async listProjectAssets(projectId: ProjectId): Promise<readonly CapabilityAsset[]> {
     return this.store.resources.listCapabilityAssets(projectId)
@@ -113,11 +125,26 @@ export class CapabilityService {
       'agent.send',
       'agent.inbox.list',
       'agent.inbox.read',
+      'delegation.accept',
+      'delegation.reject',
+      'delegation.complete',
       'mcp.list_tools',
       'mcp.call',
       'http.call',
     ]
     const now = this.now()
+    const sessions = await resources.listSessions()
+    const roster = sessions
+      .filter(candidate => candidate.deletedAt === null && candidate.binding.agent.workerId === session.binding.agent.workerId)
+      .map(candidate => ({
+        agentId: candidate.id,
+        agentKey: candidate.binding.agent.agentKey,
+        sessionId: candidate.id,
+        workerId: candidate.binding.agent.workerId,
+        projectId: candidate.projectId,
+        status: candidate.runtimeState === 'running' ? 'running' as const : 'idle' as const,
+      }))
+    const snapshotVersion = collaborationSnapshotVersion(roster)
     const snapshot: CapabilitySnapshot = {
       id: randomUUID(),
       projectId: session.projectId,
@@ -128,6 +155,12 @@ export class CapabilityService {
       allowedTools,
       allowedConnectorIds,
       connectors,
+      collaboration: {
+        version: snapshotVersion,
+        canonicalSessionId: session.id,
+        roster,
+        instructions: collaborationInstructions(snapshotVersion, session.id, roster),
+      },
       createdAt: now,
     }
     const issued = this.tokens.issue({
@@ -224,8 +257,34 @@ export class CapabilityService {
     return { message: stored }
   }
 
+  async sendDelegationRequest(delegation: Delegation): Promise<AgentInboxMessage> {
+    return this.storeDelegationMessage(delegation, 'delegation_request', false)
+  }
+
+  async sendDelegationResult(delegation: Delegation, silent: boolean): Promise<AgentInboxMessage> {
+    return this.storeDelegationMessage(delegation, 'delegation_result', silent)
+  }
+
   async listInbox(claims: CapabilityGrantClaims, input: CapabilityInboxListInput): Promise<CapabilityInboxListResult> {
     return { messages: await this.store.resources.listAgentInboxMessages(claims.sessionId, input.unreadOnly) }
+  }
+
+  async acceptDelegation(claims: CapabilityGrantClaims, input: CapabilityDelegationAcceptInput): Promise<CapabilityDelegationActionResult> {
+    const service = this.requireDelegations()
+    const accepted = await service.accept({ ...input, actorAgentId: claims.actorAgentId })
+    return { delegationId: accepted.delegation.id, status: 'accepted', replayed: accepted.replayed }
+  }
+
+  async rejectDelegation(claims: CapabilityGrantClaims, input: CapabilityDelegationRejectInput): Promise<CapabilityDelegationActionResult> {
+    const service = this.requireDelegations()
+    const rejected = await service.reject({ ...input, actorAgentId: claims.actorAgentId })
+    return { delegationId: rejected.delegation.id, status: 'rejected', replayed: rejected.replayed }
+  }
+
+  async completeDelegation(claims: CapabilityGrantClaims, input: CapabilityDelegationCompleteInput): Promise<CapabilityDelegationActionResult> {
+    const service = this.requireDelegations()
+    const completed = await service.complete({ ...input, actorAgentId: claims.actorAgentId })
+    return { delegationId: completed.delegation.id, status: completed.delegation.status as CapabilityDelegationActionResult['status'], ...(completed.delegation.childRunId ? { childRunId: completed.delegation.childRunId } : {}), replayed: completed.replayed }
   }
 
   async readInbox(claims: CapabilityGrantClaims, input: CapabilityInboxReadInput): Promise<CapabilityInboxReadResult> {
@@ -237,6 +296,55 @@ export class CapabilityService {
         : await this.store.transaction(async (tx) => tx.resources.markAgentInboxMessageRead(existing.id, this.now()))
     if (!message) throw new CapabilityError('not-found', 'Inbox message not found')
     return { message }
+  }
+
+  private async storeDelegationMessage(delegation: Delegation, type: 'delegation_request' | 'delegation_result', silent: boolean): Promise<AgentInboxMessage> {
+    const source = await this.requireSession(delegation.source.sessionId)
+    const target = await this.requireSession(delegation.target.sessionId)
+    const request = type === 'delegation_request'
+    const message: AgentInboxMessage = {
+      id: randomUUID(),
+      projectId: request ? delegation.target.projectId : delegation.source.projectId,
+      fromSessionId: request ? source.id : target.id,
+      toSessionId: request ? target.id : delegation.source.canonicalSessionId,
+      fromAgentId: (request ? delegation.source.agentId : delegation.target.agentId) as SessionId,
+      toAgentId: (request ? delegation.target.agentId : delegation.source.agentId) as SessionId,
+      fromAgentKey: request ? source.binding.agent.agentKey : target.binding.agent.agentKey,
+      toAgentKey: request ? target.binding.agent.agentKey : source.binding.agent.agentKey,
+      content: request ? delegation.objective : silent ? '' : delegation.resultSummary ?? '',
+      type,
+      payload: request ? {
+        delegationId: delegation.id,
+        dispatchId: delegation.dispatchId,
+        objective: delegation.objective,
+        sourceAgentId: delegation.source.agentId,
+        targetAgentId: delegation.target.agentId,
+        targetWorkerId: delegation.target.workerId,
+        ancestorAgentIds: delegation.ancestorAgentIds,
+        depth: delegation.depth,
+        authorityCapabilities: delegation.authority.capabilities,
+        canonicalSessionId: delegation.source.canonicalSessionId,
+      } : {
+        delegationId: delegation.id,
+        dispatchId: delegation.dispatchId,
+        sourceAgentId: delegation.source.agentId,
+        targetAgentId: delegation.target.agentId,
+        outcome: delegation.status as 'completed' | 'failed' | 'cancelled',
+        ...(delegation.childRunId ? { childRunId: delegation.childRunId } : {}),
+        ...(silent || !delegation.resultSummary ? {} : { resultSummary: delegation.resultSummary }),
+        silent,
+      },
+      payloadFingerprint: createHash('sha256').update(`${type}:${delegation.fingerprint}:${delegation.version}`).digest('hex'),
+      status: 'accepted',
+      createdAt: this.now(),
+      readAt: null,
+    }
+    return this.store.transaction(tx => tx.resources.createAgentInboxMessage({ message, idempotencyKey: `${type}:${delegation.dispatchId}` }))
+  }
+
+  private requireDelegations(): DelegationApplicationService {
+    if (!this.delegations) throw new CapabilityError('forbidden', 'Delegation capabilities are disabled')
+    return this.delegations
   }
 
   private async resolveConnectors(
@@ -267,6 +375,26 @@ export class CapabilityService {
     const session = await this.store.resources.getSession(agentId)
     return session?.projectId === projectId && session.deletedAt === null ? session : null
   }
+}
+
+function collaborationSnapshotVersion(roster: readonly { readonly agentId: SessionId; readonly projectId: ProjectId; readonly workerId: string }[]): number {
+  const digest = createHash('sha256').update(JSON.stringify(roster.map(item => [item.agentId, item.projectId, item.workerId]).sort())).digest()
+  return digest.readUInt32BE(0)
+}
+
+function collaborationInstructions(version: number, canonicalSessionId: SessionId, roster: readonly { readonly agentId: SessionId; readonly agentKey: string; readonly projectId: ProjectId }[]): string {
+  const targets = roster.map(item => `- ${item.agentId} (${item.agentKey}, project ${item.projectId})`).join('\n') || '- 无'
+  return [
+    '# Wemux Agent 协作协议',
+    `Snapshot version: ${version}`,
+    `Canonical session: ${canonicalSessionId}`,
+    '委派请求使用 delegation_request，必须包含 dispatchId、目标、目标描述、祖先链与收窄后的能力。',
+    '收到请求后必须明确 accept 或 reject。接受后在同一 Worker 创建子 Run，完成后使用 delegation_result 回投 canonical session。',
+    '消息必须署名 sourceAgentId 和 targetAgentId，不得携带令牌、凭据或连接秘密。',
+    '若有意不产生用户可见内容，仅返回精确 token [SILENT]。协议层会记录空回复，UI 不渲染该 token。',
+    '当前同 Worker 可委派目标：',
+    targets,
+  ].join('\n')
 }
 
 function capabilityAssetKind(value: unknown, index: number): CapabilityAsset['kind'] {

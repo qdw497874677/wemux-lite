@@ -1,4 +1,4 @@
-import type { ProjectId, SessionId, TurnId, WorkspaceId } from './ids.js'
+import type { ProjectId, SessionId, TurnId, WorkerId, WorkspaceId } from './ids.js'
 import type { AgentKey } from './values.js'
 
 export const capabilityToolNames = [
@@ -7,6 +7,9 @@ export const capabilityToolNames = [
   'agent.send',
   'agent.inbox.list',
   'agent.inbox.read',
+  'delegation.accept',
+  'delegation.reject',
+  'delegation.complete',
   'mcp.list_tools',
   'mcp.call',
   'http.call',
@@ -40,6 +43,22 @@ export interface CapabilityAsset {
   readonly targetPath: string | null
 }
 
+export interface CollaborationRosterEntry {
+  readonly agentId: SessionId
+  readonly agentKey: AgentKey
+  readonly sessionId: SessionId
+  readonly workerId: WorkerId
+  readonly projectId: ProjectId
+  readonly status: 'idle' | 'running' | 'stopped'
+}
+
+export interface CollaborationProtocolSnapshot {
+  readonly version: number
+  readonly canonicalSessionId: SessionId
+  readonly roster: readonly CollaborationRosterEntry[]
+  readonly instructions: string
+}
+
 export interface CapabilitySnapshot {
   readonly id: string
   readonly projectId: ProjectId
@@ -51,6 +70,8 @@ export interface CapabilitySnapshot {
   readonly allowedConnectorIds: readonly string[]
   /** Immutable, non-secret Connector definitions visible to this Turn. */
   readonly connectors?: readonly CapabilityConnectorSnapshot[]
+  /** Versioned Agent collaboration contract and same-Worker delegation roster. */
+  readonly collaboration?: CollaborationProtocolSnapshot
   readonly createdAt: string
 }
 
@@ -73,6 +94,33 @@ export interface IssuedCapabilityGrant {
 }
 
 export type AgentInboxMessageStatus = 'accepted' | 'delivered' | 'read'
+export type AgentInboxMessageType = 'agent_message' | 'delegation_request' | 'delegation_result'
+
+export interface DelegationRequestMessagePayload {
+  readonly delegationId: string
+  readonly dispatchId: string
+  readonly objective: string
+  readonly sourceAgentId: string
+  readonly targetAgentId: string
+  readonly targetWorkerId: WorkerId
+  readonly ancestorAgentIds: readonly string[]
+  readonly depth: number
+  readonly authorityCapabilities: readonly CapabilityToolName[]
+  readonly canonicalSessionId: SessionId
+}
+
+export interface DelegationResultMessagePayload {
+  readonly delegationId: string
+  readonly dispatchId: string
+  readonly sourceAgentId: string
+  readonly targetAgentId: string
+  readonly outcome: 'completed' | 'failed' | 'cancelled'
+  readonly childRunId?: string
+  readonly resultSummary?: string
+  readonly silent: boolean
+}
+
+export type AgentInboxMessagePayload = DelegationRequestMessagePayload | DelegationResultMessagePayload
 
 export interface AgentInboxMessage {
   readonly id: string
@@ -84,6 +132,8 @@ export interface AgentInboxMessage {
   readonly fromAgentKey: AgentKey
   readonly toAgentKey: AgentKey
   readonly content: string
+  readonly type?: AgentInboxMessageType
+  readonly payload?: AgentInboxMessagePayload
   /** SHA-256 of the idempotent send payload; used to reject key reuse with changed input. */
   readonly payloadFingerprint?: string
   readonly status: AgentInboxMessageStatus

@@ -21,6 +21,8 @@ import { TeamService } from './application/team-service.ts'
 import { ProjectAccessService } from './application/project-access-service.ts'
 import { ProjectionService } from './application/projection-service.ts'
 import { ApprovalDecisionRouter } from './application/approval-decision-router.ts'
+import { AttentionService } from './application/attention-service.ts'
+import { ArtifactService } from './application/artifact-service.ts'
 import { CanvasCollaborationService } from './application/canvas-collaboration-service.ts'
 import { CanvasLayoutService } from './application/canvas-layout-service.ts'
 import { ConnectorService } from './application/connector-service.ts'
@@ -36,6 +38,11 @@ import { AesGcmSecretCodec } from '@wemux/connector'
 import { SqliteCanvasLayoutRepository } from './storage/sqlite/canvas-layout-repository.ts'
 import { SqliteConnectorRepository } from './storage/sqlite/connector-repository.ts'
 import { SqliteChannelRepository } from './storage/sqlite/channel-repository.ts'
+import { SqliteApprovalDecisionRepository } from './storage/sqlite/approval-decision-repository.ts'
+import { SqliteAttentionSource } from './storage/sqlite/attention-source.ts'
+import { SqliteArtifactRepository } from './storage/sqlite/artifact-repository.ts'
+import { SqliteDelegationRepository } from './storage/sqlite/delegation-repository.ts'
+import { DelegationApplicationService } from './application/delegation-service.ts'
 import { WorkerAccessService } from './application/worker-access-service.ts'
 import { SessionAccessService } from './application/session-access-service.ts'
 import { PersonalAccessTokenService } from './application/personal-access-token-service.ts'
@@ -138,7 +145,29 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const connectorRepository = new SqliteConnectorRepository(options.databasePath)
   const capabilities = new CapabilityService(store, now, new CapabilityTokenService(capabilitySecret, now), connectorRepository)
   const service = new ServerService(store, notifications, capabilities, workerAccess, projects, sessionAccess)
-  const projections = new ProjectionService(store, projects, sessionAccess)
+  const delegationRepository = new SqliteDelegationRepository(options.databasePath)
+  const delegations = new DelegationApplicationService(
+    delegationRepository,
+    {
+      resolve: async sessionId => {
+        const session = await store.resources.getSession(sessionId)
+        if (!session || session.deletedAt !== null) throw new Error('Delegation Session not found')
+        return { workerId: session.binding.agent.workerId, capabilities: ['agent.send', 'agent.inbox.list', 'agent.inbox.read'], allowedProjectIds: [session.projectId] }
+      },
+    },
+    {
+      deliverRequest: delegation => capabilities.sendDelegationRequest(delegation),
+      deliverResult: (delegation, silent) => capabilities.sendDelegationResult(delegation, silent),
+    },
+    { appendResult: async () => {} },
+    { requestCrossProjectApproval: async () => {} },
+    now,
+  )
+  capabilities.attachDelegations(delegations)
+  const approvalDecisionRepository = new SqliteApprovalDecisionRepository(options.databasePath)
+  const projections = new ProjectionService(store, projects, sessionAccess, approvalDecisionRepository)
+  const attentionSource = new SqliteAttentionSource(options.databasePath)
+  const attention = new AttentionService(projections, attentionSource)
   const streams = new SessionStreams(service)
   const terminalStreams = new TerminalStreams(notifications)
   // 血缘服务与画布渲染无关：它只读写领域事实，查询端点不在 handler 里拼装边。
@@ -166,7 +195,9 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const sessionFiles = new SessionFileService(service, workers, workerGateway)
   const sessionTerminals = new SessionTerminalService(service, workers, workerGateway)
   const tasks = new TaskService(store, event => notifications.project(event), service)
-  const approvalDecisions = new ApprovalDecisionRouter(projections, tasks, service)
+  const artifactRepository = new SqliteArtifactRepository(options.databasePath)
+  const artifacts = new ArtifactService(artifactRepository, store, projects)
+  const approvalDecisions = new ApprovalDecisionRouter(projections, tasks, service, approvalDecisionRepository)
   const server = createServer(httpHandler({
     service,
     auth,
@@ -205,6 +236,8 @@ export function createWemuxServer(options: WemuxServerOptions) {
     dingTalk,
     projections,
     approvalDecisions,
+    attention,
+    artifacts,
   }))
   gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))
   let closed = false
@@ -239,6 +272,10 @@ export function createWemuxServer(options: WemuxServerOptions) {
       if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
       connectorRepository.close()
       channelRepository.close()
+      approvalDecisionRepository.close()
+      artifactRepository.close()
+      attentionSource.close()
+      delegationRepository.close()
       store.close()
     },
   }

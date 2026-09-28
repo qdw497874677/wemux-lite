@@ -74,3 +74,25 @@ export interface CapabilityInboxReadInput {
 export interface CapabilityInboxReadResult {
   readonly message: AgentInboxMessage
 }
+
+export interface CapabilityDelegationAcceptInput {
+  readonly delegationId: string
+  readonly expectedVersion: number
+  readonly requestId: string
+}
+
+export interface CapabilityDelegationRejectInput extends CapabilityDelegationAcceptInput {
+  readonly reason?: string
+}
+
+export interface CapabilityDelegationCompleteInput extends CapabilityDelegationAcceptInput {
+  readonly outcome: 'completed' | 'failed' | 'cancelled'
+  readonly resultSummary?: string
+}
+
+export interface CapabilityDelegationActionResult {
+  readonly delegationId: string
+  readonly status: 'accepted' | 'rejected' | 'completed' | 'failed' | 'cancelled'
+  readonly childRunId?: string
+  readonly replayed: boolean
+}

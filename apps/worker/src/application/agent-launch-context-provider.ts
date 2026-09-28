@@ -38,6 +38,7 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
           await writeFile(target, asset.content, 'utf8')
         }
       }
+      if (snapshot.collaboration) promptParts.push(snapshot.collaboration.instructions)
       const instructions = promptParts.length ? promptParts.join('\n\n') : null
       if (instructions) await writeFile(join(root, 'instructions.md'), instructions, 'utf8')
       await writeFile(join(root, 'execution-spec.json'), JSON.stringify({ snapshot, turnId: turn.id }, null, 2), 'utf8')

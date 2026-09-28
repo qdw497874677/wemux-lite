@@ -13,7 +13,7 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const runtime = { snapshot: { projectId: 'p1', sessionId: 'session', issuedAt: '2026-01-01T00:00:00.000Z', assets: [
   { id: 'a1', projectId: 'p1', kind: 'instruction', name: 'rules', content: 'Test everything.', checksum: hash('Test everything.'), targetPath: null },
   { id: 'a2', projectId: 'p1', kind: 'skill', name: 'review', content: '# Review\nReview carefully.', checksum: hash('# Review\nReview carefully.'), targetPath: 'review/SKILL.md' },
-] }, endpoint: 'server', token: 'secret' } as any
+], collaboration: { version: 7, canonicalSessionId: 'session', roster: [{ agentId: 'session-b', agentKey: 'test:b', sessionId: 'session-b', workerId: 'worker-1', projectId: 'p1', status: 'idle' }], instructions: '# Wemux Agent 协作协议\n使用 delegation_request。\n精确 [SILENT] 不渲染。' } }, endpoint: 'server', token: 'secret' } as any
 
 test('materializes immutable launch assets and keeps secrets out of files', async () => {
   const home = await mkdtemp(join(tmpdir(), 'wemux-capabilities-'))
@@ -22,6 +22,8 @@ test('materializes immutable launch assets and keeps secrets out of files', asyn
     const prepared = await provider.prepare({ id: 'turn' as any, sessionId: 'session' as any, commandId: 'command' as any, message: { messageId: 'message' as any, content: 'hello' }, state: 'queued', requestedAt: '2026-01-01T00:00:00.000Z', startedAt: null, finishedAt: null, capabilitySnapshot: runtime.snapshot, capabilityToken: runtime.token } as any)
     const context = prepared.context!
     assert.match(context.instructions!, /Test everything/)
+    assert.match(context.instructions!, /Wemux Agent 协作协议/)
+    assert.match(context.instructions!, /\[SILENT\]/)
     assert.match(await readFile(join(context.skillsRoot!, 'review', 'SKILL.md'), 'utf8'), /Review carefully/)
     assert.equal(JSON.stringify(context).includes('secret'), true)
     assert.equal((await readFile(join(context.assetsRoot, 'execution-spec.json'), 'utf8')).includes('secret'), false)
@@ -46,5 +48,5 @@ test('gateway proxies bearer capability calls and CLI parses commands', async t 
 
 test('MCP exposes the minimal tool surface', async () => {
   const listed = await handleMcpRequest({ method: 'tools/list' })
-  assert.deepEqual(listed.tools.map((tool: any) => tool.name), ['wemux_session_info', 'wemux_agent_list', 'wemux_agent_send', 'wemux_inbox_list', 'wemux_inbox_read', 'mcp_list_tools', 'mcp_call', 'http_call'])
+  assert.deepEqual(listed.tools.map((tool: any) => tool.name), ['wemux_session_info', 'wemux_agent_list', 'wemux_agent_send', 'wemux_inbox_list', 'wemux_inbox_read', 'wemux_delegation_accept', 'wemux_delegation_reject', 'wemux_delegation_complete', 'mcp_list_tools', 'mcp_call', 'http_call'])
 })

@@ -48,6 +48,21 @@ test('capability grant resolves enabled Project connectors visible to the actor 
   assert.equal(context.runtime.snapshot.allowedTools.includes('http.call'), true)
 })
 
+test('capability snapshot injects a versioned same-Worker collaboration roster and canonical session protocol', async t => {
+  const f = await fixture(t)
+  const capabilities = new CapabilityService(f.store, () => timestamp, new CapabilityTokenService('collaboration-secret'.repeat(4), () => timestamp))
+  const first = await capabilities.prepareTurn({ sessionId: f.session.id, turnId: 'turn-roster-1' as never, actorId: f.user.id })
+  assert.equal(first.runtime.snapshot.collaboration?.canonicalSessionId, f.session.id)
+  assert.equal(first.runtime.snapshot.collaboration?.roster.some(item => item.sessionId === f.session.id && item.workerId === f.workerId), true)
+  assert.match(first.runtime.snapshot.collaboration?.instructions ?? '', /delegation_request/)
+  assert.match(first.runtime.snapshot.collaboration?.instructions ?? '', /\[SILENT\]/)
+  const originalVersion = first.runtime.snapshot.collaboration?.version
+  const { session: secondSession } = await new ServerService(f.store, new Notifications(), capabilities).createSession({ requestId: 'capability-session-two', workspaceId: f.session.workspaceId, title: 'second', agentKey: 'pi', modelId: 'test' })
+  const second = await capabilities.prepareTurn({ sessionId: f.session.id, turnId: 'turn-roster-2' as never, actorId: f.user.id })
+  assert.equal(second.runtime.snapshot.collaboration?.roster.some(item => item.sessionId === secondSession.id), true)
+  assert.notEqual(second.runtime.snapshot.collaboration?.version, originalVersion)
+})
+
 test('capability connector resolution fails closed for missing actor, A3-invisible actor, and repository failure', async t => {
   const f = await fixture(t)
   const visible = connector(f.project.id)
