@@ -2,7 +2,7 @@
 
 ## 摘要
 
-本文设计统一的节点资源分发层：Server 以不可变 revision 管理 Skill、Agent 运行时、模型供应商和连接器配置，通过 ResourceBinding 分配，Worker 校验后原子物化。空服务器安装并注册 Worker 后，管理员只需在 Web 应用节点资源预设，即可观察下载、校验、安装、重启、凭证就绪与能力上线。方案复用连接器可靠推送管道和现有 Agent 安装器，坚持 BYOK，Server 只分发非秘密配置与凭证引用。连接器保留既有执行管道并纳入统一分配和状态投影。资源能力实施分三批：先吸收 G51 与 Skill，再闭合 Agent runtime 和 Preset 快速路径，最后落地模型供应商配置。Worker 本地 Web 的双宿主前端升级另设 R-web 批次，共用资源层的制品物化模式，但不混入普通节点资源绑定。
+本文设计统一的节点资源分发层：Server 以不可变 revision 管理 Skill、Agent 运行时、模型供应商和连接器配置，通过 ResourceBinding 分配，Worker 校验后原子物化。空服务器安装并注册 Worker 后，管理员只需在 Web 应用节点资源预设，即可观察下载、校验、安装、重启、凭证就绪与能力上线。方案复用现有可靠 transport outbox 和 Agent 安装器，坚持 BYOK，Server 只维护并通知期望 ResourceSet，Worker 以声明式 reconcile 主动拉取非秘密清单与内容。连接器保留既有执行管道并纳入统一分配和状态投影。资源能力实施分三批：先吸收 G51 与 Skill，再闭合 Agent runtime 和 Preset 快速路径，最后落地模型供应商配置。Worker 本地 Web 的双宿主前端升级另设 R-web 批次，共用资源层的制品物化模式，但不混入普通节点资源绑定。
 
 ## 1. 目标、边界与依据
 
@@ -20,7 +20,7 @@
 | Agent 托管安装 | `apps/worker/src/runtimes/management.ts` 的 `installAgent()` 只接受固定目录中的 Pi、OpenCode、Claude Code，安装到 `<worker-home>/agents/<key>/`，隔离 npmrc，验证包名、版本、bin 和 `--version` 后才写 `agents.json` | `agent-runtime` 不新造下载器，复用该安装器；资源层只把“装什么版本、分配给谁”变成控制面数据 |
 | Agent 变更生效 | `apps/worker/src/config/agent-settings.ts` 持久化 managed/local 选择；`apps/worker/src/cli.ts` 明确提示变更后需重启 Worker，登录和模型配置另行完成 | R2 必须设计受控重启或明确的 `restart_required` 状态，不能把文件落盘误报为 ready |
 | Skill 注入基础 | `packages/domain/src/capabilities.ts` 已有 `CapabilityAssetKind = 'skill'`；`apps/worker/src/application/agent-launch-context-provider.ts` 校验 SHA-256 并为 Turn 建隔离目录；`apps/worker/src/agents/pi-agent.ts` 通过 `--skill` 注入目录 | G51 的 revision 缓存可替代每次传全文，但 launch preparation 和 Agent Adapter 注入 seam 可直接复用 |
-| 连接器分发 | `packages/wire-protocol/src/commands.ts` 已有 `connector.definition.sync/revoke/test`；`apps/server/src/application/connector-service.ts` 持久化 Command 与 distribution；`apps/worker/src/connectors/runtime.ts` 合并集群定义、检查本地凭证并回报 `ConnectorRevisionReport` | 已验证“不可变 revision -> 可靠 Command -> Worker 应用 -> 领域 report”的推送管道，应复用其消息骨架和投递纪律 |
+| 连接器分发 | `packages/wire-protocol/src/commands.ts` 已有 `connector.definition.sync/revoke/test`；`apps/server/src/application/connector-service.ts` 持久化 Command 与 distribution；`apps/worker/src/connectors/runtime.ts` 合并集群定义、检查本地凭证并回报 `ConnectorRevisionReport` | 已验证不可变 revision、可靠 outbox、Worker 应用与领域 report 的投递纪律；资源层复用这些可靠性机制，但改为期望态通知与 Worker reconcile，不复制逐资源推送驱动 |
 | BYOK | `docs/design/connector-module-borrow-and-hexagon-boundaries.md` 冻结“凭证永不上 wire”；`apps/worker/src/connectors/credential-store.ts` 只在 Worker 使用 SecretCodec 解密本地密文 | 模型供应商 Secret 同样只能在 Worker 解析，Server 只保存引用和安全状态 |
 | G51 | `docs/design/feature-suite-approvals-routines-architecture.md` 2.4 已裁定 Skill/Revision/Binding、1 MiB、64 文件、内容寻址 blob、静态内容、launch 固定 revision、A3 和幂等 | R1 完整吸收这些裁定，不另建平行 Skill 分发模型 |
 | Paperclip 安装模式 | `docs/research/paperclip-deep-dive.md` 2.1 核实 staging、不可变安装目录、原子 `current`、`previous`、稳定 shim、健康失败回滚 | Worker 程序升级和节点资源物化应共享模式，不共享生命周期或同一个 current 指针 |
@@ -167,9 +167,9 @@ export interface ResourceBinding {
 Worker 侧建立一个深模块 `ResourceMaterializer`，外部接口保持为：
 
 ```ts
-materialize(command: ResourceSyncCommand): Promise<ResourceMaterializationReport>
-revoke(command: ResourceRevokeCommand): Promise<ResourceMaterializationReport>
-reconcile(desired: readonly ResourceBindingSnapshot[]): Promise<ReconcileResult>
+reconcile(desired: ResourceSetSnapshot): Promise<ReconcileResult>
+materialize(binding: ResourceBindingSnapshot, revision: ResourceRevisionWireSnapshot): Promise<ResourceMaterializationReport>
+collectGarbage(policy: ResourceGcPolicy): Promise<ResourceGcReport>
 ```
 
 内部按 kind 分派到 `SkillMaterializer`、`AgentRuntimeMaterializer`、`ModelProviderMaterializer` 和 `ConnectorConfigDistributionAdapter`。外部调用方不处理下载、staging、锁、hash、current、previous、清理或重试。
@@ -206,7 +206,7 @@ revision 变化总是重建新的不可变目录，不在原目录补丁更新�
 2. 未引用 revision 进入 LRU，默认每 kind 至少保留一个 previous；默认总预算建议为 Worker 可用磁盘的 20%，并受绝对上限控制。首版绝对默认值在实现规格中按真实 Pi/Claude 包体测量后冻结，不在架构文档虚构。
 3. 回收前重新核对引用计数，删除采用 rename 到 trash 后异步清除，防止长删除阻塞 materialization lock。
 4. 磁盘不足时先回收无引用 LRU，再拒绝新资源并报告所需字节、可用字节和可回收字节，绝不删除 active/previous。
-5. 离线节点重连先接收 desired snapshot，再按 revision 缺口追赶；已持有相同 hash 的 blob 不重复下载。
+5. 离线节点重连后主动请求完整 ResourceSet snapshot，再按 revision 与 integrity 缺口收敛；已持有相同 hash 的 blob 不重复下载。
 
 ### 3.7 与 `agent install` 的关系
 
@@ -216,45 +216,89 @@ revision 变化总是重建新的不可变目录，不在原目录补丁更新�
 
 理由：现有安装器已经体现官方固定版本、失败不改选择、非全局安装和 `--version` probe。再造下载器会形成两套供应链规则。Resource 层新增的是可靠分配和生命周期，不是新的 npm 客户端。
 
-## 4. 分发协议、状态与幂等
+## 4. k8s 架构对照与 kubelet 模式裁定
 
-### 4.1 wire 命令族
+### 4.1 k8s 架构对照
+
+| k8s 机制 | wemux 对应 | 现状 | 裁定 |
+|---|---|---|---|
+| Image + digest | ResourceRevision package integrity | 已有 | 对齐：内容寻址，同 digest 跨节点去重共享 blob |
+| Registry | registry origin（官方 npm） | 已有 | 增强：支持内部 registry 镜像，但仍须映射并校验已批准的官方包名、精确版本、registry origin 与 integrity，不接受任意来源 |
+| kubelet | Worker 资源管理器 | 设计中 | 对齐：声明式期望态 reconcile，采用 level-triggered 模式 |
+| Node lease/心跳 | Worker 探活 | 已有 | 对齐：能力上报视为 Node condition |
+| PodSpec/ImagePullPolicy | Preset（期望 ResourceSet） | R2 | 对齐：采用 IfNotPresent 语义，同 revision 且 integrity 一致时不重拉 |
+| ConfigMap/Secret 分离 | connector-config 与 BYOK 引用 | 已裁定 | 对齐：配置可推，凭证永不随资源推送 |
+| Init 容器编排 | Preset 依赖顺序 | 待定 | 借鉴：按 agent-runtime、skill、connector-config 顺序 apply |
+| DaemonSet | Preset 应用到所有节点 | 未设计 | 暂不照搬：首版显式指定节点 |
+| 调度器 | 无（人指定） | 不适用 | 暂不照搬：节点有个性，显式 Workspace Placement 优先 |
+| 名字空间/RBAC | Project/团队权限 | 已有 | 已覆盖，不重复建设 |
+
+### 4.2 核心裁定：kubelet 模式
+
+**裁定：Worker 侧资源管理采用声明式 reconcile 循环，Server 是期望态权威，Worker 是本地物化与实际状态权威。**
+
+1. Server 只下发期望态 `ResourceSet`，不逐条推送安装、更新或撤销命令。管理员应用 Preset 或修改 ResourceBinding 时，Server 以 CAS 更新 `(workerId, resourceSet)`，再发送轻量的期望态变更通知。
+2. Worker 本地 reconcile 比对期望 ResourceSet 与本地已安装状态，身份按 resource revision 与 integrity 判断；Worker 主动拉取缺失清单和内容，完成校验与物化后上报结果。期望态中已移除的资源不立即按命令删除，而是进入 `pending-gc`，再按第 3.6 节的引用和 GC 策略处理。
+3. reconcile 是 level-triggered，不是 edge-triggered。通知只用于降低收敛延迟，不承载唯一事实；Worker 断线重连、进程重启、定期校验或发现本地漂移时，都重新读取完整期望态并收敛，不依赖曾经错过的增量事件。
+4. 可靠性复用现有 transport outbox 的幂等与 at-least-once 语义。期望态通知和状态报告可以重复投递，Worker 以 `resourceSetRevision` 与 fingerprint 去重。分发风暴主要由 Worker 侧自排队控制，每个重连节点自行安排拉取；Server 仍保留全局并发和带宽上限，避免 registry、blob store 或出口被击穿。
+5. Server 持久维护 `(workerId, resourceSet)`。Worker 本地持久化最近一次已接收的期望态、`resourceSetRevision` 与 fingerprint，重启后先基于本地副本 reconcile，再向 Server 请求确认；若确认得到更新 revision，则继续向最新期望态收敛。
+
+## 5. 分发协议、状态与幂等
+
+### 5.1 期望态通知与主动拉取
 
 通用消息骨架建议为：
 
 ```ts
-type ResourceCommand =
-  | { kind: 'resource.revision.sync'; requestId: string; binding: ResourceBindingSnapshot; revision: ResourceRevisionWireSnapshot }
-  | { kind: 'resource.binding.revoke'; requestId: string; bindingId: string; bindingRevision: number }
-  | { kind: 'resource.reconcile'; requestId: string; desiredSetRevision: number; bindings: readonly ResourceBindingSnapshot[] }
+interface ResourceSetSnapshot {
+  readonly workerId: WorkerId
+  readonly revision: number
+  readonly fingerprint: string
+  readonly bindings: readonly ResourceBindingSnapshot[]
+}
 
-type ResourceMaterializationStatus =
+type ResourceControlMessage =
+  | { kind: 'resource.desired-set.changed'; requestId: string; workerId: WorkerId; resourceSetRevision: number; fingerprint: string }
+  | { kind: 'resource.desired-set.request'; requestId: string; workerId: WorkerId; knownRevision: number | null }
+  | { kind: 'resource.desired-set.snapshot'; requestId: string; resourceSet: ResourceSetSnapshot }
+  | { kind: 'resource.reconcile.report'; requestId: string; report: ResourceReconcileReport }
+
+type ResourceReconcileResult =
+  | 'installed'
+  | 'failed'
+  | 'version-mismatch'
+  | 'pending-gc'
+
+type ResourceMaterializationPhase =
   | 'queued' | 'downloading' | 'verifying' | 'installing'
-  | 'restart_required' | 'ready' | 'credential_required'
-  | 'unavailable' | 'failed' | 'rolled_back' | 'revoked'
+  | 'restart-required' | 'ready' | 'credential-required'
+  | 'unavailable' | 'rolled-back'
 ```
 
-报告至少包含 `requestId`、`bindingId`、`resourceId`、kind、目标 Worker、resource revision、binding revision、status、progress bytes、safe errorCode/message、activeRevision、previousRevision、occurredAt。
+报告至少包含 `requestId`、`resourceSetRevision`、`bindingId`、`resourceId`、kind、目标 Worker、resource revision、binding revision、integrity、`result`、可选 `phase`、progress bytes、safe errorCode/message、activeRevision、previousRevision、occurredAt。`installed` 表示期望 revision 已通过完整性校验并物化；`version-mismatch` 表示本地 active revision、manifest 或探测版本与期望不符；`pending-gc` 表示资源已从期望态移除，但仍受 active、previous、Invocation 或 staging 引用保护。
 
-**裁定：复用 connector sync 的消息骨架和可靠 Command 基础设施，不把 connector 命令改名后强行塞入通用 union。** 新的三种 materialized kind 使用 `resource.*`；connector adapter 继续发 `connector.*`，但两者由同一个 ResourceDistributionScheduler 调度并写统一 distribution projection。
+**裁定：分发从 Server 逐资源触发下发，改为 Server 更新期望态并通知 Worker 收敛；Worker 主动拉取完整 ResourceSet、revision manifest 与缺失内容。** `resource.desired-set.changed` 是可丢失后由重连或定期 reconcile 修复的加速信号，不携带 blob，也不逐项指示安装顺序。
 
-理由：可靠投递的共同机制是稳定 commandId、requestId、outbox、receipt、领域 report 和重连重放，而不是判别值必须相同。保留现有 connector wire 可降低迁移风险，也让领域测试继续有效。
+**裁定：Server 不主动推送 blob 或 npm artifact。** Worker 根据 manifest 和 integrity 先查本地内容寻址缓存，缺失时再从 ResourceBlobStore、已批准的官方 registry origin 或其受控内部镜像拉取。这样同 revision 具备 IfNotPresent 语义，重连不会重复下载，并把节点级下载排队留在最了解本地磁盘、网络和活跃任务的 Worker。
 
-### 4.2 ACK、receipt 与 report
+**裁定：connector-config 仍复用既有 Connector domain 的 apply 与 report 代码，但触发源改为 Worker reconcile ResourceSet。** 现有 `connector.definition.sync/revoke` 可作为迁移期内部 adapter，不再是 ResourceBinding 的分配权威；完成合同迁移后，由 Worker 拉取目标 connector revision 并调用同一 runtime apply seam，统一写入资源状态投影。
 
-1. transport ACK 只允许促使 outbox 重放，不能重新创建 Resource Command。
-2. `CommandReceipt accepted` 只表示 Worker 已持久记录，不表示安装完成。
-3. 领域 report 才推进 `downloading -> verifying -> installing -> ready|failed`。
-4. 领域身份固定为 `(bindingId, bindingRevision, resourceRevision, workerId)`；重试保持该身份，只允许新的传输序号。
-5. 同 requestId 同 fingerprint 幂等重放；同 requestId 异 fingerprint 返回冲突。
-6. binding 更新使用 CAS `expectedRevision`；Preset 应用也使用 requestId、fingerprint 和 preset revision。
-7. 收到成功或终态失败 report 后，Server 删除该领域身份的待发行记录，不能由后续纯 ACK 再入队。
+### 5.2 reconcile、ACK、receipt 与 report
 
-这些规则直接继承 `AGENTS.md` 的有界事件触发投递约束，并与现有 `ConnectorService.enqueueDefinition()` 的可靠命令模式一致。
+1. Server 对 ResourceBinding 或 Preset 的写入继续使用 `requestId`、fingerprint 与 CAS `expectedRevision`；事务提交后生成新的 `resourceSetRevision`。同 requestId 同 fingerprint 幂等返回，同 requestId 异 fingerprint 返回冲突。
+2. 期望态通知复用 transport outbox 的稳定 commandId、ACK、重连重放和 at-least-once 语义。transport ACK 只允许推进或重放 outbox，不得重新生成 ResourceSet、重新入队领域操作或被解释为物化成功。
+3. `CommandReceipt accepted` 只表示 Worker 已持久化通知或 snapshot。Worker 持久化最近期望态后即可回 receipt，安装结果必须由 `resource.reconcile.report` 表达。
+4. Worker 对同一 `resourceSetRevision + fingerprint` 可重复执行 reconcile，但 `(bindingId, bindingRevision, resourceRevision, integrity, workerId)` 相同的已安装项不得重复产生副作用。相同 revision 但 integrity 不同必须报告安全冲突并拒绝激活。
+5. Worker 按本地队列拉取和物化缺失项，并回传 `installed | failed | version-mismatch | pending-gc`。下载、校验、安装、等待重启等阶段可作为 `phase` 连续上报，但不能替代最终 reconcile 结果。
+6. Worker 收到较旧 ResourceSet 时按 revision 拒绝倒退；同 revision 不同 fingerprint 视为冲突。断线重连后请求完整 snapshot，不通过补发每条历史 binding 事件恢复。
+7. Server 以最新 ResourceSet 与 report 投影比较收敛状态。收到终态 report 后可清理对应待报告记录，但纯 ACK 不得触发重新入队；新的 reconcile 只由 ResourceSet 变更、Worker 握手或重连、Worker 主动确认请求、状态报告显示漂移等有界事件触发。
+8. 期望态移除使用新的 binding revision 与 ResourceSet CAS 表达。Worker 先报告 `pending-gc`，仅在第 3.6 节强引用消失且 GC 成功后报告该 revision 已清理，不通过 edge-triggered revoke 命令保证删除。
 
-## 5. 安全、凭证与供应链
+这些规则保留现有幂等、integrity 校验、CAS 和可靠 transport 约束，只调整驱动方向。Server 决定“应该是什么”，Worker 负责“如何拉取并收敛”，从而使错过通知、重连和重启都不会破坏最终一致性。
 
-### 5.1 Model provider 的 Secret 三方案
+## 6. 安全、凭证与供应链
+
+### 6.1 Model provider 的 Secret 三方案
 
 | 方案 | 优点 | 缺点 | 裁定 |
 |---|---|---|---|
@@ -277,7 +321,7 @@ Server 保存并下发 locator，不解析结果。Worker 在 materialize probe 
 
 本地凭证存储应复用 G42 的 SecretCodec 与 fail-closed 行为，但 owner 扩展为 `model-provider`，不能把模型 key 冒充 connector credential。Server 只接收 `not_required|unconfigured|available|unavailable|invalid` 状态。
 
-### 5.2 与 G42 契约的一致性
+### 6.2 与 G42 契约的一致性
 
 以下规则直接继承，不另设例外：
 
@@ -287,7 +331,7 @@ Server 保存并下发 locator，不解析结果。Worker 在 materialize probe 
 4. 日志和 report 只保留安全摘要，扫描类型可达图和序列化 fixture，防止 apiKey、authorization、token、password、ciphertext 等字段进入资源 wire。
 5. A3 只控制谁可分配 provider，不赋予其读取 Worker Secret 的能力。
 
-### 5.3 Agent runtime 供应链安全
+### 6.3 Agent runtime 供应链安全
 
 1. 仅允许代码内或签名 catalog 中的官方包名、精确版本、bin 和 registry origin。不得从 ResourceRevision 接受任意 URL、Git ref、shell command 或 npm range。
 2. manifest 同时固定 npm integrity 或发布产物 SHA-256、解包后关键文件 hash、大小、平台、架构、Worker 协议兼容范围。
@@ -296,7 +340,7 @@ Server 保存并下发 locator，不解析结果。Worker 在 materialize probe 
 5. 正式发布应采用不可变 artifact 后移动 channel 指针。Paperclip 的 pinning、staging、current/previous 和健康失败回滚模式可借用；仅有同源 checksum 只能防损坏，后续应增加离线签名或透明发布证明。
 6. 并发安装按 runtimeKey 串行，超时、stdout/stderr 和子进程树清理继续遵守现有 `runRuntimeProcess` 上限。
 
-### 5.4 Skill 安全裁定
+### 6.4 Skill 安全裁定
 
 R1 完整继承 G51：
 
@@ -311,7 +355,7 @@ R1 完整继承 G51：
 
 Paperclip skills-catalog 的 `trustLevel='scripts_executables'` 不适用于首版 Wemux Skill。可借 manifest 构建、contentHash、文件清单和 packaged artifact 测试，不借可执行技能信任等级。
 
-### 5.5 Preset 权限放大控制
+### 6.5 Preset 权限放大控制
 
 Preset 能批量给多节点安装软件，权限高于普通 Project 配置：
 
@@ -321,9 +365,9 @@ Preset 能批量给多节点安装软件，权限高于普通 Project 配置：
 4. Preset revision 不可变；修改生成新 revision。应用历史记录精确的 preset revision 和展开后的 binding fingerprints。
 5. Web 确认页展示将安装的软件、版本、下载体积、是否执行 npm scripts、是否要求重启和缺失凭证，不允许用“标准配置”隐藏副作用。
 
-## 6. 空服务器快速路径
+## 7. 空服务器快速路径
 
-### 6.1 NodeResourcePreset
+### 7.1 NodeResourcePreset
 
 ```ts
 export interface NodeResourcePreset {
@@ -359,18 +403,18 @@ Preset 是 ResourceBinding 模板，不是第五种资源，也不复制 Resourc
 - OpenAI 兼容或 Anthropic provider 非秘密配置及 environment locator；
 - 可选 Project connector-config。
 
-### 6.2 端到端流程
+### 7.2 端到端流程
 
 1. 管理员从 Server 获取绑定实例地址与一次性 enrollment token 的安装命令。
 2. installer 安装 Worker、register、安装用户级服务并启动；Server 收到 Worker 身份、平台、架构、磁盘和现有 Agent capability。
 3. 新节点显示为 `online / resources_unconfigured`。若显式开启匹配的 autoApply，Server 立即创建 Preset application；默认要求管理员点击“应用资源预设”。
-4. Server 展开并 CAS 创建 ResourceBinding，按依赖顺序发送：provider 非秘密配置与 Skill 可并行，runtime 按 runtimeKey 串行，connector 走既有 sync adapter。
-5. Worker 对每项持久记录命令，阶段性 report：`queued -> downloading -> verifying -> installing -> restart_required -> ready`。缺 Secret 使用 `credential_required`，不是 generic failed。
+4. Server 展开并 CAS 创建 ResourceBinding，原子更新该 Worker 的 ResourceSet revision，再发送轻量变更通知。Worker 拉取完整期望态，并按 agent-runtime、skill、connector-config 的依赖顺序自排队；model-provider 非秘密配置可在 runtime 安装前拉取，但其最终能力探测等待目标 runtime 可用。
+5. Worker 持久化 ResourceSet 后逐项 reconcile，阶段性 report：`queued -> downloading -> verifying -> installing -> restart-required -> ready`，最终回传 `installed | failed | version-mismatch | pending-gc`。缺 Secret 使用 `credential-required` phase，不是 generic failed。
 6. runtime 全部安装后，Worker 仅在无活跃 Turn、无 queued mutation 且服务管理可用时受控重启。若不能自动重启，Web 明确显示“已安装，等待重启”，不宣称 ready。
 7. Worker 重连后 reconcile desired bindings，重新 detect Agent、模型和 Skill 注入能力，上报 capability inventory。
 8. Preset 的 required entries 全部 ready，节点状态变为 `ready`；optional entry 失败则为 `ready_with_warnings`。Web 可直接创建一个验证 Session 运行无副作用 prompt。
 
-### 6.3 Web 进度与诊断
+### 7.3 Web 进度与诊断
 
 节点详情增加“资源”页签：
 
@@ -378,53 +422,53 @@ Preset 是 ResourceBinding 模板，不是第五种资源，也不复制 Resourc
 - 每项显示 kind、名称、目标 revision、active/previous revision、阶段、百分比、速度、重试次数、credential availability 和安全错误摘要。
 - 操作包括重试、回滚、撤销 binding、打开 Worker 本地凭证页、查看审计。操作按 A3 后端 capability 返回，前端不猜角色。
 - `credential_required` 提供 environment 名称或 Vault locator 诊断，但不展示 Secret 值。
-- Worker 离线时显示 `waiting_for_worker`，上线后自动追赶，不让管理员反复点击产生新 Command。
+- Worker 离线时显示 `waiting_for_worker`，上线后主动请求最新 ResourceSet 并自动收敛，不让管理员反复点击制造新的期望态 revision。
 
-### 6.4 更新与回滚
+### 7.4 更新与回滚
 
 1. 发布新 ResourceRevision 不自动改变已锁定 binding。管理员升级 Preset 或 binding 才移动 selectedRevision。
-2. 批量升级分批投递并加随机抖动；默认每批节点数和并发下载数由部署配置，避免 N 节点同时拉 Agent 大包。
+2. 批量升级由 Server 分批更新各节点期望态并加随机抖动；Worker 侧按本地并发上限自排队拉取，Server 仍以全局并发和带宽上限避免 N 节点同时拉 Agent 大包。
 3. Skill/provider revision 可在 probe 成功后立即切换，新 Invocation 生效。
 4. Agent runtime 先安装、探测、记录 previous，再排空并重启。重连后 capability probe 失败则回滚 previous 并再次重启。
-5. connector-config 继续使用现有 revision sync/revoke 与 report；credential 不可用不会回滚非秘密定义，而是保持 `credential_required/unavailable`，因为旧 revision 未必拥有可用 Secret。
+5. connector-config 由 ResourceSet reconcile 触发现有 Connector domain adapter apply 与 report；credential 不可用不会回滚非秘密定义，而是保持 `credential_required/unavailable`，因为旧 revision 未必拥有可用 Secret。
 6. 回滚是创建指向旧 immutable revision 的新 binding revision，保留完整审计，不直接篡改历史 selectedRevision。
 
-## 7. 六边形模块划分
+## 8. 六边形模块划分
 
-### 7.1 Server 控制面
+### 8.1 Server 控制面
 
 | 模块 | 职责 | 不负责 |
 |---|---|---|
 | ResourceCatalog | Resource、不可变 revision、manifest、blob/artifact ref、发布与退役 | Worker 文件写入、Secret 解析 |
 | ResourceBindingService | 唯一分配权威、A3、CAS、requestId/fingerprint、Preset 展开 | 下载和安装 |
-| ResourceDistributionScheduler | desired state 与实际 report 对比、Command 入队、离线追赶、节流 | transport ACK 生成新领域命令 |
+| ResourceSetService | 按 Worker 维护期望 ResourceSet、revision 与 fingerprint，比较实际 report，发送变更通知并实施全局节流 | 逐资源安装编排、主动推送 blob、由 transport ACK 生成新期望态 |
 | ResourceBlobStore | Server data 下内容寻址 blob、staging、hash、备份一致性 | 任意 URL proxy |
 | ResourceDistributionProjection | 汇总 connector 与 resource report，供 Web 查询 | 成为执行权威 |
 | NodeResourcePresetService | Preset revision、应用、autoApply 策略、审计 | 绕过逐资源 A3 |
 
 存储继续使用 node:sqlite 和 Server 管理文件目录。数据库与 blob 目录必须作为同一恢复集。
 
-### 7.2 Worker 执行面
+### 8.2 Worker 执行面
 
 | 模块 | 职责 |
 |---|---|
-| ResourceCommandHandler | 持久接收 sync/revoke/reconcile，验证目标和幂等身份 |
-| ResourceMaterializer | staging、hash、原子激活、previous、回滚、LRU、磁盘预算 |
+| ResourceReconcileController | 持久接收 ResourceSet snapshot 与变更通知，重启和重连时主动确认期望态，调度 level-triggered reconcile |
+| ResourceMaterializer | 主动拉取 manifest 与缺失内容，执行 staging、hash、原子激活、previous、回滚、LRU、磁盘预算 |
 | Kind adapters | Skill 文件物化、runtime 安装器复用、provider 配置与 locator probe、connector sync 适配 |
 | ResourceStateStore | binding desired/actual、引用、进度、错误、active/previous revision |
 | CapabilityReporter | 重新 detect Agent、模型、Skill 支持和 connector 状态，形成节点 ready 判定 |
 | LaunchResourceResolver | 按 Session/Project/Agent/A3 交集解析固定 revision，建立 Invocation 只读视图 |
 
-### 7.3 共享契约
+### 8.3 共享契约
 
 - `packages/domain`：ResourceKind、ResourceRevision、ResourceBinding、Preset 和状态机中的纯领域类型。
 - `packages/server-domain`：目录、绑定、Preset、分发投影与授权用例。
-- `packages/wire-protocol`：非秘密 `resource.*` Command/report；connector wire 保持现有类型。
+- `packages/wire-protocol`：非秘密 ResourceSet 变更通知、snapshot 请求/响应与 reconcile report；connector wire 在迁移期保持现有类型。
 - `packages/web-contract`：目录、binding、Preset、节点资源状态 DTO。
 
 依赖方向保持 Worker 不 import `@wemux/server-domain`。kind adapter 是 Worker 内部 seam，不把 npm、文件系统或 Connector runtime 细节泄漏到 wire。
 
-## 8. 分批实施与估时
+## 9. 分批实施与估时
 
 估时按一名熟悉仓库的工程师，每人日 8 小时，包含合同、迁移、单元/集成、真实浏览器、真实 Worker 验收和脱敏验收摘要。
 
@@ -435,8 +479,8 @@ Preset 是 ResourceBinding 模板，不是第五种资源，也不复制 Resourc
 交付物：
 
 - Resource/Revision/Binding 领域合同、SQLite repository、Server blob store。
-- `resource.revision.sync/revoke/report` 与可靠投递。
-- Worker ResourceMaterializer、原子 staging/current/previous、hash、引用与 LRU。
+- ResourceSet revision、变更通知、snapshot 拉取、reconcile report 与可靠 transport 投递。
+- Worker level-triggered reconcile、主动拉取、ResourceMaterializer、原子 staging/current/previous、hash、引用与 LRU。
 - Skill Studio 编辑、发布、绑定、分发、状态和 launch 注入。
 - connector-config 的统一状态投影与 binding 兼容迁移设计，不重写 connector runtime。
 - G51 的 1 MiB、64 文件、静态内容、A3、幂等、固定 revision 和两 Worker 验收全部落地。
@@ -471,15 +515,15 @@ Preset 是 ResourceBinding 模板，不是第五种资源，也不复制 Resourc
 
 验收：Server 数据库、wire fixture、日志和 report 中不存在 sentinel Secret；一个 Worker 用 environment locator，另一个用本地加密凭证，应用同一 provider revision 后均能探测模型；撤销或轮换 key 后新 Turn fail closed；Server 管理员无法读取 Worker Secret。
 
-### 8.4 与七件套批次四的关系
+### 9.4 与七件套批次四的关系
 
 **裁定：G51 不再作为七件套批次四中的独立实现，整体并入 R1；七件套批次四只剩 G54 Evals，并顺延到 R1 稳定后。**
 
 理由：G54 依赖不可变 Skill revision，R1 正好把 G51 的领域裁定升级为通用资源底座。若先按旧 G51 单独建设 `skill.revision.sync`，随后再引入 Resource 会产生两次 wire、repository 和 Worker cache 迁移。G54 的原估时 48 至 76 小时保持，不计入本设计三批估时。
 
-## 9. Worker 本地 Web 双宿主前端升级
+## 10. Worker 本地 Web 双宿主前端升级
 
-### 9.1 目标与宿主边界
+### 10.1 目标与宿主边界
 
 当前 `apps/worker/src/local-control/server.ts` 直接返回内联 HTML、CSS 和 JavaScript。它已经覆盖本机管理员登录、目录授权、本地 Session、Agent/模型选择、队列、审批、连接器配置和集群加入退出，后端也按 `docs/design/m2-dual-host-contract.md` 第 5 节复用同一 `WorkerRuntime`、持久队列和 Journal；缺口在于前端仍是独立实现。随着 `apps/web` 增加审批、时间线、连接器、运行详情和会话画布，两套前端的交互、可访问性与错误恢复会继续漂移。
 
@@ -492,7 +536,7 @@ Preset 是 ResourceBinding 模板，不是第五种资源，也不复制 Resourc
 
 本地模式不渲染 Team、Project、Task、Run、集群 Worker 管理、Project 画布或集群级 Attention。不得为复用组件伪造 Project、Workspace Placement 或集群 Worker ID。本地目录继续使用本地工作环境语义；本地 Session 的执行所有者、队列和 Journal 仍只有 WorkerRuntime 一份。
 
-### 9.2 前端装配方案裁定
+### 10.2 前端装配方案裁定
 
 | 方案 | 优点 | 主要问题 | 裁定 |
 |---|---|---|---|
@@ -517,7 +561,7 @@ apps/web/src/routes/
 
 采用动态 import 拆分 cluster-only 与 local-only 路由，避免 Worker 首屏下载任务看板、团队管理和集群画布代码，但发布物仍是同一个经过一次测试和签名的 Web artifact，不生成行为不同的 flag 变体。
 
-### 9.3 local-control API 契约对齐
+### 10.3 local-control API 契约对齐
 
 目标不是让 Worker 假装成 Server，而是让共享 Surface 获得同构的会话能力。`packages/web-contract` 应抽出宿主中立的 Session、Journal、Approval、Queue、Connector 和 Bootstrap DTO；Server 与 Worker HTTP adapter 都实现这些合同。可以直接复用值语义一致的 `JournalEventDTO`、事件 payload、队列项、审批决定、错误、游标和 requestId 类型；Project/Task/Team、A3、Workspace Placement、集群 freshness 等宿主专用类型不能硬塞给本地模式。
 
@@ -534,7 +578,7 @@ apps/web/src/routes/
 
 建议把 `SessionSurfaceApi` 设计为前端端口，方法覆盖 session list/create/delete、journal page/watch、enqueue/cancel/stop、approval resolve、runtime command 和 capability 查询。`cluster-host.ts` 与 `local-worker-host.ts` 只负责 URL、认证 header 和宿主 DTO 到共享合同的无损映射。任何映射若需要虚构 `projectId`、`workerId` 或 freshness，说明合同仍过度偏向集群，应继续拆分，而不是使用占位字符串。
 
-### 9.4 与 R2 的关系和估时
+### 10.4 与 R2 的关系和估时
 
 **裁定：完整升级设为独立批次 R-web，不并入 R2 的 104 至 144 小时。** R2 的验收权威仍是“干净 Linux 安装并注册 Worker -> 集群 Web 应用 Preset -> runtime 安装、重启、探测 -> 创建真实 Session”；本地内联页当前已能承担 Agent/模型与集群接入的基础操作，不能以视觉复用为由扩大资源层关键路径。
 
@@ -549,7 +593,7 @@ R-web 应在 R2 的 runtime/Preset 合同稳定后开始，可与 R2 后半段�
 
 估时包含局域网 HTTP 非安全上下文、Worker 独立离线启动、集群宿主回归、断线补页、审批和连接器 Secret 不泄漏验证。它不包含新画布能力、多人本地角色或自动 NAT 穿透。
 
-### 9.5 安全与体验约束
+### 10.5 安全与体验约束
 
 1. 继续深色优先、自动亮色，中文文案，零 em-dash 装饰，图标使用现有 lucide 与设计 token。
 2. `apps/web/src` 继续禁止直接调用 `crypto.randomUUID()`，统一使用 `src/lib/random.ts` 的 `randomId()`；本地 Worker 经 LAN/Tailnet 的 HTTP 访问必须可用。
@@ -559,7 +603,7 @@ R-web 应在 R2 的 runtime/Preset 合同稳定后开始，可与 R2 后半段�
 6. 不承诺自动 NAT 穿透，不因共享 `apps/web` 就共享 Server 登录、Team 权限、本地会话正文、Worker Credential 或 Enrollment Token。
 7. 前端 capability 只决定展示，后端仍逐请求授权。隐藏 cluster-only 页面不能替代路由和 API 拒绝。
 
-### 9.6 资产分发、包体与内联页下线
+### 10.6 资产分发、包体与内联页下线
 
 **首版裁定：将 `apps/web` 的生产构建产物嵌入 Worker tgz，保证 Worker 未加入集群、Server 离线或内网隔离时仍可立即打开本地 IDE。** 构建流程生成一次带 hash 的资产目录，由 Worker 打包脚本复制到 npm 包，例如 `package/web/`；`apps/worker/package.json` 的 `files` 和 `pack:check` 必须验证 `index.html`、asset manifest、关键 chunk、hash 与 package version。local-control 以 no-cache 提供 `index.html` 和 bootstrap，以 `max-age=3600` 提供带 hash 的 assets，并保留 CSP、Host、Origin 与认证边界。
 
@@ -573,13 +617,13 @@ Worker 前端可以在未来成为独立的 `worker-web` artifact revision，并
 
 迁移顺序冻结为：先补共享合同和 Host Adapter；再让 Worker 从打包资产提供新 SPA，并保留内联页作为显式 fallback；完成本地与集群真实浏览器验收、离线安装验收和至少一个发布周期的回退演练后，删除 `page()`、`stylesheet` 与 `local-control/client.ts` 的旧 UI。内联页不得在“新首页能打开”时立即下线，验收必须覆盖登录、目录授权、Session 创建与恢复、长历史分页、SSE 重连、队列取消、停止、审批、Agent/模型、连接器凭证、加入/暂停/退出集群以及非安全上下文复制降级。
 
-## 10. 风险与控制
+## 11. 风险与控制
 
 | 风险 | 影响 | 控制与裁定 |
 |---|---|---|
 | Agent 包体和磁盘增长 | 多 runtime、多 revision 占满 Worker，导致 Session 或 SQLite 写失败 | manifest 声明 bytes；下载前预算；active/previous 强引用；无引用 LRU；磁盘不足 fail closed；节点页显示预算 |
-| 分发风暴 | Preset 同时应用 N 节点，打满 Server、registry 或出口带宽 | Server 分批、每节点/全局并发上限、随机抖动、共享 blob 去重、支持内部 registry；安全更新也不绕过上限 |
-| 离线节点追赶 | 上线后接收多次历史 revision，浪费下载并可能倒退 | 发送 desired snapshot 与最新锁定 revision；旧 Command 在 Worker 以 binding revision 判 stale；同 hash 不重下 |
+| 分发风暴 | Preset 同时应用 N 节点，打满 Server、registry 或出口带宽 | Worker 按节点自排队拉取，Server 分批更新期望态并保留全局并发和带宽上限，配合随机抖动、共享 blob 去重和内部 registry；安全更新也不绕过上限 |
+| 离线节点追赶 | 上线后重放多次历史事件，浪费下载并可能倒退 | Worker 主动请求完整最新 ResourceSet，只向最新 revision 收敛；同 revision 校验 fingerprint，同 hash 不重下 |
 | 供应链投毒 | 控制面可让所有节点执行恶意包 | 只允许固定官方 package 和 exact version；integrity/SHA-256；签名演进；Preset 高权限；安装审计；禁止任意 URL 和 shell |
 | Preset 权限放大 | 一个模板可给大量节点安装软件、注入 Skill 或改变 provider | 实例 Preset 仅实例管理员；Project Preset 受 Worker manage；应用时重检 A3；autoApply 默认关；审计展开项 |
 | Server 失陷后分发恶意静态内容 | Skill 虽不可执行，仍可提示 Agent 做危险操作 | Skill 只能收窄 capability；A3 与 approval 不变；Skill 内容可审查、hash 固定；危险工具仍走既有审批和 capability |
@@ -593,31 +637,31 @@ Worker 前端可以在未来成为独立的 `worker-web` artifact revision，并
 | Worker 与 Web artifact 不兼容 | 独立更新前端后调用 Worker 不支持的 API，导致本地管理入口不可用 | bootstrap 协商 contract version；Worker 只激活兼容且签名有效的 artifact；保留 bundled fallback 与 previous；不允许普通 ResourceBinding 更新本地管理 UI |
 | Worker 包体持续增长 | 全量 apps/web 进入 tgz 后拖慢安装或弱网络升级 | 动态路由拆包、压缩包与首屏 chunk size budget、发布报告；增长超过预算必须拆依赖或启用带 bundled fallback 的 delta 更新 |
 
-## 11. 不变量与明确不做
+## 12. 不变量与明确不做
 
-### 11.1 不变量
+### 12.1 不变量
 
 1. ResourceRevision 发布后不可变，修订必须生成新 revision。
 2. ResourceBinding 是资源分配唯一权威，更新必须 requestId + fingerprint + CAS。
 3. Server 不保存、解密或转发 Worker 的模型与连接器 Secret。
 4. Worker 只从固定受信 artifact 或 Server 内容寻址 blob 获取内容，不接受控制面任意 URL。
-5. transport ACK 不等于物化成功，也不得触发重新入队。
+5. transport ACK 不等于物化成功，也不得触发重新生成 ResourceSet 或重新入队领域操作。
 6. active revision 只有在 staging、完整性校验和 kind probe 成功后原子切换。
 7. 运行中的 Invocation 固定资源 revision，不被新发布或 binding 更新热替换。
 8. Preset 只展开 binding，不绕过逐资源 A3、兼容性和供应链检查。
 9. ready 是能力事实，不是命令已接收或文件已下载。
 
-### 11.2 为了轻量而不做
+### 12.2 为了轻量而不做
 
 首版不做动态 ResourceKind 插件注册、任意 URL 下载、Skill marketplace、可执行 Skill、跨 Worker P2P 分发、Server 托管 Worker Secret、任意 Vault provider registry、运行中 Agent 热升级、跨平台同时首发、全局事务式多节点回滚，也不把 Worker 程序自身升级混成 `agent-runtime`。Worker 程序发布与节点资源分发共享 managed store 模式，但有独立权限、兼容矩阵和回滚生命周期。
 
-## 12. 验收矩阵
+## 13. 验收矩阵
 
 | 范围 | 必须证明 |
 |---|---|
 | 合同 | ResourceRevision 不可变；Binding CAS 与 requestId 冲突；目标 Worker/Agent/Project 范围；connector 兼容迁移不产生双重权威 |
 | Worker 文件系统 | 路径穿越、符号链接、hash 错、磁盘不足、并发同资源、staging 崩溃恢复、原子 active/previous、LRU 引用保护 |
-| 可靠投递 | receipt 与 report 分离；断线重放同 commandId；纯 ACK 不重新入队；离线 desired reconcile；stale revision 不倒退 |
+| 可靠投递 | receipt 与 report 分离；变更通知断线重放同 commandId；纯 ACK 不重新生成期望态；Worker 重启先按本地 ResourceSet reconcile 再请求确认；离线重连拉完整 snapshot；stale revision 不倒退 |
 | 供应链 | 任意 URL/package spec 被拒；固定包名/版本/bin/integrity；坏 artifact 不激活；runtime 健康失败回滚 |
 | BYOK | Secret 不进 Server DB、wire、Audit、日志和 capability snapshot；缺 key fail closed；环境和本地加密凭证两条路径；轮换后新 Turn 生效 |
 | A3 | Preset 定义、应用、目标 Worker manage、执行 Worker use 与 Project/Session 权限求交；撤权后新 Invocation 不可用 |
@@ -628,12 +672,13 @@ Worker 前端可以在未来成为独立的 `worker-web` artifact revision，并
 
 验收证据应包含固定 commit、Worker/Agent 版本、环境、命令、浏览器步骤、实际 report、失败注入和残余风险。模拟 Agent 可以覆盖故障矩阵，但不得替代“空 Worker 加入 -> Preset 应用 -> Pi 可用”的真实验收。
 
-## 13. 最终裁定汇总
+## 14. 最终裁定汇总
 
 1. **资源抽象**：以不可变 ResourceRevision 描述内容，以 ResourceBinding 唯一表达资源到 Worker/Agent/Project 的分配，以 kind adapter 在 Worker 物化。
-2. **连接器**：纳入统一 binding、Preset 和状态投影，保留现有 connector revision sync 作为执行 adapter，不重写成熟领域管道。
-3. **Agent runtime**：复用现有固定官方版本 `agent install` 安装器，资源层只增加控制面目录、分配、状态、重启和回滚。
-4. **凭证**：推荐引用式 locator，Worker 环境或 Vault 获取为标准路径，本地加密录入为 fallback，禁止 Server 保存后解密推送。
-5. **快速路径**：bootstrap 仍需一次节点命令，注册后不再要求 SSH；管理员应用 Preset，Worker 自动物化、重启、探测并上报 ready。
-6. **资源批次**：R1 10 至 14 人日，R2 13 至 18 人日，R3 8 至 12 人日，共 31 至 44 人日；G51 并入 R1，G54 顺延。
-7. **Worker 本地 Web**：`apps/web` 采用运行时 Host Adapter 与 TanStack Router 路由分组复用 Session Surface，local-control API 对齐宿主中立 web-contract；独立 R-web 为 11 至 15 人日，首版 Web 资产嵌入 Worker tgz，验收后下线内联页。计入 R-web 后整体为 42 至 59 人日。
+2. **kubelet 模式**：Server 维护每个 Worker 的期望 ResourceSet 并发送变更通知；Worker 持久化期望态，以 level-triggered reconcile 主动拉取、校验、物化、GC 和上报，断线重连不依赖增量事件。
+3. **连接器**：纳入统一 binding、Preset 和状态投影，保留现有 Connector domain apply/report 作为执行 adapter，不重写成熟领域管道。
+4. **Agent runtime**：复用现有固定官方版本 `agent install` 安装器，资源层只增加控制面目录、分配、状态、重启和回滚。
+5. **凭证**：推荐引用式 locator，Worker 环境或 Vault 获取为标准路径，本地加密录入为 fallback，禁止 Server 保存后解密推送。
+6. **快速路径**：bootstrap 仍需一次节点命令，注册后不再要求 SSH；管理员应用 Preset，Worker 自动物化、重启、探测并上报 ready。
+7. **资源批次**：R1 10 至 14 人日，R2 13 至 18 人日，R3 8 至 12 人日，共 31 至 44 人日；G51 并入 R1，G54 顺延。
+8. **Worker 本地 Web**：`apps/web` 采用运行时 Host Adapter 与 TanStack Router 路由分组复用 Session Surface，local-control API 对齐宿主中立 web-contract；独立 R-web 为 11 至 15 人日，首版 Web 资产嵌入 Worker tgz，验收后下线内联页。计入 R-web 后整体为 42 至 59 人日。
