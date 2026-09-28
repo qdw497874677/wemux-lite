@@ -49,7 +49,8 @@ test('transaction rollback, expired enrollment, revocation and worker ownership'
   await assert.rejects(workers.receive(second.workerId, { ...envelope(), type: 'ack', receipt: { commandId, status: 'accepted' } }), /another worker/)
   assert.equal((await store.commands.get(commandId))!.status, 'pending')
   await assert.rejects(workers.receive(second.workerId, { ...envelope(), type: 'event', scope: 'workspace', report: { workspaceId: workspace.id, status: 'ready', reason: null, location: null, occurredAt: now() } }), /ownership/)
-  assert.equal((await store.resources.getWorkspace(workspace.id))!.status, 'pending')
+  // Server Placement 生命周期已收口为五态；命令仍 pending 时，尚未被 Worker 确认的 Placement 合法保持 stopped。
+  assert.equal((await store.resources.getWorkspace(workspace.id))!.status, 'stopped')
   await store.transaction(async tx => {
     await tx.resources.saveWorkspace({ ...workspace, status: 'ready' })
     await tx.resources.saveWorker({ ...first.worker, capabilities: [{ agentKey: 'pi' as import('@wemux/domain').AgentKey, displayName: 'Pi', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'custom' as import('@wemux/domain').ModelId, displayName: 'Custom', source: 'detected' }] }] })
