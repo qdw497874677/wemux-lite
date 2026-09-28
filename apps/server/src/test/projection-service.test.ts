@@ -43,10 +43,10 @@ test('projection service filters inaccessible projects and deduplicates timeline
   assert.equal(timeline.items.length, 1); assert.equal(timeline.items[0]?.sourceKind, 'task_activity')
 })
 
-test('approval status is a presentation filter applied outside the F1 projection port', async () => {
+test('projection service filters approvals by status before pagination', async () => {
   const service = serviceFixture()
-  const page = await service.approvals('viewer' as never, { status: 'approved' })
-  assert.equal(page.items.length, 2)
+  assert.equal((await service.approvals('viewer' as never, { status: 'pending' })).items.length, 2)
+  assert.equal((await service.approvals('viewer' as never, { status: 'approved' })).items.length, 0)
 })
 
 test('projection service reads a persisted decision overlay and exposes the corresponding timeline event', async () => {

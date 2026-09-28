@@ -120,7 +120,7 @@ export class ProjectionService implements CrossEntityProjectionPort {
     }
     const remembered = await this.decisionOverlays()
     const deduped = [...new Map(approvals.map(item => [item.projectionKey, remembered.get(item.projectionKey) ?? item])).values()]
-      .filter(item => !query.sourceKind || item.source.kind === query.sourceKind)
+      .filter(item => (!query.sourceKind || item.source.kind === query.sourceKind) && (!query.status || item.status === query.status))
       .map(item => ({ ...item, occurredAt: item.requestedAt, sourceKind: item.source.kind, sourceId: item.projectionKey }))
     const result = page(deduped, query.cursor, query.limit)
     return { items: result.items.map(({ occurredAt: _occurredAt, sourceKind: _sourceKind, sourceId: _sourceId, ...item }) => item), nextCursor: result.nextCursor }
