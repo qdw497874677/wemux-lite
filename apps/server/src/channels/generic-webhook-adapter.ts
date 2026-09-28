@@ -45,19 +45,23 @@ export class GenericWebhookAdapter implements ChannelAdapter {
     const channel = await this.repository.getChannel(input.channelId)
     if (!channel || channel.kind !== 'generic_webhook') throw new AppError(404, 'Channel not found', 'channel_not_found')
     if (!channel.enabled) throw new AppError(409, 'Channel is disabled', 'connector_unavailable')
-    const token = singleBearer(input.authorization), secret = await this.repository.getSecret(channel.id)
-    if (!secret || !this.codec?.encrypted) throw new AppError(503, 'Channel credential unavailable', 'credential_unavailable')
-    let expected: string
-    try { expected = await this.codec.decode(secret.ciphertext, { owner: { kind: 'channel', id: channel.id }, credentialId: secret.credentialId, authType: 'api_key', revision: secret.revision }) }
-    catch { throw new AppError(503, 'Channel credential unavailable', 'credential_unavailable') }
-    if (!equal(token, expected)) throw new AppError(401, 'Invalid Channel token', 'invalid_channel_token')
-    const received = input.receivedAt ?? new Date()
+    const token = singleBearer(input.authorization), received = input.receivedAt ?? new Date()
+    const secrets = await this.repository.getSecrets(channel.id, received.toISOString() as Timestamp)
+    if (!secrets.length || !this.codec?.encrypted) throw new AppError(503, 'Channel credential unavailable', 'credential_unavailable')
+    let matchedRevision: number | null = null
+    for (const secret of secrets) {
+      try {
+        const expected = await this.codec.decode(secret.ciphertext, { owner: { kind: 'channel', id: channel.id }, credentialId: secret.credentialId, authType: 'api_key', revision: secret.revision })
+        if (equal(token, expected)) { matchedRevision = secret.revision; break }
+      } catch { continue }
+    }
+    if (matchedRevision === null) throw new AppError(401, 'Invalid Channel token', 'invalid_channel_token')
     if (input.timestamp !== undefined) { const parsed = Date.parse(input.timestamp); if (!Number.isFinite(parsed) || Math.abs(received.getTime() - parsed) > channel.config.replayWindowSeconds * 1000) throw new AppError(401, 'Webhook timestamp outside replay window', 'replay_window') }
     const envelope = parse(input.body), deliveryId = input.deliveryId === undefined ? null : identity(input.deliveryId)
     const minute = Math.floor(received.getTime() / 60_000), providerEventId = deliveryId ?? createHash('sha256').update(`${channel.config.tokenVersion}:${minute}:`).update(input.body).digest('hex')
     const normalized = { conversation: envelope.conversation, sender: envelope.sender, text: envelope.text }
     const fingerprint = stableFingerprint(normalized), inboundEventId = `${channel.id}:${providerEventId}`, at = received.toISOString() as Timestamp
-    const delivery: InboundDelivery = { id: inboundEventId, channelId: channel.id, projectId: channel.projectId, providerEventId, identityStrength: deliveryId ? 'strong' : 'weak_identity', fingerprint, tokenVersion: channel.config.tokenVersion, externalConversationKey: envelope.conversation, senderId: envelope.sender, content: envelope.text, status: 'accepted', bindingId: null, sessionId: null, sessionEnqueueRequestId: `channel-in:${inboundEventId}`, diagnostic: input.timestamp === undefined ? '未提供 X-Wemux-Timestamp' : null, receivedAt: at, updatedAt: at }
+    const delivery: InboundDelivery = { id: inboundEventId, channelId: channel.id, projectId: channel.projectId, providerEventId, identityStrength: deliveryId ? 'strong' : 'weak_identity', fingerprint, tokenVersion: matchedRevision, externalConversationKey: envelope.conversation, senderId: envelope.sender, content: envelope.text, status: 'accepted', bindingId: null, sessionId: null, sessionEnqueueRequestId: `channel-in:${inboundEventId}`, diagnostic: input.timestamp === undefined ? '未提供 X-Wemux-Timestamp' : null, receivedAt: at, updatedAt: at }
     const result = await this.repository.acceptInbound({ delivery })
     if (result.kind === 'conflict') throw new AppError(409, 'Delivery identity fingerprint conflict', 'idempotency_conflict')
     return result

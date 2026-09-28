@@ -580,6 +580,38 @@ const accountMigrations = [
      created_at TEXT NOT NULL, updated_at TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)),
      UNIQUE(channel_id,binding_id,journal_identity));
    CREATE INDEX IF NOT EXISTS channel_outbound_claim ON channel_outbound_deliveries(status,next_attempt_at,lease_expires_at,created_at);`,
+  // Channel token rotation keeps multiple credential revisions during a bounded overlap. Delivery rows
+  // intentionally lose their foreign keys to definitions/bindings so deleting management data retains diagnostics.
+  `CREATE TABLE channel_secrets_rebuilt (
+     credential_id TEXT PRIMARY KEY, channel_id TEXT NOT NULL,
+     revision INTEGER NOT NULL CHECK(revision > 0), ciphertext TEXT NOT NULL CHECK(ciphertext LIKE 'enc:v2:%'),
+     expires_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+     UNIQUE(channel_id,revision));
+   INSERT INTO channel_secrets_rebuilt(credential_id,channel_id,revision,ciphertext,expires_at,created_at,updated_at)
+     SELECT credential_id,channel_id,revision,ciphertext,NULL,created_at,updated_at FROM channel_secrets;
+   DROP TABLE channel_secrets;
+   ALTER TABLE channel_secrets_rebuilt RENAME TO channel_secrets;
+   CREATE INDEX channel_secrets_channel ON channel_secrets(channel_id,revision DESC);
+   CREATE TABLE channel_inbound_deliveries_rebuilt (
+     id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, project_id TEXT NOT NULL,
+     provider_event_id TEXT NOT NULL, fingerprint TEXT NOT NULL, status TEXT NOT NULL,
+     session_request_id TEXT NOT NULL, received_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+     data TEXT NOT NULL CHECK(json_valid(data)), UNIQUE(channel_id,provider_event_id));
+   INSERT INTO channel_inbound_deliveries_rebuilt SELECT * FROM channel_inbound_deliveries;
+   DROP TABLE channel_inbound_deliveries;
+   ALTER TABLE channel_inbound_deliveries_rebuilt RENAME TO channel_inbound_deliveries;
+   CREATE INDEX channel_inbound_status ON channel_inbound_deliveries(status,received_at);
+   CREATE UNIQUE INDEX channel_inbound_session_request ON channel_inbound_deliveries(session_request_id);
+   CREATE TABLE channel_outbound_deliveries_rebuilt (
+     id TEXT PRIMARY KEY, channel_id TEXT NOT NULL, binding_id TEXT NOT NULL,
+     project_id TEXT NOT NULL, session_id TEXT NOT NULL, journal_identity TEXT NOT NULL,
+     status TEXT NOT NULL, attempt INTEGER NOT NULL CHECK(attempt >= 0), next_attempt_at TEXT, lease_expires_at TEXT,
+     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)),
+     UNIQUE(channel_id,binding_id,journal_identity));
+   INSERT INTO channel_outbound_deliveries_rebuilt SELECT * FROM channel_outbound_deliveries;
+   DROP TABLE channel_outbound_deliveries;
+   ALTER TABLE channel_outbound_deliveries_rebuilt RENAME TO channel_outbound_deliveries;
+   CREATE INDEX channel_outbound_claim ON channel_outbound_deliveries(status,next_attempt_at,lease_expires_at,created_at);`,
 ]
 
 const migrations = [...legacyMigrations, ...accountMigrations]

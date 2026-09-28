@@ -7,6 +7,7 @@ export interface ChannelSecretRecord {
   readonly channelId: ChannelId
   readonly ciphertext: string
   readonly revision: number
+  readonly expiresAt: Timestamp | null
   readonly createdAt: Timestamp
   readonly updatedAt: Timestamp
 }
@@ -21,7 +22,7 @@ export interface ChannelRequestRecord {
   readonly projectId: ProjectId
   readonly requestId: string
   readonly fingerprint: string
-  readonly operation: 'create' | 'enable' | 'disable' | 'binding.create' | 'binding.enable' | 'binding.disable' | 'outbound.replay' | 'test'
+  readonly operation: 'create' | 'enable' | 'disable' | 'rotate_token' | 'delete' | 'binding.create' | 'binding.enable' | 'binding.disable' | 'outbound.replay' | 'test'
   readonly result: unknown
   readonly createdAt: Timestamp
 }
@@ -40,9 +41,12 @@ export interface ChannelRepository {
   listChannels(projectId: ProjectId): Promise<readonly Channel[]>
   listEnabledChannels(): Promise<readonly Channel[]>
   getSecret(channelId: ChannelId): Promise<ChannelSecretRecord | null>
+  getSecrets(channelId: ChannelId, at: Timestamp): Promise<readonly ChannelSecretRecord[]>
   getRequest(projectId: ProjectId, requestId: string): Promise<ChannelRequestRecord | null>
   createChannel(channel: Channel, secret: ChannelSecretRecord, callbackUrl: string | null, request: ChannelRequestRecord): Promise<void>
   updateChannel(channel: Channel, expectedRevision: number, request: ChannelRequestRecord, cancelPending?: boolean): Promise<boolean>
+  rotateChannelSecret(channel: Channel, expectedRevision: number, secret: ChannelSecretRecord, previousExpiresAt: Timestamp, request: ChannelRequestRecord): Promise<boolean>
+  deleteChannel(channelId: ChannelId, projectId: ProjectId, expectedRevision: number, at: Timestamp, request: ChannelRequestRecord): Promise<'deleted' | 'revision_conflict' | 'active_lease'>
   channelCallbackUrl(channelId: ChannelId): Promise<string | null>
 
   getBinding(id: ChannelBindingId): Promise<ChannelBindingRecord | null>

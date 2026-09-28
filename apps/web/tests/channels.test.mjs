@@ -27,6 +27,21 @@ test('钉钉 Stream Channel 表单展示凭证、连接说明与在线诊断', (
   assert.match(page, /testChannel/)
 })
 
+test('Channel 令牌轮换仅对管理者展示并一次性显示新值', () => {
+  for (const label of ['轮换令牌', '旧令牌将在 15 分钟后失效', '一次性 Channel 令牌']) assert.match(page, new RegExp(label))
+  assert.match(page, /canManage/)
+  assert.match(page, /rotateChannelToken/)
+  assert.match(client, /channelTokenRotation/)
+})
+
+test('Channel 删除入口要求先停用并显示确认对话框', () => {
+  for (const label of ['删除 Channel', '请先停用 Channel', '投递诊断保留 30 天']) assert.match(page, new RegExp(label))
+  assert.match(page, /useConfirmDialog/)
+  assert.match(page, /disabled=\{item\.enabled/)
+  assert.match(client, /deleteChannel/)
+  assert.match(client, /'DELETE'/)
+})
+
 test('Channel 路由接入应用并使用 typed API', () => {
   assert.match(app, /section === 'channels'/)
   assert.match(client, /createChannelBinding/)

@@ -488,8 +488,8 @@ Channel binding 不是新的独立 Grant。创建/修改 binding 需要 Project 
 实施中沉淀的偏差与遗留(后续批次消化,不阻塞连接器模块可用性):
 
 1. 真实飞书验收未执行:需要部署者提供测试应用与公网 HTTPS 回调;协议层由版本化 fixture(v2024-11)+本地 HTTP fixture 全链路覆盖。
-2. Channel token 轮换的旧 token 15 分钟并存窗口未实现;当前轮换方式是新建 Channel→迁移 binding→challenge 验证→停用旧 Channel。
-3. Channel 完整删除生命周期(停用→60s 租约→30 天诊断保留)未实现,当前只有启停。
+2. Channel token 轮换已完成:同一 Channel 原子新增 credential revision，旧 revision 保留 15 分钟并存窗口；generic webhook 按有效 revision 列表验证，新 token 仅在轮换响应中一次性显示；requestId+fingerprint 幂等与 CAS 冲突已覆盖。
+3. Channel 完整删除生命周期已完成:仅停用后可删，存在未到期 sending 租约时拒绝并等待最长 60 秒租约自然到期后重试；删除定义、binding 与凭证密文，inbound/outbound delivery 和审计保留供 30 天 retention 扫描，诊断查询标记 `channelDeleted`；已删 Channel 的 webhook 关闭失败。
 4. OPEN-1 地址 pinning transport 维持推迟;高风险部署在实现前禁用出站连接器。
 5. e2e 直跑源码模式暴露 server 应用层 30+ 文件参数属性不兼容 strip-only,已全部改显式字段;新增代码须保持该风格(worker/server 源码可能被 apps/e2e 以 node --experimental-strip-types 直跑)。
 6. 根 typecheck 在并行功能(canvas/终端/文件写入等)合入期间可能被其接口不一致阻塞;连接器相关文件在阶段 5 提交时点 0 类型错误。

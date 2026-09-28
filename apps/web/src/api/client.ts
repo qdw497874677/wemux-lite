@@ -1,7 +1,7 @@
 import type { Run, LaunchRequest, LaunchResponse, TaskSummary, TaskDetail, TaskCreate, TaskPatch, TaskActivity, AssignmentRequest, CreateTaskWorkspaceRequest, UnbindWorkspaceRequest } from '@wemux/web-contract/task-platform'
 import type { CanvasLayoutResponse, CanvasLayoutSaveRequest, CanvasLayoutSaveResponse, CanvasLayoutScope, SessionGraphResponse } from '@wemux/web-contract/session-graph'
 import type { ConnectorDTO, ConnectorListDTO, ConnectorTestDTO, ConnectorWriteDTO } from '@wemux/web-contract/connectors'
-import type { ChannelListDTO, CreateChannelBindingDTO, CreateChannelDTO, CreatedChannelDTO } from '@wemux/web-contract/channels'
+import type { ChannelListDTO, CreateChannelBindingDTO, CreateChannelDTO, CreatedChannelDTO, DeleteChannelDTO, DeletedChannelDTO, RotateChannelTokenDTO } from '@wemux/web-contract/channels'
 import { randomId } from '../lib/random.ts'
 import { readDeviceId } from '../lib/device-scope.ts'
 import type {
@@ -74,7 +74,9 @@ export const routes = {
   connectorState: (projectId: string, connectorId: string, action: 'enable' | 'disable' | 'test') => `/api/projects/${id(projectId)}/connectors/${id(connectorId)}/${action}`,
   channels: (projectId: string) => `/api/projects/${id(projectId)}/channels`,
   channelState: (projectId: string, channelId: string) => `/api/projects/${id(projectId)}/channels/${id(channelId)}/enabled`,
+  channel: (projectId: string, channelId: string) => `/api/projects/${id(projectId)}/channels/${id(channelId)}`,
   channelTest: (projectId: string, channelId: string) => `/api/projects/${id(projectId)}/channels/${id(channelId)}/test`,
+  channelTokenRotation: (projectId: string, channelId: string) => `/api/projects/${id(projectId)}/channels/${id(channelId)}/token/rotate`,
   channelBindings: (projectId: string) => `/api/projects/${id(projectId)}/channel-bindings`,
   channelBindingState: (projectId: string, bindingId: string) => `/api/projects/${id(projectId)}/channel-bindings/${id(bindingId)}/enabled`,
   channelReplay: (projectId: string, deliveryId: string) => `/api/projects/${id(projectId)}/channel-deliveries/${id(deliveryId)}/replay`,
@@ -294,6 +296,8 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     createChannel: (projectId: string, body: CreateChannelDTO) => request<CreatedChannelDTO>(routes.channels(projectId), body),
     testChannel: (projectId: string, channelId: string) => request<{ ok: true; appIdHint?: string; clientIdHint?: string; endpoint?: string }>(routes.channelTest(projectId, channelId), {}),
     setChannelEnabled: (projectId: string, channelId: string, body: { requestId: string; expectedRevision: number; enabled: boolean }) => request<unknown>(routes.channelState(projectId, channelId), body),
+    rotateChannelToken: (projectId: string, channelId: string, body: RotateChannelTokenDTO) => request<CreatedChannelDTO>(routes.channelTokenRotation(projectId, channelId), body),
+    deleteChannel: (projectId: string, channelId: string, body: DeleteChannelDTO) => request<DeletedChannelDTO>(routes.channel(projectId, channelId), body, undefined, 'DELETE'),
     createChannelBinding: (projectId: string, body: CreateChannelBindingDTO) => request<unknown>(routes.channelBindings(projectId), body),
     setChannelBindingEnabled: (projectId: string, bindingId: string, body: { requestId: string; expectedRevision: number; enabled: boolean }) => request<unknown>(routes.channelBindingState(projectId, bindingId), body),
     replayChannelDelivery: (projectId: string, deliveryId: string, body: { requestId: string; reason: string }) => request<unknown>(routes.channelReplay(projectId, deliveryId), body),

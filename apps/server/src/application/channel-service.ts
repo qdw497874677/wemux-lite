@@ -45,7 +45,7 @@ constructor(
       const channel: DingTalkChannel = { id, projectId: input.projectId, name, kind: 'dingtalk', credentialRef: credentialId, credentialAvailability: 'available', enabled: true, revision: 1, config: { clientIdHint: hint(clientId), robotCode, streamMode: true, messageTopic: '/v1.0/im/bot/messages/get' }, createdAt: at, updatedAt: at }
       const ciphertext = await this.codec.encode(JSON.stringify({ clientId, clientSecret, robotCode }), { owner: { kind: 'channel', id }, credentialId, authType: 'custom_credential', revision: 1 })
       const result: ChannelMutationResult = { channel, replayed: false }
-      await this.repository.createChannel(channel, { credentialId, channelId: id, ciphertext, revision: 1, createdAt: at, updatedAt: at }, null, request(input, fingerprint, 'create', result))
+      await this.repository.createChannel(channel, { credentialId, channelId: id, ciphertext, revision: 1, expiresAt: null, createdAt: at, updatedAt: at }, null, request(input, fingerprint, 'create', result))
       const adapter = this.adapterFor?.('dingtalk')
       if (adapter) await adapter.enable(id)
       return result
@@ -58,7 +58,7 @@ constructor(
       const channel: FeishuChannel = { id, projectId: input.projectId, name, kind: 'feishu', credentialRef: credentialId, credentialAvailability: 'available', enabled: true, revision: 1, config: { appIdHint: appId.length > 8 ? `${appId.slice(0, 4)}…${appId.slice(-4)}` : appId, verificationMode: encryptKey ? 'encrypted' : 'verification_token', acceptEventSchema: '2.0', tenantKey: null }, createdAt: at, updatedAt: at }
       const ciphertext = await this.codec.encode(JSON.stringify({ appId, appSecret, verificationToken, encryptKey }), { owner: { kind: 'channel', id }, credentialId, authType: 'custom_credential', revision: 1 })
       const result: ChannelMutationResult = { channel, replayed: false }
-      await this.repository.createChannel(channel, { credentialId, channelId: id, ciphertext, revision: 1, createdAt: at, updatedAt: at }, null, request(input, fingerprint, 'create', result))
+      await this.repository.createChannel(channel, { credentialId, channelId: id, ciphertext, revision: 1, expiresAt: null, createdAt: at, updatedAt: at }, null, request(input, fingerprint, 'create', result))
       return result
     }
     const callbackUrl = input.callbackUrl === null ? null : httpUrl(input.callbackUrl), sourceCidrs = input.sourceCidrs.map(value => required(value, 100, 'sourceCidrs'))
@@ -68,7 +68,7 @@ constructor(
     const channel: GenericWebhookChannel = { id, projectId: input.projectId, name, kind: 'generic_webhook', credentialRef: credentialId, credentialAvailability: 'available', enabled: true, revision: 1, config: { tokenVersion: 1, previousTokenValidUntil: null, replayWindowSeconds: 300, sourceCidrs }, createdAt: at, updatedAt: at }
     const ciphertext = await this.codec.encode(token, { owner: { kind: 'channel', id }, credentialId, authType: 'api_key', revision: 1 })
     const storedResult: ChannelMutationResult = { channel, replayed: false }
-    await this.repository.createChannel(channel, { credentialId, channelId: id, ciphertext, revision: 1, createdAt: at, updatedAt: at }, callbackUrl, request(input, fingerprint, 'create', storedResult))
+    await this.repository.createChannel(channel, { credentialId, channelId: id, ciphertext, revision: 1, expiresAt: null, createdAt: at, updatedAt: at }, callbackUrl, request(input, fingerprint, 'create', storedResult))
     return { ...storedResult, issuedToken: token }
   }
 
@@ -92,6 +92,42 @@ constructor(
         throw error
       }
     }
+    return result
+  }
+
+  async rotateToken(actorId: UserId, input: WriteInput & { readonly channelId: ChannelId; readonly expectedRevision: number }): Promise<ChannelMutationResult> {
+    await this.projects.require(actorId, input.projectId, 'manager')
+    if (!this.codec?.encrypted) throw new AppError(503, 'Channel credential encryption is unavailable', 'credential_unavailable')
+    const fingerprint = this.identity(input, { operation: 'rotate_token', channelId: input.channelId, expectedRevision: input.expectedRevision })
+    const replay = await this.replayExisting<ChannelMutationResult>(input, fingerprint); if (replay) return replay
+    const current = await this.requireChannel(input.channelId, input.projectId)
+    if (current.kind !== 'generic_webhook') throw new AppError(409, 'Channel token rotation is unavailable', 'channel_kind_unsupported')
+    if (current.revision !== input.expectedRevision) throw revisionConflict()
+    const latest = await this.repository.getSecret(current.id)
+    if (!latest) throw new AppError(503, 'Channel credential unavailable', 'credential_unavailable')
+    const at = now(), previousTokenValidUntil = new Date(Date.parse(at) + 15 * 60_000).toISOString() as Timestamp
+    const credentialId = randomUUID() as ConnectorCredentialId, credentialRevision = latest.revision + 1, token = randomBytes(32).toString('base64url')
+    const channel: GenericWebhookChannel = { ...current, credentialRef: credentialId, revision: current.revision + 1, config: { ...current.config, tokenVersion: current.config.tokenVersion + 1, previousTokenValidUntil }, updatedAt: at }
+    const ciphertext = await this.codec.encode(token, { owner: { kind: 'channel', id: channel.id }, credentialId, authType: 'api_key', revision: credentialRevision })
+    const storedResult: ChannelMutationResult = { channel, replayed: false }
+    if (!await this.repository.rotateChannelSecret(channel, input.expectedRevision, { credentialId, channelId: channel.id, ciphertext, revision: credentialRevision, expiresAt: null, createdAt: at, updatedAt: at }, previousTokenValidUntil, request(input, fingerprint, 'rotate_token', storedResult))) throw revisionConflict()
+    return { ...storedResult, issuedToken: token }
+  }
+
+  async delete(actorId: UserId, input: WriteInput & { readonly channelId: ChannelId; readonly expectedRevision: number }): Promise<{ readonly channelId: ChannelId; readonly replayed: boolean }> {
+    await this.projects.require(actorId, input.projectId, 'manager')
+    const fingerprint = this.identity(input, { operation: 'delete', channelId: input.channelId, expectedRevision: input.expectedRevision })
+    const replay = await this.replayExisting<{ readonly channelId: ChannelId; readonly replayed: boolean }>(input, fingerprint); if (replay) return replay
+    const current = await this.requireChannel(input.channelId, input.projectId)
+    if (current.revision !== input.expectedRevision) throw revisionConflict()
+    if (current.enabled) throw new AppError(409, 'Channel must be disabled before deletion', 'channel_enabled')
+    const result = { channelId: current.id, replayed: false }
+    // We reject while any 60-second sending lease is active instead of introducing a pending-delete state.
+    const deleted = await this.repository.deleteChannel(current.id, input.projectId, input.expectedRevision, now(), request(input, fingerprint, 'delete', result))
+    if (deleted === 'active_lease') throw new AppError(409, 'Channel has an active sending lease', 'channel_active_lease')
+    if (deleted === 'revision_conflict') throw revisionConflict()
+    const adapter = this.adapterFor?.(current.kind)
+    if (adapter) await adapter.disable(current.id)
     return result
   }
 

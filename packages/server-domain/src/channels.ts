@@ -28,6 +28,7 @@ export interface InboundDelivery {
   readonly sessionId: SessionId | null
   readonly sessionEnqueueRequestId: string
   readonly diagnostic: string | null
+  readonly channelDeleted?: true
   readonly receivedAt: Timestamp
   readonly updatedAt: Timestamp
 }
@@ -56,6 +57,7 @@ export interface OutboundDelivery {
   readonly leaseExpiresAt: Timestamp | null
   readonly responseStatus: number | null
   readonly diagnostic: string | null
+  readonly channelDeleted?: true
   readonly createdAt: Timestamp
   readonly updatedAt: Timestamp
   readonly deliveredAt: Timestamp | null

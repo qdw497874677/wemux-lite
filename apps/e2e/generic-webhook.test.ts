@@ -10,7 +10,7 @@ import { provisionAdministrator } from './session.ts'
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 async function eventually<T>(read: () => Promise<T>, accept: (value: T) => boolean): Promise<T> { let latest: T | undefined; for (let attempt = 0; attempt < 240; attempt++) { latest = await read(); if (accept(latest)) return latest; await delay(25) } assert.fail(`Timed out: ${JSON.stringify(latest)}`) }
-function workerProcess(args: string[]): ChildProcess { return spawn(process.execPath, ['--import', 'tsx', '../worker/src/cli.ts', ...args], { cwd: process.cwd(), env: process.env, stdio: ['ignore', 'pipe', 'pipe'] }) }
+function workerProcess(args: string[]): ChildProcess { return spawn(process.execPath, ['--import', 'tsx', new URL('../worker/src/cli.ts', import.meta.url).pathname, ...args], { cwd: process.cwd(), env: process.env, stdio: ['ignore', 'pipe', 'pipe'] }) }
 async function completed(child: ChildProcess) { let stdout = '', stderr = ''; child.stdout?.setEncoding('utf8').on('data', chunk => { stdout += chunk }); child.stderr?.setEncoding('utf8').on('data', chunk => { stderr += chunk }); const code = await new Promise<number | null>(resolve => child.once('close', resolve)); return { stdout, stderr, code } }
 
 test('generic webhook vertical slice delivers inbound once and one final assistant callback', { timeout: 45_000 }, async t => {
@@ -47,6 +47,9 @@ test('generic webhook vertical slice delivers inbound once and one final assista
   assert.equal(page.events.filter((event: { payload: { kind: string } }) => event.payload.kind === 'assistant.text.delta').map((event: { payload: { text: string } }) => event.payload.text).join(''), 'Echo: hello webhook')
   await eventually(async () => callbacks, value => value.length === 1); assert.equal((callbacks[0] as { text: string }).text, 'Echo: hello webhook')
   const diagnostics = await api(`/projects/${project.id}/channels`); assert.equal(diagnostics.inbound[0].status, 'enqueued'); assert.equal(diagnostics.outbound[0].status, 'delivered')
+  const rotated = await api(`/projects/${project.id}/channels/${channel.channel.id}/token/rotate`, 'POST', { requestId: 'channel-rotate', expectedRevision: 1 }); assert.equal(typeof rotated.issuedToken, 'string'); assert.equal((await send('provider-old-overlap')).status, 202)
+  const newTokenResponse = await fetch(`${baseUrl}/hooks/generic/${channel.channel.id}`, { method: 'POST', headers: { authorization: `Bearer ${rotated.issuedToken}`, 'content-type': 'application/json', 'x-wemux-delivery-id': 'provider-new-token', 'x-wemux-timestamp': new Date().toISOString() }, body: JSON.stringify({ conversation: 'external-1', sender: 'fixture', text: 'hello rotated webhook' }) }); assert.equal(newTokenResponse.status, 202)
+  const rotatedReplay = await api(`/projects/${project.id}/channels/${channel.channel.id}/token/rotate`, 'POST', { requestId: 'channel-rotate', expectedRevision: 1 }); assert.equal(rotatedReplay.replayed, true); assert.equal(rotatedReplay.issuedToken, undefined)
   await api(`/projects/${project.id}/channel-bindings/${binding.binding.id}/enabled`, 'POST', { requestId: 'binding-disable', expectedRevision: 1, enabled: false })
   assert.equal((await send('provider-delivery-2')).status, 202)
   await eventually(() => api(`/projects/${project.id}/channels`), value => value.inbound.some((item: { providerEventId: string; status: string }) => item.providerEventId === 'provider-delivery-2' && item.status === 'failed_closed'))
