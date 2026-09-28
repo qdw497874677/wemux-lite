@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { networkInterfaces, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { chromium } from '/tmp/wemux-tailnet-pw/node_modules/playwright-core/index.mjs'
 
@@ -18,6 +18,15 @@ const requireReal = process.env.WEMUX_REAL_AGENT_E2E === '1'
 const adminEmail = 'g44b-admin@example.com'
 const password = 'g44b-real-pi-password'
 const delay = ms => new Promise(resolveDelay => setTimeout(resolveDelay, ms))
+
+function privateFixtureHost() {
+  if (process.env.WEMUX_G44B_FIXTURE_HOST) return process.env.WEMUX_G44B_FIXTURE_HOST
+  for (const addresses of Object.values(networkInterfaces())) {
+    const address = addresses?.find(item => item.family === 'IPv4' && !item.internal && /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(item.address))
+    if (address) return address.address
+  }
+  throw new Error('未找到可供 Worker HTTP Connector 访问的私网 fixture 地址，请设置 WEMUX_G44B_FIXTURE_HOST')
+}
 const log = message => console.log(`[approvals-pi-agent] ${message}`)
 
 async function freePort() {
@@ -115,15 +124,17 @@ async function realChain(piModels) {
   await mkdir(outbox)
   const serverPort = await freePort(), fixturePort = await freePort()
   const origin = `http://127.0.0.1:${serverPort}`
-  const fixtureOrigin = `http://127.0.0.1:${fixturePort}`
+  const fixtureHost = privateFixtureHost()
+  const fixtureOrigin = `http://${fixtureHost}:${fixturePort}`
   const logs = { server: '', worker: '' }, requests = []
   const fixture = createHttpServer(async (request, response) => {
     let body = ''
     for await (const chunk of request) body += chunk
     requests.push({ method: request.method, url: request.url, body: body ? JSON.parse(body) : null })
+    await writeFile(join(temp, 'fixture-requests.json'), JSON.stringify(requests))
     response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ accepted: true, fixture: 'g44b' }))
   })
-  await new Promise((resolveListen, reject) => fixture.once('error', reject).listen(fixturePort, '127.0.0.1', resolveListen))
+  await new Promise((resolveListen, reject) => fixture.once('error', reject).listen(fixturePort, fixtureHost === '127.0.0.1' ? fixtureHost : '0.0.0.0', resolveListen))
   let serverProcess, workerProcess, browser
   try {
     serverProcess = child(resolve(root, 'apps/server/dist/main.js'), [], { PORT: String(serverPort), HOST: '127.0.0.1', WEMUX_ADMIN_EMAILS: adminEmail, WEMUX_DATABASE_PATH: join(temp, 'server.sqlite'), WEMUX_PUBLIC_URL: origin, WEMUX_SMTP_FROM: 'Wemux <no-reply@example.com>', WEMUX_MAIL_OUTBOX: outbox, WEMUX_CAPABILITY_SECRET: randomBytes(32).toString('hex'), WEMUX_CONNECTOR_ENCRYPTION_KEY: randomBytes(32).toString('hex'), WEMUX_WEB_DIST: resolve(root, 'apps/web/dist') }, logs, 'server')
@@ -147,7 +158,7 @@ async function realChain(piModels) {
     assert.equal(await new Promise(resolveClose => registration.once('close', resolveClose)), 0, logs.worker)
     const workerId = JSON.parse(logs.worker.trim().split('\n').find(line => line.startsWith('{'))).workerId
     logs.worker = ''
-    workerProcess = child(resolve(root, 'apps/worker/dist/cli.js'), ['start', '--home', workerHome, '--name', 'G44b Pi Worker'], { HOME: '/opt/data', PATH: `/opt/data/.npm-global/bin:${process.env.PATH ?? ''}` }, logs, 'worker')
+    workerProcess = child(resolve(root, 'apps/worker/dist/cli.js'), ['start', '--home', workerHome, '--name', 'G44b Pi Worker'], { HOME: '/opt/data', PATH: `/opt/data/.npm-global/bin:${process.env.PATH ?? ''}`, WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK: 'true' }, logs, 'worker')
     await eventually(() => api('/workers'), value => value.items?.some(worker => worker.id === workerId && worker.connectionState === 'online'), 'Worker online', 60_000)
     const capabilityPage = await eventually(() => api(`/workers/${workerId}/capabilities`), value => value.capabilities?.some(capability => capability.agentKey === 'pi' && capability.availability.status === 'available'), 'Pi capability', 60_000)
     const pi = capabilityPage.capabilities.find(capability => capability.agentKey === 'pi')
@@ -180,7 +191,8 @@ async function realChain(piModels) {
     await page.getByText(pending.title, { exact: true }).waitFor()
     await page.screenshot({ path: join(evidenceDir, '01-real-pi-http-call-pending.png'), fullPage: true })
 
-    await api(`/approvals/${encodeURIComponent(pending.projectionKey)}/decisions`, 'POST', { requestId: randomUUID(), decision: 'approve', sourceRevision: pending.sourceRevision, note: 'G44b 真实 Pi 验收批准' })
+    await page.getByText(pending.title, { exact: true }).click()
+    await page.getByRole('button', { name: '批准', exact: true }).click()
     const events = await eventually(() => api(`/sessions/${created.session.id}/events?fromSeq=1&limit=1000`), value => value.events?.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'completed') && requests.length === 1, 'Pi 恢复、fixture 请求与 turn 完成', 180_000)
     assert.equal(requests[0].method, 'POST')
     assert.equal(requests[0].url, '/items')
@@ -199,13 +211,23 @@ async function realChain(piModels) {
   } catch (error) {
     await writeFile(join(evidenceDir, 'failed-server.log'), logs.server)
     await writeFile(join(evidenceDir, 'failed-worker.log'), logs.worker)
+    try {
+      const { DatabaseSync } = await import('node:sqlite').then(m => m)
+      const dump = new DatabaseSync(join(workerHome, 'worker.sqlite'), { readOnly: true })
+      const kinds = []
+      for (const table of ['session_journal', 'journal', 'session_events']) {
+        try { const rows = dump.prepare(`SELECT payload_json FROM ${table} ORDER BY rowid DESC LIMIT 40`).all(); for (const row of rows) kinds.push(`${table}: ${String(row.payload_json).slice(0, 160)}`); break } catch { continue }
+      }
+      await writeFile(join(evidenceDir, 'failed-journal.txt'), kinds.join('\n') || '(no journal rows found)')
+    } catch (dumpError) { await writeFile(join(evidenceDir, 'failed-journal.txt'), `journal dump failed: ${String(dumpError)}`) }
     throw error
   } finally {
     await browser?.close().catch(() => {})
     await stop(workerProcess)
     await stop(serverProcess)
     await new Promise(resolveClose => fixture.close(resolveClose))
-    await rm(temp, { recursive: true, force: true })
+    if (process.env.WEMUX_G44B_KEEP === '1') log(`KEEP temp dir: ${temp}`)
+    else await rm(temp, { recursive: true, force: true })
   }
 }
 

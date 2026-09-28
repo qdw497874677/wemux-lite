@@ -1,10 +1,14 @@
 import { spawn } from 'node:child_process'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { ApprovalId } from '@wemux/domain'
 import type { AgentRuntimeSession, RuntimeCommand, RuntimeOperationInput, RuntimeSessionAdapter, RuntimeSessionOpenInput } from '../application/ports/runtime-session.js'
 import type { AgentSignal, AgentTurnHandle } from '../application/ports/agent-adapter.js'
 import { parseJsonLines } from './json-lines.js'
 import { mapRuntimeRecord } from './runtime-event-mapper.js'
 import { splitModelId } from '../domain/model-id.js'
+import { piCapabilityExtension } from '../capabilities/pi-tools.js'
 
 /** Pi CLI expects `provider/model`, while the platform modelId convention is `provider::model`. */
 function piModelArgument(modelId: string): string {
@@ -47,19 +51,23 @@ class PiRuntimeSession implements AgentRuntimeSession {
   private exitInfo: { code: number | null; signal: NodeJS.Signals | null } | null = null
   /** Resolves when the current child's stdio streams and process have fully closed. */
   private childClosed: Promise<void> = Promise.resolve()
+  private launchKey: string | null = null
+  private extensionDir: string | null = null
+  private capabilityReadyPath: string | null = null
 
   constructor(private readonly executable: string, private readonly input: RuntimeSessionOpenInput) {}
 
   async execute(request: RuntimeOperationInput): Promise<AgentTurnHandle> {
     if (this.activeOperation) throw new Error('Pi runtime session is busy')
-    const child = await this.ensureChild()
+    const child = await this.ensureChild(request.launchContext)
     this.activeOperation = request.operationId
+    await this.requireCapabilityToolsReady()
     await writeLine(child, { type: 'prompt', id: request.operationId, message: request.message.content })
     return { signals: this.signals(request.operationId, child), stop: async () => this.interrupt(request.operationId) }
   }
 
   async command(command: RuntimeCommand): Promise<void> {
-    const child = await this.ensureChild()
+    const child = await this.ensureChild(null)
     const type = command.name === 'interrupt' ? 'abort' : command.name
     if (command.name === 'set_model') {
       const selected = typeof command.arguments.modelId === 'string' ? splitModelId(command.arguments.modelId as import('@wemux/domain').ModelId) : null
@@ -71,13 +79,13 @@ class PiRuntimeSession implements AgentRuntimeSession {
   }
 
   async resolveApproval(approvalId: ApprovalId, decision: 'approve' | 'deny'): Promise<void> {
-    const child = await this.ensureChild()
+    const child = await this.ensureChild(null)
     await writeLine(child, { type: 'approval_response', id: approvalId, approved: decision === 'approve' })
   }
 
   async close(): Promise<void> {
     const child = this.child
-    if (!child || child.exitCode !== null || child.signalCode !== null) return
+    if (!child || child.exitCode !== null || child.signalCode !== null) { await this.cleanupExtension(); return }
     child.kill('SIGTERM')
     const forceTimer = setTimeout(() => {
       if (child.exitCode === null && child.signalCode === null) {
@@ -86,7 +94,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
     }, 3000)
     forceTimer.unref()
     try { await this.childClosed }
-    finally { clearTimeout(forceTimer) }
+    finally { clearTimeout(forceTimer); await this.cleanupExtension() }
   }
 
   /** 同步强杀：即使已经发送过 SIGTERM，也必须能升级为 SIGKILL。 */
@@ -106,8 +114,17 @@ class PiRuntimeSession implements AgentRuntimeSession {
    * buffered) becomes an unhandled `'error'` event and crashes the whole Worker
    * process — the root cause of sessions stuck in "正在处理" with 0/1 nodes online.
    */
-  private async ensureChild() {
-    if (this.child && !this.child.killed && !this.exitInfo) return this.child
+  private async ensureChild(context: import('../application/ports/agent-adapter.js').AgentLaunchContext | null) {
+    const nextLaunchKey = context ? JSON.stringify({
+      assetsRoot: context.assetsRoot,
+      capabilityEndpoint: context.capabilityEndpoint,
+      capabilityToken: context.capabilityToken,
+      instructions: context.instructions,
+      skillsRoot: context.skillsRoot,
+    }) : this.launchKey
+    if (this.child && !this.child.killed && !this.exitInfo && nextLaunchKey === this.launchKey) return this.child
+    if (this.child && !this.child.killed && !this.exitInfo) await this.close()
+    else await this.cleanupExtension()
 
     // Reset per-child diagnostic state before spawning.
     this.childFailure = null
@@ -117,7 +134,22 @@ class PiRuntimeSession implements AgentRuntimeSession {
     const args = ['--mode', 'rpc']
     if (this.input.modelId) args.push('--model', piModelArgument(this.input.modelId))
     if (this.input.resume) args.push('--session', this.input.resume)
-    const child = spawn(this.executable, args, { cwd: this.input.cwd, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] })
+    if (context?.skillsRoot) args.push('--skill', context.skillsRoot)
+    if (context?.instructions) args.push('--append-system-prompt', context.instructions)
+    if (context?.capabilityEndpoint || context?.capabilityToken) {
+      if (!context.capabilityEndpoint || !context.capabilityToken) throw new Error('Pi capability injection requires both endpoint and token')
+      this.extensionDir = await mkdtemp(join(tmpdir(), 'wemux-pi-runtime-extension-'))
+      this.capabilityReadyPath = join(this.extensionDir, 'ready')
+      const extensionPath = join(this.extensionDir, 'capabilities.mjs')
+      await writeFile(extensionPath, piCapabilityExtension(this.capabilityReadyPath), { mode: 0o600 })
+      args.push('--extension', extensionPath)
+    }
+    this.launchKey = nextLaunchKey
+    const child = spawn(this.executable, args, {
+      cwd: this.input.cwd,
+      env: { ...process.env, ...context?.environment, WEMUX_PI_CAPABILITY_ENDPOINT: context?.capabilityEndpoint ?? '', WEMUX_PI_CAPABILITY_TOKEN: context?.capabilityToken ?? '' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
     if (!child.stdin || !child.stdout || !child.stderr) throw new Error('Pi runtime streams unavailable')
 
     // Persistent listeners — never removed while the child lives.
@@ -154,6 +186,28 @@ class PiRuntimeSession implements AgentRuntimeSession {
 
     this.child = child
     return child
+  }
+
+  private async requireCapabilityToolsReady(): Promise<void> {
+    if (!this.capabilityReadyPath) return
+    const deadline = Date.now() + 5_000
+    while (Date.now() < deadline) {
+      try {
+        const state = await readFile(this.capabilityReadyPath, 'utf8')
+        if (state === 'ready') return
+        if (state === 'inactive') break
+      } catch { /* Pi 可能尚未触发 session_start。 */ }
+      await new Promise(resolve => setTimeout(resolve, 25))
+    }
+    throw new Error('Pi capability extension did not load or its tools are disabled; refusing to silently omit Wemux tools')
+  }
+
+  private async cleanupExtension(): Promise<void> {
+    const directory = this.extensionDir
+    this.extensionDir = null
+    this.capabilityReadyPath = null
+    this.launchKey = null
+    if (directory) await rm(directory, { recursive: true, force: true })
   }
 
   private async interrupt(operationId: RuntimeOperationInput['operationId']) {

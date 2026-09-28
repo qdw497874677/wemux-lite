@@ -28,7 +28,7 @@ export class WorkerConnectorRuntime {
     this.credentials = WorkerCredentialStore.fromEnvironment(store)
     this.supervisor = options.supervisor ?? new McpProcessSupervisor()
     this.mcp = new WorkerMcpClient({ supervisor: this.supervisor, fetch: options.fetch, lookup: options.lookup, deploymentAllowsPrivateNetwork: process.env.WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK === 'true' })
-    this.http = new HttpConnectorExecutor(this.credentials, { fetch: options.fetch, lookup: options.lookup })
+    this.http = new HttpConnectorExecutor(this.credentials, { fetch: options.fetch, lookup: options.lookup, deploymentAllowsPrivateNetwork: process.env.WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK === 'true' })
     const approval: ConnectorApprovalPort = { request: (input, signal) => this.requestApproval(input, signal, options.onApproval) }
     this.gateway = new ToolExecutionGateway(store, this.credentials, this.mcp, { verify: token => {
       const active = this.turns.get(token)

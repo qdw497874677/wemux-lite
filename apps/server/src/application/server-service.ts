@@ -427,7 +427,7 @@ export class ServerService {
     if (content.includes('\0')) throw new AppError(400, 'Message contains an unsupported NUL character')
     if (Buffer.byteLength(JSON.stringify(content)) > 200000) throw new AppError(400, 'Message exceeds the protocol byte limit')
     const capabilityActor = actor ?? session.ownerId
-    const prepared = this.capabilities ? await this.capabilities.prepareTurn({ sessionId: id, turnId: newId<'TurnId'>(), actorId: capabilityActor }, tx.resources) : null
+    const prepared = this.capabilities ? await this.capabilities.prepareTurn({ sessionId: id, turnId: newId<'TurnId'>(), actorId: capabilityActor }, tx) : null
     const command: WorkerCommand = { kind: 'session.enqueue', sessionId: id, message: { messageId, content, ...(actor ? { sentByAccountId: actor } : {}) }, ...(prepared ? { capabilities: prepared.runtime } : {}) }
     if (new TextEncoder().encode(JSON.stringify({ type: 'command', commandId, command })).byteLength > 900 * 1024) throw new AppError(413, 'Message and capability assets exceed the worker transport limit')
     await this.command(tx, session.binding.agent.workerId, command, commandId)

@@ -48,6 +48,20 @@ test('capability grant resolves enabled Project connectors visible to the actor 
   assert.equal(context.runtime.snapshot.allowedTools.includes('http.call'), true)
 })
 
+test('session enqueue resolves connectors through transaction readers', async t => {
+  const f = await fixture(t)
+  const visible = connector(f.project.id, { allowedWorkerIds: [f.workerId] })
+  const capabilities = new CapabilityService(f.store, () => timestamp, new CapabilityTokenService('transaction-secret'.repeat(4), () => timestamp), { list: async () => [visible] })
+  const service = new ServerService(f.store, new Notifications(), capabilities)
+  const result = await service.enqueue(f.session.id, { content: '使用连接器' }, f.user.id)
+  const pending = await f.store.commands.getPendingCommand(result.commandId)
+  assert.equal(pending?.command.kind, 'session.enqueue')
+  if (pending?.command.kind !== 'session.enqueue') return
+  assert.deepEqual(pending.command.capabilities?.snapshot.allowedConnectorIds, [visible.id])
+  assert.deepEqual(pending.command.capabilities?.snapshot.connectors, [visible])
+  assert.deepEqual(pending.command.capabilities?.grant.allowedConnectorIds, [visible.id])
+})
+
 test('capability snapshot injects a versioned same-Worker collaboration roster and canonical session protocol', async t => {
   const f = await fixture(t)
   const capabilities = new CapabilityService(f.store, () => timestamp, new CapabilityTokenService('collaboration-secret'.repeat(4), () => timestamp))

@@ -112,12 +112,13 @@ export class CapabilityService {
     readonly turnId: CapabilityGrantClaims['turnId']
     readonly actorId?: import('@wemux/domain').UserId
     readonly allowedTools?: readonly CapabilityToolName[]
-  }, resources = this.store.resources): Promise<{ readonly runtime: CapabilityRuntimePayload; readonly token: string }> {
+  }, readers: Pick<ServerStore, 'identity' | 'resources'> = this.store): Promise<{ readonly runtime: CapabilityRuntimePayload; readonly token: string }> {
+    const { identity, resources } = readers
     const session = await this.requireSession(input.sessionId, resources)
     const workspace = await resources.getWorkspace(session.workspaceId)
     if (!workspace) throw new CapabilityError('not-found', 'Workspace not found')
     const assets = await resources.listCapabilityAssets(session.projectId)
-    const connectors = await this.resolveConnectors(session, input)
+    const connectors = await this.resolveConnectors(session, input, identity, resources)
     const allowedConnectorIds = connectors.map(connector => connector.id)
     const allowedTools = input.allowedTools ?? [
       'session.info',
@@ -350,17 +351,25 @@ export class CapabilityService {
   private async resolveConnectors(
     session: Awaited<ReturnType<CapabilityService['requireSession']>>,
     input: { readonly actorId?: import('@wemux/domain').UserId },
+    identity: ServerStore['identity'],
+    resources: ServerStore['resources'],
   ): Promise<readonly ConnectorDefinition[]> {
     if (!this.connectors || !input.actorId) return []
     try {
-      const project = await this.store.resources.getProject(session.projectId)
+      const project = await resources.getProject(session.projectId)
       if (!project || project.deletedAt) return []
       const workerId = session.binding.agent.workerId
-      const records = await this.store.identity.getIdentityRecords({ userId: input.actorId, teamId: project.teamId, projectId: project.id, workerId, sessionId: session.id })
+      const records = await identity.getIdentityRecords({ userId: input.actorId, teamId: project.teamId, projectId: project.id, workerId, sessionId: session.id })
       const projectVisible = project.ownerId === input.actorId || Boolean(records.membership && (records.projectGrant || project.shareScope === 'team'))
       if (!projectVisible) return []
       return (await this.connectors.list(session.projectId)).filter(connector => connector.enabled && (!connector.allowedWorkerIds.length || connector.allowedWorkerIds.includes(workerId)))
-    } catch {
+    } catch (error) {
+      console.error('[wemux] 解析会话连接器失败', {
+        sessionId: session.id,
+        projectId: session.projectId,
+        actorId: input.actorId,
+        error,
+      })
       return []
     }
   }
