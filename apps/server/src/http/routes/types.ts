@@ -21,6 +21,8 @@ import type { MailSettings } from '../../application/mail/email-delivery.ts'
 import type { PersonalAccessTokenService } from '../../application/personal-access-token-service.ts'
 import type { ProjectionService } from '../../application/projection-service.ts'
 import type { ApprovalDecisionRouter } from '../../application/approval-decision-router.ts'
+import type { AttentionService } from '../../application/attention-service.ts'
+import type { ArtifactService } from '../../application/artifact-service.ts'
 import type { ProjectAccessService } from '../../application/project-access-service.ts'
 import type { ServerService } from '../../application/server-service.ts'
 import type { SessionAccessService } from '../../application/session-access-service.ts'
@@ -81,6 +83,8 @@ export interface HttpHandlerOptions {
   readonly dingTalk?: DingTalkAdapter | null
   readonly projections?: ProjectionService | null
   readonly approvalDecisions?: ApprovalDecisionRouter | null
+  readonly attention?: AttentionService | null
+  readonly artifacts?: ArtifactService | null
 }
 
 export interface RouteRequestContext extends HttpHandlerOptions {

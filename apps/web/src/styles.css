@@ -681,6 +681,41 @@ code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospac
 .animate-fade-up { animation: fade-up var(--duration-normal) var(--ease-out-expo) both; }
 .animate-pulse-dot { animation: pulse-dot 1.8s ease-in-out infinite; }
 
+.content-shell { margin: 0 auto; width: 100%; max-width: 72rem; padding: 1.25rem; }
+.content-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1.25rem; }
+.content-header h1 { font-size: 1.5rem; font-weight: 700; }
+.content-header p { color: var(--muted-foreground); font-size: .875rem; }
+.eyebrow { color: var(--primary) !important; font-size: .7rem !important; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.secondary-button { display: inline-flex; align-items: center; gap: .4rem; border: 1px solid var(--border); border-radius: .5rem; padding: .45rem .7rem; font-size: .8rem; }
+.attention-groups { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); }
+.attention-group { overflow: hidden; border: 1px solid var(--border); border-radius: .75rem; background: var(--card); }
+.attention-group > header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--border); padding: .8rem 1rem; }
+.attention-group__title { display: flex; align-items: center; gap: .55rem; }
+.attention-group__title h2 { font-size: .9rem; font-weight: 650; }
+.count-badge { min-width: 1.5rem; border-radius: 999px; background: color-mix(in srgb, var(--primary) 18%, transparent); padding: .15rem .45rem; text-align: center; color: var(--primary); font-size: .7rem; font-weight: 700; }
+.attention-items { display: grid; }
+.attention-item { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .85rem 1rem; transition: background .15s; }
+.attention-item + .attention-item { border-top: 1px solid var(--border); }
+.attention-item:hover { background: var(--muted); }
+.attention-item span { min-width: 0; }
+.attention-item strong, .attention-item small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attention-item strong { font-size: .84rem; }
+.attention-item small, .attention-item time { color: var(--muted-foreground); font-size: .7rem; }
+.empty-card { display: flex; min-height: 18rem; flex-direction: column; align-items: center; justify-content: center; gap: .55rem; border: 1px dashed var(--border); border-radius: .75rem; color: var(--muted-foreground); text-align: center; }
+.empty-card strong { color: var(--foreground); }
+.artifact-section { margin-top: 1rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+.artifact-section h2 { font-size: .95rem; font-weight: 650; }
+.artifact-section header p, .artifact-empty { color: var(--muted-foreground); font-size: .75rem; }
+.artifact-form { display: grid; gap: .5rem; grid-template-columns: 1fr 2fr 1fr 6rem auto; margin: .75rem 0; }
+.artifact-form input, .artifact-form select { min-width: 0; border: 1px solid var(--border); border-radius: .45rem; background: var(--background); padding: .45rem .55rem; font-size: .75rem; }
+.artifact-form button, .artifact-actions button, .artifact-actions a { display: inline-flex; align-items: center; gap: .3rem; border: 1px solid var(--border); border-radius: .4rem; padding: .4rem .55rem; font-size: .7rem; }
+.artifact-list { display: grid; gap: .45rem; }
+.artifact-row { display: flex; align-items: center; justify-content: space-between; gap: .75rem; border: 1px solid var(--border); border-radius: .55rem; padding: .65rem .75rem; }
+.artifact-row strong, .artifact-row small { display: block; }
+.artifact-row small, .artifact-actions span { color: var(--muted-foreground); font-size: .68rem; }
+.artifact-actions { display: flex; align-items: center; gap: .35rem; }
+@media (max-width: 800px) { .artifact-form { grid-template-columns: 1fr 1fr; } .artifact-row { align-items: flex-start; flex-direction: column; } }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }

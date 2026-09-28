@@ -188,6 +188,11 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
   }
   return {
     launchScope: JSON.stringify([window.location.origin, readDeviceId(), config.teamId]),
+    attention: (signal?: AbortSignal) => request<import('@wemux/server-domain').AttentionResult>('/api/attention', undefined, signal),
+    artifacts: (projectId: string, taskId: string, signal?: AbortSignal) => request<{ items: readonly import('@wemux/server-domain').Artifact[] }>(`/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/artifacts`, undefined, signal),
+    taskRunsForArtifacts: (projectId: string, taskId: string, signal?: AbortSignal) => request<{ items: readonly { id: string; status: string }[] }>(`/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/runs`, undefined, signal),
+    registerArtifact: (projectId: string, taskId: string, input: Omit<import('@wemux/server-domain').RegisterArtifactCommand, 'taskId'>) => request<import('@wemux/server-domain').Artifact>(`/api/projects/${encodeURIComponent(projectId)}/tasks/${encodeURIComponent(taskId)}/artifacts`, { method: 'POST', body: JSON.stringify(input) }),
+    reviewArtifact: (artifactId: string, input: Omit<import('@wemux/server-domain').ReviewArtifactCommand, 'artifactId'>) => request<import('@wemux/server-domain').Artifact>(`/api/artifacts/${encodeURIComponent(artifactId)}/review`, { method: 'POST', body: JSON.stringify(input) }),
     sessionGraph: (projectId: string, signal?: AbortSignal) => request<SessionGraphResponse>(routes.sessionGraph(projectId), undefined, signal),
     canvasLayout: (projectId: string, scope: CanvasLayoutScope, signal?: AbortSignal) => request<CanvasLayoutResponse>(`${routes.canvasLayout(projectId)}?scope=${scope}`, undefined, signal),
     saveCanvasLayout: (projectId: string, body: CanvasLayoutSaveRequest) => request<CanvasLayoutSaveResponse>(routes.canvasLayout(projectId), body, undefined, 'PUT'),

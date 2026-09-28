@@ -22,6 +22,7 @@ const valid: Record<SessionEventPayload['kind'], Record<string, unknown>> = {
   'usage.updated': { kind: 'usage.updated', turnId: 't1', usage: { inputTokens: 1, outputTokens: 2, completeness: 'complete' } },
   'compaction.started': { kind: 'compaction.started', turnId: 't1', reason: 'auto' },
   'compaction.finished': { kind: 'compaction.finished', turnId: 't1', summary: '压缩摘要' },
+  'model.changed': { kind: 'model.changed', previousModelId: null, modelId: 'model-next' },
   'runtime.notice': { kind: 'runtime.notice', level: 'warning', code: 'agent.auto-retry', message: '运行时错误，正在自动重试：429', retry: { attempt: 1, maxAttempts: 10, delayMs: 2000 } },
   'turn.finished': { kind: 'turn.finished', turnId: 't1', outcome: 'completed', failure: null },
   'session.runtime.changed': { kind: 'session.runtime.changed', state: 'idle', reason: null },

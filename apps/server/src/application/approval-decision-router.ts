@@ -4,9 +4,10 @@ import type { ApprovalId, SessionId, UserId } from '@wemux/domain'
 import type { ProjectionService } from './projection-service.ts'
 import type { TaskService, TaskContext } from './task-service.ts'
 import type { ServerService } from './server-service.ts'
+import type { ApprovalDecisionRepository } from './ports/approval-decision-repository.ts'
 import { AppError } from './errors.ts'
 
-interface Receipt { readonly fingerprint: string; readonly result: ApprovalDecisionResult }
+const IDEMPOTENCY_WINDOW_MS = 24 * 60 * 60 * 1000
 
 function keyParts(projectionKey: string): readonly string[] {
   try { return projectionKey.split(':').map(decodeURIComponent) }
@@ -24,20 +25,24 @@ function validate(input: ApprovalDecisionInput): void {
 }
 
 export class ApprovalDecisionRouter implements ApprovalDecisionPort {
-  private readonly receipts = new Map<string, Receipt>()
   private readonly projections: ProjectionService
   private readonly tasks: TaskService
   private readonly sessions: ServerService
-  constructor(projections: ProjectionService, tasks: TaskService, sessions: ServerService) {
+  private readonly repository: ApprovalDecisionRepository
+  private readonly clock: () => Date
+  constructor(projections: ProjectionService, tasks: TaskService, sessions: ServerService, repository: ApprovalDecisionRepository, clock: () => Date = () => new Date()) {
     this.projections = projections
     this.tasks = tasks
     this.sessions = sessions
+    this.repository = repository
+    this.clock = clock
   }
 
   async decide(actorId: UserId, projectionKey: string, input: ApprovalDecisionInput): Promise<ApprovalDecisionResult> {
     validate(input)
-    const receiptKey = `${actorId}:${input.requestId}`
-    const previous = this.receipts.get(receiptKey)
+    const at = this.clock()
+    const now = at.toISOString() as never
+    const previous = await this.repository.getReceipt(actorId, input.requestId, now)
     if (previous) {
       if (previous.fingerprint !== input.fingerprint) throw new AppError(409, 'requestId fingerprint conflict', 'idempotency_conflict')
       return { ...previous.result, replayed: true }
@@ -51,9 +56,8 @@ export class ApprovalDecisionRouter implements ApprovalDecisionPort {
     else if (current.source.kind === 'session_tool') await this.sessionDecision(actorId, input, current)
     else throw new AppError(409, 'Connector or Channel approval authority is unavailable', 'approval_authority_unavailable')
     const refreshed = this.optimisticTerminal(current, input)
-    this.projections.rememberDecision(refreshed)
     const result = { approval: refreshed, replayed: false }
-    this.receipts.set(receiptKey, { fingerprint: input.fingerprint, result })
+    await this.repository.save({ actorId, requestId: input.requestId, fingerprint: input.fingerprint, result, createdAt: now }, refreshed, new Date(at.getTime() + IDEMPOTENCY_WINDOW_MS).toISOString() as never)
     return result
   }
 
@@ -71,6 +75,6 @@ export class ApprovalDecisionRouter implements ApprovalDecisionPort {
   }
 
   private optimisticTerminal(current: ApprovalView, input: ApprovalDecisionInput): ApprovalView {
-    return { ...current, status: input.decision === 'approve' ? 'approved' : input.decision === 'deny' ? 'denied' : 'changes_requested', decidedAt: new Date().toISOString() as never, decisionCapabilities: [] }
+    return { ...current, status: input.decision === 'approve' ? 'approved' : input.decision === 'deny' ? 'denied' : 'changes_requested', decidedAt: this.clock().toISOString() as never, decisionCapabilities: [] }
   }
 }

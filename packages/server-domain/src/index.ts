@@ -1,5 +1,6 @@
 export * from '@wemux/domain'
 export * from './access.js'
+export * from './artifact.js'
 export * from './audit.js'
 export * from './credentials.js'
 export * from './connectors.js'

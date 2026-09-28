@@ -1,4 +1,6 @@
 import { adminRoutes } from './admin-routes.ts'
+import { attentionRoutes } from './attention-routes.ts'
+import { artifactRoutes } from './artifact-routes.ts'
 import { authRoutes } from './auth-routes.ts'
 import { canvasRoutes } from './canvas-routes.ts'
 import { channelRoutes } from './channel-routes.ts'
@@ -27,6 +29,8 @@ export const routes: readonly RouteDescriptor[] = [
   ...connectorRoutes,
   ...taskRoutes,
   ...projectionRoutes,
+  ...attentionRoutes,
+  ...artifactRoutes,
   ...projectRoutes,
   ...workspaceRoutes,
   ...workerRoutes,

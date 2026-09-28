@@ -97,22 +97,39 @@ export interface ApprovalQuery {
 
 export type ApprovalPage = CursorPage<ApprovalView>
 
-/** Reserved F1 seam for G50. Batch one deliberately returns an empty page. */
+export type AttentionItemKind = 'approval' | 'task_assignment' | 'run_problem' | 'channel_dead_letter'
 export interface AttentionView {
   readonly projectionKey: string
+  readonly kind: AttentionItemKind
   readonly projectId: ProjectId
-  readonly occurredAt: Timestamp
+  readonly title: string
+  readonly detail: string
+  readonly href: string
+  readonly sourceId: string
+  readonly occurredAt: Timestamp | null
   readonly freshness: ProjectionFreshness
 }
 export interface AttentionQuery {
+  readonly actorId?: UserId
   readonly projectId?: ProjectId
-  readonly status?: ApprovalProjectionStatus
+  readonly kind?: AttentionItemKind
   readonly cursor?: string
   readonly limit?: number
 }
+export interface AttentionGroup {
+  readonly kind: AttentionItemKind
+  readonly label: string
+  readonly count: number
+  readonly items: readonly AttentionView[]
+}
+export interface AttentionResult {
+  readonly total: number
+  readonly generatedAt: Timestamp
+  readonly groups: readonly AttentionGroup[]
+}
 export type AttentionPage = CursorPage<AttentionView>
 
-export type TimelineSourceKind = 'audit' | 'task_activity' | 'run' | 'channel_delivery' | 'session'
+export type TimelineSourceKind = 'audit' | 'task_activity' | 'run' | 'channel_delivery' | 'session' | 'artifact'
 export interface TimelineEvent {
   readonly cursor: string
   readonly sourceKind: TimelineSourceKind

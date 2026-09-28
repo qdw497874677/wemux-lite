@@ -74,6 +74,9 @@ export class AuthenticationService {
    * 实例管理员校验：授权根是部署声明的邮箱（`WEMUX_ADMIN_EMAILS`）。持登录会话不再等于管理员，
    * 且实例没有任何可自助完成的提权入口。Team 级 owner/admin 与实例级管理员互不提升。
    */
+  async isAdministrator(userId: UserId): Promise<boolean> {
+    return this.administrators.configured && this.administrators.isAdministrator(this.store.identity, userId)
+  }
   async authenticateAdmin(credential: RequestCredential): Promise<void> {
     if (!credential.loginSession && !credential.bearer) throw new AppError(401, 'Unauthorized')
     const userId = (await this.actor(credential, 'admin')).userId

@@ -580,6 +580,15 @@ const accountMigrations = [
      created_at TEXT NOT NULL, updated_at TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)),
      UNIQUE(channel_id,binding_id,journal_identity));
    CREATE INDEX IF NOT EXISTS channel_outbound_claim ON channel_outbound_deliveries(status,next_attempt_at,lease_expires_at,created_at);`,
+  // G48 decision receipts and optimistic terminal overlays share the 24-hour idempotency window.
+  `CREATE TABLE IF NOT EXISTS approval_decision_receipts (
+     actor_id TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+     created_at TEXT NOT NULL, expires_at TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)),
+     PRIMARY KEY(actor_id,request_id));
+   CREATE INDEX IF NOT EXISTS approval_decision_receipts_expiry ON approval_decision_receipts(expires_at);
+   CREATE TABLE IF NOT EXISTS approval_decision_overlays (
+     projection_key TEXT PRIMARY KEY, expires_at TEXT NOT NULL, data TEXT NOT NULL CHECK(json_valid(data)));
+   CREATE INDEX IF NOT EXISTS approval_decision_overlays_expiry ON approval_decision_overlays(expires_at);`,
   // Channel token rotation keeps multiple credential revisions during a bounded overlap. Delivery rows
   // intentionally lose their foreign keys to definitions/bindings so deleting management data retains diagnostics.
   `CREATE TABLE channel_secrets_rebuilt (
@@ -612,6 +621,24 @@ const accountMigrations = [
    DROP TABLE channel_outbound_deliveries;
    ALTER TABLE channel_outbound_deliveries_rebuilt RENAME TO channel_outbound_deliveries;
    CREATE INDEX channel_outbound_claim ON channel_outbound_deliveries(status,next_attempt_at,lease_expires_at,created_at);`,
+  `CREATE TABLE IF NOT EXISTS artifacts (
+     id TEXT PRIMARY KEY, project_id TEXT NOT NULL, task_id TEXT NOT NULL, run_id TEXT NOT NULL,
+     session_id TEXT NOT NULL, workspace_id TEXT NOT NULL, worker_id TEXT NOT NULL,
+     relative_path TEXT NOT NULL, mime_type TEXT NOT NULL, size INTEGER NOT NULL CHECK(size >= 0),
+     source TEXT NOT NULL CHECK(source='manual'), review_state TEXT NOT NULL,
+     revision INTEGER NOT NULL CHECK(revision > 0), created_by TEXT NOT NULL,
+     created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+   CREATE INDEX IF NOT EXISTS artifacts_task_created ON artifacts(task_id,created_at DESC);
+   CREATE TRIGGER IF NOT EXISTS trg_artifact_created_activity AFTER INSERT ON artifacts BEGIN
+     INSERT INTO task_activity(task_id,seq,data,source_key) VALUES(NEW.task_id,COALESCE((SELECT MAX(seq)+1 FROM task_activity WHERE task_id=NEW.task_id),1),json_object('type','artifact.registered','actor','system','payload',json_object('artifactId',NEW.id,'runId',NEW.run_id,'createdBy',NEW.created_by,'relativePath',NEW.relative_path,'reviewState',NEW.review_state,'revision',NEW.revision),'requestId','artifact:'||NEW.id||':registered','occurredAt',NEW.created_at),'artifact:'||NEW.id||':registered');
+   END;
+   CREATE TRIGGER IF NOT EXISTS trg_artifact_reviewed_activity AFTER UPDATE OF review_state ON artifacts WHEN NEW.review_state <> OLD.review_state BEGIN
+     INSERT INTO task_activity(task_id,seq,data,source_key) VALUES(NEW.task_id,COALESCE((SELECT MAX(seq)+1 FROM task_activity WHERE task_id=NEW.task_id),1),json_object('type','artifact.reviewed','actor','system','payload',json_object('artifactId',NEW.id,'runId',NEW.run_id,'createdBy',NEW.created_by,'relativePath',NEW.relative_path,'reviewState',NEW.review_state,'revision',NEW.revision),'requestId','artifact:'||NEW.id||':review:'||NEW.revision,'occurredAt',NEW.updated_at),'artifact:'||NEW.id||':review:'||NEW.revision);
+   END;
+   CREATE TABLE IF NOT EXISTS artifact_requests (
+     request_id TEXT PRIMARY KEY, operation TEXT NOT NULL, artifact_id TEXT NOT NULL,
+     request_hash TEXT NOT NULL, response_json TEXT NOT NULL CHECK(json_valid(response_json)), created_at TEXT NOT NULL);
+   CREATE INDEX IF NOT EXISTS artifact_requests_created ON artifact_requests(created_at);`,
 ]
 
 const migrations = [...legacyMigrations, ...accountMigrations]

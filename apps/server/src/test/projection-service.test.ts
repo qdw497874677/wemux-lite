@@ -4,7 +4,7 @@ import { ProjectionService, decodeProjectionCursor } from '../application/projec
 import type { ApprovalView } from '@wemux/server-domain'
 
 const now = '2026-04-01T12:00:00.000Z'
-function serviceFixture() {
+function serviceFixture(overlays: readonly ApprovalView[] = []) {
   const projects = [{ id: 'project-visible', name: 'Visible' }]
   const task = { id: 'task-1', projectId: 'project-visible', title: 'Ship approval', version: 3 }
   const review = { id: 'review-1', taskId: 'task-1', taskRunId: 'run-1', actor: 'user-reviewer', requestedAt: now, status: 'pending' }
@@ -24,7 +24,7 @@ function serviceFixture() {
     },
     identity: { queryAudit: async () => ({ items: [{ id: 'audit-1', actorId: 'user-reviewer', action: 'review.requested', resource: { kind: 'project', id: 'project-visible' }, metadata: { requestId: 'request-review' }, occurredAt: now, result: 'success' }] }) },
   }
-  return new ProjectionService(store as never, { list: async () => projects } as never, { list: async () => [session] } as never)
+  return new ProjectionService(store as never, { list: async () => projects } as never, { list: async () => [session] } as never, { listOverlays: async () => overlays } as never)
 }
 
 test('projection service aggregates task and session approvals with freshness and stable cursor', async () => {
@@ -49,11 +49,11 @@ test('approval status is a presentation filter applied outside the F1 projection
   assert.equal(page.items.length, 2)
 })
 
-test('projection service remembers a decision and exposes the corresponding timeline event', async () => {
-  const service = serviceFixture(), pending = (await service.approvals('viewer' as never, { sourceKind: 'task_review' })).items[0]
+test('projection service reads a persisted decision overlay and exposes the corresponding timeline event', async () => {
+  const pending = (await serviceFixture().approvals('viewer' as never, { sourceKind: 'task_review' })).items[0]
   assert.ok(pending)
   const decided: ApprovalView = { ...pending, status: 'approved', decidedAt: '2026-04-01T12:01:00.000Z' as never, decisionCapabilities: [] }
-  service.rememberDecision(decided)
+  const service = serviceFixture([decided])
   assert.equal((await service.approvals('viewer' as never, { sourceKind: 'task_review' })).items[0]?.status, 'approved')
   assert.ok((await service.timeline('viewer' as never, {})).items.some(item => item.action === 'approval.decided'))
 })

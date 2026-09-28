@@ -16,6 +16,7 @@ import type { Session } from '@wemux/server-domain'
 import type { ServerStore } from './ports/server-store.ts'
 import type { ProjectAccessService } from './project-access-service.ts'
 import type { SessionAccessService } from './session-access-service.ts'
+import type { ApprovalDecisionRepository } from './ports/approval-decision-repository.ts'
 import { AppError } from './errors.ts'
 
 interface ProjectionCursor { readonly occurredAt: string; readonly sourceKind: string; readonly sourceId: string }
@@ -80,14 +81,15 @@ function currentSessionApprovals(session: Session, events: readonly JournalEvent
 }
 
 export class ProjectionService implements CrossEntityProjectionPort {
-  private readonly overlays = new Map<string, ApprovalView>()
   private readonly store: ServerStore
   private readonly projects: ProjectAccessService
   private readonly sessions: SessionAccessService
-  constructor(store: ServerStore, projects: ProjectAccessService, sessions: SessionAccessService) {
+  private readonly approvalDecisions: ApprovalDecisionRepository
+  constructor(store: ServerStore, projects: ProjectAccessService, sessions: SessionAccessService, approvalDecisions: ApprovalDecisionRepository) {
     this.store = store
     this.projects = projects
     this.sessions = sessions
+    this.approvalDecisions = approvalDecisions
   }
 
   async approvals(actorId: UserId, query: ApprovalQuery): Promise<ApprovalPage> {
@@ -116,7 +118,7 @@ export class ProjectionService implements CrossEntityProjectionPort {
       const events = (await this.store.cache.readEvents(session.id, 1 as never, state.contiguousSeq)).events
       approvals.push(...currentSessionApprovals(session, events, state.status))
     }
-    const remembered = this.decisionOverlays()
+    const remembered = await this.decisionOverlays()
     const deduped = [...new Map(approvals.map(item => [item.projectionKey, remembered.get(item.projectionKey) ?? item])).values()]
       .filter(item => !query.sourceKind || item.source.kind === query.sourceKind)
       .map(item => ({ ...item, occurredAt: item.requestedAt, sourceKind: item.source.kind, sourceId: item.projectionKey }))
@@ -136,6 +138,8 @@ export class ProjectionService implements CrossEntityProjectionPort {
   }
 
   async attention(_actorId: UserId, _query: AttentionQuery): Promise<AttentionPage> { return { items: [], nextCursor: null } }
+
+  async allowedProjectIds(actorId: UserId): Promise<ReadonlySet<ProjectId>> { return new Set((await this.projects.list(actorId)).map(project => project.id)) }
 
   async timeline(actorId: UserId, query: TimelineQuery): Promise<TimelinePage> {
     const projects = await this.projects.list(actorId)
@@ -164,7 +168,7 @@ export class ProjectionService implements CrossEntityProjectionPort {
         subject: { kind: audit.resource.kind, id: audit.resource.id, label: visible.get(projectId)?.name ?? audit.resource.kind }, summary: audit.action,
         result: audit.result, href: `/projects/${projectId}`, freshness: { status: 'current', observedAt: audit.occurredAt } })
     }
-    for (const overlay of this.decisionOverlays().values()) {
+    for (const overlay of (await this.decisionOverlays()).values()) {
       if (!visible.has(overlay.projectId) || (query.projectId && query.projectId !== overlay.projectId) || !overlay.decidedAt) continue
       events.push({ cursor: '', sourceKind: overlay.source.kind === 'task_review' ? 'task_activity' : 'session', sourceId: `approval:${overlay.projectionKey}:${overlay.sourceRevision}`, sourceKey: `approval.decided:${overlay.projectionKey}:${overlay.sourceRevision}`, occurredAt: overlay.decidedAt, projectId: overlay.projectId,
         actor: { kind: 'system', id: null, label: '审批服务' }, action: 'approval.decided', subject: { kind: 'approval', id: overlay.projectionKey, label: overlay.title }, summary: `${overlay.title}：${overlay.status === 'approved' ? '已批准' : overlay.status === 'denied' ? '已拒绝' : '要求修改'}`,
@@ -180,6 +184,8 @@ export class ProjectionService implements CrossEntityProjectionPort {
     return page(filtered, query.cursor, query.limit)
   }
 
-  private decisionOverlays(): ReadonlyMap<string, ApprovalView> { return this.overlays }
-  rememberDecision(approval: ApprovalView): void { this.overlays.set(approval.projectionKey, approval) }
+  private async decisionOverlays(): Promise<ReadonlyMap<string, ApprovalView>> {
+    const persisted = await this.approvalDecisions.listOverlays(new Date().toISOString() as Timestamp)
+    return new Map(persisted.map(item => [item.projectionKey, item] as const))
+  }
 }
