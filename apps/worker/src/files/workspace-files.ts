@@ -1,12 +1,13 @@
 import { execFile } from 'node:child_process'
 import { constants } from 'node:fs'
-import { lstat, open, realpath, readdir } from 'node:fs/promises'
-import { isAbsolute, relative, resolve } from 'node:path'
+import { lstat, mkdir, open, realpath, readdir } from 'node:fs/promises'
+import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import type { Timestamp } from '@wemux/domain'
 import type { WorkspaceDiffLine } from '@wemux/wire-protocol'
 
-export const MAX_FILE_READ_BYTES = 1024 * 1024
+export const MAX_FILE_READ_BYTES = 10 * 1024 * 1024
+export const MAX_FILE_WRITE_BYTES = 10 * 1024 * 1024
 
 export interface WorkspaceFileEntry {
   readonly name: string
@@ -17,9 +18,15 @@ export interface WorkspaceFileEntry {
 
 export interface WorkspaceFileRead {
   readonly content: string | null
+  readonly base64Content?: string
   readonly size: number
   readonly truncated: boolean
   readonly binary: boolean
+}
+
+export interface WorkspaceFileWrite {
+  readonly subpath: string
+  readonly size: number
 }
 
 export interface WorkspaceFileDiff {
@@ -144,6 +151,39 @@ export async function diffWorkspaceFile(workspaceRoot: string, subpath: string):
   return { supported: true, lines: parseGitDiff(stdout) }
 }
 
+const decodeBase64 = (content: string): Buffer => {
+  if (typeof content !== 'string') throw new Error('Invalid base64 content')
+  if (content.length > Math.ceil(MAX_FILE_WRITE_BYTES / 3) * 4 + 4) throw new Error(`File exceeds ${MAX_FILE_WRITE_BYTES} byte limit`)
+  if (content.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(content) || content.slice(0, -2).includes('=') || !/^(?:|[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{4})$/.test(content.slice(-4))) throw new Error('Invalid base64 content')
+  const bytes = Buffer.from(content, 'base64')
+  if (bytes.length > MAX_FILE_WRITE_BYTES) throw new Error(`File exceeds ${MAX_FILE_WRITE_BYTES} byte limit`)
+  return bytes
+}
+
+export async function writeWorkspaceFile(workspaceRoot: string, subpath: string, base64Content: string): Promise<WorkspaceFileWrite> {
+  if (typeof subpath !== 'string' || !subpath || subpath.includes('\0') || isAbsolute(subpath)) throw new Error('Invalid workspace path')
+  const root = await realpath(workspaceRoot)
+  const candidate = resolve(root, subpath)
+  assertInside(root, candidate)
+  const parent = dirname(candidate)
+  let ancestor = parent
+  while (ancestor !== root) {
+    try { ancestor = await realpath(ancestor); break }
+    catch (error) {
+      if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') throw error
+      ancestor = dirname(ancestor)
+    }
+  }
+  ancestor = await realpath(ancestor)
+  assertInside(root, ancestor)
+  await mkdir(parent, { recursive: true })
+  assertInside(root, await realpath(parent))
+  const bytes = decodeBase64(base64Content)
+  const handle = await open(candidate, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0), 0o600)
+  try { await handle.writeFile(bytes) } finally { await handle.close() }
+  return { subpath: relative(root, candidate).replaceAll('\\', '/'), size: bytes.length }
+}
+
 export async function readWorkspaceFile(workspaceRoot: string, subpath: string, maxBytes: number): Promise<WorkspaceFileRead> {
   if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_FILE_READ_BYTES) throw new Error(`maxBytes must be between 1 and ${MAX_FILE_READ_BYTES}`)
   const target = await resolveWorkspacePath(workspaceRoot, subpath)
@@ -160,6 +200,7 @@ export async function readWorkspaceFile(workspaceRoot: string, subpath: string, 
     const binary = content === null || bytes.includes(0)
     return {
       content: binary ? null : content,
+      ...(binary ? { base64Content: bytes.toString('base64') } : {}),
       size: stat.size,
       truncated: stat.size > bytesRead,
       binary,

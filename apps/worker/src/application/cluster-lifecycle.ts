@@ -170,7 +170,7 @@ export class ClusterLifecycle {
     const gateway = this.gateway ?? new CapabilityGateway(null, this.connectors)
     const endpoint = await gateway.listen()
     this.gateway = gateway
-    const runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, { send: () => {} }, workerId, installation.name, new FilesystemAgentLaunchContextProvider(this.options.home, endpoint, turn => this.connectors.registerTurn(turn, workerId)), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }))
+    const runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, { send: () => {} }, workerId, installation.name, new FilesystemAgentLaunchContextProvider(this.options.home, endpoint, turn => this.connectors.registerTurn(turn, workerId)), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), null, this.connectors)
     try {
       await runtime.initialize()
       this.runtime = runtime
@@ -259,7 +259,7 @@ export class ClusterLifecycle {
           new Promise<void>(resolve => setTimeout(resolve, 1000)),
         ])
       }
-      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint, turn => this.connectors.registerTurn(turn, identity.workerId)), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), await loadNodePty())
+      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint, turn => this.connectors.registerTurn(turn, identity.workerId)), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), await loadNodePty(), this.connectors)
       this.runtime = runtime
       await runtime.initialize()
       this.transport = transport

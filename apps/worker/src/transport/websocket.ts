@@ -86,7 +86,7 @@ export class WebSocketTransport implements WorkerTransport {
       headers: { authorization: `Bearer ${this.options.authToken}` },
       handshakeTimeout: connectTimeoutMs,
       perMessageDeflate: false,
-      maxPayload: 4 * 1024 * 1024,
+      maxPayload: 16 * 1024 * 1024,
     })
     this.socket = socket
     this.connectTimer = setTimeout(() => socket.terminate(), connectTimeoutMs)

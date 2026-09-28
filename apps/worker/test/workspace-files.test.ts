@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { promisify } from 'node:util'
-import { diffWorkspaceFile, listWorkspaceFiles, MAX_FILE_READ_BYTES, parseGitDiff, readWorkspaceFile } from '../src/files/workspace-files.js'
+import { diffWorkspaceFile, listWorkspaceFiles, MAX_FILE_READ_BYTES, MAX_FILE_WRITE_BYTES, parseGitDiff, readWorkspaceFile, writeWorkspaceFile } from '../src/files/workspace-files.js'
 
 const git = promisify(execFile)
 
@@ -30,7 +30,24 @@ test('workspace file access rejects traversal and symlink escape', async () => {
   }
 })
 
-test('workspace file read truncates at the requested limit and caps requests at 1MB', async () => {
+test('workspace file write is binary-safe, creates parents, and rejects traversal, symlink escapes, invalid base64, and oversized content', async () => {
+  const { parent, root } = await fixture()
+  try {
+    const binary = Buffer.from([0, 1, 2, 0xfe, 0xff])
+    assert.deepEqual(await writeWorkspaceFile(root, 'uploads/nested/image.bin', binary.toString('base64')), { subpath: 'uploads/nested/image.bin', size: binary.length })
+    assert.deepEqual(await readWorkspaceFile(root, 'uploads/nested/image.bin', 32), { content: null, base64Content: binary.toString('base64'), size: binary.length, truncated: false, binary: true })
+    await writeFile(join(parent, 'secret.txt'), 'secret')
+    await symlink(parent, join(root, 'escape-dir'))
+    await assert.rejects(writeWorkspaceFile(root, '../secret.txt', 'YQ=='), /escapes workspace root/)
+    await assert.rejects(writeWorkspaceFile(root, 'escape-dir/file.txt', 'YQ=='), /escapes workspace root/)
+    await assert.rejects(writeWorkspaceFile(root, 'uploads/bad.bin', '%%%'), /Invalid base64 content/)
+    await assert.rejects(writeWorkspaceFile(root, 'uploads/large.bin', Buffer.alloc(MAX_FILE_WRITE_BYTES + 1).toString('base64')), /byte limit/)
+  } finally {
+    await rm(parent, { recursive: true, force: true })
+  }
+})
+
+test('workspace file read truncates at the requested limit and caps requests at 10MB', async () => {
   const { parent, root } = await fixture()
   try {
     await writeFile(join(root, 'large.txt'), 'x'.repeat(MAX_FILE_READ_BYTES + 32))
@@ -42,7 +59,7 @@ test('workspace file read truncates at the requested limit and caps requests at 
     })
     await assert.rejects(readWorkspaceFile(root, 'large.txt', MAX_FILE_READ_BYTES + 1), /maxBytes/)
     await writeFile(join(root, 'binary.dat'), Buffer.from([0xff, 0xfe, 0xfd]))
-    assert.deepEqual(await readWorkspaceFile(root, 'binary.dat', 16), { content: null, size: 3, truncated: false, binary: true })
+    assert.deepEqual(await readWorkspaceFile(root, 'binary.dat', 16), { content: null, base64Content: '//79', size: 3, truncated: false, binary: true })
   } finally {
     await rm(parent, { recursive: true, force: true })
   }

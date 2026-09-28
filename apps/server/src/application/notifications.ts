@@ -22,9 +22,16 @@ export class Notifications {
   }
   commands(workerId: WorkerId): void { this.emitter.emit(`commands:${workerId}`) }
   session(sessionId: SessionId): void { this.emitter.emit(`session:${sessionId}`) }
+  terminal(event: TerminalEventPayload): void { this.emitter.emit(`terminal:${event.sessionId}`, event) }
   authorization(userId: UserId): void { this.emitter.emit(`authorization:${userId}`) }
   onCommands(workerId: WorkerId, listener: Listener): () => void { return this.subscribe(`commands:${workerId}`, listener) }
   onSession(sessionId: SessionId, listener: Listener): () => void { return this.subscribe(`session:${sessionId}`, listener) }
+  onTerminal(sessionId: SessionId, listener: (event: TerminalEventPayload) => void | Promise<void>): () => void {
+    const key = `terminal:${sessionId}`
+    const isolated = (event: TerminalEventPayload) => { try { void Promise.resolve(listener(event)).catch(error => this.failure(key, error)) } catch (error) { this.failure(key, error) } }
+    this.emitter.on(key, isolated)
+    return () => { this.emitter.off(key, isolated) }
+  }
   onAuthorization(userId: UserId, listener: Listener): () => void { return this.subscribe(`authorization:${userId}`, listener) }
   private failure(key: string, error: unknown): void {
     // A broken diagnostics sink must not affect an already committed API either.

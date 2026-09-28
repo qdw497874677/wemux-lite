@@ -53,6 +53,18 @@ test('session file routes authorize the session and proxy list/read/diff respons
   assert.equal(read.status, 200)
   assert.equal(read.data.content, 'export {}\n')
 
+  const writeRequest = request(base, token, `/sessions/${session.id}/fs/write`, { subpath: 'uploads/image.png', base64Content: 'AAEC/w==' })
+  const writeMessage = await peer.wait(message => message.type === 'fs.request' && message.operation === 'write')
+  assert.equal(writeMessage.type, 'fs.request')
+  assert.equal(writeMessage.operation, 'write')
+  if (writeMessage.operation !== 'write') throw new Error('Expected file write request')
+  assert.equal(writeMessage.subpath, 'uploads/image.png')
+  assert.equal(writeMessage.base64Content, 'AAEC/w==')
+  peer.send({ type: 'fs.response', requestId: writeMessage.requestId, ok: true, operation: 'write', subpath: writeMessage.subpath, size: 4 })
+  const written = await writeRequest
+  assert.equal(written.status, 200)
+  assert.deepEqual(written.data, { type: 'fs.response', requestId: writeMessage.requestId, ok: true, operation: 'write', subpath: 'uploads/image.png', size: 4 })
+
   const diffRequest = request(base, token, `/sessions/${session.id}/fs/diff`, { subpath: 'src/index.ts' })
   const diffMessage = await peer.wait(message => message.type === 'fs.request' && message.operation === 'diff')
   assert.equal(diffMessage.type, 'fs.request')
@@ -61,6 +73,8 @@ test('session file routes authorize the session and proxy list/read/diff respons
   assert.equal(diff.status, 200)
   assert.deepEqual(diff.data.lines, [{ type: 'del', oldLine: 1, text: 'export {}' }, { type: 'add', newLine: 1, text: 'export const value = 1' }])
 
-  assert.equal((await request(base, token, `/sessions/${session.id}/fs/read`, { subpath: 'x', maxBytes: 1024 * 1024 + 1 })).status, 400)
+  assert.equal((await request(base, token, `/sessions/${session.id}/fs/read`, { subpath: 'x', maxBytes: 10 * 1024 * 1024 + 1 })).status, 400)
+  assert.equal((await request(base, token, `/sessions/${session.id}/fs/write`, { subpath: '', base64Content: 'YQ==' })).status, 400)
+  assert.equal((await request(base, token, `/sessions/${session.id}/fs/write`, { subpath: 'uploads/too-large.bin', base64Content: 'x'.repeat(Math.ceil((10 * 1024 * 1024) / 3) * 4 + 5) })).status, 400)
   assert.equal((await request(base, token, `/sessions/${session.id}/fs/diff`, { subpath: '' })).status, 400)
 })
