@@ -9,10 +9,26 @@ export const capabilityToolNames = [
   'agent.inbox.read',
   'mcp.list_tools',
   'mcp.call',
+  'http.call',
 ] as const
 
 export type CapabilityToolName = (typeof capabilityToolNames)[number]
 export type CapabilityAssetKind = 'skill' | 'prompt' | 'instruction' | 'file'
+
+/** Non-secret Connector definition pinned to one Turn. */
+export interface CapabilityConnectorSnapshot {
+  readonly id: string
+  readonly projectId: ProjectId
+  readonly kind: 'mcp' | 'http'
+  readonly name: string
+  readonly revision: number
+  readonly enabled: boolean
+  readonly allowedWorkerIds: readonly string[]
+  readonly credentialRef: string | null
+  readonly credentialAvailability: 'not_required' | 'unconfigured' | 'available' | 'unavailable' | 'invalid'
+  readonly riskDefaults: { readonly requireApprovalForRead: boolean; readonly allowMcpReadOnlyHint: boolean }
+  readonly config: unknown
+}
 
 export interface CapabilityAsset {
   readonly id: string
@@ -33,6 +49,8 @@ export interface CapabilitySnapshot {
   readonly assets: readonly CapabilityAsset[]
   readonly allowedTools: readonly CapabilityToolName[]
   readonly allowedConnectorIds: readonly string[]
+  /** Immutable, non-secret Connector definitions visible to this Turn. */
+  readonly connectors?: readonly CapabilityConnectorSnapshot[]
   readonly createdAt: string
 }
 

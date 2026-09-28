@@ -11,6 +11,7 @@ import type { WorkerConnectorStore } from './store.js'
 
 interface ActiveTurn { readonly token: string; readonly snapshot: CapabilitySnapshot; readonly claims: CapabilityGrantClaims; readonly workerId: string }
 type Pending = ConnectorApprovalRequest & { readonly id: string; readonly createdAt: string; resolve(decision: 'approve' | 'deny'): void; readonly timer: NodeJS.Timeout }
+export type ConnectorApprovalEvent = { readonly kind: 'requested'; readonly approval: Omit<Pending, 'resolve' | 'timer'> } | { readonly kind: 'resolved'; readonly approvalId: string; readonly decision: 'approve' | 'deny' }
 
 export class WorkerConnectorRuntime {
   readonly store: WorkerConnectorStore
@@ -22,25 +23,32 @@ export class WorkerConnectorRuntime {
   private readonly turns = new Map<string, ActiveTurn>()
   private readonly pending = new Map<string, Pending>()
 
-  constructor(store: WorkerConnectorStore, options: { readonly fetch?: typeof fetch; readonly lookup?: import('@wemux/connector').GuardedFetchDnsLookup; readonly supervisor?: McpProcessSupervisor } = {}) {
+  constructor(store: WorkerConnectorStore, options: { readonly fetch?: typeof fetch; readonly lookup?: import('@wemux/connector').GuardedFetchDnsLookup; readonly supervisor?: McpProcessSupervisor; readonly onApproval?: (event: ConnectorApprovalEvent) => void | Promise<void> } = {}) {
     this.store = store
     this.credentials = WorkerCredentialStore.fromEnvironment(store)
     this.supervisor = options.supervisor ?? new McpProcessSupervisor()
     this.mcp = new WorkerMcpClient({ supervisor: this.supervisor, fetch: options.fetch, lookup: options.lookup, deploymentAllowsPrivateNetwork: process.env.WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK === 'true' })
     this.http = new HttpConnectorExecutor(this.credentials, { fetch: options.fetch, lookup: options.lookup })
-    const approval: ConnectorApprovalPort = { request: input => this.requestApproval(input) }
+    const approval: ConnectorApprovalPort = { request: (input, signal) => this.requestApproval(input, signal, options.onApproval) }
     this.gateway = new ToolExecutionGateway(store, this.credentials, this.mcp, { verify: token => {
       const active = this.turns.get(token)
       if (!active) throw new Error('Unknown capability token')
       return active.claims
-    } }, approval)
+    } }, approval, this.http)
   }
 
   async registerTurn(turn: Turn, workerId: string): Promise<{ token: string; snapshot: CapabilitySnapshot; release(): Promise<void> }> {
-    const connectors = (await this.store.listConnectorDefinitions()).filter(definition => definition.kind === 'mcp' && definition.enabled && (!definition.allowedWorkerIds.length || definition.allowedWorkerIds.includes(workerId as never)))
+    const installed = (await this.store.listConnectorDefinitions()).filter(definition => definition.enabled && (!definition.allowedWorkerIds.length || definition.allowedWorkerIds.includes(workerId as never)))
     const existing = turn.capabilitySnapshot
-    const snapshot: CapabilitySnapshot = existing ? { ...existing, allowedConnectorIds: intersect(existing.allowedConnectorIds ?? [], connectors.map(item => item.id)) } : {
-      id: `local-${turn.id}`, projectId: 'local' as never, workspaceId: 'local' as never, sessionId: turn.sessionId, version: 1, assets: [], allowedTools: ['mcp.list_tools', 'mcp.call'], allowedConnectorIds: connectors.map(item => item.id), createdAt: new Date().toISOString(),
+    const pinned = existing?.connectors ?? installed
+    for (const definition of pinned) {
+      const local = installed.find(item => item.id === definition.id && item.revision === definition.revision)
+      if (local) await this.store.saveConnectorDefinition({ ...local, credentialAvailability: definition.credentialAvailability })
+    }
+    const connectorIds = intersect(existing?.allowedConnectorIds ?? installed.map(item => item.id), installed.map(item => item.id))
+    const connectors = pinned.filter(item => connectorIds.includes(item.id as never))
+    const snapshot: CapabilitySnapshot = existing ? { ...existing, allowedConnectorIds: connectorIds, connectors } : {
+      id: `local-${turn.id}`, projectId: 'local' as never, workspaceId: 'local' as never, sessionId: turn.sessionId, version: 1, assets: [], allowedTools: ['mcp.list_tools', 'mcp.call', 'http.call'], allowedConnectorIds: connectorIds, connectors, createdAt: new Date().toISOString(),
     }
     const token = turn.capabilityToken ?? randomBytes(32).toString('base64url')
     const claims: CapabilityGrantClaims = { id: `worker-${turn.id}`, sessionId: turn.sessionId, turnId: turn.id, actorAgentId: turn.sessionId, projectId: snapshot.projectId, workspaceId: snapshot.workspaceId, allowedTools: snapshot.allowedTools, allowedConnectorIds: snapshot.allowedConnectorIds, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 60_000).toISOString() }
@@ -54,6 +62,7 @@ export class WorkerConnectorRuntime {
     const common = { token, snapshot: active.snapshot, currentTurn: { sessionId: active.claims.sessionId, turnId: active.claims.turnId, projectId: active.claims.projectId, workspaceId: active.claims.workspaceId, workerId: active.workerId }, connectorId: String(input.connectorId ?? ''), agentSupportsApproval: true, signal }
     if (operation === 'mcp.list_tools') return { status: 200, body: await this.gateway.listTools(common) }
     if (operation === 'mcp.call') return { status: 200, body: await this.gateway.execute({ ...common, requestId: String(input.requestId ?? ''), toolCallId: String(input.toolCallId ?? '') as never, connectorRevision: Number(input.connectorRevision), toolName: String(input.toolName ?? ''), input: input.arguments ?? {} }) }
+    if (operation === 'http.call') return { status: 200, body: await this.gateway.executeHttp({ ...common, requestId: String(input.requestId ?? ''), toolCallId: String(input.toolCallId ?? '') as never, connectorRevision: Number(input.connectorRevision), operationId: String(input.operationId ?? ''), input: httpInput(input.input) }) }
     return null
   }
 
@@ -100,17 +109,23 @@ export class WorkerConnectorRuntime {
   }
   forceShutdown() { for (const pending of this.pending.values()) pending.resolve('deny'); this.turns.clear(); this.mcp.forceShutdown() }
 
-  private requestApproval(input: ConnectorApprovalRequest): Promise<'approve' | 'deny'> {
-    const id = `${input.requestId}:${input.toolCallId}`
+  private requestApproval(input: ConnectorApprovalRequest, signal?: AbortSignal, onApproval?: (event: ConnectorApprovalEvent) => void | Promise<void>): Promise<'approve' | 'deny'> {
+    const id = input.approvalId
     return new Promise(resolve => {
-      const finish = (decision: 'approve' | 'deny') => { const pending = this.pending.get(id); if (!pending) return; clearTimeout(pending.timer); this.pending.delete(id); resolve(decision) }
+      const finish = (decision: 'approve' | 'deny') => { const pending = this.pending.get(id); if (!pending) return; clearTimeout(pending.timer); this.pending.delete(id); signal?.removeEventListener('abort', abort); void onApproval?.({ kind: 'resolved', approvalId: id, decision }); resolve(decision) }
+      const abort = () => finish('deny')
       const timer = setTimeout(() => finish('deny'), 5 * 60_000); timer.unref()
-      this.pending.set(id, { ...input, id, createdAt: new Date().toISOString(), timer, resolve: finish })
+      const pending = { ...input, id, createdAt: new Date().toISOString(), timer, resolve: finish }
+      this.pending.set(id, pending)
+      signal?.addEventListener('abort', abort, { once: true })
+      const { resolve: _resolve, timer: _timer, ...approval } = pending
+      void onApproval?.({ kind: 'requested', approval })
     })
   }
 }
 
 function intersect<T>(left: readonly T[], right: readonly T[]) { const allowed = new Set(right); return left.filter(value => allowed.has(value)) }
+function httpInput(value: unknown) { return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, never> : {} }
 function safeMessage(error: unknown): string { const value = error instanceof Error ? error.message : 'Connector test failed'; return value.replace(/(?:Basic|Bearer)\s+\S+/gi, '[redacted]').slice(0, 512) }
 function validateDefinition(definition: McpConnectorDefinition) {
   if (definition.kind !== 'mcp' || !definition.id || !definition.name || !Number.isSafeInteger(definition.revision) || definition.revision < 1) throw new Error('Invalid MCP connector definition')

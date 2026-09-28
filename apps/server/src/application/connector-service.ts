@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { CommandId, ProjectId, Timestamp, UserId, WorkerId } from '@wemux/domain'
-import type { ConnectorDefinition, ConnectorId, HttpConnectorDefinition } from '@wemux/connector'
+import type { ConnectorDefinition, ConnectorId, HttpConnectorDefinition, McpConnectorDefinition } from '@wemux/connector'
 import { stableFingerprint } from '@wemux/connector'
 import type { ConnectorMutationResult, ConnectorTestResult } from '@wemux/server-domain'
 import type { ConnectorRevisionReport, WorkerCommand } from '@wemux/wire-protocol'
@@ -47,7 +47,7 @@ export class ConnectorService {
     const replay = await this.replay<ConnectorMutationResult>(input, fingerprint)
     if (replay) return replay
     const at = now(), id = randomUUID() as ConnectorId
-    const definition = { ...parsed, id, projectId: input.projectId, revision: 1, credentialAvailability: parsed.config.authentication === 'none' ? 'not_required' : 'unconfigured', createdAt: at, updatedAt: at } satisfies HttpConnectorDefinition
+    const definition = completeDefinition(parsed, { id, projectId: input.projectId, revision: 1, credentialAvailability: connectorAuthentication(parsed) === 'none' ? 'not_required' : 'unconfigured', createdAt: at, updatedAt: at })
     const result: ConnectorMutationResult = { definition, replayed: false, commandIds: [] }
     await this.repository.create(definition, request(input, fingerprint, 'create', id, result))
     return this.distributeNewRevision(actorId, input, definition, result, 'create')
@@ -61,7 +61,7 @@ export class ConnectorService {
     const replay = await this.replay<ConnectorMutationResult>(input, fingerprint)
     if (replay) return replay
     if (current.revision !== input.expectedRevision) throw new AppError(409, 'Connector revision conflict', 'revision_conflict')
-    const definition = { ...parsed, id: current.id, projectId: current.projectId, revision: current.revision + 1, credentialAvailability: current.credentialAvailability, createdAt: current.createdAt, updatedAt: now() } satisfies HttpConnectorDefinition
+    const definition = completeDefinition(parsed, { id: current.id, projectId: current.projectId, revision: current.revision + 1, credentialAvailability: current.credentialAvailability, createdAt: current.createdAt, updatedAt: now() })
     const result: ConnectorMutationResult = { definition, replayed: false, commandIds: [] }
     if (!await this.repository.update(definition, input.expectedRevision, request(input, fingerprint, 'update', definition.id, result))) throw new AppError(409, 'Connector revision conflict', 'revision_conflict')
     return this.distributeNewRevision(actorId, input, definition, result, 'update')
@@ -161,14 +161,34 @@ export class ConnectorService {
 
 const now = (): Timestamp => new Date().toISOString() as Timestamp
 function request(input: WriteInput, fingerprint: string, operation: ConnectorRequestRecord['operation'], connectorId: ConnectorId, result: unknown): ConnectorRequestRecord { return { projectId: input.projectId, requestId: input.requestId, fingerprint, operation, connectorId, result, createdAt: now() } }
-function parseDefinition(value: unknown, projectId: ProjectId): Omit<HttpConnectorDefinition, 'id' | 'projectId' | 'revision' | 'credentialAvailability' | 'createdAt' | 'updatedAt'> {
+type ConnectorDefinitionDraft = Omit<HttpConnectorDefinition, 'id' | 'projectId' | 'revision' | 'credentialAvailability' | 'createdAt' | 'updatedAt'> | Omit<McpConnectorDefinition, 'id' | 'projectId' | 'revision' | 'credentialAvailability' | 'createdAt' | 'updatedAt'>
+function parseDefinition(value: unknown, projectId: ProjectId): ConnectorDefinitionDraft {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AppError(400, 'Invalid Connector definition')
   const v = value as Record<string, unknown>
   const allowed = ['kind','name','description','enabled','allowedWorkerIds','credentialRef','riskDefaults','config']
   if (Object.keys(v).some(key => !allowed.includes(key))) throw new AppError(400, 'Unknown Connector field')
-  if (v.kind !== 'http' || typeof v.name !== 'string' || !v.name.trim() || v.name.length > 200 || (v.description !== null && typeof v.description !== 'string') || typeof v.enabled !== 'boolean' || !Array.isArray(v.allowedWorkerIds) || !v.riskDefaults || !v.config) throw new AppError(400, 'Invalid HTTP Connector definition')
-  const config = v.config as Record<string, unknown>, url = new URL(String(config.baseUrl))
-  if (!['http:','https:'].includes(url.protocol) || url.username || url.password || url.hash) throw new AppError(400, 'Invalid baseUrl')
-  if (!Array.isArray(config.allowedOperations) || !config.allowedOperations.length || config.allowedOperations.length > 128) throw new AppError(400, 'Invalid allowedOperations')
-  return { kind: 'http', name: v.name.trim(), description: v.description as string | null, enabled: v.enabled, allowedWorkerIds: [...new Set(v.allowedWorkerIds.map(String))] as WorkerId[], credentialRef: v.credentialRef === null ? null : String(v.credentialRef) as never, riskDefaults: v.riskDefaults as never, config: { baseUrl: url.toString(), allowedOperations: config.allowedOperations as never, authentication: config.authentication as never, publicHeaders: config.publicHeaders as never, allowPrivateNetwork: config.allowPrivateNetwork as never } }
+  if ((v.kind !== 'http' && v.kind !== 'mcp') || typeof v.name !== 'string' || !v.name.trim() || v.name.length > 200 || (v.description !== null && typeof v.description !== 'string') || typeof v.enabled !== 'boolean' || !Array.isArray(v.allowedWorkerIds) || !v.riskDefaults || !v.config) throw new AppError(400, 'Invalid Connector definition')
+  const common = { name: v.name.trim(), description: v.description as string | null, enabled: v.enabled, allowedWorkerIds: [...new Set(v.allowedWorkerIds.map(String))] as WorkerId[], credentialRef: v.credentialRef === null ? null : String(v.credentialRef) as never, riskDefaults: v.riskDefaults as never }
+  const config = v.config as Record<string, unknown>
+  if (v.kind === 'http') {
+    const url = new URL(String(config.baseUrl))
+    if (!['http:','https:'].includes(url.protocol) || url.username || url.password || url.hash) throw new AppError(400, 'Invalid baseUrl')
+    if (!Array.isArray(config.allowedOperations) || !config.allowedOperations.length || config.allowedOperations.length > 128) throw new AppError(400, 'Invalid allowedOperations')
+    return { ...common, kind: 'http', config: { baseUrl: url.toString(), allowedOperations: config.allowedOperations as never, authentication: config.authentication as never, publicHeaders: config.publicHeaders as never, allowPrivateNetwork: config.allowPrivateNetwork as never } }
+  }
+  if (config.transport === 'stdio') return { ...common, kind: 'mcp', config: { transport: 'stdio', command: String(config.command), args: config.args as readonly string[], cwd: config.cwd === null ? null : String(config.cwd), publicEnvironment: config.publicEnvironment as Readonly<Record<string, string>>, secretEnvironmentNames: config.secretEnvironmentNames as readonly string[] } }
+  if (config.transport === 'streamable_http') {
+    const url = new URL(String(config.url))
+    if (!['http:','https:'].includes(url.protocol) || url.username || url.password || url.hash) throw new AppError(400, 'Invalid MCP url')
+    return { ...common, kind: 'mcp', config: { transport: 'streamable_http', url: url.toString(), publicHeaders: config.publicHeaders as Readonly<Record<string, string>>, authentication: config.authentication as 'none' | 'api_key' | 'custom_credential', allowPrivateNetwork: config.allowPrivateNetwork as boolean } }
+  }
+  throw new AppError(400, 'Invalid MCP Connector definition')
+}
+
+function completeDefinition(parsed: ConnectorDefinitionDraft, fields: Pick<ConnectorDefinition, 'id' | 'projectId' | 'revision' | 'credentialAvailability' | 'createdAt' | 'updatedAt'>): ConnectorDefinition {
+  return parsed.kind === 'http' ? { ...parsed, ...fields } : { ...parsed, ...fields }
+}
+function connectorAuthentication(definition: ConnectorDefinitionDraft): 'none' | 'api_key' | 'custom_credential' {
+  if (definition.kind === 'http') return definition.config.authentication
+  return definition.config.transport === 'stdio' ? (definition.config.secretEnvironmentNames.length ? 'custom_credential' : 'none') : definition.config.authentication
 }

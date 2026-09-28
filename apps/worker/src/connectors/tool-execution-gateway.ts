@@ -1,10 +1,12 @@
-import { stableFingerprint, summarizeAgentResult, summarizeJournal, type ConnectorExecutionErrorCode, type ExecutionResult, type McpConnectorDefinition, type OperationType, type ToolCall } from '@wemux/connector'
+import { stableFingerprint, summarizeAgentResult, summarizeJournal, type ConnectorDefinition, type ConnectorExecutionErrorCode, type ExecutionResult, type HttpConnectorDefinition, type McpConnectorDefinition, type OperationType, type ToolCall } from '@wemux/connector'
 import type { CapabilityGrantClaims, CapabilitySnapshot, ToolCallId } from '@wemux/domain'
 import { ConnectorCredentialError, WorkerCredentialStore } from './credential-store.ts'
 import { McpLimitError, WorkerMcpClient } from './mcp-client.ts'
+import { HttpConnectorExecutor, type HttpCallInput } from './http-executor.ts'
 import type { WorkerConnectorStore } from './store.ts'
 
 export interface ConnectorApprovalRequest {
+  readonly approvalId: string
   readonly sessionId: string
   readonly turnId: string
   readonly toolCallId: string
@@ -42,6 +44,7 @@ export class ToolExecutionGateway {
   private readonly store: WorkerConnectorStore
   private readonly credentials: WorkerCredentialStore
   private readonly mcp: WorkerMcpClient
+  private readonly http: HttpConnectorExecutor
   private readonly verifier: CapabilityVerifier
   private readonly approval?: ConnectorApprovalPort
   private readonly active = new Map<string, Promise<ExecutionResult>>()
@@ -52,10 +55,12 @@ export class ToolExecutionGateway {
     mcp: WorkerMcpClient,
     verifier: CapabilityVerifier,
     approval?: ConnectorApprovalPort,
+    http = new HttpConnectorExecutor(credentials),
   ) {
     this.store = store
     this.credentials = credentials
     this.mcp = mcp
+    this.http = http
     this.verifier = verifier
     this.approval = approval
   }
@@ -64,7 +69,7 @@ export class ToolExecutionGateway {
     const requestId = `list:${input.currentTurn.turnId}:${input.connectorId}`
     try {
       const scope = await this.authorize(input.token, input.snapshot, input.currentTurn, input.connectorId)
-      const connector = await this.definition(input.connectorId)
+      const connector = await this.definition(input.connectorId) as McpConnectorDefinition
       if (!scope.allowedConnectorIds.includes(connector.id)) return failure('scope_denied', requestId, connector.revision, 'Connector is outside capability scope')
       const secret = await this.resolveSecret(connector)
       const catalog = await this.mcp.listTools(input.currentTurn.sessionId, connector, secret, input.signal)
@@ -72,7 +77,15 @@ export class ToolExecutionGateway {
     } catch (error) { return mappedFailure(error, requestId, null) }
   }
 
+  async executeHttp(input: Omit<ToolExecutionInput, 'toolName'> & { readonly operationId: string; readonly input: Omit<HttpCallInput, 'operationId'> }): Promise<ExecutionResult> {
+    return this.executeInternal({ ...input, input: { ...input.input, operationId: input.operationId }, toolName: input.operationId }, 'http')
+  }
+
   async execute(input: ToolExecutionInput): Promise<ExecutionResult> {
+    return this.executeInternal(input, 'mcp')
+  }
+
+  private async executeInternal(input: ToolExecutionInput, kind: 'mcp' | 'http'): Promise<ExecutionResult> {
     if (!input.requestId || Buffer.byteLength(input.requestId) > 200) return failure('invalid_input', input.requestId || '', null, 'requestId must contain at most 200 UTF-8 bytes')
     const fingerprint = stableFingerprint({ projectId: input.currentTurn.projectId, workspaceId: input.currentTurn.workspaceId, sessionId: input.currentTurn.sessionId, turnId: input.currentTurn.turnId, toolCallId: input.toolCallId, connectorId: input.connectorId, connectorRevision: input.connectorRevision, toolName: input.toolName, input: input.input })
     const existing = await this.store.getConnectorExecution(input.requestId)
@@ -83,32 +96,34 @@ export class ToolExecutionGateway {
       if (active) return active
       return failure('connector_unavailable', input.requestId, existing.toolCall.connectorRevision, 'An earlier execution is still in progress', true)
     }
-    const promise = this.run(input, fingerprint)
+    const promise = this.run(input, fingerprint, kind)
     this.active.set(input.requestId, promise)
     try { return await promise } finally { this.active.delete(input.requestId) }
   }
 
-  private async run(input: ToolExecutionInput, fingerprint: string): Promise<ExecutionResult> {
-    let connector: McpConnectorDefinition | null = null
+  private async run(input: ToolExecutionInput, fingerprint: string, kind: 'mcp' | 'http'): Promise<ExecutionResult> {
+    let connector: ConnectorDefinition | null = null
     try {
       const claims = await this.authorize(input.token, input.snapshot, input.currentTurn, input.connectorId)
-      connector = await this.definition(input.connectorId)
+      connector = await this.definition(input.connectorId, kind)
       if (connector.revision !== input.connectorRevision) return failure('revision_conflict', input.requestId, connector.revision, 'Connector revision changed', true)
       if (!claims.allowedConnectorIds.includes(connector.id)) return failure('scope_denied', input.requestId, connector.revision, 'Connector is outside grant scope')
-      const provisionalCall: ToolCall = { requestId: input.requestId, fingerprint, projectId: input.currentTurn.projectId as never, workspaceId: input.currentTurn.workspaceId as never, sessionId: input.currentTurn.sessionId as never, turnId: input.currentTurn.turnId as never, toolCallId: input.toolCallId, connectorId: connector.id, connectorRevision: connector.revision, action: { kind: 'mcp', toolName: input.toolName }, operationType: 'write', input: input.input, actor: { kind: 'agent', agentId: claims.actorAgentId, requestedByAccountId: (input.requestedByAccountId ?? null) as never, channelDeliveryId: input.channelDeliveryId ?? null }, createdAt: new Date().toISOString() as never }
+      const operationType = kind === 'http' ? httpOperation(connector as HttpConnectorDefinition, input.toolName) : 'write'
+      const provisionalCall: ToolCall = { requestId: input.requestId, fingerprint, projectId: input.currentTurn.projectId as never, workspaceId: input.currentTurn.workspaceId as never, sessionId: input.currentTurn.sessionId as never, turnId: input.currentTurn.turnId as never, toolCallId: input.toolCallId, connectorId: connector.id, connectorRevision: connector.revision, action: kind === 'http' ? { kind: 'http', operationId: input.toolName } : { kind: 'mcp', toolName: input.toolName }, operationType, input: input.input, actor: { kind: 'agent', agentId: claims.actorAgentId, requestedByAccountId: (input.requestedByAccountId ?? null) as never, channelDeliveryId: input.channelDeliveryId ?? null }, createdAt: new Date().toISOString() as never }
       const started = await this.store.beginConnectorExecution({ requestId: input.requestId, fingerprint, state: 'running', toolCall: provisionalCall, result: null, journalSummary: null, createdAt: provisionalCall.createdAt, completedAt: null })
       if (started === 'exists') return failure('connector_unavailable', input.requestId, connector.revision, 'Connector execution is already running', true)
-      const catalog = await this.mcp.listTools(input.currentTurn.sessionId, connector, await this.resolveSecret(connector), input.signal)
-      const tool = catalog.tools.find(item => item.name === input.toolName)
-      if (!tool) return await this.persist(provisionalCall, failure('invalid_input', input.requestId, connector.revision, 'Unknown MCP tool'))
-      const call: ToolCall = { ...provisionalCall, operationType: tool.operationType }
+      const call: ToolCall = kind === 'mcp'
+        ? await this.resolveMcpCall(input, connector as McpConnectorDefinition, provisionalCall)
+        : provisionalCall
       if (requiresApproval(call.operationType, connector)) {
         if (!input.agentSupportsApproval || input.channelDeliveryId || !this.approval) return await this.persist(call, failure('approval_denied', input.requestId, connector.revision, 'Interactive approval is unavailable'))
-        const decision = await this.approval.request({ sessionId: call.sessionId, turnId: call.turnId, toolCallId: call.toolCallId, requestId: call.requestId, fingerprint, connectorRevision: call.connectorRevision, operationType: call.operationType }, input.signal)
+        const decision = await this.approval.request({ approvalId: call.toolCallId, sessionId: call.sessionId, turnId: call.turnId, toolCallId: call.toolCallId, requestId: call.requestId, fingerprint, connectorRevision: call.connectorRevision, operationType: call.operationType }, input.signal)
         if (decision !== 'approve') return await this.persist(call, failure('approval_denied', input.requestId, connector.revision, 'Connector call was denied'))
       }
       if (input.signal?.aborted) return await this.persist(call, failure('cancelled', input.requestId, connector.revision, 'Connector call was cancelled'))
-      const output = await this.mcp.callTool(input.currentTurn.sessionId, connector, await this.resolveSecret(connector), input.toolName, input.input, input.signal)
+      const output = kind === 'mcp'
+        ? await this.mcp.callTool(input.currentTurn.sessionId, connector as McpConnectorDefinition, await this.resolveSecret(connector), input.toolName, input.input, input.signal)
+        : (await this.http.execute(connector as HttpConnectorDefinition, input.input as HttpCallInput, input.signal)).agentSummary
       const agentResult = summarizeAgentResult(output)
       if (JSON.stringify(agentResult) === '"[truncated]"' || Buffer.byteLength(JSON.stringify(agentResult)) > 256 * 1024) return await this.persist(call, failure('response_too_large', input.requestId, connector.revision, 'MCP result exceeds the Agent output limit'))
       return await this.persist(call, success(agentResult, input.requestId, connector.revision))
@@ -126,13 +141,20 @@ export class ToolExecutionGateway {
     return claims
   }
 
-  private async definition(id: string): Promise<McpConnectorDefinition> {
+  private async definition(id: string, kind: 'mcp' | 'http' = 'mcp'): Promise<ConnectorDefinition> {
     const connector = await this.store.getConnectorDefinition(id)
-    if (!connector || connector.kind !== 'mcp' || !connector.enabled) throw new GatewayError('connector_unavailable', 'MCP connector is unavailable')
+    if (!connector || connector.kind !== kind || !connector.enabled) throw new GatewayError('connector_unavailable', `${kind.toUpperCase()} connector is unavailable`)
     return connector
   }
 
-  private async resolveSecret(connector: McpConnectorDefinition) {
+  private async resolveMcpCall(input: ToolExecutionInput, connector: McpConnectorDefinition, provisionalCall: ToolCall): Promise<ToolCall> {
+    const catalog = await this.mcp.listTools(input.currentTurn.sessionId, connector, await this.resolveSecret(connector), input.signal)
+    const tool = catalog.tools.find(item => item.name === input.toolName)
+    if (!tool) throw new GatewayError('invalid_input', 'Unknown MCP tool')
+    return { ...provisionalCall, operationType: tool.operationType }
+  }
+
+  private async resolveSecret(connector: ConnectorDefinition) {
     if (!connector.credentialRef) return null
     return (await this.credentials.resolve(connector.credentialRef, connector.id)).secret
   }
@@ -154,7 +176,12 @@ class GatewayError extends Error {
     this.retryable = retryable
   }
 }
-function requiresApproval(operationType: OperationType, connector: McpConnectorDefinition) { return operationType !== 'read' || connector.riskDefaults.requireApprovalForRead }
+function httpOperation(connector: HttpConnectorDefinition, operationId: string): OperationType {
+  const operation = connector.config.allowedOperations.find(item => item.id === operationId)
+  if (!operation) throw new GatewayError('invalid_input', 'Unknown HTTP operation')
+  return operation.operationTypeOverride ?? (['GET', 'HEAD', 'OPTIONS'].includes(operation.method) ? 'read' : operation.method === 'DELETE' ? 'destructive' : 'write')
+}
+function requiresApproval(operationType: OperationType, connector: ConnectorDefinition) { return operationType !== 'read' || connector.riskDefaults.requireApprovalForRead }
 function success(output: unknown, requestId: string, connectorRevision: number): ExecutionResult { return { ok: true, output, requestId, connectorRevision, completedAt: new Date().toISOString() as never } }
 function failure(code: ConnectorExecutionErrorCode, requestId: string, connectorRevision: number | null, message: string, retryable = false): ExecutionResult { return { ok: false, error: { code, message, retryable, retryAfterMs: null }, requestId, connectorRevision, completedAt: new Date().toISOString() as never } }
 function mappedFailure(error: unknown, requestId: string, revision: number | null): ExecutionResult {
@@ -166,5 +193,6 @@ function mappedFailure(error: unknown, requestId: string, revision: number | nul
   if (/timed out|timeout/i.test(message)) return failure('timeout', requestId, revision, 'Connector operation timed out')
   if (/private|reserved|userinfo|protocol/i.test(message)) return failure('unsafe_destination', requestId, revision, 'Connector destination is not allowed')
   if (/capacity|shutting down/i.test(message)) return failure('connector_unavailable', requestId, revision, 'Connector is unavailable', true)
-  return failure('upstream_error', requestId, revision, 'MCP server returned an error')
+  if (/exceeds the Agent output limit/i.test(message)) return failure('response_too_large', requestId, revision, message)
+  return failure('upstream_error', requestId, revision, 'Connector returned an error')
 }

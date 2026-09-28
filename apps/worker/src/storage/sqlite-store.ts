@@ -131,14 +131,15 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
   }
   async getConnectorDefinition(id: string): Promise<ConnectorDefinition | null> { await this.tail; return this.getDocument('cluster-connector-definitions', id) ?? this.getDocument('connector-definitions', id) }
   async saveConnectorDefinition(definition: ConnectorDefinition): Promise<void> { await this.tail; this.put('connector-definitions', definition.id, definition) }
-  async saveClusterConnectorDefinition(definition: ConnectorDefinition): Promise<'applied' | 'current' | 'stale'> {
-    await this.tail
-    const existing = this.getDocument<ConnectorDefinition>('cluster-connector-definitions', definition.id)
-    if (existing && existing.projectId !== definition.projectId) throw new Error('Connector project binding is immutable')
-    if (existing && existing.revision > definition.revision) return 'stale'
-    if (existing && existing.revision === definition.revision) return JSON.stringify(existing) === JSON.stringify(definition) ? 'current' : Promise.reject(new Error('Connector revision content conflict'))
-    this.put('cluster-connector-definitions', definition.id, definition)
-    return 'applied'
+  saveClusterConnectorDefinition(definition: ConnectorDefinition): Promise<'applied' | 'current' | 'stale'> {
+    return this.mutate(async () => {
+      const existing = this.getDocument<ConnectorDefinition>('cluster-connector-definitions', definition.id)
+      if (existing && existing.projectId !== definition.projectId) throw new Error('Connector project binding is immutable')
+      if (existing && existing.revision > definition.revision) return 'stale'
+      if (existing && existing.revision === definition.revision) return JSON.stringify(existing) === JSON.stringify(definition) ? 'current' : Promise.reject(new Error('Connector revision content conflict'))
+      this.put('cluster-connector-definitions', definition.id, definition)
+      return 'applied'
+    })
   }
   async deleteConnectorDefinition(id: string): Promise<void> { await this.tail; this.db.prepare("DELETE FROM documents WHERE bucket IN ('connector-definitions','cluster-connector-definitions') AND id=?").run(id) }
   async getConnectorCredential(id: string): Promise<CredentialRecord | null> {
@@ -230,14 +231,17 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
     this.put('sessions', id, { ...session, runtimeState: state, updatedAt: now() })
     this.append(id, [{ occurredAt: now(), payload: { kind: 'session.runtime.changed', state, reason: null } }])
   }
+  private mutate<T>(work: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(work)
+    this.tail = result.catch(() => {})
+    return result
+  }
   transaction<T>(work: (tx: WorkerStoreTx) => Promise<T>): Promise<T> {
-    const result = this.tail.then(async () => {
+    return this.mutate(async () => {
       this.db.exec('BEGIN IMMEDIATE')
       try { const value = await work(this.tx); this.db.exec('COMMIT'); return value }
       catch (error) { this.db.exec('ROLLBACK'); throw error }
     })
-    this.tail = result.catch(() => {})
-    return result
   }
   private tx: WorkerStoreTx = {
     workspaces: {

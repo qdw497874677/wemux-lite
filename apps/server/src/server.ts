@@ -135,7 +135,8 @@ export function createWemuxServer(options: WemuxServerOptions) {
   // 账号安全（Ticket 06/08）与会话策略共用同一套参数：强认证窗口与撤销规则不允许有两份实现。
   const security = new AccountSecurityService({ store, identity, mail: mail.settings, mailReason: mail.reason, sessionPolicy })
   const capabilitySecret = options.capabilitySecret ?? process.env.WEMUX_CAPABILITY_SECRET ?? randomCapabilitySecret()
-  const capabilities = new CapabilityService(store, now, new CapabilityTokenService(capabilitySecret, now))
+  const connectorRepository = new SqliteConnectorRepository(options.databasePath)
+  const capabilities = new CapabilityService(store, now, new CapabilityTokenService(capabilitySecret, now), connectorRepository)
   const service = new ServerService(store, notifications, capabilities, workerAccess, projects, sessionAccess)
   const projections = new ProjectionService(store, projects, sessionAccess)
   const streams = new SessionStreams(service)
@@ -145,7 +146,6 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const canvasLayouts = new CanvasLayoutService(store, new SqliteCanvasLayoutRepository(store), projects, lineage)
   const projectStreams = new ProjectStreams(notifications)
   let gateway: WorkerGateway | undefined
-  const connectorRepository = new SqliteConnectorRepository(options.databasePath)
   const connectors = new ConnectorService(connectorRepository, store, projects, workerAccess, notifications)
   const channelRepository = new SqliteChannelRepository(options.databasePath)
   const encryptionKey = options.channelEncryptionKey?.trim() || process.env.WEMUX_CONNECTOR_ENCRYPTION_KEY?.trim()

@@ -44,6 +44,7 @@ export class WorkerRuntime {
     private readonly connectorControl?: {
       syncClusterDefinition(definition: Extract<WorkerCommand, { kind: 'connector.definition.sync' }>['definition'], workerId: string): Promise<{ status: ConnectorRevisionReport['status']; credentialAvailability: ConnectorRevisionReport['credentialAvailability']; message: string }>
       testClusterDefinition(connectorId: string, revision: number): Promise<{ status: ConnectorRevisionReport['status']; credentialAvailability: ConnectorRevisionReport['credentialAvailability']; message: string }>
+      resolveApproval?(approvalId: string, decision: 'approve' | 'deny'): boolean
     }) {
     this.agentRunner = new WorkerAgentRunner({ agents, runtimeAdapters, sessionStore: store })
     this.terminals = terminalPty ? new TerminalManager(
@@ -297,6 +298,7 @@ export class WorkerRuntime {
       return
     }
     if (command.kind === 'runtime.approval.resolve') {
+      if (this.connectorControl?.resolveApproval?.(command.approvalId, command.decision)) return
       const activeTurnId = (await this.store.sessions.get(command.sessionId))?.activeTurnId
       if (!activeTurnId) throw new Error('Agent invocation is not active')
       await this.agentRunner.resolveApproval({ sessionId: command.sessionId, invocationId: activeTurnId, approvalId: command.approvalId, decision: command.decision })

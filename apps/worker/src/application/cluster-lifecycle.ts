@@ -4,7 +4,7 @@ import type { AgentAdapter } from './ports/agent-adapter.js'
 import type { LocalState } from './ports/local-state.js'
 import type { WorkerStore } from './ports/worker-store.js'
 import type { SessionStore } from '@wemux/agent-interchange'
-import type { AgentKey, CommandId } from '@wemux/domain'
+import type { AgentKey, CommandId, Timestamp } from '@wemux/domain'
 import { WorkerTransportStore } from '../transport/transport-store.js'
 import type { CommandReceipt, WorkerCommand } from '@wemux/wire-protocol'
 import type { WorkerIdentity } from '../domain/worker-identity.js'
@@ -74,7 +74,7 @@ export class ClusterLifecycle {
     private readonly store: WorkerStore & LocalState & SessionStore,
     private agents: readonly AgentAdapter[],
     private readonly options: ClusterLifecycleOptions,
-  ) { this.connectors = new WorkerConnectorRuntime(store as WorkerStore & LocalState & SessionStore & import('../connectors/store.js').WorkerConnectorStore) }
+  ) { this.connectors = new WorkerConnectorRuntime(store as WorkerStore & LocalState & SessionStore & import('../connectors/store.js').WorkerConnectorStore, { onApproval: event => this.publishConnectorApproval(event) }) }
 
   connection() { return this.state }
 
@@ -91,6 +91,12 @@ export class ClusterLifecycle {
   connectorCredentialAvailable() { return this.connectors.credentials.available }
   listConnectorApprovals() { return this.connectors.listApprovals() }
   resolveConnectorApproval(id: string, decision: 'approve' | 'deny') { return this.connectors.resolveApproval(id, decision) }
+
+  private async publishConnectorApproval(event: import('../connectors/runtime.js').ConnectorApprovalEvent) {
+    if (event.kind !== 'requested') return
+    const approval = event.approval
+    await this.store.transaction(tx => tx.appendJournal(approval.sessionId as never, [{ occurredAt: approval.createdAt as Timestamp, payload: { kind: 'approval.requested', turnId: approval.turnId as never, approvalId: approval.approvalId as never, action: { kind: 'connector', requestId: approval.requestId, toolCallId: approval.toolCallId, connectorRevision: approval.connectorRevision, operationType: approval.operationType }, reason: '连接器写操作需要批准' } }]))
+  }
 
   async agentSettings() {
     const settings = await readAgentSettings(this.options.home)

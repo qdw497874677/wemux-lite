@@ -9,6 +9,7 @@ import type {
   SessionId,
   Timestamp,
 } from '@wemux/domain'
+import type { ConnectorDefinition } from '@wemux/connector'
 import type {
   CapabilityAgentListResult,
   CapabilityAgentSendInput,
@@ -21,6 +22,7 @@ import type {
   CapabilitySessionInfoResult,
 } from '@wemux/wire-protocol'
 import type { ServerStore } from './ports/server-store.ts'
+import type { ConnectorRepository } from './ports/connector-repository.ts'
 import { CapabilityTokenService } from './capability-token-service.ts'
 
 export class CapabilityError extends Error {
@@ -51,11 +53,13 @@ export class CapabilityService {
   private readonly store: ServerStore
   private readonly now: () => Timestamp
   private readonly tokens: CapabilityTokenService
+  private readonly connectors?: Pick<ConnectorRepository, 'list'>
   constructor(
     store: ServerStore,
     now: () => Timestamp,
     tokens: CapabilityTokenService,
-  ) { this.store = store; this.now = now; this.tokens = tokens;}
+    connectors?: Pick<ConnectorRepository, 'list'>,
+  ) { this.store = store; this.now = now; this.tokens = tokens; this.connectors = connectors;}
 
   async listProjectAssets(projectId: ProjectId): Promise<readonly CapabilityAsset[]> {
     return this.store.resources.listCapabilityAssets(projectId)
@@ -94,18 +98,24 @@ export class CapabilityService {
   async prepareTurn(input: {
     readonly sessionId: SessionId
     readonly turnId: CapabilityGrantClaims['turnId']
+    readonly actorId?: import('@wemux/domain').UserId
     readonly allowedTools?: readonly CapabilityToolName[]
   }, resources = this.store.resources): Promise<{ readonly runtime: CapabilityRuntimePayload; readonly token: string }> {
     const session = await this.requireSession(input.sessionId, resources)
     const workspace = await resources.getWorkspace(session.workspaceId)
     if (!workspace) throw new CapabilityError('not-found', 'Workspace not found')
     const assets = await resources.listCapabilityAssets(session.projectId)
+    const connectors = await this.resolveConnectors(session, input)
+    const allowedConnectorIds = connectors.map(connector => connector.id)
     const allowedTools = input.allowedTools ?? [
       'session.info',
       'agent.list',
       'agent.send',
       'agent.inbox.list',
       'agent.inbox.read',
+      'mcp.list_tools',
+      'mcp.call',
+      'http.call',
     ]
     const now = this.now()
     const snapshot: CapabilitySnapshot = {
@@ -116,7 +126,8 @@ export class CapabilityService {
       version: 1,
       assets,
       allowedTools,
-      allowedConnectorIds: [],
+      allowedConnectorIds,
+      connectors,
       createdAt: now,
     }
     const issued = this.tokens.issue({
@@ -127,7 +138,7 @@ export class CapabilityService {
       projectId: session.projectId,
       workspaceId: session.workspaceId,
       allowedTools,
-      allowedConnectorIds: [],
+      allowedConnectorIds,
     })
     return {
       token: issued.token,
@@ -226,6 +237,24 @@ export class CapabilityService {
         : await this.store.transaction(async (tx) => tx.resources.markAgentInboxMessageRead(existing.id, this.now()))
     if (!message) throw new CapabilityError('not-found', 'Inbox message not found')
     return { message }
+  }
+
+  private async resolveConnectors(
+    session: Awaited<ReturnType<CapabilityService['requireSession']>>,
+    input: { readonly actorId?: import('@wemux/domain').UserId },
+  ): Promise<readonly ConnectorDefinition[]> {
+    if (!this.connectors || !input.actorId) return []
+    try {
+      const project = await this.store.resources.getProject(session.projectId)
+      if (!project || project.deletedAt) return []
+      const workerId = session.binding.agent.workerId
+      const records = await this.store.identity.getIdentityRecords({ userId: input.actorId, teamId: project.teamId, projectId: project.id, workerId, sessionId: session.id })
+      const projectVisible = project.ownerId === input.actorId || Boolean(records.membership && (records.projectGrant || project.shareScope === 'team'))
+      if (!projectVisible) return []
+      return (await this.connectors.list(session.projectId)).filter(connector => connector.enabled && (!connector.allowedWorkerIds.length || connector.allowedWorkerIds.includes(workerId)))
+    } catch {
+      return []
+    }
   }
 
   private async requireSession(sessionId: SessionId, resources = this.store.resources) {
