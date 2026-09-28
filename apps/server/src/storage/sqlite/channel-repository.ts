@@ -1,16 +1,17 @@
-import { DatabaseSync } from 'node:sqlite'
+import type { DatabaseSync } from 'node:sqlite'
 import type { ProjectId, SessionId, Timestamp } from '@wemux/domain'
 import type { Channel, ChannelBindingId, ChannelId } from '@wemux/connector'
 import type { InboundDelivery, OutboundDelivery } from '@wemux/server-domain'
-import { migrate } from './migrations.ts'
+import { resolveSqliteDatabase, type SharedSqliteDatabase, type SqliteDatabaseSource } from './shared-database.ts'
 import type { AcceptInboundInput, AcceptInboundResult, ChannelBindingRecord, ChannelRepository, ChannelRequestRecord, ChannelSecretRecord } from '../../application/ports/channel-repository.ts'
 
 export class SqliteChannelRepository implements ChannelRepository {
-  private queue: Promise<unknown> = Promise.resolve()
   private readonly db: DatabaseSync
-  constructor(path: string) { this.db = new DatabaseSync(path); this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;'); migrate(this.db) }
-  close(): void { this.db.close() }
-  private serial<T>(work: () => T): Promise<T> { const result = this.queue.then(work); this.queue = result.catch(() => undefined); return result }
+  private readonly database: SharedSqliteDatabase
+  private readonly ownsDatabase: boolean
+  constructor(source: SqliteDatabaseSource) { const resolved = resolveSqliteDatabase(source); this.database = resolved.database; this.ownsDatabase = resolved.owned; this.db = this.database.connection }
+  close(): void { if (this.ownsDatabase) this.database.close() }
+  private serial<T>(work: () => T): Promise<T> { return this.database.serial(work) }
   private transaction<T>(work: () => T): T { this.db.exec('BEGIN IMMEDIATE'); try { const result = work(); this.db.exec('COMMIT'); return result } catch (error) { this.db.exec('ROLLBACK'); throw error } }
 
   getChannel(id: ChannelId): Promise<Channel | null> { return this.serial(() => this.channel(this.db.prepare('SELECT data FROM channel_definitions WHERE id=?').get(id))) }

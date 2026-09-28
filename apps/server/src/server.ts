@@ -2,6 +2,7 @@ import { TaskService } from './application/task-service.ts'
 import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { SqliteServerStore } from './storage/sqlite/store.ts'
+import { SharedSqliteDatabase } from './storage/sqlite/shared-database.ts'
 import { AuthenticationService } from './application/auth.ts'
 import { AdministratorDirectory, parseAdministratorEmails } from './application/administrator-directory.ts'
 import { IdentityService, defaultLoginSessionPolicy, defaultSessionCookieName, systemClock } from './application/identity-service.ts'
@@ -108,8 +109,9 @@ function randomCapabilitySecret(): string {
 }
 
 export function createWemuxServer(options: WemuxServerOptions) {
-  // 只有真正提供连接的 Server 进程才能重置在线状态：启动瞬间确实没有任何 Worker 连接。
-  const store = new SqliteServerStore(options.databasePath, { presenceReset: true })
+  // 主库仓储共用单连接与 FIFO；presenceReset 仍只由真正拥有 Worker 连接的 Server 启动入口触发。
+  const database = new SharedSqliteDatabase(options.databasePath)
+  const store = new SqliteServerStore(database, { presenceReset: true })
   const administrators = new AdministratorDirectory(store.identity, parseAdministratorEmails(options.administratorEmails ?? process.env.WEMUX_ADMIN_EMAILS))
   const auth = new AuthenticationService(store, administrators)
   // 浏览器会话策略只有一份：账号安全里的强认证窗口与撤销语义必须和登录态完全一致。
@@ -142,10 +144,10 @@ export function createWemuxServer(options: WemuxServerOptions) {
   // 账号安全（Ticket 06/08）与会话策略共用同一套参数：强认证窗口与撤销规则不允许有两份实现。
   const security = new AccountSecurityService({ store, identity, mail: mail.settings, mailReason: mail.reason, sessionPolicy })
   const capabilitySecret = options.capabilitySecret ?? process.env.WEMUX_CAPABILITY_SECRET ?? randomCapabilitySecret()
-  const connectorRepository = new SqliteConnectorRepository(options.databasePath)
+  const connectorRepository = new SqliteConnectorRepository(database)
   const capabilities = new CapabilityService(store, now, new CapabilityTokenService(capabilitySecret, now), connectorRepository)
   const service = new ServerService(store, notifications, capabilities, workerAccess, projects, sessionAccess)
-  const delegationRepository = new SqliteDelegationRepository(options.databasePath)
+  const delegationRepository = new SqliteDelegationRepository(database)
   const delegations = new DelegationApplicationService(
     delegationRepository,
     {
@@ -164,9 +166,9 @@ export function createWemuxServer(options: WemuxServerOptions) {
     now,
   )
   capabilities.attachDelegations(delegations)
-  const approvalDecisionRepository = new SqliteApprovalDecisionRepository(options.databasePath)
+  const approvalDecisionRepository = new SqliteApprovalDecisionRepository(database)
   const projections = new ProjectionService(store, projects, sessionAccess, approvalDecisionRepository)
-  const attentionSource = new SqliteAttentionSource(options.databasePath)
+  const attentionSource = new SqliteAttentionSource(database)
   const attention = new AttentionService(projections, attentionSource)
   const streams = new SessionStreams(service)
   const terminalStreams = new TerminalStreams(notifications)
@@ -176,7 +178,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const projectStreams = new ProjectStreams(notifications)
   let gateway: WorkerGateway | undefined
   const connectors = new ConnectorService(connectorRepository, store, projects, workerAccess, notifications)
-  const channelRepository = new SqliteChannelRepository(options.databasePath)
+  const channelRepository = new SqliteChannelRepository(database)
   const encryptionKey = options.channelEncryptionKey?.trim() || process.env.WEMUX_CONNECTOR_ENCRYPTION_KEY?.trim()
   const channelCodec = encryptionKey ? new AesGcmSecretCodec({ currentKey: encryptionKey, previousKeys: process.env.WEMUX_CONNECTOR_ENCRYPTION_PREVIOUS_KEYS?.split(',').map(value => value.trim()).filter(Boolean) }) : null
   const channelRouter = new ChannelRouter(channelRepository, sessionAccess, projects, workerAccess, service)
@@ -195,7 +197,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const sessionFiles = new SessionFileService(service, workers, workerGateway)
   const sessionTerminals = new SessionTerminalService(service, workers, workerGateway)
   const tasks = new TaskService(store, event => notifications.project(event), service)
-  const artifactRepository = new SqliteArtifactRepository(options.databasePath)
+  const artifactRepository = new SqliteArtifactRepository(database)
   const artifacts = new ArtifactService(artifactRepository, store, projects)
   const approvalDecisions = new ApprovalDecisionRouter(projections, tasks, service, approvalDecisionRepository)
   const server = createServer(httpHandler({
@@ -277,6 +279,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
       attentionSource.close()
       delegationRepository.close()
       store.close()
+      database.close()
     },
   }
 }

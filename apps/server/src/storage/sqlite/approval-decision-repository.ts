@@ -1,26 +1,24 @@
-import { DatabaseSync } from 'node:sqlite'
+import type { DatabaseSync } from 'node:sqlite'
 import type { ApprovalView } from '@wemux/server-domain'
 import type { Timestamp, UserId } from '@wemux/domain'
 import type { ApprovalDecisionReceipt, ApprovalDecisionRepository } from '../../application/ports/approval-decision-repository.ts'
-import { migrate } from './migrations.ts'
+import { resolveSqliteDatabase, type SharedSqliteDatabase, type SqliteDatabaseSource } from './shared-database.ts'
 
 export class SqliteApprovalDecisionRepository implements ApprovalDecisionRepository {
   private readonly db: DatabaseSync
-  private queue: Promise<unknown> = Promise.resolve()
+  private readonly database: SharedSqliteDatabase
+  private readonly ownsDatabase: boolean
 
-  constructor(path: string) {
-    this.db = new DatabaseSync(path)
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;')
-    migrate(this.db)
+  constructor(source: SqliteDatabaseSource) {
+    const resolved = resolveSqliteDatabase(source)
+    this.database = resolved.database
+    this.ownsDatabase = resolved.owned
+    this.db = this.database.connection
   }
 
-  close(): void { this.db.close() }
+  close(): void { if (this.ownsDatabase) this.database.close() }
 
-  private serial<T>(work: () => T): Promise<T> {
-    const result = this.queue.then(work)
-    this.queue = result.catch(() => undefined)
-    return result
-  }
+  private serial<T>(work: () => T): Promise<T> { return this.database.serial(work) }
 
   async getReceipt(actorId: UserId, requestId: string, now: Timestamp): Promise<ApprovalDecisionReceipt | null> {
     return this.serial(() => {

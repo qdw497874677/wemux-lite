@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { DatabaseSync } from 'node:sqlite'
-import { migrate } from './migrations.ts'
+import type { DatabaseSync } from 'node:sqlite'
+import { resolveSqliteDatabase, type SharedSqliteDatabase, type SqliteDatabaseSource } from './shared-database.ts'
 import type { Artifact, ArtifactReviewState } from '@wemux/server-domain'
 import type { ArtifactRepository } from '../../application/ports/artifact-repository.ts'
 
@@ -18,10 +18,12 @@ const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(valu
 
 export class SqliteArtifactRepository implements ArtifactRepository {
   readonly #db: DatabaseSync
-  constructor(databasePath: string) { this.#db = new DatabaseSync(databasePath); migrate(this.#db); this.#db.exec('PRAGMA foreign_keys = OFF') }
-  close(): void { this.#db.close() }
+  readonly #database: SharedSqliteDatabase
+  readonly #ownsDatabase: boolean
+  constructor(source: SqliteDatabaseSource) { const resolved = resolveSqliteDatabase(source); this.#database = resolved.database; this.#ownsDatabase = resolved.owned; this.#db = this.#database.connection; if (this.#ownsDatabase) this.#db.exec('PRAGMA foreign_keys = OFF') }
+  close(): void { if (this.#ownsDatabase) this.#database.close() }
 
-  async create(artifact: Artifact, requestId: string, responseBody: string, now: string): Promise<Artifact> {
+  create(artifact: Artifact, requestId: string, responseBody: string, now: string): Promise<Artifact> { return this.#database.serial(() => {
     const requestHash = hash(artifact)
     const previous = this.#db.prepare('SELECT request_hash,response_json FROM artifact_requests WHERE request_id=?').get(requestId) as Record<string, unknown> | undefined
     if (previous) {
@@ -36,12 +38,12 @@ export class SqliteArtifactRepository implements ArtifactRepository {
       this.#db.exec('COMMIT')
       return artifact
     } catch (error) { this.#db.exec('ROLLBACK'); throw error }
-  }
+  }) }
 
-  async get(id: string): Promise<Artifact | null> { const row = this.#db.prepare('SELECT * FROM artifacts WHERE id=?').get(id) as Record<string, unknown> | undefined; return row ? rowToArtifact(row) : null }
-  async listByTask(taskId: string): Promise<readonly Artifact[]> { return (this.#db.prepare('SELECT * FROM artifacts WHERE task_id=? ORDER BY created_at DESC').all(taskId) as Record<string, unknown>[]).map(rowToArtifact) }
+  get(id: string): Promise<Artifact | null> { return this.#database.serial(() => { const row = this.#db.prepare('SELECT * FROM artifacts WHERE id=?').get(id) as Record<string, unknown> | undefined; return row ? rowToArtifact(row) : null }) }
+  listByTask(taskId: string): Promise<readonly Artifact[]> { return this.#database.serial(() => (this.#db.prepare('SELECT * FROM artifacts WHERE task_id=? ORDER BY created_at DESC').all(taskId) as Record<string, unknown>[]).map(rowToArtifact)) }
 
-  async review(id: string, decision: Exclude<ArtifactReviewState, 'pending'>, expectedRevision: number, requestId: string, now: string): Promise<Artifact> {
+  review(id: string, decision: Exclude<ArtifactReviewState, 'pending'>, expectedRevision: number, requestId: string, now: string): Promise<Artifact> { return this.#database.serial(() => {
     const requestHash = hash({ id, decision, expectedRevision })
     const previous = this.#db.prepare('SELECT request_hash,response_json FROM artifact_requests WHERE request_id=?').get(requestId) as Record<string, unknown> | undefined
     if (previous) { if (previous.request_hash !== requestHash) throw new Error('Idempotency conflict'); return JSON.parse(String(previous.response_json)) as Artifact }
@@ -55,5 +57,5 @@ export class SqliteArtifactRepository implements ArtifactRepository {
       this.#db.exec('COMMIT')
       return artifact
     } catch (error) { this.#db.exec('ROLLBACK'); throw error }
-  }
+  }) }
 }

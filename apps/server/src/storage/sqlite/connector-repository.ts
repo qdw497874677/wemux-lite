@@ -1,6 +1,6 @@
-import { DatabaseSync } from 'node:sqlite'
+import type { DatabaseSync } from 'node:sqlite'
 import type { ConnectorDefinition, ConnectorId } from '@wemux/connector'
-import { migrate } from './migrations.ts'
+import { resolveSqliteDatabase, type SharedSqliteDatabase, type SqliteDatabaseSource } from './shared-database.ts'
 import type {
   ConnectorDistributionRecord,
   ConnectorRepository,
@@ -8,16 +8,13 @@ import type {
 } from '../../application/ports/connector-repository.ts'
 
 export class SqliteConnectorRepository implements ConnectorRepository {
-  private queue: Promise<unknown> = Promise.resolve()
   private readonly db: DatabaseSync
-  constructor(path: string) { this.db = new DatabaseSync(path); this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;'); migrate(this.db) }
-  close(): void { this.db.close() }
+  private readonly database: SharedSqliteDatabase
+  private readonly ownsDatabase: boolean
+  constructor(source: SqliteDatabaseSource) { const resolved = resolveSqliteDatabase(source); this.database = resolved.database; this.ownsDatabase = resolved.owned; this.db = this.database.connection }
+  close(): void { if (this.ownsDatabase) this.database.close() }
 
-  private serial<T>(work: () => T): Promise<T> {
-    const result = this.queue.then(work)
-    this.queue = result.catch(() => undefined)
-    return result
-  }
+  private serial<T>(work: () => T): Promise<T> { return this.database.serial(work) }
 
   get(id: ConnectorId): Promise<ConnectorDefinition | null> {
     return this.serial(() => {

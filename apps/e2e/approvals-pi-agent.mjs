@@ -9,7 +9,7 @@ import { join, resolve } from 'node:path'
 import { chromium } from '/tmp/wemux-tailnet-pw/node_modules/playwright-core/index.mjs'
 
 const root = process.cwd()
-const evidenceDir = resolve(root, '.scratch/g44b')
+const evidenceDir = resolve(root, '.scratch/g44b-real')
 const blockedDir = resolve(root, '.scratch/feature-suite-b1/pi-agent-e2e')
 const chromiumPath = '/opt/data/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome'
 const piPath = '/opt/data/.npm-global/bin/pi'
@@ -189,8 +189,11 @@ async function realChain(piModels) {
     assert.ok(events.events.some(event => event.payload.kind === 'approval.resolved' && event.payload.approvalId === toolCallId && event.payload.decision === 'approve'))
     await page.reload()
     await page.getByText('已批准', { exact: true }).first().waitFor()
-    await page.screenshot({ path: join(evidenceDir, '02-real-pi-http-call-completed.png'), fullPage: true })
-    await writeFile(join(evidenceDir, 'summary.md'), `# G44b 真实 Pi HTTP Connector 审批验收\n\n- 结果：通过\n- Pi 模型：\`${requestedModel}\`\n- Worker：\`${workerId}\`\n- Session：\`${created.session.id}\`\n- Connector：\`${connector.id}\` revision ${connector.revision}\n- Approval：\`${pending.projectionKey}\`\n- fixture：收到 1 次 \`POST /items\`，请求体为 \`${JSON.stringify(requests[0].body)}\`\n- Journal：同时包含 \`approval.requested\`、\`approval.resolved(approve)\`、\`turn.finished(completed)\`\n- 截图：\`.scratch/g44b/01-real-pi-http-call-pending.png\`、\`.scratch/g44b/02-real-pi-http-call-completed.png\`\n`)
+    await page.screenshot({ path: join(evidenceDir, '02-real-pi-http-call-approved.png'), fullPage: true })
+    await page.goto(`${origin}/timeline`)
+    await page.getByRole('heading', { name: '时间线' }).waitFor()
+    await page.screenshot({ path: join(evidenceDir, '03-real-pi-timeline.png'), fullPage: true })
+    await writeFile(join(evidenceDir, 'summary.md'), `# G44b 真实 Pi HTTP Connector 审批验收\n\n- 结果：通过\n- Pi 模型：\`${requestedModel}\`\n- Worker：\`${workerId}\`\n- Session：\`${created.session.id}\`\n- Connector：\`${connector.id}\` revision ${connector.revision}\n- Approval：\`${pending.projectionKey}\`\n- fixture：收到 1 次 \`POST /items\`，请求体为 \`${JSON.stringify(requests[0].body)}\`\n- Journal：同时包含 \`approval.requested\`、\`approval.resolved(approve)\`、\`turn.finished(completed)\`\n- 截图：\`.scratch/g44b-real/01-real-pi-http-call-pending.png\`、\`.scratch/g44b-real/02-real-pi-http-call-approved.png\`、\`.scratch/g44b-real/03-real-pi-timeline.png\`\n`)
     await rm(join(blockedDir, 'BLOCKED.md'), { force: true })
     log('REAL PASS: Pi → http_call → pending → approve → fixture → turn completed')
   } catch (error) {

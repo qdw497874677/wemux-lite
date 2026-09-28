@@ -1,12 +1,12 @@
 import { validReviewMetadata } from '@wemux/web-contract/task-platform'
-import { DatabaseSync } from 'node:sqlite'
+import type { DatabaseSync } from 'node:sqlite'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { AgentInboxMessage, CapabilityAsset, EventSeq, JournalEvent, ProjectId, SessionId, TeamId, Timestamp, WorkerId } from '@wemux/domain'
 import type { AuditEntry, AuditPage, AuditQuery, CommandProjection, EnrollmentTokenRecord, ExternalLoginIdentity, Membership, OAuthTransaction, PersonalAccessTokenRecord, RegistrationAttempt, SessionCacheState, SessionForkRecord, TeamInvitation, User, UserEmail, VerificationChallenge, VerificationPurpose, Worker, WorkerCredentialRecord, Workspace } from '@wemux/server-domain'
 import type { ServerStore, ServerStoreTx } from '../../application/ports/server-store.ts'
 import type { PendingCommand } from '../../application/ports/server-store-types.ts'
 import { AppError } from '../../application/errors.ts'
-import { migrate } from './migrations.ts'
+import { resolveSqliteDatabase, type SharedSqliteDatabase, type SqliteDatabaseSource } from './shared-database.ts'
 
 /** One Fork per (Project, requestId): the idempotency index row points at the winning Fork. */
 const forkRequestIndexId = (projectId: ProjectId, requestId: string): string => `${projectId}:${requestId}`
@@ -14,7 +14,8 @@ const forkRequestIndexId = (projectId: ProjectId, requestId: string): string => 
 /** JSON holds domain records; indexed command/event columns implement ordering and uniqueness. */
 export class SqliteServerStore implements ServerStore {
   private readonly db: DatabaseSync
-  private queue: Promise<unknown> = Promise.resolve()
+  private readonly database: SharedSqliteDatabase
+  private readonly ownsDatabase: boolean
   private readonly transactionContext = new AsyncLocalStorage<{ id: symbol; active: boolean }>()
   private activeTransactionId: symbol | undefined
   /** Every method (including a captured method) checks its own transaction lease. */
@@ -42,9 +43,7 @@ export class SqliteServerStore implements ServerStore {
         if (typeof read !== 'function') return read
         return (...args: unknown[]) => {
           if (this.transactionContext.getStore()?.active) return Promise.reject(new Error('Use tx readers inside a transaction'))
-          const result = this.queue.then(() => read(...args))
-          this.queue = result.catch(() => undefined)
-          return result
+          return this.database.serial(() => read(...args))
         }
       },
     })
@@ -55,27 +54,22 @@ export class SqliteServerStore implements ServerStore {
    * 都不能影响正在运行的 Server 的连接状态。历史上本机 CLI 会把在线 Worker 刷成离线，
    * 而那条连接还在心跳，界面就永远停在离线。
    */
-  constructor(path: string, options: { presenceReset?: boolean } = {}) {
-    this.db = new DatabaseSync(path)
-    this.db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;')
-    try { migrate(this.db) } catch (error) { this.db.close(); throw error }
+  constructor(source: SqliteDatabaseSource, options: { presenceReset?: boolean } = {}) {
+    const resolved = resolveSqliteDatabase(source)
+    this.database = resolved.database
+    this.ownsDatabase = resolved.owned
+    this.db = this.database.connection
     if (options.presenceReset) {
       for (const worker of this.list<Worker>('worker')) this.put('worker', worker.id, { ...worker, connectionState: 'offline' })
       for (const cache of this.list<SessionCacheState>('cache')) this.put('cache', cache.sessionId, { ...cache, status: 'offline' })
     }
   }
-  close(): void { this.db.close() }
+  close(): void { if (this.ownsDatabase) this.database.close() }
   async getRecord<T>(kind: string, id: string): Promise<T | null> { return this.committedRead(() => this.get<T>(kind, id)) }
   async putRecord(kind: string, id: string, value: unknown): Promise<void> { await this.committedWrite(() => this.put(kind, id, value)) }
-  private async committedRead<T>(read: () => T): Promise<T> {
-    const result = this.queue.then(read)
-    this.queue = result.catch(() => undefined)
-    return result
-  }
+  private committedRead<T>(read: () => T): Promise<T> { return this.database.serial(read) }
   private async committedWrite(write: () => void): Promise<void> {
-    const result = this.queue.then(() => { this.db.exec('BEGIN IMMEDIATE'); try { write(); this.db.exec('COMMIT') } catch (error) { this.db.exec('ROLLBACK'); throw error } })
-    this.queue = result.catch(() => undefined)
-    await result
+    await this.database.serial(() => { this.db.exec('BEGIN IMMEDIATE'); try { write(); this.db.exec('COMMIT') } catch (error) { this.db.exec('ROLLBACK'); throw error } })
   }
   private get<T>(kind: string, id: string): T | null {
     const row = this.db.prepare('SELECT data FROM records WHERE kind=? AND id=?').get(kind, id)
@@ -624,21 +618,17 @@ export class SqliteServerStore implements ServerStore {
   }
   transaction<T>(work: (tx: ServerStoreTx) => Promise<T>): Promise<T> {
     if (this.transactionContext.getStore()?.active) return Promise.reject(new Error('Nested transactions are not supported; use tx primitives'))
-    const result = this.queue.then(() => {
+    return this.database.transaction(() => {
       const token = { id: Symbol('transaction'), active: true }
       return this.transactionContext.run(token, async () => {
         try {
-          this.db.exec('BEGIN IMMEDIATE')
           this.activeTransactionId = token.id
-          try { const value = await work(this.transactionFacade(token)); this.db.exec('COMMIT'); return value }
-          catch (error) { this.db.exec('ROLLBACK'); throw error }
+          return await work(this.transactionFacade(token))
         } finally {
           token.active = false
           this.activeTransactionId = undefined
         }
       })
     })
-    this.queue = result.catch(() => undefined)
-    return result
   }
 }
