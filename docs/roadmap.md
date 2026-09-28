@@ -42,8 +42,8 @@ Agent Network 近期采用独立的纵向优先级，不改变上述产品阶段
 - **C0 模块合同与依赖门**：冻结 Session Fork、图读模型、Session Surface 状态所有权及 Domain → Application → Host Adapter → Presentation 的依赖方向；禁止 React Flow 类型进入领域/Server 契约。
 - **C1 Fork 与血缘权威**：交付固定 `sourceEventCursor`、目标 Session 原子创建、幂等、权限收窄、审计、祖先/后代查询；先完成 API 和测试，不依赖画布 UI。
 - **C2 基础协作画布（已完成，Ticket 18）**：`@xyflow/react` 只存在于 Canvas Viewport Adapter；已交付权威图投影、摘要节点、Fork 边、选择、平移缩放、确定性默认位置、本机 revision 隔离布局和失败回退。URL 深链/返回恢复、Server CAS 布局、移动端专用降级及 100 节点预算按 Ticket 22 收口。
-- **C3 交互 Session Surface**：画布节点可直接对话，与专注视图共享草稿、Journal、队列和控制状态；复用现有 `framer-motion` 完成最大化/缩回及 viewport/scroll/focus 恢复。
-- **C4 授权实时同步与撤权**：交付权威图增量、最小 Presence、cursor 缺口恢复和打开中实时流撤权；不被团队布局阻塞。
+- **C3 交互 Session Surface（已完成，Ticket 19）**：画布节点可直接对话，与专注视图共享草稿、Journal、队列和控制状态；已交付单 interactive 节点、摘要偏好、URL 恢复和 focus 往返。
+- **C4 授权实时同步与撤权（已完成，Ticket 20）**：已交付 Server 权威 revision/cursor、有界重放与缺口 snapshot 回退、30 秒低敏 Presence、跨 Team 隔离和打开中 SSE 撤权；没有引入共同编辑或团队布局。
 - **C5 布局持久化与大型图性能**：交付个人/团队布局、冲突保护、性能基线与预算；只有实测需要时动态引入 `elkjs`。
 - **C6 编排关系与开放接口**：先按 Ticket 23 冻结 Delegation、handoff、Artifact Reference、Run Attachment 合同，再由 Ticket 21 投影到图；CLI/SDK/外部自动化调用同一 Application Interface。
 
@@ -261,4 +261,4 @@ M2 已交付的双宿主会话能力作为 C3 的运行时基础，但不据此�
 5. 现有或新增阻断问题按证据处理；历史 Web 启动提示仅在仍可复现或阻碍当前路径时优先修复，不再作为默认前置任务。
 6. 账号线 A0 已走完 A0.1（Ticket 04）/A0.2（Ticket 05）/A0.3（Ticket 07），并以 Ticket 06/08 完成密码/邮箱安全管理及登录方式显式绑定/解绑；Wave A/B/C 跨票据验收均通过（`apps/server/scripts/verify-wave-ab.mjs`、`verify-wave-c.mjs`）。A1 的 Team 创建、邀请与成员治理（Ticket 09/13）、A3 的 Project/Worker/Session 授权与实时撤权（Ticket 10–13）、A2 的 PAT、设备会话、账号生命周期与可筛选审计（Ticket 14/15）已交付；下一步回到产品主线的新增搜索/最近工作/下载授权或后续正式票据。采用 [账号系统设计](design/account-identity-system.md) 的交互与验收矩阵；真实 Google 部署实测仍需合规 HTTPS 域名、Client 配置与测试账号，未配置时只标注真实验收阻塞。
 7. 画布线先执行 C0 模块合同，再执行 C1 Fork/血缘权威；两者不改现有 UI 依赖。C1 稳定后才安装 `@xyflow/react` 推进 C2，避免先画静态假图后补领域语义。
-8. C3 已通过 Ticket 19 复用双宿主 Session Runtime，实现同一 Session Surface 的画布交互、摘要缩回与专注往返；C4 等待 A3 权限门，C5 独立验收布局性能，C6 先完成 Ticket 23 编排合同再推进 Ticket 21 投影。
+8. C3 已通过 Ticket 19 复用双宿主 Session Runtime，实现同一 Session Surface 的画布交互、摘要缩回与专注往返；C4 已通过 Ticket 20 交付权威 cursor、最小 Presence、缺口恢复与活动流撤权。下一步 C5 独立验收布局持久化与性能；C6 先完成 Ticket 23 编排合同再推进 Ticket 21 投影。

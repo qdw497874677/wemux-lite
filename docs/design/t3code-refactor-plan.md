@@ -76,6 +76,8 @@
 - 审批升级为 `request.opened/resolved` 事件对（决策结果进事件流可回放，配合上游 P0-4 审批链）
 - compaction 双模式抽象（native / slash-command）
 - AbortReason 七值枚举（上游 P0-2，t3code 的 turn.aborted 语义同源）
+- 失败分类器提供 14 类稳定子原因；仅 `agent_error.provider_network` 可自动重试，规则按具体到通用顺序匹配并守卫数字边界
+- `resume` 仅恢复 Session 的逻辑上下文与观测投影；重连后创建全新的 turn 和 provider 进程树，不续接中断 turn 的流或工具调用。旧 turn 用 `abortReason` 终止，语义对齐 AX 的快照恢复模型
 - 前置依赖：task9b 路由拆分（验证收尾中）
 
 **验收**：协议测试 + 会话页 Reasoning 展示真实 reasoning_text 流。
