@@ -12,7 +12,37 @@ const object = (value: unknown): Record<string, unknown> => {
   return value as Record<string, unknown>
 }
 
+const presetConflict = new Set(['preset_revision_conflict', 'preset_application_request_conflict', 'resource_set_revision_conflict', 'preset_binding_conflict'])
+const presetInvalid = new Set(['invalid_preset', 'invalid_preset_entry', 'invalid_preset_application', 'preset_auto_apply_unavailable', 'preset_revision_not_published', 'invalid_runtime_binding', 'preset_resource_kind_unavailable', 'duplicate_preset_entry'])
+function presetError(error: unknown): Error {
+  if (!(error instanceof Error)) return new Error('Preset operation failed')
+  if (error.message === 'preset_not_found') return new AppError(404, 'Preset revision not found', error.message)
+  if (presetConflict.has(error.message)) return new AppError(409, 'Preset or Worker resources have changed; refresh and retry', error.message)
+  if (presetInvalid.has(error.message)) return new AppError(400, 'Invalid Preset request', error.message)
+  return error
+}
+
 export const nodeResourceRoutes: readonly RouteDescriptor[] = [
+  { method: 'GET', pattern: '/resource-presets', auth: 'admin', handler: async context => { await context.operator(); context.json(200, { items: service(context).presets() }) } },
+  { method: 'POST', pattern: '/resource-presets', auth: 'admin', handler: async context => {
+    const actor = await context.operator(), body = object(await context.readBody())
+    try {
+      context.json(201, service(context).createPreset({ id: body.id as string | undefined, name: body.name as string, description: body.description as string, entries: body.entries as never, expectedRevision: body.expectedRevision as number, autoApply: body.autoApply as never, createdBy: actor }))
+    } catch (error) { throw presetError(error) }
+  } },
+  { method: 'GET', pattern: '/resource-preset-applications', auth: 'admin', handler: async context => {
+    await context.operator()
+    const workerId = context.url.searchParams.get('workerId')
+    context.json(200, { items: service(context).presetApplications(workerId ? workerId as WorkerId : undefined) })
+  } },
+  { method: 'POST', pattern: '/resource-presets/:presetId/applications', auth: 'admin', handler: async context => {
+    const actor = await context.operator(), body = object(await context.readBody())
+    if (typeof body.workerId !== 'string' || typeof body.requestId !== 'string') throw new AppError(400, 'Missing preset application fields', 'invalid_request')
+    await context.service.getWorker(body.workerId as WorkerId)
+    try {
+      context.json(201, await service(context).applyPreset({ presetId: context.params.presetId, presetRevision: body.presetRevision as number, workerId: body.workerId as WorkerId, requestId: body.requestId, expectedSetRevision: body.expectedSetRevision as number, createdBy: actor }))
+    } catch (error) { throw presetError(error) }
+  } },
   { method: 'GET', pattern: '/resources', auth: 'admin', handler: context => context.json(200, { items: service(context).resources() }) },
   { method: 'POST', pattern: '/resources', auth: 'admin', handler: async context => {
     const actor = await context.operator()

@@ -7,6 +7,8 @@ import type {
   ResourceRevision,
   ResourceRevisionId,
   ResourceSetSnapshot,
+  NodeResourcePreset,
+  NodeResourcePresetApplication,
   Timestamp,
   UserId,
   WorkerId,
@@ -21,10 +23,12 @@ type SetRow = { revision: number; fingerprint: string; snapshot_json: string; up
 export class SqliteResourceRepository {
   readonly db: DatabaseSync
   readonly ownsDatabase: boolean
+  readonly database: import('./sqlite/shared-database.ts').SharedSqliteDatabase
 
   constructor(source: SqliteDatabaseSource) {
     const opened = resolveSqliteDatabase(source)
     this.db = opened.database.connection
+    this.database = opened.database
     this.ownsDatabase = opened.owned
     this.migrate()
   }
@@ -71,6 +75,22 @@ export class SqliteResourceRepository {
         snapshot_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS resource_presets (
+        id TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        data TEXT NOT NULL,
+        PRIMARY KEY(id, revision)
+      );
+      CREATE TABLE IF NOT EXISTS resource_preset_applications (
+        id TEXT PRIMARY KEY,
+        request_id TEXT NOT NULL UNIQUE,
+        preset_id TEXT NOT NULL,
+        preset_revision INTEGER NOT NULL,
+        worker_id TEXT NOT NULL,
+        data TEXT NOT NULL,
+        FOREIGN KEY(preset_id, preset_revision) REFERENCES resource_presets(id, revision)
+      );
+      CREATE INDEX IF NOT EXISTS resource_preset_applications_worker ON resource_preset_applications(worker_id);
       CREATE TABLE IF NOT EXISTS resource_reconcile_reports (
         request_id TEXT PRIMARY KEY,
         worker_id TEXT NOT NULL,
@@ -83,6 +103,38 @@ export class SqliteResourceRepository {
   }
 
   close(): void { if (this.ownsDatabase) this.db.close() }
+
+  transaction<T>(work: () => T | Promise<T>): Promise<T> { return this.database.transaction(work) }
+
+  presets(): readonly NodeResourcePreset[] {
+    return (this.db.prepare('SELECT data FROM resource_presets ORDER BY id,revision').all() as { data: string }[]).map(row => JSON.parse(row.data) as NodeResourcePreset)
+  }
+
+  preset(id: string, revision: number): NodeResourcePreset | null {
+    const row = this.db.prepare('SELECT data FROM resource_presets WHERE id=? AND revision=?').get(id, revision) as { data: string } | undefined
+    return row ? JSON.parse(row.data) as NodeResourcePreset : null
+  }
+
+  createPreset(preset: NodeResourcePreset, expectedRevision: number): NodeResourcePreset {
+    const latest = this.db.prepare('SELECT max(revision) AS revision FROM resource_presets WHERE id=?').get(preset.id) as { revision: number | null }
+    if ((latest.revision ?? 0) !== expectedRevision || preset.revision !== expectedRevision + 1) throw new Error('preset_revision_conflict')
+    this.db.prepare('INSERT INTO resource_presets(id,revision,data) VALUES(?,?,?)').run(preset.id, preset.revision, JSON.stringify(preset))
+    return preset
+  }
+
+  presetApplication(requestId: string): NodeResourcePresetApplication | null {
+    const row = this.db.prepare('SELECT data FROM resource_preset_applications WHERE request_id=?').get(requestId) as { data: string } | undefined
+    return row ? JSON.parse(row.data) as NodeResourcePresetApplication : null
+  }
+
+  presetApplications(workerId?: WorkerId): readonly NodeResourcePresetApplication[] {
+    const rows = (workerId ? this.db.prepare('SELECT data FROM resource_preset_applications WHERE worker_id=? ORDER BY rowid DESC').all(workerId) : this.db.prepare('SELECT data FROM resource_preset_applications ORDER BY rowid DESC').all()) as { data: string }[]
+    return rows.map(row => JSON.parse(row.data) as NodeResourcePresetApplication)
+  }
+
+  createPresetApplication(value: NodeResourcePresetApplication): void {
+    this.db.prepare('INSERT INTO resource_preset_applications(id,request_id,preset_id,preset_revision,worker_id,data) VALUES(?,?,?,?,?,?)').run(value.id, value.requestId, value.presetId, value.presetRevision, value.workerId, JSON.stringify(value))
+  }
 
   createResource(resource: Resource): Resource {
     this.db.prepare('INSERT INTO resources(id,kind,name,description,data,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run(resource.id, resource.kind, resource.name, resource.description, JSON.stringify(resource), resource.createdBy, resource.createdAt, resource.updatedAt)

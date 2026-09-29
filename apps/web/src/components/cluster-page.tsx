@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useResources } from '../app/resources'
+import { PresetStudio } from '../features/presets/preset-studio'
 // 集群阶段管理：参照 wemux-slim 的 admin-nodes-page（节点/心跳）与 admin-tasks-page（阶段统计+表格+动作），
 // 映射到 wemux-lite 的三条阶段线：命令交付（pending→accepted/rejected/failed/cancelled）、
 // 工作区供给（pending→provisioning→ready/failed）、会话运行（idle/queued/running/…）。
@@ -140,6 +141,7 @@ export function ClusterPage({ api, connected, canEnrollWorkers, onAddWorker, onR
 
       <section className="space-y-3">
         <h2 className="text-sm font-semibold">工作节点</h2>
+        {canEnrollWorkers && <PresetStudio api={api} workers={workers} />}
         {!workers.length && <p className="rounded-xl border border-border bg-card p-6 text-center text-xs text-muted-foreground">{canEnrollWorkers ? '尚未注册任何工作节点。点击「添加工作节点」生成注册命令。' : '当前账号没有可使用的工作节点。请联系节点 owner 或 manager 授予 use 权限。'}</p>}
         <div className="space-y-1 rounded-lg border border-border bg-card p-2">
           {workers.map(worker => {

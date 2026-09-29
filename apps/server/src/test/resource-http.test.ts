@@ -13,6 +13,8 @@ function context(overrides: Record<string, unknown> = {}) {
   const output: { status?: number; body?: unknown } = {}
   const resources = {
     resources: () => [{ id: 'resource-1' }],
+    presets: () => [{ id: 'preset-1', revision: 1 }],
+    presetApplications: () => [{ application: { id: 'application-1' }, items: [] }],
     resource: () => ({ id: 'resource-1' }),
     revisions: () => [{ id: 'revision-1' }],
     bindings: () => [{ id: 'binding-1' }],
@@ -47,6 +49,26 @@ test('resource management routes are administrator-only and expose catalog, bind
   const desired = context({ params: { workerId: 'worker-1' } })
   await route('GET', '/workers/:workerId/resource-set').handler(desired.value)
   assert.deepEqual(desired.output.body, { workerId: 'worker-1', revision: 1, bindings: [] })
+})
+
+test('Preset routes require administrator and derive actor; invalid and conflicted writes return structured HTTP errors', async () => {
+  const presets = context()
+  await route('GET', '/resource-presets').handler(presets.value)
+  assert.deepEqual(presets.output.body, { items: [{ id: 'preset-1', revision: 1 }] })
+  const applications = context()
+  await route('GET', '/resource-preset-applications').handler(applications.value)
+  assert.deepEqual(applications.output.body, { items: [{ application: { id: 'application-1' }, items: [] }] })
+  let received: unknown
+  const created = context({ readBody: async () => ({ id: 'preset-1', name: '节点预设', description: '', entries: [], expectedRevision: 0, createdBy: 'forged' }), resources: { createPreset: (body: unknown) => { received = body; return body } } })
+  await route('POST', '/resource-presets').handler(created.value)
+  assert.equal((received as { createdBy: string }).createdBy, 'user-1')
+  assert.equal(created.output.status, 201)
+  const applied = context({ params: { presetId: 'preset-1' }, readBody: async () => ({ workerId: 'worker-1', requestId: 'request-1', expectedSetRevision: 0, presetRevision: 1, createdBy: 'forged' }), service: { getWorker: async () => ({ id: 'worker-1' }) }, resources: { applyPreset: (body: unknown) => { received = body; return body } } })
+  await route('POST', '/resource-presets/:presetId/applications').handler(applied.value)
+  assert.equal((received as { createdBy: string }).createdBy, 'user-1')
+  assert.equal(applied.output.status, 201)
+  const conflict = context({ readBody: async () => ({}), resources: { createPreset: () => { throw new Error('preset_revision_conflict') } } })
+  await assert.rejects(async () => route('POST', '/resource-presets').handler(conflict.value), (error: { status: number; code: string }) => error.status === 409 && error.code === 'preset_revision_conflict')
 })
 
 test('catalog and published revision derive creator from the authenticated administrator', async () => {

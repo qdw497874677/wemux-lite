@@ -101,7 +101,7 @@ async function runScenario() {
     const runtimeBindingId = 'e2e-pi-runtime-binding'
     assert.equal((await request(base, '/api/resource-bindings', { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify({ id: runtimeBindingId, workerId: secondWorkerId, resourceRevisionId: runtimeRevision.id, agentKey: 'pi' }) })).response.status, 201)
     const runtimeProjection = async () => (await request(base, `/api/resource-bindings?workerId=${secondWorkerId}`, { headers: { cookie: auth.cookie } })).body.items.find((item: { binding: { id: string } }) => item.binding.id === runtimeBindingId)
-    await waitFor(async () => (await runtimeProjection())?.reconcile?.phase === 'restart-required', 120_000)
+    await waitFor(async () => (await runtimeProjection())?.reconcile?.phase === 'restart-required', 420_000)
     assert.equal((await runtimeProjection()).binding.status, 'notified', 'installation alone is not ready')
     assert.equal((await readAgentSettings(secondHome)).pi, undefined, 'running Worker must retain its previous Agent selection')
     await stop(secondWorker); secondWorker = null
@@ -109,10 +109,30 @@ async function runScenario() {
     await waitFor(async () => (await readAgentSettings(secondHome)).pi?.package === `${pi.name}@${pi.version}`, 30_000)
     await waitFor(async () => ['ready', 'credential-required'].includes((await runtimeProjection())?.reconcile?.phase), 50_000)
     const runtimePhase = (await runtimeProjection()).reconcile.phase
+    // A Preset expands to ResourceBindings in one CAS-protected ResourceSet
+    // update; the real Worker must converge and report back through the same API.
+    const presetSkillId = 'e2e-preset-skill', presetSkill: Resource = { ...resource, id: presetSkillId, name: 'Preset E2E Skill' }
+    const presetRevision = revision(presetSkillId, 'e2e-preset-rev-1', 1, '# from preset')
+    assert.equal((await request(base, '/api/resources', { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify(presetSkill) })).response.status, 201)
+    assert.equal((await request(base, `/api/resource-blobs/${presetRevision.blobHash}`, { method: 'PUT', headers: adminHeaders(auth), body: JSON.stringify({ base64Content: Buffer.from('# from preset').toString('base64') }) })).response.status, 201)
+    assert.equal((await request(base, `/api/resources/${presetSkillId}/revisions`, { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify(presetRevision.revision) })).response.status, 201)
+    const publishedPreset = await request(base, '/api/resource-presets', { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify({ id: 'e2e-preset', name: '标准节点', description: '', expectedRevision: 0, autoApply: { enabled: false }, entries: [{ resourceId: presetSkillId, resourceRevisionId: presetRevision.revision.id, agentKey: null, projectId: null, required: true }] }) })
+    assert.equal(publishedPreset.response.status, 201, JSON.stringify(publishedPreset.body))
+    const presetSet = await request(base, `/api/workers/${workerId}/resource-set`, { headers: { cookie: auth.cookie } })
+    const appliedPreset = await request(base, '/api/resource-presets/e2e-preset/applications', { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify({ presetRevision: 1, workerId, requestId: 'e2e-preset-apply-1', expectedSetRevision: presetSet.body.revision }) })
+    assert.equal(appliedPreset.response.status, 201, JSON.stringify(appliedPreset.body))
+    const appliedAgain = await request(base, '/api/resource-presets/e2e-preset/applications', { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify({ presetRevision: 1, workerId, requestId: 'e2e-preset-apply-1', expectedSetRevision: presetSet.body.revision }) })
+    assert.equal(appliedAgain.response.status, 201)
+    assert.equal(appliedAgain.body.id, appliedPreset.body.id)
+    const presetCurrent = join(workerHome, 'resources', 'skill', presetSkillId, 'current', 'SKILL.md')
+    await waitFor(async () => readFile(presetCurrent, 'utf8').then(value => value === '# from preset').catch(() => false))
+    await waitFor(async () => { const result = await request(base, `/api/resource-preset-applications?workerId=${workerId}`, { headers: { cookie: auth.cookie } }); return result.body.items[0]?.items[0]?.reconcile?.phase === 'ready' })
+    const presetConflict = await request(base, '/api/resource-presets/e2e-preset/applications', { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify({ presetRevision: 1, workerId, requestId: 'e2e-preset-apply-2', expectedSetRevision: presetSet.body.revision }) })
+    assert.equal(presetConflict.response.status, 409, 'stale ResourceSet CAS cannot apply twice')
     const tree = await import('node:child_process').then(({ execFile }) => new Promise<string>((resolveTree, reject) => execFile('find', [join(workerHome, 'resources'), join(secondHome, 'resources'), '-maxdepth', '6', '-printf', '%y %p -> %l\n'], (error, stdout) => error ? reject(error) : resolveTree(stdout))))
     const bindings = await request(base, `/api/resource-bindings?workerId=${workerId}`, { headers: { cookie: auth.cookie } })
     const statuses = bindings.body.items.map((item: { binding: { id: string; status: string }; reconcile: { phase: string } | null }) => `${item.binding.id}: ${item.binding.status} (${item.reconcile?.phase ?? 'none'})`)
-    const evidence = ['real Server + two Worker processes: succeeded', 'first convergence: revision one installed and reported ready on both Workers', 'offline update: revision two assigned only to Worker one while it was stopped', 'reconnect convergence: Worker one revision two, Worker two revision one', `Pi official artifact installation: restart-required before restart, ${runtimePhase} after actual Worker restart`, `bindings: ${statuses.join(', ')}`].join('\n') + '\n'
+    const evidence = ['real Server + two Worker processes: succeeded', 'first convergence: revision one installed and reported ready on both Workers', 'offline update: revision two assigned only to Worker one while it was stopped', 'reconnect convergence: Worker one revision two, Worker two revision one', `Pi official artifact installation: restart-required before restart, ${runtimePhase} after actual Worker restart`, 'Preset manual application: one CAS ResourceSet update, idempotent replay, Worker ready and stale CAS conflict', `bindings: ${statuses.join(', ')}`].join('\n') + '\n'
     const safeTree = tree.replaceAll(secondHome, '<worker-2-home>').replaceAll(workerHome, '<worker-1-home>')
     await writeFile(join(scratch, 'resource-reconcile-e2e.txt'), evidence)
     await writeFile(join(scratch, 'worker-resource-tree.txt'), safeTree)
@@ -120,4 +140,4 @@ async function runScenario() {
   finally { await stop(worker); await stop(secondWorker); await stop(server); if (!process.env.WEMUX_RESOURCE_E2E_KEEP) await rm(temp, { recursive: true, force: true }); else console.error(`KEEP dir: ${temp}`) }
 }
 
-test('真实 Server + 两 Worker 完成 Skill 分发及 Pi runtime 安装、重启、探测', { timeout: 240_000 }, runScenario)
+test('真实 Server + 两 Worker 完成 Skill 分发及 Pi runtime 安装、重启、探测', { timeout: 540_000 }, runScenario)

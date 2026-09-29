@@ -1,4 +1,4 @@
-import type { Resource, ResourceBinding, ResourceBindingStatus, ResourceRevision, ReconcileReport } from '@wemux/domain'
+import type { NodeResourcePreset, NodeResourcePresetApplication, NodeResourcePresetEntry, Resource, ResourceBinding, ResourceBindingStatus, ResourceRevision, ReconcileReport, ResourceSetSnapshot } from '@wemux/domain'
 import type { Run, LaunchRequest, LaunchResponse, TaskSummary, TaskDetail, TaskCreate, TaskPatch, TaskActivity, AssignmentRequest, CreateTaskWorkspaceRequest, UnbindWorkspaceRequest } from '@wemux/web-contract/task-platform'
 import type { CanvasLayoutResponse, CanvasLayoutSaveRequest, CanvasLayoutSaveResponse, CanvasLayoutScope, SessionGraphResponse } from '@wemux/web-contract/session-graph'
 import type { ConnectorDTO, ConnectorListDTO, ConnectorTestDTO, ConnectorWriteDTO } from '@wemux/web-contract/connectors'
@@ -58,6 +58,10 @@ export const routes = {
   resourceRevisions: (resourceId: string) => `/api/resources/${id(resourceId)}/revisions`,
   resourceBlob: (sha256: string) => `/api/resource-blobs/${id(sha256)}`,
   resourceBindings: '/api/resource-bindings',
+  resourcePresets: '/api/resource-presets',
+  resourcePresetApplications: '/api/resource-preset-applications',
+  resourcePresetApplicationsFor: (presetId: string) => `/api/resource-presets/${id(presetId)}/applications`,
+  resourceSet: (workerId: string) => `/api/workers/${id(workerId)}/resource-set`,
   resourceBinding: (bindingId: string) => `/api/resource-bindings/${id(bindingId)}`,
   capabilities: (workerId: string) => `/api/workers/${id(workerId)}/capabilities`,
   workerAccess: (workerId: string) => `/api/workers/${id(workerId)}/access`,
@@ -292,6 +296,11 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     createEnrollmentToken: (body: CreateEnrollmentTokenDTO) => request<EnrollmentTokenDTO>(routes.enrollmentTokens, body),
     tailnet: (signal?: AbortSignal) => request<TailnetInfoDTO>(routes.tailnet, undefined, signal),
     resources: (signal?: AbortSignal) => list<Resource>(routes.resources, signal),
+    resourcePresets: (signal?: AbortSignal) => request<{ items: NodeResourcePreset[] }>(routes.resourcePresets, undefined, signal),
+    createResourcePreset: (body: { id: string; name: string; description: string; expectedRevision: number; entries: readonly NodeResourcePresetEntry[]; autoApply: { enabled: false } }) => request<NodeResourcePreset>(routes.resourcePresets, body),
+    resourcePresetApplications: (signal?: AbortSignal) => request<{ items: { application: NodeResourcePresetApplication; items: { binding: ResourceBinding; reconcile: ReconcileReport | null }[] }[] }>(routes.resourcePresetApplications, undefined, signal),
+    applyResourcePreset: (presetId: string, body: { presetRevision: number; workerId: string; requestId: string; expectedSetRevision: number }) => request<NodeResourcePresetApplication>(routes.resourcePresetApplicationsFor(presetId), body),
+    resourceSet: (workerId: string, signal?: AbortSignal) => request<ResourceSetSnapshot>(routes.resourceSet(workerId), undefined, signal),
     resourceDetail: (resourceId: string, signal?: AbortSignal) => request<{ resource: Resource; revisions: ResourceRevision[] }>(routes.resource(resourceId), undefined, signal),
     createResource: (resource: Resource) => request<Resource>(routes.resources, resource),
     putResourceBlob: (sha256: string, base64Content: string) => request<{ sha256: string; deduplicated: boolean }>(routes.resourceBlob(sha256), { base64Content }, undefined, 'PUT'),
