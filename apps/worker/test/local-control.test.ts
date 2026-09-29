@@ -140,6 +140,55 @@ test('local control exposes CSRF-protected cluster lifecycle operations', async 
   } finally { await f.cleanup() }
 })
 
+test('local connector writes reject malformed and cross-scope definitions before persistence', async () => {
+  const saved: unknown[] = []
+  const cluster = {
+    listConnectors: async () => saved,
+    connectorCredentialAvailable: () => false,
+    saveConnector: async (definition: unknown) => { saved.push(definition); return definition },
+    deleteConnector: async (id: string) => { saved.splice(saved.findIndex(item => (item as { id: string }).id === id), 1) },
+    putConnectorCredential: async () => ({ id: 'local-key', revision: 1, profile: { accountId: null, displayName: null, grantedScopes: [] }, ciphertext: 'NEVER-RETURN-THIS' }),
+  } as unknown as NonNullable<LocalControlHandlers['cluster']>
+  const f = await fixture({ cluster })
+  try {
+    const login = await fetch(`${f.server.url}/api/local/auth/session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'owner', password: 'correct horse battery staple' }) })
+    const session = cookie(login)
+    const csrf = (await login.json() as { csrf: string }).csrf
+    const headers = { cookie: session, 'x-wemux-csrf': csrf, 'content-type': 'application/json' }
+    const definition = { id: 'local-example', projectId: 'local', kind: 'mcp', name: 'example', description: null, revision: 1, enabled: true, allowedWorkerIds: [], credentialRef: null, credentialAvailability: 'not_required', riskDefaults: { requireApprovalForRead: false, allowMcpReadOnlyHint: true }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), config: { transport: 'stdio', command: '/usr/bin/node', args: ['--version'], cwd: null, publicEnvironment: {}, secretEnvironmentNames: [] } }
+    const save = (body: unknown, requestHeaders = headers) => fetch(`${f.server.url}/api/local/connectors`, { method: 'POST', headers: requestHeaders, body: JSON.stringify(body) })
+    assert.equal((await save(definition, { ...headers, 'x-wemux-csrf': '' })).status, 403)
+    for (const bad of [
+      { ...definition, projectId: 'other' },
+      { ...definition, config: { ...definition.config, args: 'not-an-array' } },
+      { ...definition, config: { transport: 'streamable_http', url: 'file:///etc/passwd', publicHeaders: {}, authentication: 'none', allowPrivateNetwork: false } },
+      { ...definition, config: { ...definition.config, unexpectedSecret: 'leak' } },
+      { ...definition, riskDefaults: { ...definition.riskDefaults, requireApprovalForRead: 'false' } },
+    ]) assert.equal((await save(bad)).status, 400)
+    assert.equal(saved.length, 0)
+    assert.equal((await save(definition)).status, 201)
+    assert.equal(saved.length, 1)
+    saved[0] = { ...(saved[0] as object), config: { ...definition.config, publicEnvironment: { PUBLIC_TOKEN: 'DO-NOT-EXPOSE' } } }
+    const redacted = await fetch(`${f.server.url}/api/local/connectors`, { headers: { cookie: session } })
+    assert.equal(redacted.status, 200)
+    assert.doesNotMatch(await redacted.text(), /DO-NOT-EXPOSE/)
+    saved[0] = definition
+    assert.equal((await save(definition)).status, 409)
+    assert.equal((await save({ ...definition, revision: 2, createdAt: '2022-01-01T00:00:00.000Z' })).status, 409)
+    const credential = (id: string, body: unknown) => fetch(`${f.server.url}/api/local/connectors/${id}/credential`, { method: 'PUT', headers, body: JSON.stringify(body) })
+    assert.equal((await credential('cluster-foreign', { id: 'local-key', authType: 'api_key', secret: { value: 'hidden' } })).status, 404)
+    assert.equal((await credential('local-example', { id: 'local-key', authType: 'api_key', secret: { value: 'hidden' }, extra: true })).status, 400)
+    assert.equal((await credential('local-example', { id: 'local-key', authType: 'api_key', secret: { value: 'hidden' } })).status, 400)
+    saved[0] = { ...(saved[0] as object), credentialRef: 'local-key', credentialAvailability: 'unconfigured', config: { ...definition.config, secretEnvironmentNames: ['value'] } }
+    const response = await credential('local-example', { id: 'local-key', authType: 'api_key', secret: { value: 'hidden' } })
+    assert.equal(response.status, 200)
+    assert.doesNotMatch(await response.text(), /hidden|NEVER-RETURN-THIS/)
+    assert.equal((await fetch(`${f.server.url}/api/local/connectors/cluster-foreign`, { method: 'DELETE', headers })).status, 404)
+    assert.equal((await fetch(`${f.server.url}/api/local/connectors/local-example`, { method: 'DELETE', headers })).status, 204)
+    assert.equal(saved.length, 0)
+  } finally { await f.cleanup() }
+})
+
 test('local control serves session controls and protects every workbench write with CSRF', async () => {
   const calls: string[] = []
   const localSession = {

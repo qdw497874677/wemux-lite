@@ -15,6 +15,8 @@ let queuePending = false
 let approvalPending = false
 let enrolled = false
 let connectionPhase = 'offline'
+let installation = null
+let connector = null
 const requests = []
 const responseJson = (response, status, value, headers = {}) => response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers }).end(JSON.stringify(value))
 const server = createServer(async (request, response) => {
@@ -30,13 +32,33 @@ const server = createServer(async (request, response) => {
     if (url.pathname === '/api/local/auth/session' && request.method === 'DELETE') return responseJson(response, 204, null, { 'set-cookie': 'wemux-local-session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0' })
     if (url.pathname === '/api/local/status') return responseJson(response, 200, { csrf: 'local-csrf', installation: { installationId: 'local', name: '本机 Worker' }, cluster: { enrolled, serverUrl: enrolled ? 'https://server.example' : undefined, connection: { phase: connectionPhase, failure: null } }, capabilities: [{ agentKey: 'test', displayName: '测试 Agent', mode: 'execution', version: '1', availability: { status: 'available' }, models: [{ modelId: 'test-model', displayName: '测试模型', source: 'detected' }] }] })
     if (url.pathname === '/api/local/agents' && request.method === 'GET') return responseJson(response, 200, { selections: [{ key: 'pi', executable: 'pi', source: 'PATH', selected: false }], capabilities: [] })
+    if (url.pathname === '/api/local/agents/install' && request.method === 'GET') return responseJson(response, 200, { installation })
+    if (url.pathname === '/api/local/agents/install' && request.method === 'POST') {
+      const input = JSON.parse(await new Promise(resolve => { let text = ''; request.on('data', chunk => text += chunk); request.on('end', () => resolve(text)) }))
+      assert.deepEqual(input, { key: 'pi', confirm: true })
+      installation = { key: 'pi', phase: 'ready', message: '安装完成；请重启 Worker' }
+      return responseJson(response, 202, { installation })
+    }
     if (url.pathname === '/api/local/agents/pi' && request.method === 'PUT') {
       const input = JSON.parse(await new Promise(resolve => { let text = ''; request.on('data', chunk => text += chunk); request.on('end', () => resolve(text)) }))
       assert.equal(input.executable, '/usr/bin/pi')
       return responseJson(response, 200, { selections: [{ key: 'pi', executable: '/usr/bin/pi', source: 'local', selected: true }], capabilities: [] })
     }
     if (url.pathname === '/api/local/agents/pi' && request.method === 'DELETE') return responseJson(response, 200, { selections: [{ key: 'pi', executable: 'pi', source: 'PATH', selected: false }], capabilities: [] })
-    if (url.pathname === '/api/local/connectors' && request.method === 'GET') return responseJson(response, 200, { items: [], credentialCapability: 'unavailable' })
+    if (url.pathname === '/api/local/connectors' && request.method === 'GET') return responseJson(response, 200, { items: connector ? [connector] : [], credentialCapability: 'available' })
+    if (url.pathname === '/api/local/connectors' && request.method === 'POST') {
+      connector = JSON.parse(await new Promise(resolve => { let text = ''; request.on('data', chunk => text += chunk); request.on('end', () => resolve(text)) }))
+      assert.equal(connector.projectId, 'local')
+      assert.equal(connector.kind, 'mcp')
+      return responseJson(response, 201, connector)
+    }
+    if (url.pathname.startsWith('/api/local/connectors/local-') && url.pathname.endsWith('/credential') && request.method === 'PUT') {
+      const input = JSON.parse(await new Promise(resolve => { let text = ''; request.on('data', chunk => text += chunk); request.on('end', () => resolve(text)) }))
+      assert.deepEqual(input.secret, { API_TOKEN: 'browser-secret-value' })
+      assert.equal(input.id, connector.credentialRef)
+      return responseJson(response, 200, { id: input.id, revision: 1 })
+    }
+    if (url.pathname.startsWith('/api/local/connectors/local-') && request.method === 'DELETE') { connector = null; return responseJson(response, 204, null) }
     if (url.pathname === '/api/local/cluster/discover' && request.method === 'POST') return responseJson(response, 200, { serverUrl: 'https://server.example', status: 200, ok: true, name: '测试 Server' })
     if (url.pathname === '/api/local/cluster/enroll' && request.method === 'POST') {
       const body = JSON.parse(await new Promise(resolve => { let text = ''; request.on('data', chunk => text += chunk); request.on('end', () => resolve(text)) }))
@@ -148,6 +170,24 @@ try {
   await page.getByText('已显式指定').waitFor()
   await page.getByRole('button', { name: '恢复自动检测' }).click()
   await page.getByText('pi（PATH，自动检测）').waitFor()
+  await page.getByRole('button', { name: '托管安装' }).first().click()
+  await page.getByRole('button', { name: '确认联网安装' }).click()
+  await page.getByText(/pi：安装完成/).waitFor()
+  await page.getByRole('button', { name: '新增本地 MCP' }).click()
+  await page.getByLabel('名称').fill('browser mcp')
+  await page.getByLabel('可执行文件').fill('/usr/bin/node')
+  await page.getByLabel(/Secret 环境变量名/).fill('API_TOKEN')
+  await page.getByLabel(/本机凭据标识/).fill('local-key-browser')
+  await page.getByRole('button', { name: '保存连接器' }).click()
+  await page.getByText(/browser mcp（mcp）/).waitFor()
+  await page.getByRole('button', { name: '设置凭据' }).click()
+  await page.getByLabel('Secret 值').fill('browser-secret-value')
+  await page.getByRole('button', { name: '保存密钥' }).click()
+  await page.getByText(/凭据已加密保存/).waitFor()
+  assert.equal(await page.getByText('browser-secret-value').count(), 0)
+  await page.getByRole('button', { name: '删除', exact: true }).click()
+  await page.getByRole('button', { name: '确认删除' }).click()
+  await page.getByText('暂无连接器').waitFor()
   await page.goto(`${base}/local/cluster`)
   await page.getByText('未加入集群，本地对话仍可使用。').waitFor()
   await page.getByLabel('Server 地址').fill('https://server.example')

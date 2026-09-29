@@ -6,6 +6,8 @@ import type { LocalState } from '../application/ports/local-state.js'
 import { verifyLocalAdmin } from '../application/local-installation.js'
 import { LocalWorkbenchError, type LocalWorkbenchService } from '../application/local-workbench.js'
 import type { ClusterLifecycle } from '../application/cluster-lifecycle.js'
+import { parseLocalConnector, redactLocalConnector } from './connector-input.js'
+import { installWarning } from '../runtimes/management.js'
 
 const sessionCookie = 'wemux_worker_session'
 const sessionLifetimeMs = 8 * 60 * 60 * 1000
@@ -32,7 +34,7 @@ export interface LocalControlServer {
 export interface LocalControlHandlers {
   readonly shutdown?: () => Promise<void>
   readonly workbench?: LocalWorkbenchService
-  readonly cluster?: Pick<ClusterLifecycle, 'connection' | 'discover' | 'enroll' | 'connect' | 'pause' | 'resume' | 'leave' | 'agentSettings' | 'selectAgent' | 'resetAgent' | 'listConnectors' | 'saveConnector' | 'deleteConnector' | 'putConnectorCredential' | 'connectorCredentialAvailable' | 'listConnectorApprovals' | 'resolveConnectorApproval'>
+  readonly cluster?: Pick<ClusterLifecycle, 'connection' | 'discover' | 'enroll' | 'connect' | 'pause' | 'resume' | 'leave' | 'agentSettings' | 'selectAgent' | 'resetAgent' | 'listConnectors' | 'saveConnector' | 'deleteConnector' | 'putConnectorCredential' | 'connectorCredentialAvailable' | 'agentInstallation' | 'beginAgentInstallation' | 'listConnectorApprovals' | 'resolveConnectorApproval'>
 }
 
 function json(response: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
@@ -163,19 +165,32 @@ export async function startLocalControlServer(options: LocalControlServerOptions
         if (!handlers.cluster) return json(response, 409, { error: 'Connector control is unavailable' })
         const target = new URL(request.url, `http://${request.headers.host}`)
         const segments = target.pathname.split('/').filter(Boolean)
-        if (request.method === 'GET' && target.pathname === '/api/local/connectors') return json(response, 200, { items: await handlers.cluster.listConnectors(), credentialCapability: handlers.cluster.connectorCredentialAvailable() ? 'available' : 'unavailable' })
+        if (request.method === 'GET' && target.pathname === '/api/local/connectors') return json(response, 200, { items: (await handlers.cluster.listConnectors()).map(redactLocalConnector), credentialCapability: handlers.cluster.connectorCredentialAvailable() ? 'available' : 'unavailable' })
         if (request.method === 'GET' && target.pathname === '/api/local/connectors/approvals') return json(response, 200, { items: handlers.cluster.listConnectorApprovals() })
         if (request.method !== 'GET' && request.headers['x-wemux-csrf'] !== authenticated.csrf) return json(response, 403, { error: 'Forbidden' })
         if (request.method === 'POST' && target.pathname === '/api/local/connectors') {
-          const definition = await readJson(request)
-          return json(response, 201, await handlers.cluster.saveConnector(definition as unknown as import('@wemux/connector').McpConnectorDefinition))
+          const definition = parseLocalConnector(await readJson(request))
+          const existing = (await handlers.cluster.listConnectors()).find(item => item.id === definition.id)
+          if (existing && (existing.projectId !== 'local' || existing.kind !== 'mcp')) return json(response, 409, { error: '连接器标识已由集群占用' })
+          if (existing && (definition.revision !== existing.revision + 1 || definition.createdAt !== existing.createdAt)) return json(response, 409, { error: '连接器版本冲突，请刷新后重试' })
+          if (!existing && definition.revision !== 1) return json(response, 409, { error: '新建连接器版本必须为 1' })
+          if (existing && (JSON.stringify(existing.config) !== JSON.stringify(definition.config) || existing.credentialRef !== definition.credentialRef) && definition.credentialAvailability === 'available') return json(response, 400, { error: '配置或凭据变更后须重新验证凭据' })
+          const saved = await handlers.cluster.saveConnector(definition)
+          return json(response, 201, redactLocalConnector(saved))
         }
-        const connectorId = segments[3]
-        if (request.method === 'DELETE' && segments.length === 4 && connectorId) { await handlers.cluster.deleteConnector(decodeURIComponent(connectorId)); return json(response, 204, null) }
+        const connectorId = segments[3] ? decodeURIComponent(segments[3]) : ''
+        if (request.method === 'DELETE' && segments.length === 4 && connectorId) {
+          if (!/^local-[A-Za-z0-9_-]{1,122}$/.test(connectorId) || !(await handlers.cluster.listConnectors()).some(item => item.id === connectorId && item.projectId === 'local' && item.kind === 'mcp')) return json(response, 404, { error: '本地连接器不存在' })
+          await handlers.cluster.deleteConnector(connectorId)
+          return json(response, 204, null)
+        }
         if (request.method === 'PUT' && segments.length === 5 && segments[4] === 'credential' && connectorId) {
           const body = await readJson(request)
-          if (typeof body.id !== 'string' || (body.authType !== 'api_key' && body.authType !== 'custom_credential') || !body.secret || typeof body.secret !== 'object' || Array.isArray(body.secret)) return json(response, 400, { error: '凭证参数无效' })
-          const record = await handlers.cluster.putConnectorCredential({ id: body.id as import('@wemux/connector').ConnectorCredentialId, connectorId: decodeURIComponent(connectorId), authType: body.authType, secret: body.secret as Record<string, string> })
+          if (Object.keys(body).some(key => !['id', 'authType', 'secret'].includes(key)) || typeof body.id !== 'string' || !/^local-[A-Za-z0-9_-]{1,122}$/.test(body.id) || (body.authType !== 'api_key' && body.authType !== 'custom_credential') || !body.secret || typeof body.secret !== 'object' || Array.isArray(body.secret) || !Object.keys(body.secret).length || Object.keys(body.secret).length > 64 || Object.entries(body.secret).some(([name, value]) => !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name) || typeof value !== 'string' || Buffer.byteLength(value) > 64 * 1024)) return json(response, 400, { error: '凭证参数无效' })
+          if (!/^local-[A-Za-z0-9_-]{1,122}$/.test(connectorId) || !(await handlers.cluster.listConnectors()).some(item => item.id === connectorId && item.projectId === 'local')) return json(response, 404, { error: '本地连接器不存在' })
+          const secret = body.secret as Record<string, string>
+          if (!(await handlers.cluster.listConnectors()).some(item => item.id === connectorId && item.credentialRef === body.id && item.kind === 'mcp' && (item.config.transport !== 'stdio' || (Object.keys(secret).length === item.config.secretEnvironmentNames.length && item.config.secretEnvironmentNames.every(name => typeof secret[name] === 'string'))))) return json(response, 400, { error: '凭据字段必须匹配本地连接器' })
+          const record = await handlers.cluster.putConnectorCredential({ id: body.id as import('@wemux/connector').ConnectorCredentialId, connectorId, authType: body.authType, secret: body.secret as Record<string, string> })
           return json(response, 200, { id: record.id, revision: record.revision, profile: record.profile })
         }
         if (request.method === 'POST' && segments.length === 6 && segments[3] === 'approvals' && segments[5] === 'resolve') {
@@ -189,6 +204,13 @@ export async function startLocalControlServer(options: LocalControlServerOptions
         if (!authenticated) return json(response, 401, { error: 'Authentication required' })
         if (!handlers.cluster) return json(response, 409, { error: 'Agent settings are unavailable' })
         if (request.method === 'GET' && request.url === '/api/local/agents') return json(response, 200, await handlers.cluster.agentSettings())
+        if (request.method === 'GET' && request.url === '/api/local/agents/install') return json(response, 200, { installation: handlers.cluster.agentInstallation() })
+        if (request.method === 'POST' && request.url === '/api/local/agents/install') {
+          if (request.headers['x-wemux-csrf'] !== authenticated.csrf) return json(response, 403, { error: 'Forbidden' })
+          const body = await readJson(request)
+          if (typeof body.key !== 'string' || body.confirm !== true || Object.keys(body).some(key => !['key', 'confirm'].includes(key))) return json(response, 400, { error: installWarning })
+          return json(response, 202, { installation: handlers.cluster.beginAgentInstallation(body.key) })
+        }
         const match = request.url.match(/^\/api\/local\/agents\/([^/?]+)$/)
         if (!match) return json(response, 404, { error: 'Not found' })
         if (request.headers['x-wemux-csrf'] !== authenticated.csrf) return json(response, 403, { error: 'Forbidden' })

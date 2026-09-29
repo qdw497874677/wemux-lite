@@ -33,6 +33,16 @@ test('local MCP definition CRUD preserves immutable snapshots supplied by caller
   assert.equal(await store.getConnectorDefinition('connector-local'), null)
 })
 
+test('deleting a local Connector never removes a Server-owned Connector with the same id', async t => {
+  const { store } = await setup(t)
+  await store.saveConnectorDefinition(connector())
+  const cluster = { ...connector(3), projectId: 'server-project' as never }
+  assert.equal(await store.saveClusterConnectorDefinition(cluster), 'applied')
+  await store.deleteConnectorDefinition('connector-local')
+  assert.deepEqual(await store.getConnectorDefinition('connector-local'), cluster)
+  assert.deepEqual(await store.listConnectorDefinitions(), [cluster])
+})
+
 test('credential storage uses enc:v2 and never writes plaintext secret', async t => {
   const { store, path } = await setup(t)
   const credentials = new WorkerCredentialStore(store, { key: 'connector-test-key' })

@@ -72,6 +72,24 @@ for (const protocol of ['ws', 'wss']) test(`leave converts ${protocol} identity 
   } finally { await f.close() }
 })
 
+test('local managed Agent installation reports progress, prevents duplicates and retains prior selection on failure', async () => {
+  const f = await fixture()
+  try {
+    let finish!: (value: Awaited<ReturnType<typeof import('../src/runtimes/management.js').installAgent>>) => void
+    const pending = new Promise<Awaited<ReturnType<typeof import('../src/runtimes/management.js').installAgent>>>(resolve => { finish = resolve })
+    const install = async () => pending
+    assert.equal(f.lifecycle.beginAgentInstallation('pi', install).phase, 'installing')
+    assert.throws(() => f.lifecycle.beginAgentInstallation('pi', install), /已有 Agent 安装/)
+    finish({ key: 'pi', executable: '/unused', source: 'managed', package: 'pinned', version: '1', message: '重启 Worker 后生效' })
+    await waitFor(() => f.lifecycle.agentInstallation()?.phase === 'ready')
+    assert.match(f.lifecycle.agentInstallation()?.message ?? '', /重启 Worker/)
+    f.lifecycle.beginAgentInstallation('pi', async () => { throw new Error('secret-looking-install-failure') })
+    await waitFor(() => f.lifecycle.agentInstallation()?.phase === 'failed')
+    assert.doesNotMatch(f.lifecycle.agentInstallation()?.message ?? '', /secret-looking/)
+    assert.equal(await readFile(join(f.home, 'agents.json'), 'utf8').catch(() => ''), '')
+  } finally { await f.close() }
+})
+
 test('connect failure restores local execution and pause/leave preserve local sessions and journal', async t => {
   const f = await fixture()
   try {

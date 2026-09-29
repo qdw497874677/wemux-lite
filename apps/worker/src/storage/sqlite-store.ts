@@ -141,7 +141,7 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
       return 'applied'
     })
   }
-  async deleteConnectorDefinition(id: string): Promise<void> { await this.tail; this.db.prepare("DELETE FROM documents WHERE bucket IN ('connector-definitions','cluster-connector-definitions') AND id=?").run(id) }
+  async deleteConnectorDefinition(id: string): Promise<void> { await this.tail; this.db.prepare("DELETE FROM documents WHERE bucket='connector-definitions' AND id=?").run(id) }
   async getConnectorCredential(id: string): Promise<CredentialRecord | null> {
     await this.tail
     const row = this.db.prepare('SELECT * FROM connector_credentials WHERE id=?').get(id) as Record<string, unknown> | undefined

@@ -18,7 +18,7 @@ import { runtimeAdaptersFor } from './runtime-adapters.js'
 import type { RuntimeSessionAdapter } from './ports/runtime-session.js'
 import { agentsForHome } from '../agents/detection.js'
 import { agentSelections, readAgentSettings, removeAgentSelection, runtimeKey } from '../config/agent-settings.js'
-import { useAgent } from '../runtimes/management.js'
+import { installAgent, useAgent } from '../runtimes/management.js'
 import { CapabilityGateway } from '../capabilities/gateway.js'
 import { FilesystemAgentLaunchContextProvider } from './agent-launch-context-provider.js'
 import { serverUrl, type WorkerTransport } from '../config.js'
@@ -71,6 +71,7 @@ export class ClusterLifecycle {
   private readonly connectors: WorkerConnectorRuntime
   private transitions: Promise<unknown> = Promise.resolve()
   private state: WorkerConnectionState = { phase: 'offline', retryAt: null, failure: null }
+  private installation: { key: string; phase: 'installing' | 'ready' | 'failed'; message: string } | null = null
 
   constructor(
     private readonly store: WorkerStore & LocalState & SessionStore,
@@ -87,9 +88,25 @@ export class ClusterLifecycle {
   }
 
   listConnectors() { return this.connectors.listDefinitions() }
-  saveConnector(definition: McpConnectorDefinition) { return this.transition(() => this.connectors.saveDefinition(definition)) }
-  deleteConnector(id: string) { return this.transition(() => this.connectors.deleteDefinition(id)) }
-  putConnectorCredential(input: Parameters<WorkerConnectorRuntime['credentials']['put']>[0]) { return this.transition(() => this.connectors.credentials.put(input)) }
+  saveConnector(definition: McpConnectorDefinition) { return this.transition(async () => {
+    const existing = (await this.connectors.listDefinitions()).find(item => item.id === definition.id)
+    if (existing && (existing.projectId !== 'local' || existing.kind !== 'mcp')) throw new LocalWorkbenchError('连接器标识已由集群占用')
+    if (existing ? definition.revision !== existing.revision + 1 || definition.createdAt !== existing.createdAt : definition.revision !== 1) throw new LocalWorkbenchError('连接器版本冲突，请刷新后重试')
+    const availability = definition.credentialRef === null ? 'not_required' : existing?.credentialRef === definition.credentialRef && existing.credentialAvailability === 'available' ? 'available' : 'unconfigured'
+    return this.connectors.saveDefinition({ ...definition, credentialAvailability: availability })
+  }) }
+  deleteConnector(id: string) { return this.transition(async () => {
+    const definition = (await this.connectors.listDefinitions()).find(item => item.id === id)
+    if (!definition || definition.kind !== 'mcp' || definition.projectId !== 'local') throw new LocalWorkbenchError('本地连接器不存在')
+    return this.connectors.deleteDefinition(id)
+  }) }
+  putConnectorCredential(input: Parameters<WorkerConnectorRuntime['credentials']['put']>[0]) { return this.transition(async () => {
+    const definition = (await this.connectors.listDefinitions()).find(item => item.id === input.connectorId)
+    if (!definition || definition.kind !== 'mcp' || definition.projectId !== 'local' || definition.credentialRef !== input.id) throw new LocalWorkbenchError('凭据标识必须匹配本地连接器')
+    const record = await this.connectors.credentials.put(input)
+    await this.connectors.saveDefinition({ ...definition, revision: definition.revision + 1, updatedAt: new Date().toISOString() as typeof definition.updatedAt, credentialAvailability: 'available' })
+    return record
+  }) }
   connectorCredentialAvailable() { return this.connectors.credentials.available }
   listConnectorApprovals() { return this.connectors.listApprovals() }
   resolveConnectorApproval(id: string, decision: 'approve' | 'deny') { return this.connectors.resolveApproval(id, decision) }
@@ -120,6 +137,19 @@ export class ClusterLifecycle {
       await this.reloadAgentsInternal()
       return this.agentSettings()
     })
+  }
+
+  agentInstallation() { return this.installation }
+  beginAgentInstallation(key: string, install: typeof installAgent = installAgent) {
+    if (!['pi', 'claude-code', 'opencode'].includes(key)) throw new LocalWorkbenchError('此 Agent 不支持托管安装')
+    const selected = runtimeKey(key)
+    if (this.installation?.phase === 'installing') throw new LocalWorkbenchError('已有 Agent 安装正在进行')
+    this.installation = { key: selected, phase: 'installing', message: '正在下载并校验固定版本的官方 npm 包，请等待。' }
+    void install(this.options.home, selected, true).then(
+      result => { this.installation = { key: selected, phase: 'ready', message: result.message } },
+      () => { this.installation = { key: selected, phase: 'failed', message: '托管安装失败；原有选择已保留。请检查 Worker 日志和网络后重试。' } },
+    )
+    return this.installation
   }
 
   reloadAgents() { return this.transition(() => this.reloadAgentsInternal()) }

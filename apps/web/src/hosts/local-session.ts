@@ -18,7 +18,12 @@ export interface LocalAgentSettings {
   selections: { key: string; executable: string; source: string; selected: boolean }[]
   capabilities: AgentDTO[]
 }
-export interface LocalConnectorList { items: { id: string; name: string; kind: string; enabled: boolean; credentialAvailability: string }[]; credentialCapability: 'available' | 'unavailable' }
+export interface LocalConnectorDefinition {
+  id: string; projectId: string; kind: string; name: string; description: string | null; revision: number; enabled: boolean; allowedWorkerIds: string[]; credentialRef: string | null; credentialAvailability: string; riskDefaults: { requireApprovalForRead: boolean; allowMcpReadOnlyHint: boolean }; createdAt: string; updatedAt: string
+  config: { transport: 'stdio'; command: string; args: string[]; cwd: string | null; publicEnvironment: Record<string, string>; secretEnvironmentNames: string[] } | { transport: 'streamable_http'; url: string; publicHeaders: Record<string, string>; authentication: 'none' | 'api_key' | 'custom_credential'; allowPrivateNetwork: boolean }
+}
+export interface LocalConnectorList { items: LocalConnectorDefinition[]; credentialCapability: 'available' | 'unavailable' }
+export interface LocalAgentInstallation { installation: { key: string; phase: 'installing' | 'ready' | 'failed'; message: string } | null }
 export interface LocalClusterDiscovery { serverUrl: string; ok: boolean; status: number; name?: string; error?: string }
 export interface LocalSendReceipt { commandId: string; status: string; messageId: string }
 
@@ -51,7 +56,12 @@ export function createLocalSessionApi(fetcher: typeof fetch = fetch, onUnauthori
     agents: () => request<LocalAgentSettings>('agents'),
     selectAgent: (key: string, executable: string) => request<LocalAgentSettings>(`agents/${encodeURIComponent(key)}`, 'PUT', { executable }),
     resetAgent: (key: string) => request<LocalAgentSettings>(`agents/${encodeURIComponent(key)}`, 'DELETE'),
+    agentInstallation: () => request<LocalAgentInstallation>('agents/install'),
+    installAgent: (key: string) => request<LocalAgentInstallation>('agents/install', 'POST', { key, confirm: true }),
     connectors: () => request<LocalConnectorList>('connectors'),
+    saveConnector: (definition: LocalConnectorDefinition) => request<LocalConnectorDefinition>('connectors', 'POST', definition),
+    deleteConnector: (id: string) => request<void>(`connectors/${encodeURIComponent(id)}`, 'DELETE'),
+    putConnectorCredential: (connectorId: string, id: string, secret: Record<string, string>, authType: 'api_key' | 'custom_credential') => request<{ id: string; revision: number }>(`connectors/${encodeURIComponent(connectorId)}/credential`, 'PUT', { id, authType, secret }),
     discoverCluster: (serverUrl: string) => request<LocalClusterDiscovery>('cluster/discover', 'POST', { serverUrl }),
     enrollCluster: (serverUrl: string, token: string, name: string) => request<{ identity: { workerId: string } }>('cluster/enroll', 'POST', { serverUrl, token, name }),
     resumeCluster: () => request('cluster/resume', 'POST'),
