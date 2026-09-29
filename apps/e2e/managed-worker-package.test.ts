@@ -2,15 +2,18 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createWemuxServer } from '../server/src/server.ts'
 import { login, provisionAdministrator } from './session.ts'
+import { installCatalog } from '../worker/src/runtimes/management.ts'
+import { readAgentSettings } from '../worker/src/config/agent-settings.ts'
 
 const repositoryRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)))
 const packagePath = join(repositoryRoot, 'artifacts/wemux-lite-worker.tgz')
+const managedPiEnabled = () => process.env.WEMUX_REAL_PACKAGE_MANAGED_PI_E2E === '1'
 
 async function eventually(check: () => Promise<boolean>, timeoutMs = 60_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
@@ -31,7 +34,7 @@ async function runInstaller(script: string, env: NodeJS.ProcessEnv): Promise<{ c
 }
 
 /** Real npm + Server + packaged CLI. systemctl is replaced only because CI has no user manager. */
-test('managed installer runs the real packaged Worker and retains identity across reinstall', { timeout: 360_000 }, async t => {
+test('managed installer runs the real packaged Worker and retains identity across reinstall', { timeout: 540_000 }, async t => {
   if (process.env.WEMUX_MANAGED_PACKAGE_E2E !== '1') {
     t.skip('set WEMUX_MANAGED_PACKAGE_E2E=1 with a built artifacts/wemux-lite-worker.tgz to run npm installation')
     return
@@ -61,7 +64,8 @@ test('managed installer runs the real packaged Worker and retains identity acros
   t.after(async () => {
     await stopService()
     await server.close()
-    await rm(directory, { recursive: true, force: true })
+    if (process.env.WEMUX_MANAGED_PACKAGE_KEEP !== '1') await rm(directory, { recursive: true, force: true })
+    else console.error(`KEEP dir: ${directory}`)
   })
   baseUrl = await server.listen(0)
   const administrator = await provisionAdministrator({ store: server.store, baseUrl, email: administratorEmail })
@@ -70,6 +74,13 @@ test('managed installer runs the real packaged Worker and retains identity acros
   const installerResponse = await fetch(`${baseUrl}/downloads/install-worker.sh`)
   assert.equal(installerResponse.status, 200)
   await writeFile(script, await installerResponse.text())
+  // Only share the operator's npm content-addressed cache. Do not inherit npmrc,
+  // auth, or registry overrides into the isolated Worker home.
+  if (managedPiEnabled()) {
+    await mkdir(join(directory, '.npm'), { recursive: true })
+    const cache = join(process.env.HOME ?? '', '.npm/_cacache')
+    await symlink(cache, join(directory, '.npm/_cacache'))
+  }
   await mkdir(bin)
   const stub = join(bin, 'systemctl')
   await writeFile(stub, `#!/bin/sh
@@ -141,6 +152,23 @@ exit 1
     payload: { mode: 'blobs', files: [{ path: 'SKILL.md', size: Buffer.byteLength(content), mediaType: 'text/markdown', sha256: digest, blobSha256: digest }] },
     contentSha256: digest, supplyChain: { mode: 'static-content', manifestSha256: digest }, createdAt: now,
   })
+  const managedPi = managedPiEnabled()
+  const runtimeId = 'managed-package-pi-runtime'
+  const runtimeRevisionId = 'managed-package-pi-runtime-v1'
+  if (managedPi) {
+    assert.equal(await readAgentSettings(workerHome).then(settings => settings.pi), undefined, 'Worker home must not have a preselected Pi')
+    const pi = installCatalog.pi
+    const runtimeHash = createHash('sha256').update(`${pi.name}@${pi.version}:${pi.integrity}`).digest('hex')
+    await administrator.api('/resources', 'POST', { id: runtimeId, kind: 'agent-runtime', name: 'Official Pi runtime', description: '', definition: {}, createdAt: now, updatedAt: now })
+    await administrator.api(`/resources/${runtimeId}/revisions`, 'POST', {
+      id: runtimeRevisionId, resourceId: runtimeId, kind: 'agent-runtime', version: 1, state: 'published',
+      manifest: { schemaVersion: 1, name: 'Official Pi runtime', description: '', compatibility: { workerProtocol: '2', platforms: ['linux'], architectures: ['x64'], agentKeys: ['pi'] }, bytes: 0, fileCount: 0, sha256: runtimeHash, materializerVersion: 1, restartPolicy: 'worker' },
+      payload: { mode: 'artifact', packageName: pi.name, packageVersion: pi.version, registryOrigin: 'https://registry.npmjs.org', packageIntegrity: pi.integrity },
+      contentSha256: runtimeHash,
+      supplyChain: { mode: 'registry-package', packageName: pi.name, packageVersion: pi.version, registryOrigin: 'https://registry.npmjs.org', packageIntegrity: pi.integrity },
+      createdAt: now,
+    })
+  }
   let applicationId = ''
   if (process.env.WEMUX_REAL_PACKAGE_WEB_E2E === '1') {
     const playwright = await import(process.env.PLAYWRIGHT_CORE_PATH ?? '/tmp/wemux-tailnet-pw/node_modules/playwright-core/index.mjs')
@@ -158,12 +186,19 @@ exit 1
       await page.getByLabel('预设资源').selectOption(skillId)
       await page.getByLabel('预设版本').selectOption(revisionId)
       await page.getByRole('button', { name: '添加资源' }).click()
+      if (managedPi) {
+        await page.getByLabel('预设资源').selectOption(runtimeId)
+        await page.getByLabel('预设版本').selectOption(runtimeRevisionId)
+        await page.getByLabel('预设 Agent').selectOption('pi')
+        await page.getByRole('button', { name: '添加资源' }).click()
+      }
       await page.getByLabel('预设名称').fill('Managed package preset')
       await page.getByRole('button', { name: '发布预设', exact: true }).click()
       await page.getByText('已发布预设 v1').waitFor()
       await page.getByLabel('应用工作节点').selectOption(workerId)
       await page.getByRole('button', { name: '应用到节点' }).click()
       await page.getByRole('dialog').getByText(/Managed Skill v1.*静态 Skill/).waitFor()
+      if (managedPi) await page.getByRole('dialog').getByText(/Official Pi runtime v1.*npm 安装/).waitFor()
       await page.getByRole('dialog').getByRole('button', { name: '确认应用' }).click()
       await page.getByText('已提交手工应用').waitFor()
       const posted = await administrator.api<{ items: { application: { id: string } }[] }>(`/resource-preset-applications?workerId=${workerId}`)
@@ -174,7 +209,10 @@ exit 1
   } else {
     const preset = await administrator.api<{ id: string; revision: number }>('/resource-presets', 'POST', {
       id: 'managed-package-preset', name: 'Managed package preset', description: '', expectedRevision: 0,
-      autoApply: { enabled: false }, entries: [{ resourceId: skillId, resourceRevisionId: revisionId, agentKey: null, projectId: null, required: true }],
+      autoApply: { enabled: false }, entries: [
+        { resourceId: skillId, resourceRevisionId: revisionId, agentKey: null, projectId: null, required: true },
+        ...(managedPi ? [{ resourceId: runtimeId, resourceRevisionId: runtimeRevisionId, agentKey: 'pi', projectId: null, required: true }] : []),
+      ],
     })
     const set = await administrator.api<{ revision: number }>(`/workers/${workerId}/resource-set`)
     const application = await administrator.api<{ id: string }>(`/resource-presets/${preset.id}/applications`, 'POST', {
@@ -185,7 +223,18 @@ exit 1
   await eventually(async () => {
     const items = await administrator.api<{ items: { application: { id: string }; items: { binding: { resourceRevisionId: string; status: string }; reconcile: { phase: string } | null }[] }[] }>(`/resource-preset-applications?workerId=${workerId}`)
     return items.items.some(item => item.application.id === applicationId && item.items.some(value => value.binding.resourceRevisionId === revisionId && value.binding.status === 'installed' && value.reconcile?.phase === 'ready'))
+  }, managedPi ? 180_000 : 60_000).catch(async error => {
+    const items = await administrator.api<{ items: { application: { id: string }; items: { binding: { resourceRevisionId: string }; reconcile: { phase: string; errorCode: string | null } | null }[] }[] }>(`/resource-preset-applications?workerId=${workerId}`)
+    const phases = items.items.filter(item => item.application.id === applicationId).flatMap(item => item.items.map(value => `${value.binding.resourceRevisionId}:${value.reconcile?.phase ?? 'pending'}:${value.reconcile?.errorCode ?? ''}`))
+    throw new Error(`Skill convergence failed: ${phases.join(', ')}`, { cause: error })
   })
+  if (managedPi) {
+    await eventually(async () => {
+      const items = await administrator.api<{ items: { application: { id: string }; items: { binding: { resourceRevisionId: string; status: string }; reconcile: { phase: string } | null }[] }[] }>(`/resource-preset-applications?workerId=${workerId}`)
+      return items.items.some(item => item.application.id === applicationId && item.items.some(value => value.binding.resourceRevisionId === runtimeRevisionId && value.binding.status === 'notified' && value.reconcile?.phase === 'restart-required'))
+    }, 300_000)
+    assert.equal((await readAgentSettings(workerHome)).pi, undefined, 'staged Pi must not change a running Worker selection')
+  }
   const skillFile = join(workerHome, 'resources', 'skill', skillId, 'current', 'SKILL.md')
   assert.equal(await readFile(skillFile, 'utf8'), content)
   const previousCredential = await readFile(join(workerHome, 'credential'))
@@ -201,6 +250,16 @@ exit 1
     return list.items.some(item => item.id === workerId && item.connectionState === 'online')
   })
   assert.deepEqual(await readFile(join(workerHome, 'credential')), previousCredential, 'reinstallation preserves the enrolled Worker identity')
+  if (managedPi) {
+    await eventually(async () => {
+      const items = await administrator.api<{ items: { application: { id: string }; items: { binding: { resourceRevisionId: string; status: string }; reconcile: { phase: string } | null }[] }[] }>(`/resource-preset-applications?workerId=${workerId}`)
+      return items.items.some(item => item.application.id === applicationId && item.items.some(value => value.binding.resourceRevisionId === runtimeRevisionId && value.binding.status === 'installed' && value.reconcile?.phase === 'ready'))
+    })
+    const selection = (await readAgentSettings(workerHome)).pi
+    assert.equal(selection?.source, 'managed')
+    assert.ok(selection?.executable.startsWith(join(workerHome, 'agents', 'pi') + '/'), 'Pi must be installed in disposable Worker home')
+    assert.equal(selection?.package, `${installCatalog.pi.name}@${installCatalog.pi.version}`)
+  }
   assert.equal(await readFile(skillFile, 'utf8'), content, 'reinstallation preserves the active Preset Skill')
   const resumed = await administrator.api<{ items: { application: { id: string }; items: { binding: { resourceRevisionId: string; status: string }; reconcile: { phase: string } | null }[] }[] }>(`/resource-preset-applications?workerId=${workerId}`)
   assert.ok(resumed.items.some(item => item.application.id === applicationId && item.items.some(value => value.binding.resourceRevisionId === revisionId && value.binding.status === 'installed' && value.reconcile?.phase === 'ready')), 'Preset projection remains ready after Worker reconnect')

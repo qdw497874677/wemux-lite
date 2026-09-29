@@ -15,4 +15,4 @@ WEMUX_REAL_AGENT_E2E=1 WEMUX_REAL_PI_MODEL='my-codex::gpt-6-sol' \
 
 `qwen-token-plan-cn::glm-5` 虽出现在 Pi 的可检测模型列表，实际提供方返回 `403 AccessDenied.Unpurchased`；“被列出”不等于“已开通”。改用经独立 `pi --print --no-tools` 探针可执行的 `my-codex::gpt-6-sol` 后，两轮请求成功。真实模型验收依赖操作者在本机提供可用的 Pi 凭证，测试默认跳过，不能在 CI 没有密钥时伪称通过。
 
-**后续进展（2026-09-29）**：本脚本仍只覆盖源码 Worker 的两轮真实 Pi Session；另有 `apps/e2e/managed-worker-package.test.ts` 可选付费分支，已验证真实发布 tgz 的 managed install、Server API 手动 Preset、固定 Skill 注入及模型回复（详见 `docs/acceptance/r2-linux-worker-installer.md`）。打包链路已可选串联真实 Chromium 的 Web 手动 Preset 与有权限模型 Turn（见 `docs/acceptance/r2-linux-worker-installer.md`），但没有真实 `systemd --user` manager，且使用机器现有 Pi CLI/凭证而非由 Preset 托管安装 runtime；因此仍不宣称完成 R2 裸机闭环。
+**后续进展（2026-09-29）**：本脚本仍只覆盖源码 Worker 的两轮真实 Pi Session；另有 `apps/e2e/managed-worker-package.test.ts` 可选付费分支，已验证真实发布 tgz 的 managed install、Server API 手动 Preset、固定 Skill 注入及模型回复（详见 `docs/acceptance/r2-linux-worker-installer.md`）。打包链路已可选串联真实 Chromium 的 Web 手动 Preset 与有权限模型 Turn（见 `docs/acceptance/r2-linux-worker-installer.md`），组合分支也已验证由 Preset 托管安装 Worker home 内官方 Pi 并在重启后完成真实模型 Turn；仍使用操作者提供的 Pi 凭证，且没有真实 `systemd --user` manager，因此不宣称完成 R2 裸机闭环。
