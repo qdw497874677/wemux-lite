@@ -12,7 +12,7 @@ import type {
   WorkerId,
 } from '@wemux/domain'
 import { assertResourceBindingTransition, assertResourceRevisionImmutable, assertResourceRevisionValid } from '@wemux/domain'
-import { resolveSqliteDatabase, type SqliteDatabaseSource } from './sqlite/shared-database.js'
+import { resolveSqliteDatabase, type SqliteDatabaseSource } from './sqlite/shared-database.ts'
 
 type RevisionRow = { data: string }
 type BindingRow = { data: string; status: ResourceBindingStatus; revision: number }
@@ -184,5 +184,10 @@ export class SqliteResourceRepository {
 
   recordReport(report: import('@wemux/domain').ReconcileReport): void {
     this.db.prepare('INSERT OR IGNORE INTO resource_reconcile_reports(request_id,worker_id,binding_id,resource_set_revision,report_json,occurred_at) VALUES(?,?,?,?,?,?)').run(report.requestId, report.workerId, report.bindingId, report.resourceSetRevision, JSON.stringify(report), report.occurredAt)
+  }
+
+  latestReport(bindingId: string): import('@wemux/domain').ReconcileReport | null {
+    const row = this.db.prepare('SELECT report_json FROM resource_reconcile_reports WHERE binding_id=? ORDER BY occurred_at DESC,rowid DESC LIMIT 1').get(bindingId) as { report_json: string } | undefined
+    return row ? JSON.parse(row.report_json) as import('@wemux/domain').ReconcileReport : null
   }
 }

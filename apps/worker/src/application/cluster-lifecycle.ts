@@ -28,6 +28,7 @@ import { orderEndpoints, parsePreference, resolveAutoPreference } from '../trans
 import { loadNodePty } from '../terminal/terminal-manager.js'
 import { WorkerConnectorRuntime } from '../connectors/runtime.js'
 import type { McpConnectorDefinition } from '@wemux/connector'
+import { ResourceReconciler } from '../resources/resource-reconciler.ts'
 
 export type WorkerConnectionState = {
   readonly phase: 'offline' | 'connecting' | 'online' | 'degraded'
@@ -66,6 +67,7 @@ export class ClusterLifecycle {
   private transport: WebSocketTransport | null = null
   private gateway: CapabilityGateway | null = null
   private tunnelPool: TunnelPool | null = null
+  private resources: ResourceReconciler | null = null
   private readonly connectors: WorkerConnectorRuntime
   private transitions: Promise<unknown> = Promise.resolve()
   private state: WorkerConnectionState = { phase: 'offline', retryAt: null, failure: null }
@@ -220,6 +222,7 @@ export class ClusterLifecycle {
       this.gateway = gateway
       const capabilityEndpoint = await gateway.listen()
       let runtime!: WorkerRuntime
+      let resources!: ResourceReconciler
       const transportStore = new WorkerTransportStore(join(this.options.home, 'transport.sqlite'))
       const transport = new WebSocketTransport({
         url: urls[0],
@@ -230,10 +233,14 @@ export class ClusterLifecycle {
         platform: process.platform,
         architecture: process.arch,
         store: transportStore,
-        onMessage: message => { void runtime.receive(message) },
+        onMessage: message => {
+          if (message.type === 'resource.set.notify' || message.type === 'resource.set.pull' || message.type === 'resource.blob.fetch') resources.receive(message)
+          else void runtime.receive(message)
+        },
         onConnected: () => {
           if (this.transport !== transport) return
           this.state = { phase: 'online', retryAt: null, failure: null }
+          void resources.connected().catch(error => this.options.onNotice?.(`资源收敛失败：${error instanceof Error ? error.message : String(error)}`))
           void runtime.connected()
         },
         onNotice: message => this.options.onNotice?.(message),
@@ -265,8 +272,10 @@ export class ClusterLifecycle {
           new Promise<void>(resolve => setTimeout(resolve, 1000)),
         ])
       }
+      resources = new ResourceReconciler({ workerId: identity.workerId, home: this.options.home, databasePath: join(this.options.home, 'resources.sqlite'), transport, concurrency: Number(process.env.WEMUX_RESOURCE_CONCURRENCY ?? '2') })
       runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint, turn => this.connectors.registerTurn(turn, identity.workerId)), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), await loadNodePty(), this.connectors)
       this.runtime = runtime
+      this.resources = resources
       await runtime.initialize()
       this.transport = transport
       transport.start()
@@ -338,6 +347,8 @@ export class ClusterLifecycle {
     this.runtime = null
     const gateway = this.gateway
     this.gateway = null
+    const resources = this.resources
+    this.resources = null
     const pool = this.tunnelPool
     this.tunnelPool = null
     try {
@@ -350,8 +361,11 @@ export class ClusterLifecycle {
         } finally { clearTimeout(abortTimer) }
       }
     } finally {
-      try { if (gateway) await gateway.close() }
-      finally { if (pool) await pool.close() }
+      try { if (resources) await resources.close() }
+      finally {
+        try { if (gateway) await gateway.close() }
+        finally { if (pool) await pool.close() }
+      }
     }
   }
 }

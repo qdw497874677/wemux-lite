@@ -16,6 +16,7 @@ function context(overrides: Record<string, unknown> = {}) {
     resource: () => ({ id: 'resource-1' }),
     revisions: () => [{ id: 'revision-1' }],
     bindings: () => [{ id: 'binding-1' }],
+    bindingProjections: () => [{ binding: { id: 'binding-1' }, reconcile: null }],
     desiredSet: () => ({ workerId: 'worker-1', revision: 1, bindings: [] }),
     createResource: (value: unknown) => value,
     updateResource: (value: unknown) => value,
@@ -41,7 +42,7 @@ test('resource management routes are administrator-only and expose catalog, bind
 
   const bindings = context()
   await route('GET', '/resource-bindings').handler(bindings.value)
-  assert.deepEqual(bindings.output.body, { items: [{ id: 'binding-1' }] })
+  assert.deepEqual(bindings.output.body, { items: [{ binding: { id: 'binding-1' }, reconcile: null }] })
 
   const desired = context({ params: { workerId: 'worker-1' } })
   await route('GET', '/workers/:workerId/resource-set').handler(desired.value)

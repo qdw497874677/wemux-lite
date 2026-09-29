@@ -52,7 +52,7 @@ export const nodeResourceRoutes: readonly RouteDescriptor[] = [
   { method: 'GET', pattern: '/resource-bindings', auth: 'admin', handler: async context => {
     await context.operator()
     const workerId = context.url.searchParams.get('workerId')
-    context.json(200, { items: service(context).bindings(workerId ? workerId as WorkerId : undefined) })
+    context.json(200, { items: service(context).bindingProjections(workerId ? workerId as WorkerId : undefined) })
   } },
   { method: 'POST', pattern: '/resource-bindings', auth: 'admin', handler: async context => {
     const actor = await context.operator(), body = object(await context.readBody())
