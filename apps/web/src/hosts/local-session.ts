@@ -13,7 +13,7 @@ export interface LocalSendReceipt { commandId: string; status: string; messageId
 
 export function createLocalSessionApi(fetcher: typeof fetch = fetch, onUnauthorized: () => void = () => {}) {
   let csrf = ''
-  const request = async <T>(path: string, method: 'GET' | 'POST' = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> => {
+  const request = async <T>(path: string, method: 'GET' | 'POST' | 'DELETE' = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> => {
     const headers: Record<string, string> = { Accept: 'application/json' }
     if (method !== 'GET') { headers['x-wemux-csrf'] = csrf; headers['content-type'] = 'application/json' }
     const response = await fetcher(`/api/local/${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal, credentials: 'same-origin', cache: 'no-store' })
@@ -41,6 +41,8 @@ export function createLocalSessionApi(fetcher: typeof fetch = fetch, onUnauthori
       return { ...result, messageId: ids.messageId }
     },
     stop: (sessionId: string, turnId: string) => request(`${sessionPath(sessionId)}/turns/${encodeURIComponent(turnId)}/stop`, 'POST'),
+    cancelQueued: (sessionId: string, commandId: string) => request(`${sessionPath(sessionId)}/queue/${encodeURIComponent(commandId)}/cancel`, 'DELETE'),
+    resolveApproval: (sessionId: string, approvalId: string, decision: 'approve' | 'deny', commandId: string) => request(`${sessionPath(sessionId)}/approvals/${encodeURIComponent(approvalId)}/resolve`, 'POST', { decision, commandId }),
     journal: (sessionId: string, fromSeq: number, limit: number) => request<{ events: JournalEventDTO[]; throughSeq: number; hasMore: boolean }>(`${sessionPath(sessionId)}/journal?fromSeq=${fromSeq}&limit=${limit}`),
   }
 }

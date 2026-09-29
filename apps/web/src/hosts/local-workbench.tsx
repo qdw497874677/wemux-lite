@@ -16,6 +16,9 @@ function LocalTimeline({ session, api }: { session: LocalSessionRecord; api: Ret
   const [error, setError] = useState('')
   const [pending, setPending] = useState(false)
   const [attempt, setAttempt] = useState<{ content: string; ids: { commandId: string; messageId: string } } | null>(null)
+  const [actions, setActions] = useState<Record<string, 'approve' | 'deny'>>({})
+  const [busy, setBusy] = useState<string | null>(null)
+  const [queuedAction, setQueuedAction] = useState<{ commandId: string; status: 'pending' | 'accepted' } | null>(null)
   const history = useSession(journal, session.sessionId, revision)
   useEffect(() => {
     if (attempt && history.messages.some(message => message.id === attempt.ids.messageId)) {
@@ -29,6 +32,21 @@ function LocalTimeline({ session, api }: { session: LocalSessionRecord; api: Ret
     try { await api.send(session.sessionId, text, ids); setAttempt(null); setContent(''); setRevision(value => value + 1) }
     catch (cause) { setError(cause instanceof Error ? `${cause.message}；重试会复用原请求标识。` : '发送结果未知；重试会复用原请求标识。') }
     finally { setPending(false) }
+  }
+  const cancelQueued = async (commandId: string) => {
+    if (busy || expired || history.freshness?.status !== 'synced' || !history.queuedItems.some(item => item.commandId === commandId)) return
+    setQueuedAction({ commandId, status: 'pending' }); setBusy(`queue:${commandId}`); setError('')
+    try { await api.cancelQueued(session.sessionId, commandId); setQueuedAction({ commandId, status: 'accepted' }); setRevision(value => value + 1) }
+    catch (cause) { setQueuedAction(null); setError(cause instanceof Error ? cause.message : '取消排队失败') }
+    finally { setBusy(null) }
+  }
+  const resolveApproval = async (approvalId: string, decision: 'approve' | 'deny') => {
+    if (busy || expired || history.freshness?.status !== 'synced' || !history.pendingApprovals.some(item => item.approvalId === approvalId)) return
+    const commandId = randomId()
+    setBusy(`approval:${approvalId}`); setError('')
+    try { await api.resolveApproval(session.sessionId, approvalId, decision, commandId); setActions(current => ({ ...current, [approvalId]: decision })); setRevision(value => value + 1) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : '审批处理失败') }
+    finally { setBusy(null) }
   }
   const stop = async () => {
     if (!history.activeTurnId || expired) return
@@ -44,6 +62,8 @@ function LocalTimeline({ session, api }: { session: LocalSessionRecord; api: Ret
       {!history.timeline.length && <p className="text-sm text-muted-foreground">{history.checkedAt ? '暂无消息，可以开始对话。' : '正在加载历史…'}</p>}
       {history.timeline.map(entry => <TimelineEntry key={entry.id} entry={entry} />)}
     </ConversationContent><ConversationScrollButton /></Conversation>
+    {history.queuedItems.length > 0 && <section aria-label="排队消息" className="space-y-2 rounded-md border border-border p-3"><h3 className="text-sm font-medium">排队消息</h3>{history.queuedItems.map(item => <div key={item.commandId} className="flex items-center justify-between gap-3 text-sm"><span className="min-w-0 truncate">{item.content}</span><button type="button" className="shrink-0 underline disabled:opacity-50" disabled={expired || !!busy || history.freshness?.status !== 'synced'} onClick={() => void cancelQueued(item.commandId)}>取消排队</button>{queuedAction?.commandId === item.commandId && <span className="text-xs text-muted-foreground">{queuedAction.status === 'pending' ? '提交中' : '已提交，等待 Journal 确认'}</span>}</div>)}</section>}
+    {history.pendingApprovals.length > 0 && <section aria-label="待处理审批" className="space-y-2 rounded-md border border-border p-3"><h3 className="text-sm font-medium">待处理审批</h3>{history.pendingApprovals.map(item => <div key={item.approvalId} className="space-y-2 text-sm"><p>{item.reason || 'Agent 请求执行操作'}：{typeof item.action === 'string' ? item.action : JSON.stringify(item.action)}</p><div className="flex gap-3">{(['approve', 'deny'] as const).map(decision => <button key={decision} type="button" className="underline disabled:opacity-50" disabled={expired || !!busy || history.freshness?.status !== 'synced'} onClick={() => void resolveApproval(item.approvalId, decision)}>{decision === 'approve' ? '批准' : '拒绝'}</button>)}</div>{actions[item.approvalId] && <p className="text-muted-foreground">已提交{actions[item.approvalId] === 'approve' ? '批准' : '拒绝'}请求；以 Journal 收敛结果为准。</p>}</div>)}</section>}
     {error && <p role="alert" className="text-sm text-error-foreground">{error}</p>}
     <form className="flex flex-col gap-2" onSubmit={event => { event.preventDefault(); void send() }}>
       <label htmlFor="local-prompt" className="text-sm">消息</label><textarea id="local-prompt" className="min-h-24 rounded-md border border-border bg-background p-3" value={content} onChange={event => setContent(event.target.value)} />
