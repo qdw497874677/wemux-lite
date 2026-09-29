@@ -18,6 +18,8 @@ export interface ResourceNotifier {
   send(workerId: WorkerId, payload: ResourceSetNotifyPayload): void
 }
 
+const runtimePackages: Readonly<Record<string, string>> = { pi: '@earendil-works/pi-coding-agent', opencode: 'opencode-ai', 'claude-code': '@anthropic-ai/claude-code' }
+
 export interface CreateResourceBindingInput {
   readonly id?: string
   readonly workerId: WorkerId
@@ -62,6 +64,7 @@ export class ResourceService {
   createBinding(input: CreateResourceBindingInput): ResourceBinding {
     const revision = this.repository.revision(input.resourceRevisionId)
     if (!revision) throw new Error('resource_revision_not_found')
+    if (revision.kind === 'agent-runtime' && (input.projectId != null || !input.agentKey || revision.payload.mode !== 'artifact' || runtimePackages[input.agentKey] !== revision.payload.packageName)) throw new Error('invalid_runtime_binding')
     const at = input.createdAt ?? this.now()
     const binding: ResourceBinding = {
       id: input.id ?? randomUUID(), workerId: input.workerId, resourceRevisionId: revision.id,
@@ -116,6 +119,7 @@ export class ResourceService {
           resourceRevisionId: revision.id, resourceId: revision.resourceId, kind: revision.kind,
           contentSha256: revision.contentSha256,
           files: revision.payload.mode === 'blobs' ? revision.payload.files : [],
+          ...(revision.payload.mode === 'artifact' ? { artifact: revision.payload } : {}),
         }
       }).sort((left, right) => left.bindingId.localeCompare(right.bindingId))
     const fingerprint = createHash('sha256').update(JSON.stringify(desired)).digest('hex')

@@ -143,6 +143,8 @@ export interface ResourceBindingSnapshot {
   readonly kind: ResourceKind
   readonly contentSha256: string
   readonly files: readonly ResourceFile[]
+  /** Immutable registry artifact metadata, required for agent-runtime bindings. */
+  readonly artifact?: Extract<ResourceRevisionPayload, { readonly mode: 'artifact' }>
 }
 
 export interface ResourceSetSnapshot {

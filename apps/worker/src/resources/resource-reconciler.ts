@@ -5,6 +5,9 @@ import type { AgentKey, ProjectId, ReconcileReport, ResourceBindingSnapshot, Res
 import type { ResourceBlobFetchPayload, ServerResourcePayload, WorkerPayload } from '@wemux/wire-protocol'
 import { ResourceStateStore } from './resource-state-store.ts'
 import { SkillMaterializer } from './skill-materializer.ts'
+import { RuntimeMaterializer } from './runtime-materializer.ts'
+import { stageAgentRuntime } from '../runtimes/management.ts'
+import type { RuntimeProcess } from '../runtimes/management.ts'
 
 interface ResourceTransport { send(payload: WorkerPayload): Promise<void> | void }
 
@@ -36,6 +39,8 @@ export interface ResourceReconcilerOptions {
   readonly transport: ResourceTransport
   readonly concurrency?: number
   readonly now?: () => Timestamp
+  readonly runtimeProcess?: RuntimeProcess
+  readonly stageRuntime?: typeof stageAgentRuntime
 }
 
 export class ResourceReconciler {
@@ -43,6 +48,7 @@ export class ResourceReconciler {
   private readonly transport: ResourceTransport
   private readonly state: ResourceStateStore
   private readonly materializer: SkillMaterializer
+  private readonly runtimes: RuntimeMaterializer
   private readonly now: () => Timestamp
   private readonly semaphore: Semaphore
   private readonly pulls = new Map<string, PendingRequest<ResourceSetSnapshot>>()
@@ -60,6 +66,7 @@ export class ResourceReconciler {
     this.state = new ResourceStateStore(options.databasePath)
     this.now = options.now ?? (() => new Date().toISOString() as Timestamp)
     this.materializer = new SkillMaterializer(options.home, this.state, this.now)
+    this.runtimes = new RuntimeMaterializer(options.home, this.state, this.now, options.runtimeProcess, options.stageRuntime)
     this.semaphore = new Semaphore(options.concurrency ?? 2)
   }
 
@@ -183,7 +190,10 @@ export class ResourceReconciler {
       await this.report(previous, binding, 'pending-gc', 'gc', null, '资源已移出期望态，等待安全回收')
     }
 
-    await Promise.all(snapshot.bindings.map(binding => this.singleFlight(binding.resourceId, async () => {
+    // Runtime npm install is serialized across resource IDs sharing one Agent key.
+    const runtimes = snapshot.bindings.filter(binding => binding.kind === 'agent-runtime')
+    for (const binding of runtimes) await this.singleFlight(`runtime:${binding.agentKey}`, () => this.semaphore.use(() => this.reconcileBinding(snapshot, binding)))
+    await Promise.all(snapshot.bindings.filter(binding => binding.kind !== 'agent-runtime').map(binding => this.singleFlight(binding.resourceId, async () => {
       await this.semaphore.use(() => this.reconcileBinding(snapshot, binding))
     })))
   }
@@ -197,6 +207,10 @@ export class ResourceReconciler {
   }
 
   private async reconcileBinding(snapshot: ResourceSetSnapshot, binding: ResourceBindingSnapshot): Promise<void> {
+    if (binding.kind === 'agent-runtime') {
+      await this.reconcileRuntime(snapshot, binding)
+      return
+    }
     if (binding.kind !== 'skill') {
       await this.report(snapshot, binding, 'failed', null, 'unsupported_resource_kind', `尚不支持物化 ${binding.kind}`)
       return
@@ -220,6 +234,36 @@ export class ResourceReconciler {
       await this.report(snapshot, binding, 'installed', 'ready', null, null)
     } catch (error) {
       await this.report(snapshot, binding, 'failed', null, error instanceof Error ? error.message : 'resource_materialization_failed', '资源物化失败，已保留当前激活版本')
+    }
+  }
+
+  private async reconcileRuntime(snapshot: ResourceSetSnapshot, binding: ResourceBindingSnapshot): Promise<void> {
+    const installed = this.state.installed(binding.resourceId)
+    if (installed?.resourceRevisionId === binding.resourceRevisionId && installed.integrity !== binding.contentSha256) {
+      await this.report(snapshot, binding, 'version-mismatch', null, 'resource_revision_integrity_conflict', '相同 revision 的完整性标识不同')
+      return
+    }
+    try {
+      if (installed?.activation === 'failed' && installed.resourceRevisionId === binding.resourceRevisionId) {
+        await this.report(snapshot, binding, 'failed', null, 'runtime_activation_failed', 'Agent 启动探测失败，已回退到原有选择；发布新 revision 后可重试')
+        return
+      }
+      if (await this.runtimes.verify(binding)) {
+        if (installed && installed.bindingId !== binding.bindingId) this.state.saveInstalled({ ...installed, bindingId: binding.bindingId })
+      } else {
+        await this.report(snapshot, binding, 'installed', 'queued', null, null)
+        await this.report(snapshot, binding, 'installed', 'downloading', null, null)
+        await this.report(snapshot, binding, 'installed', 'verifying', null, null)
+        await this.report(snapshot, binding, 'installed', 'installing', null, null)
+        await this.runtimes.materialize(binding)
+      }
+      const current = this.state.installed(binding.resourceId)
+      if (current?.activation === 'ready') await this.report(snapshot, binding, 'installed', 'ready', null, null)
+      else if (current?.activation === 'credential-required') await this.report(snapshot, binding, 'installed', 'credential-required', null, 'Agent 已安装，但模型凭证或配置不可用')
+      else if (current?.activation === 'failed') await this.report(snapshot, binding, 'failed', null, 'runtime_activation_failed', 'Agent 启动探测失败，已回退到原有选择')
+      else await this.report(snapshot, binding, 'installed', 'restart-required', null, 'Agent 已安装并通过版本探测，等待安全重启')
+    } catch (error) {
+      await this.report(snapshot, binding, 'failed', null, error instanceof Error ? error.message : 'runtime_materialization_failed', 'Agent 安装或探测失败，已保留当前激活版本')
     }
   }
 

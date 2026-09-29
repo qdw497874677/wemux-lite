@@ -7,6 +7,7 @@ import { SqliteWorkerStore } from './storage/sqlite-store.js'
 import { defaultAgents } from './agents/detection.js'
 import { agentSelections, readAgentSettings } from './config/agent-settings.js'
 import { installAgent, installCatalog, installWarning, restartNotice, useAgent } from './runtimes/management.js'
+import { activateStagedRuntimes, checkActivatedRuntimes } from './resources/runtime-materializer.ts'
 import { ClusterLifecycle } from './application/cluster-lifecycle.js'
 import { createLocalAdmin, ensureLocalInstallation } from './application/local-installation.js'
 import { createLocalWorkbenchService } from './application/local-workbench.js'
@@ -77,8 +78,14 @@ export async function main(args = process.argv.slice(2)) {
     const database = join(options.home, 'worker.sqlite')
     store = new SqliteWorkerStore(database)
     await chmod(database, 0o600)
-    const settings = await readAgentSettings(options.home)
-    const agents = defaultAgents(settings)
+    if (options.command === 'start') await activateStagedRuntimes(options.home, store.identity()?.workerId)
+    let settings = await readAgentSettings(options.home)
+    let agents = defaultAgents(settings)
+    if (options.command === 'start' && await checkActivatedRuntimes(options.home, store.identity()?.workerId, agents)) {
+      console.error('[runtime] Agent 启动探测失败，已回退到原有选择；继续使用回退后的配置')
+      settings = await readAgentSettings(options.home)
+      agents = defaultAgents(settings)
+    }
     const installation = ensureLocalInstallation(store, options.name)
     if (options.command === 'admin') {
       if (options.adminAction !== 'init' || options.extraPositionals.length || options.agentKey) throw new Error('使用 admin init [--username NAME] [--password-file FILE]')

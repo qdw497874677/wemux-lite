@@ -10,6 +10,8 @@ import test from 'node:test'
 import { SqliteServerStore } from '../server/src/storage/sqlite/store.ts'
 import { hashPassword } from '../server/src/application/password.ts'
 import type { Resource, ResourceRevision } from '@wemux/domain'
+import { installCatalog } from '../worker/src/runtimes/management.ts'
+import { readAgentSettings } from '../worker/src/config/agent-settings.ts'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../../')
 const serverEntry = join(root, 'apps/server/dist/main.js')
@@ -89,10 +91,28 @@ async function runScenario() {
     await waitFor(async () => readFile(current, 'utf8').then(value => value === '# revision two').catch(() => false))
     await waitFor(async () => { const result = await request(base, `/api/resource-bindings?workerId=${workerId}`, { headers: { cookie: auth.cookie } }); return result.body.items.some((item: { binding: { id: string; status: string }; reconcile: { phase: string } | null }) => item.binding.id === 'e2e-binding-2' && item.binding.status === 'installed' && item.reconcile?.phase === 'ready') })
     assert.equal(await readFile(secondCurrent, 'utf8'), '# revision one', '第二个 Worker 未更新绑定时保持旧版本')
+    // Exercise the real registry-backed runtime path with a real Server/Worker.
+    // Do not infer authenticated model availability merely from npm installation.
+    const pi = installCatalog.pi, runtimeId = 'e2e-pi-runtime', runtimeHash = sha('pi-runtime-manifest')
+    const runtime: Resource = { id: runtimeId, kind: 'agent-runtime', name: 'Pi runtime', description: '', definition: {}, createdBy: 'e2e-admin' as never, createdAt: new Date().toISOString() as never, updatedAt: new Date().toISOString() as never }
+    const runtimeRevision: ResourceRevision = { id: 'e2e-pi-runtime-rev-1', resourceId: runtimeId, kind: 'agent-runtime', version: 1, state: 'published', manifest: { schemaVersion: 1, name: 'Pi runtime', description: '', compatibility: { workerProtocol: '2', platforms: ['linux'], architectures: ['x64'], agentKeys: ['pi' as never] }, bytes: 0, fileCount: 0, sha256: runtimeHash, materializerVersion: 1, restartPolicy: 'worker' }, payload: { mode: 'artifact', packageName: pi.name, packageVersion: pi.version, registryOrigin: 'https://registry.npmjs.org', packageIntegrity: pi.integrity }, supplyChain: { mode: 'registry-package', packageName: pi.name, packageVersion: pi.version, registryOrigin: 'https://registry.npmjs.org', packageIntegrity: pi.integrity }, contentSha256: runtimeHash, createdBy: 'e2e-admin' as never, createdAt: new Date().toISOString() as never }
+    assert.equal((await request(base, '/api/resources', { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify(runtime) })).response.status, 201)
+    assert.equal((await request(base, `/api/resources/${runtimeId}/revisions`, { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify(runtimeRevision) })).response.status, 201)
+    const runtimeBindingId = 'e2e-pi-runtime-binding'
+    assert.equal((await request(base, '/api/resource-bindings', { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify({ id: runtimeBindingId, workerId: secondWorkerId, resourceRevisionId: runtimeRevision.id, agentKey: 'pi' }) })).response.status, 201)
+    const runtimeProjection = async () => (await request(base, `/api/resource-bindings?workerId=${secondWorkerId}`, { headers: { cookie: auth.cookie } })).body.items.find((item: { binding: { id: string } }) => item.binding.id === runtimeBindingId)
+    await waitFor(async () => (await runtimeProjection())?.reconcile?.phase === 'restart-required', 120_000)
+    assert.equal((await runtimeProjection()).binding.status, 'notified', 'installation alone is not ready')
+    assert.equal((await readAgentSettings(secondHome)).pi, undefined, 'running Worker must retain its previous Agent selection')
+    await stop(secondWorker); secondWorker = null
+    secondWorker = spawn(process.execPath, [workerEntry, 'start', '--home', secondHome], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }); secondWorker.stdout!.on('data', chunk => output.push(`[worker-2-restarted] ${chunk}`)); secondWorker.stderr!.on('data', chunk => output.push(`[worker-2-restarted-err] ${chunk}`))
+    await waitFor(async () => (await readAgentSettings(secondHome)).pi?.package === `${pi.name}@${pi.version}`, 30_000)
+    await waitFor(async () => ['ready', 'credential-required'].includes((await runtimeProjection())?.reconcile?.phase), 50_000)
+    const runtimePhase = (await runtimeProjection()).reconcile.phase
     const tree = await import('node:child_process').then(({ execFile }) => new Promise<string>((resolveTree, reject) => execFile('find', [join(workerHome, 'resources'), join(secondHome, 'resources'), '-maxdepth', '6', '-printf', '%y %p -> %l\n'], (error, stdout) => error ? reject(error) : resolveTree(stdout))))
     const bindings = await request(base, `/api/resource-bindings?workerId=${workerId}`, { headers: { cookie: auth.cookie } })
     const statuses = bindings.body.items.map((item: { binding: { id: string; status: string }; reconcile: { phase: string } | null }) => `${item.binding.id}: ${item.binding.status} (${item.reconcile?.phase ?? 'none'})`)
-    const evidence = ['real Server + two Worker processes: succeeded', 'first convergence: revision one installed and reported ready on both Workers', 'offline update: revision two assigned only to Worker one while it was stopped', 'reconnect convergence: Worker one revision two, Worker two revision one', `bindings: ${statuses.join(', ')}`].join('\n') + '\n'
+    const evidence = ['real Server + two Worker processes: succeeded', 'first convergence: revision one installed and reported ready on both Workers', 'offline update: revision two assigned only to Worker one while it was stopped', 'reconnect convergence: Worker one revision two, Worker two revision one', `Pi official artifact installation: restart-required before restart, ${runtimePhase} after actual Worker restart`, `bindings: ${statuses.join(', ')}`].join('\n') + '\n'
     const safeTree = tree.replaceAll(secondHome, '<worker-2-home>').replaceAll(workerHome, '<worker-1-home>')
     await writeFile(join(scratch, 'resource-reconcile-e2e.txt'), evidence)
     await writeFile(join(scratch, 'worker-resource-tree.txt'), safeTree)
@@ -100,4 +120,4 @@ async function runScenario() {
   finally { await stop(worker); await stop(secondWorker); await stop(server); if (!process.env.WEMUX_RESOURCE_E2E_KEEP) await rm(temp, { recursive: true, force: true }); else console.error(`KEEP dir: ${temp}`) }
 }
 
-test('真实 Server + 两 Worker 完成独立 skill 分发、断线追赶和二次收敛', { timeout: 90_000 }, runScenario)
+test('真实 Server + 两 Worker 完成 Skill 分发及 Pi runtime 安装、重启、探测', { timeout: 240_000 }, runScenario)

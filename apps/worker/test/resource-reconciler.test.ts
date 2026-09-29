@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -8,6 +8,10 @@ import type { ResourceSetSnapshot, Turn, WorkerId } from '@wemux/domain'
 import { FilesystemAgentLaunchContextProvider } from '../src/application/agent-launch-context-provider.ts'
 import type { WorkerPayload } from '@wemux/wire-protocol'
 import { ResourceReconciler } from '../src/resources/resource-reconciler.ts'
+import { activateStagedRuntimes, checkActivatedRuntimes } from '../src/resources/runtime-materializer.ts'
+import { readAgentSettings, saveAgentSelection } from '../src/config/agent-settings.ts'
+import { installCatalog } from '../src/runtimes/management.ts'
+import type { AgentAdapter, LocalAgentDetection } from '../src/application/ports/agent-adapter.ts'
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex')
 const workerId = 'worker-resource-test' as WorkerId
@@ -32,6 +36,123 @@ async function fixture() {
   reconciler = new ResourceReconciler({ workerId, home, databasePath: join(home, 'resources.sqlite'), transport, now: () => '2026-01-01T00:00:00.000Z' as never })
   return { home, sent, blobs, reconciler, close: async () => { await reconciler.close(); await rm(home, { recursive: true, force: true }) } }
 }
+
+test('Agent runtime: pinned artifact stages without changing selection; repeated snapshot reprobes; failed update retains previous', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'wemux-runtime-resource-'))
+  const sent: WorkerPayload[] = []
+  const artifact = { mode: 'artifact' as const, packageName: installCatalog.pi.name, packageVersion: installCatalog.pi.version, registryOrigin: 'https://registry.npmjs.org', packageIntegrity: installCatalog.pi.integrity }
+  const binding = (revision: number, id: string) => ({ bindingId: 'runtime-binding', bindingRevision: revision, agentKey: 'pi' as never, projectId: null, resourceRevisionId: id, resourceId: 'runtime-resource', kind: 'agent-runtime' as const, contentSha256: sha(id), files: [], artifact })
+  const desired = (revision: number, id: string): ResourceSetSnapshot => ({ workerId, revision, fingerprint: sha(`runtime-${revision}`), createdAt: '2026-01-01T00:00:00.000Z' as never, bindings: [binding(revision, id)] })
+  let installs = 0
+  let invalid = false
+  const stageRuntime = async (_home: string, _artifact: typeof artifact) => {
+    if (invalid) throw new Error('artifact integrity mismatch')
+    installs++
+    const directory = join(home, 'agents', 'pi', `0.85.1-${installs}`)
+    const executable = join(directory, 'node_modules', artifact.packageName, installCatalog.pi.bin)
+    await mkdir(join(executable, '..'), { recursive: true })
+    await writeFile(executable, '#!/bin/sh\nprintf "0.85.1\\n"\n', { mode: 0o755 })
+    return { key: 'pi' as const, executable, directory, package: `${artifact.packageName}@${artifact.packageVersion}`, version: '0.85.1' }
+  }
+  const reconciler = new ResourceReconciler({ workerId, home, databasePath: join(home, 'resources.sqlite'), transport: { send: async payload => { sent.push(payload) } }, stageRuntime, runtimeProcess: async () => '0.85.1' })
+  try {
+    await reconciler.reconcile(desired(1, 'runtime-rev-1'))
+    assert.equal(installs, 1)
+    assert.equal(sent.at(-1)?.type === 'resource.reconcile.report' && sent.at(-1).report.phase, 'restart-required')
+    assert.equal(await readFile(join(home, 'agents.json'), 'utf8').catch(() => ''), '', 'runtime staging must not activate running Agent')
+    await reconciler.reconcile(desired(1, 'runtime-rev-1'))
+    assert.equal(installs, 1, 'unchanged revision should only probe staged executable')
+    await reconciler.close()
+    await activateStagedRuntimes(home, workerId, async () => '0.85.1')
+    const selected = await readAgentSettings(home)
+    assert.equal(selected.pi?.executable, join(home, 'agents', 'pi', '0.85.1-1', 'node_modules', artifact.packageName, installCatalog.pi.bin), 'next Worker start activates staged runtime')
+    await checkActivatedRuntimes(home, workerId, [probeAgent(selected.pi!.executable, 'available')])
+    const restarted = new ResourceReconciler({ workerId, home, databasePath: join(home, 'resources.sqlite'), transport: { send: async payload => { sent.push(payload) } }, stageRuntime, runtimeProcess: async () => '0.85.1' })
+    try {
+      await restarted.reconcile(desired(1, 'runtime-rev-1'))
+      assert.equal(installs, 1, 'restart must not reinstall')
+      assert.equal(sent.at(-1)?.type === 'resource.reconcile.report' && sent.at(-1).report.phase, 'ready', 'ready requires fresh Agent capability probe')
+    } finally { await restarted.close() }
+    // New revision is still installed separately; activation only happens at the next start.
+    const invalidBinding = { ...binding(2, 'runtime-rev-2'), artifact: { ...artifact, registryOrigin: 'https://untrusted.invalid' } }
+    const third = new ResourceReconciler({ workerId, home, databasePath: join(home, 'resources.sqlite'), transport: { send: async payload => { sent.push(payload) } }, stageRuntime, runtimeProcess: async () => '0.85.1' })
+    try {
+    await third.reconcile({ ...desired(2, 'runtime-rev-2'), bindings: [invalidBinding] })
+    assert.equal(installs, 1, 'unapproved artifact must be rejected before invoking installer')
+    assert.equal(sent.at(-1)?.type === 'resource.reconcile.report' && sent.at(-1).report.result, 'failed')
+    invalid = true
+    await third.reconcile(desired(2, 'runtime-rev-2'))
+    assert.equal(sent.at(-1)?.type === 'resource.reconcile.report' && sent.at(-1).report.result, 'failed')
+    assert.equal(installs, 1)
+    assert.equal(await readFile(join(home, 'agents', 'pi', '0.85.1-1', 'node_modules', artifact.packageName, installCatalog.pi.bin), 'utf8').then(text => text.includes('0.85.1')), true)
+    assert.equal((await readAgentSettings(home)).pi?.executable, selected.pi?.executable, 'failed update preserves active selection')
+    } finally { await third.close() }
+  } finally { await rm(home, { recursive: true, force: true }) }
+})
+
+test('activation refuses another Worker identity and retains previous Agent selection for rollback', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'wemux-runtime-activation-'))
+  const executable = join(home, 'agents', 'pi', '0.85.1-staged', 'node_modules', installCatalog.pi.name, installCatalog.pi.bin)
+  const previous = join(home, 'previous-agent')
+  const artifact = { mode: 'artifact' as const, packageName: installCatalog.pi.name, packageVersion: installCatalog.pi.version, registryOrigin: 'https://registry.npmjs.org', packageIntegrity: installCatalog.pi.integrity }
+  const binding = { bindingId: 'bind', bindingRevision: 1, agentKey: 'pi' as never, projectId: null, resourceRevisionId: 'revision-1', resourceId: 'pi-runtime', kind: 'agent-runtime' as const, contentSha256: sha('runtime'), files: [], artifact }
+  const desired: ResourceSetSnapshot = { workerId, revision: 1, fingerprint: sha('set'), bindings: [binding], createdAt: '2026-01-01T00:00:00Z' as never }
+  const state = new (await import('../src/resources/resource-state-store.ts')).ResourceStateStore(join(home, 'resources.sqlite'))
+  try {
+    await mkdir(join(executable, '..'), { recursive: true })
+    await writeFile(executable, '#!/bin/sh\nprintf "0.85.1\\n"\n', { mode: 0o755 })
+    await writeFile(previous, '#!/bin/sh\nprintf "0.85.1\\n"\n', { mode: 0o755 })
+    await saveAgentSelection(home, 'pi', { executable: previous, source: 'local', selectedAt: '2026-01-01T00:00:00Z' })
+    state.saveDesired(desired)
+    state.saveInstalled({ bindingId: binding.bindingId, resourceId: binding.resourceId, resourceRevisionId: binding.resourceRevisionId, kind: 'agent-runtime', integrity: binding.contentSha256, runtimeKey: 'pi', executable, files: {}, path: join(home, 'agents', 'pi', '0.85.1-staged'), installedAt: '2026-01-01T00:00:00Z', lastUsedAt: '2026-01-01T00:00:00Z' })
+    state.close()
+    await activateStagedRuntimes(home, 'another-worker' as WorkerId, async () => '0.85.1')
+    assert.equal((await readAgentSettings(home)).pi?.executable, previous)
+    await activateStagedRuntimes(home, workerId, async () => '0.85.1')
+    assert.equal((await readAgentSettings(home)).pi?.executable, executable)
+    const reopened = new (await import('../src/resources/resource-state-store.ts')).ResourceStateStore(join(home, 'resources.sqlite'))
+    assert.equal(reopened.installed(binding.resourceId)?.previousExecutable, previous)
+    reopened.close()
+    assert.equal(await checkActivatedRuntimes(home, workerId, [probeAgent(executable, 'authentication-required')]), false)
+    const authState = new (await import('../src/resources/resource-state-store.ts')).ResourceStateStore(join(home, 'resources.sqlite'))
+    assert.equal(authState.installed(binding.resourceId)?.activation, 'credential-required')
+    authState.close()
+  } finally { await rm(home, { recursive: true, force: true }) }
+})
+
+function probeAgent(executable: string, status: 'available' | 'authentication-required' | 'unavailable'): AgentAdapter {
+  return { agentKey: 'pi' as never, mode: 'execution', detect: async (): Promise<LocalAgentDetection> => ({
+    agentKey: 'pi' as never, displayName: 'Pi', executablePath: executable, diagnostics: [], version: '0.85.1', mode: 'execution',
+    availability: status === 'available' ? { status } : { status, reason: 'probe result' }, models: [],
+  }) }
+}
+
+test('failed Agent capability probe restores exact previous selection and never marks runtime ready', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'wemux-runtime-rollback-'))
+  const oldExecutable = join(home, 'old-agent')
+  const executable = join(home, 'agents', 'pi', 'staged', 'node_modules', installCatalog.pi.name, installCatalog.pi.bin)
+  const artifact = { mode: 'artifact' as const, packageName: installCatalog.pi.name, packageVersion: installCatalog.pi.version, registryOrigin: 'https://registry.npmjs.org', packageIntegrity: installCatalog.pi.integrity }
+  const binding = { bindingId: 'bind', bindingRevision: 1, agentKey: 'pi' as never, projectId: null, resourceRevisionId: 'revision-1', resourceId: 'pi-runtime', kind: 'agent-runtime' as const, contentSha256: sha('runtime'), files: [], artifact }
+  const state = new (await import('../src/resources/resource-state-store.ts')).ResourceStateStore(join(home, 'resources.sqlite'))
+  try {
+    await mkdir(join(executable, '..'), { recursive: true })
+    await writeFile(executable, '#!/bin/sh\nprintf "0.85.1\\n"\n', { mode: 0o755 })
+    await writeFile(oldExecutable, '#!/bin/sh\nprintf "old\\n"\n', { mode: 0o755 })
+    const oldSelection = { executable: oldExecutable, source: 'managed' as const, package: 'old@1.0.0', selectedAt: '2025-01-01T00:00:00Z' }
+    await saveAgentSelection(home, 'pi', oldSelection)
+    state.saveDesired({ workerId, revision: 1, fingerprint: sha('set'), bindings: [binding], createdAt: '2026-01-01T00:00:00Z' as never })
+    state.saveInstalled({ bindingId: binding.bindingId, resourceId: binding.resourceId, resourceRevisionId: binding.resourceRevisionId, kind: 'agent-runtime', integrity: binding.contentSha256, runtimeKey: 'pi', executable, files: {}, path: join(home, 'agents', 'pi', 'staged'), installedAt: '2026-01-01T00:00:00Z', lastUsedAt: '2026-01-01T00:00:00Z' })
+    state.close()
+    await activateStagedRuntimes(home, workerId, async () => '0.85.1')
+    assert.equal(await checkActivatedRuntimes(home, workerId, [probeAgent(executable, 'unavailable')]), true, 'startup must rebuild adapters from restored selection')
+    assert.deepEqual((await readAgentSettings(home)).pi, oldSelection)
+    const reopened = new (await import('../src/resources/resource-state-store.ts')).ResourceStateStore(join(home, 'resources.sqlite'))
+    assert.equal(reopened.installed(binding.resourceId)?.activation, 'failed')
+    reopened.close()
+    await activateStagedRuntimes(home, workerId, async () => '0.85.1')
+    assert.deepEqual((await readAgentSettings(home)).pi, oldSelection, 'failed revision must not reactivate on next restart')
+  } finally { await rm(home, { recursive: true, force: true }) }
+})
 
 test('reconcile 差异矩阵：缺失下载，已收敛不重复下载，磁盘漂移重新物化', async () => {
   const f = await fixture()

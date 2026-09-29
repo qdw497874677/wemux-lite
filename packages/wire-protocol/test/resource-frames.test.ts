@@ -25,6 +25,11 @@ test('resource snapshot scope must explicitly carry project and Agent filters', 
   assert.doesNotThrow(() => parseServerTransportFrame(payload(binding)))
   assert.throws(() => parseServerTransportFrame(payload({ ...binding, agentKey: 42 })), /Invalid Server/)
   assert.throws(() => parseServerTransportFrame(payload({ ...binding, projectId: 42 })), /Invalid Server/)
+  const runtime = { ...binding, kind: 'agent-runtime', agentKey: 'pi', artifact: { mode: 'artifact', packageName: '@earendil-works/pi-coding-agent', packageVersion: '0.85.1', registryOrigin: 'https://registry.npmjs.org', packageIntegrity: 'sha512-AAAA' } }
+  assert.doesNotThrow(() => parseServerTransportFrame(payload(runtime)))
+  assert.throws(() => parseServerTransportFrame(payload({ ...runtime, artifact: { ...runtime.artifact, registryOrigin: 'https://untrusted.invalid' } })), /Invalid Server/)
+  assert.throws(() => parseServerTransportFrame(payload({ ...runtime, artifact: { ...runtime.artifact, extra: 'unsafe' } })), /Invalid Server/)
+  assert.throws(() => parseServerTransportFrame(payload({ ...runtime, artifact: undefined })), /Invalid Server/)
   const { agentKey: _, ...missing } = binding
   assert.throws(() => parseServerTransportFrame(payload(missing)), /Invalid Server/)
 })

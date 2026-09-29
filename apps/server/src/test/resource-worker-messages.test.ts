@@ -59,6 +59,27 @@ test('Worker report 被持久化并投影 phase，ready 后更新 binding 状态
   } finally { repository.close(); await rm(blobsRoot, { recursive: true, force: true }) }
 })
 
+test('Agent runtime binding pins Agent identity and exact official artifact in desired set', () => {
+  const repository = new SqliteResourceRepository(':memory:')
+  try {
+    const service = new ResourceService(repository, { send: () => undefined }, () => at)
+    const artifact = { mode: 'artifact' as const, packageName: '@earendil-works/pi-coding-agent', packageVersion: '0.85.1', registryOrigin: 'https://registry.npmjs.org', packageIntegrity: 'sha512-FGRN+OHbWaefBPGaTggAdLjrIHW+s2PzLyglz/5dfLzb9of7uuXMXYC0fJIeZTw+shS32o2cuQ9jF7YSDuL/oQ==' }
+    const integrity = sha('runtime-manifest')
+    const resource: Resource = { id: 'pi-runtime', kind: 'agent-runtime', name: 'Pi', description: '', definition: {}, createdBy: actor, createdAt: at, updatedAt: at }
+    const revision: ResourceRevision = { id: 'pi-0.85.1', resourceId: resource.id, kind: 'agent-runtime', version: 1, state: 'published', manifest: { schemaVersion: 1, name: 'Pi', description: '', compatibility: { workerProtocol: '2', platforms: ['linux'], architectures: ['x64'], agentKeys: ['pi' as never] }, bytes: 0, fileCount: 0, sha256: integrity, materializerVersion: 1, restartPolicy: 'worker' }, payload: artifact, contentSha256: integrity, supplyChain: { mode: 'registry-package', packageName: artifact.packageName, packageVersion: artifact.packageVersion, registryOrigin: artifact.registryOrigin, packageIntegrity: artifact.packageIntegrity }, createdBy: actor, createdAt: at }
+    service.createResource(resource); service.createRevision(revision)
+    for (const invalid of [{ agentKey: null }, { agentKey: 'claude-code' as never }, { agentKey: 'pi' as never, projectId: 'project-1' as never }]) {
+      assert.throws(() => service.createBinding({ workerId, resourceRevisionId: revision.id, createdBy: actor, ...invalid }), /invalid_runtime_binding/)
+    }
+    service.createBinding({ workerId, resourceRevisionId: revision.id, agentKey: 'pi' as never, createdBy: actor })
+    const binding = service.desiredSet(workerId).bindings[0]!
+    assert.deepEqual(binding.artifact, artifact)
+    assert.equal(binding.agentKey, 'pi')
+    assert.equal(binding.projectId, null)
+    assert.deepEqual(binding.files, [])
+  } finally { repository.close() }
+})
+
 test('blob fetch 按 hash 返回内容，不存在时返回 not-found', async () => {
   const repository = new SqliteResourceRepository(':memory:')
   const root = await mkdtemp(join(tmpdir(), 'wemux-server-resource-'))

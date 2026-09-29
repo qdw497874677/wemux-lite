@@ -7,8 +7,16 @@ export interface InstalledResourceState {
   readonly bindingId: string
   readonly resourceId: string
   readonly resourceRevisionId: string
-  readonly kind: 'skill'
+  readonly kind: 'skill' | 'agent-runtime'
   readonly integrity: string
+  /** Only runtime entries have a fixed catalog key and staged executable. */
+  readonly runtimeKey?: 'pi' | 'opencode' | 'claude-code'
+  readonly executable?: string
+  /** Selection active before the staged runtime was activated at Worker startup. */
+  readonly previousExecutable?: string | null
+  readonly previousSelection?: import('../config/agent-settings.ts').AgentSelection | null
+  /** Fresh-start Agent probe; never infer ready from the npm version probe alone. */
+  readonly activation?: 'ready' | 'credential-required' | 'failed'
   readonly files: Readonly<Record<string, string>>
   readonly path: string
   readonly installedAt: string

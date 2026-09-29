@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,7 +9,7 @@ import { test, type TestContext } from 'node:test'
 import { config } from '../src/config.js'
 import { agentsForHome } from '../src/agents/detection.js'
 import { agentCommand, agentSelections, readAgentSettings, removeAgentSelection } from '../src/config/agent-settings.js'
-import { installAgent, installCatalog, runRuntimeProcess, useAgent, type ProcessRequest, type RuntimeProcess } from '../src/runtimes/management.js'
+import { installAgent, installCatalog, matchesRuntimeVersion, runRuntimeProcess, useAgent, type ProcessRequest, type RuntimeProcess } from '../src/runtimes/management.js'
 
 async function fixture(t: TestContext) {
   const home = await mkdtemp(join(tmpdir(), 'wemux-runtimes-'))
@@ -19,23 +20,39 @@ async function executable(path: string) {
   await mkdir(join(path, '..'), { recursive: true })
   await writeFile(path, '#!/usr/bin/env node\nconsole.log("1.0.0")\n', { mode: 0o755 })
 }
-function installer(calls: ProcessRequest[], fail?: 'npm' | 'version' | 'manifest'): RuntimeProcess {
+const fixtureIntegrity = `sha512-${createHash('sha512').update('fixture-artifact').digest('base64')}`
+function installFixture(home: string, key: string, run: RuntimeProcess) {
+  return installAgent(home, key, true, run, fixtureIntegrity)
+}
+function installer(calls: ProcessRequest[], fail?: 'npm' | 'version' | 'manifest' | 'integrity'): RuntimeProcess {
+  let selected = installCatalog.pi as (typeof installCatalog)[keyof typeof installCatalog]
   return async request => {
     calls.push(request)
     if (request.command !== 'npm') {
       if (fail === 'version') throw new Error('version timed out')
-      return '1.0.0'
+      return selected.version
     }
     if (fail === 'npm') throw new Error('npm timed out')
-    const requested = request.args.at(-1)
-    const spec = requested === '@earendil-works/pi-coding-agent@0.85.1' ? installCatalog.pi : requested === 'opencode-ai@1.18.31' ? installCatalog.opencode : installCatalog['claude-code']
-    const root = join(request.args[request.args.indexOf('--prefix') + 1], 'node_modules', spec.name)
-    await executable(join(root, spec.bin))
-    const binName = spec === installCatalog.pi ? 'pi' : spec === installCatalog.opencode ? 'opencode' : 'claude'
-    await writeFile(join(root, 'package.json'), JSON.stringify({ name: spec.name, version: fail === 'manifest' ? '0.0.0' : spec.version, bin: { [binName]: spec.bin } }))
+    if (request.args[0] === 'pack') {
+      const requested = request.args.at(-1)
+      selected = requested === '@earendil-works/pi-coding-agent@0.85.1' ? installCatalog.pi : requested === 'opencode-ai@1.18.31' ? installCatalog.opencode : installCatalog['claude-code']
+      const filename = `${selected.name.replace(/^@/, '').replace('/', '-')}-${selected.version}.tgz`
+      await writeFile(join(request.cwd!, filename), fail === 'integrity' ? 'tampered-artifact' : 'fixture-artifact')
+      return JSON.stringify([{ filename }])
+    }
+    const root = join(request.args[request.args.indexOf('--prefix') + 1], 'node_modules', selected.name)
+    await executable(join(root, selected.bin))
+    const binName = selected === installCatalog.pi ? 'pi' : selected === installCatalog.opencode ? 'opencode' : 'claude'
+    await writeFile(join(root, 'package.json'), JSON.stringify({ name: selected.name, version: fail === 'manifest' ? '0.0.0' : selected.version, bin: { [binName]: selected.bin } }))
     return ''
   }
 }
+
+test('pinned runtime probe rejects a different patch version', () => {
+  assert.equal(matchesRuntimeVersion('pi 0.85.1', '0.85.1'), true)
+  assert.equal(matchesRuntimeVersion('pi 0.85.10', '0.85.1'), false)
+  assert.equal(matchesRuntimeVersion('pi 10.85.1', '0.85.1'), false)
+})
 
 test('CLI opt-in is explicit; aliases work; arbitrary packages and unsupported installs are rejected before spawn', async t => {
   const home = await fixture(t)
@@ -77,24 +94,28 @@ test('absolute path reuse probes only the executable, persists across reload, ne
 for (const key of ['pi', 'opencode', 'claude'] as const) test(`managed ${key} install uses exact non-global npm args, validates and persists provenance`, async t => {
   const home = await fixture(t)
   const calls: ProcessRequest[] = []
-  const result = await installAgent(home, key, true, installer(calls))
+  const result = await installFixture(home, key, installer(calls))
   const prefix = calls[0].cwd!
   const spec = key === 'pi' ? '@earendil-works/pi-coding-agent@0.85.1' : key === 'opencode' ? 'opencode-ai@1.18.31' : '@anthropic-ai/claude-code@2.1.34'
-  assert.deepEqual(calls[0], { command: 'npm', args: ['install', '--global=false', '--prefix', prefix, '--no-save', '--package-lock=false', '--no-audit', '--no-fund', '--registry=https://registry.npmjs.org', '--', spec], cwd: prefix, env: calls[0].env, timeout: 300_000 })
+  assert.deepEqual(calls[0], { command: 'npm', args: ['pack', '--json', '--ignore-scripts', '--pack-destination', prefix, '--registry=https://registry.npmjs.org', '--', spec], cwd: prefix, env: calls[0].env, timeout: 300_000 })
+  const artifact = join(prefix, `${installCatalog[result.key].name.replace(/^@/, '').replace('/', '-')}-${installCatalog[result.key].version}.tgz`)
+  assert.deepEqual(calls[1], { command: 'npm', args: ['install', '--global=false', '--prefix', prefix, '--no-save', '--package-lock=false', '--no-audit', '--no-fund', '--registry=https://registry.npmjs.org', '--', artifact], cwd: prefix, env: calls[1].env, timeout: 300_000 })
   assert.ok(prefix.startsWith(join(home, 'agents', result.key)))
-  assert.deepEqual(calls[1], { command: result.executable, args: ['--version'], timeout: 10_000 })
+  assert.deepEqual(calls[2], { command: result.executable, args: ['--version'], timeout: 10_000 })
   assert.equal((await readAgentSettings(home))[result.key]?.package, spec)
   assert.equal((await readAgentSettings(home))[result.key]?.source, 'managed')
   assert.match(result.message, /重启/)
 })
 
-for (const failure of ['npm', 'version', 'manifest'] as const) test(`${failure} failure preserves prior selection and removes only failed prefix`, async t => {
+for (const failure of ['npm', 'version', 'manifest', 'integrity'] as const) test(`${failure} failure preserves prior selection and removes only failed prefix`, async t => {
   const home = await fixture(t)
   const path = join(home, 'user-pi')
   await executable(path)
   await useAgent(home, 'pi', path, async () => '1')
   const before = await readFile(join(home, 'agents.json'), 'utf8')
-  await assert.rejects(installAgent(home, 'pi', true, installer([], failure)))
+  const calls: ProcessRequest[] = []
+  await assert.rejects(installFixture(home, 'pi', installer(calls, failure)))
+  if (failure === 'integrity') assert.equal(calls.filter(call => call.command === 'npm').length, 1, 'tampered archive must never reach npm install')
   assert.equal(await readFile(join(home, 'agents.json'), 'utf8'), before)
   assert.deepEqual(await readdir(join(home, 'agents', 'pi')), [])
   assert.match(await readFile(path, 'utf8'), /console.log/)
@@ -102,11 +123,29 @@ for (const failure of ['npm', 'version', 'manifest'] as const) test(`${failure} 
   assert.equal(await readFile(join(home, 'agents.json'), 'utf8'), before)
 })
 
+test('malformed npm pack metadata is rejected before install and leaves the selected Agent untouched', async t => {
+  const home = await fixture(t)
+  const path = join(home, 'prior-pi')
+  await executable(path)
+  await useAgent(home, 'pi', path, async () => '1')
+  const before = await readFile(join(home, 'agents.json'), 'utf8')
+  for (const metadata of ['{}', '[]', '[{"filename":"../escape.tgz"}]', '[{"filename":"archive.zip"}]']) {
+    const calls: ProcessRequest[] = []
+    await assert.rejects(installFixture(home, 'pi', async request => {
+      calls.push(request)
+      return metadata
+    }), /npm artifact metadata invalid/)
+    assert.equal(calls.length, 1, 'untrusted metadata must not reach installation')
+    assert.equal(await readFile(join(home, 'agents.json'), 'utf8'), before)
+    assert.deepEqual(await readdir(join(home, 'agents', 'pi')), [])
+  }
+})
+
 test('reinstall uses a new prefix without changing old managed files; selections merge', async t => {
   const home = await fixture(t)
-  const first = await installAgent(home, 'pi', true, installer([]))
-  await installAgent(home, 'claude', true, installer([]))
-  const second = await installAgent(home, 'pi', true, installer([]))
+  const first = await installFixture(home, 'pi', installer([]))
+  await installFixture(home, 'claude', installer([]))
+  const second = await installFixture(home, 'pi', installer([]))
   assert.notEqual(first.executable, second.executable)
   assert.match(await readFile(first.executable, 'utf8'), /console.log/)
   assert.equal(Object.keys(await readAgentSettings(home)).length, 2)
@@ -143,7 +182,8 @@ test('managed npm resolves only official registries offline despite inherited sc
   t.after(() => { process.env = original })
   Object.assign(process.env, overrides)
   const calls: ProcessRequest[] = []
-  await installAgent(home, 'claude', true, async request => {
+  const mockNpm = installer(calls)
+  await installFixture(home, 'claude', async request => {
     if (request.command === 'npm') {
       assert.notEqual(request.env?.npm_config_userconfig, hostile)
       assert.notEqual(request.env?.npm_config_globalconfig, hostile)
@@ -157,7 +197,7 @@ test('managed npm resolves only official registries offline despite inherited sc
       for (const scope of ['@anthropic-ai', '@earendil-works', '@other']) assert.equal(resolved[`${scope}:registry`], undefined)
       assert.equal(resolved['https-proxy'], overrides.npm_config_https_proxy)
     }
-    return installer(calls)(request)
+    return mockNpm(request)
   })
 })
 
@@ -244,27 +284,26 @@ test('future detection uses saved paths and reports missing selections without t
   assert.equal(detections[0].availability.status, 'unavailable')
 })
 
-test('CLI runs mock npm as a real child with literal fixed args and selects its validated executable', async t => {
+test('CLI runs mock npm as a real child with literal fixed args and rejects a tampered official artifact', async t => {
   const home = await fixture(t)
   const bin = join(home, 'bin')
   await mkdir(bin)
   const log = join(home, 'npm-args.json')
   await writeFile(join(bin, 'npm'), `#!${process.execPath}\nconst fs = require('node:fs'); const path = require('node:path');
 const args = process.argv.slice(2); fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify(args));
-const prefix = args[args.indexOf('--prefix') + 1];
-const root = path.join(prefix, 'node_modules/@anthropic-ai/claude-code'); fs.mkdirSync(root, {recursive:true});
-fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({name:'@anthropic-ai/claude-code',version:'2.1.34',bin:{claude:'cli.js'}}));
-fs.writeFileSync(path.join(root, 'cli.js'), '#!${process.execPath}\\nconsole.log("2.1.34")\\n', {mode:0o755});
+if (args[0] === 'pack') {
+  const filename = 'anthropic-ai-claude-code-2.1.34.tgz';
+  fs.writeFileSync(path.join(args[args.indexOf('--pack-destination') + 1], filename), 'tampered');
+  process.stdout.write(JSON.stringify([{filename}]));
+} else { process.stderr.write('unexpected install after tampered archive'); process.exitCode = 7; }
 `, { mode: 0o755 })
   const exec = promisify(execFile)
-  const result = await exec(process.execPath, ['--import', 'tsx', new URL('../src/cli.ts', import.meta.url).pathname, 'agent', 'install', 'claude', '--yes', '--home', home], { env: { ...process.env, PATH: bin } })
-  assert.match(result.stderr, /registry.npmjs.org/)
-  const output = JSON.parse(result.stdout)
+  await assert.rejects(exec(process.execPath, ['--import', 'tsx', new URL('../src/cli.ts', import.meta.url).pathname, 'agent', 'install', 'claude', '--yes', '--home', home], { env: { ...process.env, PATH: bin } }), /artifact integrity mismatch/)
   const args = JSON.parse(await readFile(log, 'utf8'))
+  assert.equal(args[0], 'pack')
   assert.equal(args.at(-1), '@anthropic-ai/claude-code@2.1.34')
-  assert.equal(args[1], '--global=false')
-  assert.equal(output.version, '2.1.34')
-  assert.equal((await readAgentSettings(home))['claude-code']?.executable, output.executable)
+  assert.equal((await readAgentSettings(home))['claude-code'], undefined)
+  assert.deepEqual(await readdir(join(home, 'agents', 'claude-code')), [])
 })
 
 test('CLI installation without --yes does not launch npm or create a database', async t => {

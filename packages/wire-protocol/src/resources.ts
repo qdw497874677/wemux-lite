@@ -78,6 +78,10 @@ const integer = (value: unknown, min = 0): value is number => typeof value === '
 const exact = (value: Record<string, unknown>, keys: readonly string[]) => Object.keys(value).every(key => keys.includes(key)) && keys.every(key => key in value)
 const hash = (value: unknown): value is string => typeof value === 'string' && SHA256.test(value)
 const kind = (value: unknown): value is ResourceKind => value === 'skill' || value === 'agent-runtime' || value === 'model-provider' || value === 'connector-config'
+const artifact = (value: unknown): boolean => {
+  const item = object(value)
+  return Boolean(item && exact(item, ['mode', 'packageName', 'packageVersion', 'registryOrigin', 'packageIntegrity']) && item.mode === 'artifact' && text(item.packageName) && text(item.packageVersion) && item.registryOrigin === 'https://registry.npmjs.org' && typeof item.packageIntegrity === 'string' && /^sha512-[A-Za-z0-9+/]+={0,2}$/.test(item.packageIntegrity))
+}
 
 function summary(value: unknown): boolean {
   const item = object(value)
@@ -91,7 +95,8 @@ function file(value: unknown): boolean {
 
 function binding(value: unknown): boolean {
   const item = object(value)
-  return Boolean(item && exact(item, ['bindingId', 'bindingRevision', 'agentKey', 'projectId', 'resourceRevisionId', 'resourceId', 'kind', 'contentSha256', 'files']) && text(item.bindingId) && integer(item.bindingRevision, 1) && (item.agentKey === null || text(item.agentKey)) && (item.projectId === null || text(item.projectId)) && text(item.resourceRevisionId) && text(item.resourceId) && kind(item.kind) && hash(item.contentSha256) && Array.isArray(item.files) && item.files.length <= 64 && item.files.every(file))
+  if (!item || !Object.keys(item).every(key => ['bindingId', 'bindingRevision', 'agentKey', 'projectId', 'resourceRevisionId', 'resourceId', 'kind', 'contentSha256', 'files', 'artifact'].includes(key)) || !['bindingId', 'bindingRevision', 'agentKey', 'projectId', 'resourceRevisionId', 'resourceId', 'kind', 'contentSha256', 'files'].every(key => key in item)) return false
+  return Boolean(text(item.bindingId) && integer(item.bindingRevision, 1) && (item.agentKey === null || text(item.agentKey)) && (item.projectId === null || text(item.projectId)) && text(item.resourceRevisionId) && text(item.resourceId) && kind(item.kind) && hash(item.contentSha256) && Array.isArray(item.files) && item.files.length <= 64 && item.files.every(file) && (item.kind === 'agent-runtime' ? artifact(item.artifact) && item.files.length === 0 : item.artifact === undefined))
 }
 
 function snapshot(value: unknown): boolean {
