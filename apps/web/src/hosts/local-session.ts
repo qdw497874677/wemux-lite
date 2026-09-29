@@ -8,21 +8,33 @@ export interface LocalSessionRecord {
   runtimeState: string
   activeTurnId: string | null
 }
-export interface LocalStatus { csrf: string; capabilities: AgentDTO[]; installation: { name: string; installationId: string } }
+export interface LocalStatus {
+  csrf: string
+  capabilities: AgentDTO[]
+  installation: { name: string; installationId: string }
+  cluster: { enrolled: boolean; serverUrl?: string; workerId?: string; connection: { phase: string; failure: string | null } | null }
+}
+export interface LocalAgentSettings {
+  selections: { key: string; executable: string; source: string; selected: boolean }[]
+  capabilities: AgentDTO[]
+}
+export interface LocalConnectorList { items: { id: string; name: string; kind: string; enabled: boolean; credentialAvailability: string }[]; credentialCapability: 'available' | 'unavailable' }
+export interface LocalClusterDiscovery { serverUrl: string; ok: boolean; status: number; name?: string; error?: string }
 export interface LocalSendReceipt { commandId: string; status: string; messageId: string }
 
 export function createLocalSessionApi(fetcher: typeof fetch = fetch, onUnauthorized: () => void = () => {}) {
   let csrf = ''
-  const request = async <T>(path: string, method: 'GET' | 'POST' | 'DELETE' = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> => {
+  const request = async <T>(path: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE' = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> => {
     const headers: Record<string, string> = { Accept: 'application/json' }
     if (method !== 'GET') { headers['x-wemux-csrf'] = csrf; headers['content-type'] = 'application/json' }
     const response = await fetcher(`/api/local/${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal, credentials: 'same-origin', cache: 'no-store' })
     if (response.status === 401 && path !== 'auth/session' && path !== 'status') onUnauthorized()
     if (!response.ok) {
       let message = `本地请求失败：HTTP ${response.status}`
-      try { const error = await response.json() as { error?: string }; if (typeof error.error === 'string') message = error.error } catch { /* Keep HTTP status. */ }
+      try { const error = await response.json() as { error?: string; message?: string }; if (typeof error.message === 'string') message = error.message; else if (typeof error.error === 'string') message = error.error } catch { /* Keep HTTP status. */ }
       throw new Error(message)
     }
+    if (response.status === 204) return undefined as T
     return response.json() as Promise<T>
   }
   const sessionPath = (id: string) => `workbench/sessions/${encodeURIComponent(id)}`
@@ -32,6 +44,19 @@ export function createLocalSessionApi(fetcher: typeof fetch = fetch, onUnauthori
       const result = await request<{ csrf: string }>('auth/session', 'POST', { username, password }); csrf = result.csrf
       return this.status()
     },
+    async logout() {
+      await request<void>('auth/session', 'DELETE')
+      csrf = ''
+    },
+    agents: () => request<LocalAgentSettings>('agents'),
+    selectAgent: (key: string, executable: string) => request<LocalAgentSettings>(`agents/${encodeURIComponent(key)}`, 'PUT', { executable }),
+    resetAgent: (key: string) => request<LocalAgentSettings>(`agents/${encodeURIComponent(key)}`, 'DELETE'),
+    connectors: () => request<LocalConnectorList>('connectors'),
+    discoverCluster: (serverUrl: string) => request<LocalClusterDiscovery>('cluster/discover', 'POST', { serverUrl }),
+    enrollCluster: (serverUrl: string, token: string, name: string) => request<{ identity: { workerId: string } }>('cluster/enroll', 'POST', { serverUrl, token, name }),
+    resumeCluster: () => request('cluster/resume', 'POST'),
+    pauseCluster: () => request('cluster/pause', 'POST'),
+    leaveCluster: () => request('cluster/enrollment', 'DELETE'),
     directories: () => request<{ items: LocalDirectory[] }>('workbench/directories').then(result => result.items),
     addDirectory: (path: string) => request<LocalDirectory>('workbench/directories', 'POST', { path }),
     sessions: () => request<{ items: LocalSessionRecord[] }>('workbench/sessions').then(result => result.items),

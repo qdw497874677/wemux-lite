@@ -2,6 +2,34 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createLocalSessionApi } from '../src/hosts/local-session.ts'
 
+test('local settings and cluster adapter uses Worker cookie/CSRF and handles 204 leave', async () => {
+  const requests = []
+  const api = createLocalSessionApi(async (url, init) => {
+    requests.push({ url, ...init })
+    if (url.endsWith('/status')) return Response.json({ csrf: 'worker-only-csrf', capabilities: [], cluster: { enrolled: false }, installation: { name: 'local', installationId: 'one' } })
+    if (url.endsWith('/cluster/enrollment') || url.endsWith('/auth/session')) return new Response(null, { status: 204 })
+    if (url.endsWith('/cluster/discover')) return Response.json({ serverUrl: 'https://server.example', ok: true, status: 200 })
+    if (url.endsWith('/cluster/enroll')) return Response.json({ identity: { workerId: 'w1' } }, { status: 201 })
+    if (url.endsWith('/agents/pi')) return Response.json({ selections: [], capabilities: [] })
+    throw new Error(`unexpected URL ${url}`)
+  })
+  await api.status()
+  await api.selectAgent('pi', '/usr/bin/pi')
+  assert.equal(requests[1].method, 'PUT')
+  assert.deepEqual(JSON.parse(requests[1].body), { executable: '/usr/bin/pi' })
+  await api.resetAgent('pi')
+  assert.equal(requests[2].method, 'DELETE')
+  await api.discoverCluster('https://server.example')
+  await api.enrollCluster('https://server.example', 'secret', 'worker')
+  assert.deepEqual(JSON.parse(requests[4].body), { serverUrl: 'https://server.example', token: 'secret', name: 'worker' })
+  assert.equal(await api.leaveCluster(), undefined)
+  assert.equal(await api.logout(), undefined)
+  assert.equal(requests[6].url, '/api/local/auth/session')
+  assert.equal(requests[6].method, 'DELETE')
+  assert.ok(requests.slice(1).every(request => request.headers['x-wemux-csrf'] === 'worker-only-csrf' && request.credentials === 'same-origin'))
+  assert.ok(requests.every(request => request.url.startsWith('/api/local/')))
+})
+
 test('local adapter writes with Worker CSRF and stable caller message identities', async () => {
   const requests = []
   const api = createLocalSessionApi(async (url, init) => {

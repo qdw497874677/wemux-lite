@@ -1,6 +1,6 @@
 # R-web 双宿主前端实施切片
 
-状态：2026-09-29 拆分待实施；M2 W1/W2/W3 的 Worker 本地 HTTP/API 已完成，但本地页面仍是 `apps/worker/src/local-control/server.ts` 的内联页，不是 `apps/web` 的共享会话界面。设计依据：`docs/design/node-resource-distribution-architecture.md` §10、`docs/design/worker-web-workbench.md`、`docs/design/m2-dual-host-contract.md`。R2 真实用户级 systemd 服务及重启恢复尚未验收，不以 R-web 代替该验收。
+状态：2026-09-29 切片 1 已通过；切片 2 的共享 Web 本地 Session/队列/审批在 Worker-shaped 同源 fixture 中已通过，切片 3 的 Agent 路径/连接器只读状态与集群接入生命周期已接入但托管安装及 Secret 管理尚缺；真正的 Worker 本地页面仍是 `apps/worker/src/local-control/server.ts` 的内联页，尚未发布共享 Web。设计依据：`docs/design/node-resource-distribution-architecture.md` §10、`docs/design/worker-web-workbench.md`、`docs/design/m2-dual-host-contract.md`。R2 真实用户级 systemd 服务及重启恢复尚未验收，不以 R-web 代替该验收。
 
 ## 顺序与验收切片
 
@@ -8,6 +8,12 @@
 2. **共享 Session Interface**：定义宿主中立的会话/Journal/队列/审批/运行能力 Interface，用现有 Server 和 Worker 作为两个真实 Adapter。对齐 Journal 正向分页、旧记录查询与 gap，SSE 的游标、重连及会话撤权；不要把本地目录伪装成 Project/Placement，也不要生成虚假 Worker ID。先迁移单个本地会话完整路径：授权目录、创建会话、选择 Agent/模型、发送、时间线、停止、刷新补页；再迁移队列逐条取消、运行详情和审批。双宿主通过相同的 Surface 行为用例验收。
 3. **本地设置与集群接入**：在共享壳中迁移已有 local-control 的 Agent 设置、连接器/本地 Secret、探测与加入/暂停/退出集群；登录表单、可恢复错误和能力不可用态按 Worker 身份模型实现。操作仍由 Worker 后端校验 Host、Origin、CSRF、目录与授权；浏览器不能持久化 enrollment token 或 Worker credential。特别覆盖脱敏、断网离线继续对话及集群身份切换不共享本地正文。
 4. **Worker 发布物及内联页下线**：只在上述共享 UI 真正可用后，把同一次构建的 `apps/web/dist` 嵌入 Worker tgz。改造 pack/check、静态服务 MIME/CSP/cache、版本与大小门禁，未入集群也能离线首开；明确独立于普通 ResourceBinding/Preset 的 Worker 软件升级权威。真实浏览器分别对 Server 和打包 Worker 验收 LAN HTTP 非安全上下文、登录、对话、SSE 重连、审批与撤权。最后移除内联 HTML/CSS/JS，不能先删除已有可用本地入口。
+
+## 当前切片验收记录
+
+- 宿主 bootstrap 与路由隔离：`docs/acceptance/r-web-host-bootstrap.md`（已完成）。
+- Session、队列及审批：`docs/acceptance/r-web-session-slice.md`、`docs/acceptance/r-web-queue-approvals.md`（共享 Web + 同源模拟 Worker 的浏览器验收通过，但真实 Worker 和打包静态资源未验收）。
+- 设置与集群加入：共享 Web 已通过同源浏览器流程；Agent 托管安装、连接器编辑与本地 Secret 管理暂保留内联页，故第 3 项部分完成。不得在第 4 项门禁通过前下线内联页。
 
 ## 首个可独立验收的交付
 

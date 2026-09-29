@@ -13,6 +13,8 @@ let events = []
 let activeTurnId = null
 let queuePending = false
 let approvalPending = false
+let enrolled = false
+let connectionPhase = 'offline'
 const requests = []
 const responseJson = (response, status, value, headers = {}) => response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers }).end(JSON.stringify(value))
 const server = createServer(async (request, response) => {
@@ -25,7 +27,26 @@ const server = createServer(async (request, response) => {
     }
     if (request.headers.cookie !== 'wemux-local-session=local') return responseJson(response, 401, { error: 'Authentication required' })
     if (request.method !== 'GET' && request.headers['x-wemux-csrf'] !== 'local-csrf') return responseJson(response, 403, { error: 'CSRF required' })
-    if (url.pathname === '/api/local/status') return responseJson(response, 200, { csrf: 'local-csrf', installation: { installationId: 'local', name: '本机 Worker' }, capabilities: [{ agentKey: 'test', displayName: '测试 Agent', mode: 'execution', version: '1', availability: { status: 'available' }, models: [{ modelId: 'test-model', displayName: '测试模型', source: 'detected' }] }] })
+    if (url.pathname === '/api/local/auth/session' && request.method === 'DELETE') return responseJson(response, 204, null, { 'set-cookie': 'wemux-local-session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0' })
+    if (url.pathname === '/api/local/status') return responseJson(response, 200, { csrf: 'local-csrf', installation: { installationId: 'local', name: '本机 Worker' }, cluster: { enrolled, serverUrl: enrolled ? 'https://server.example' : undefined, connection: { phase: connectionPhase, failure: null } }, capabilities: [{ agentKey: 'test', displayName: '测试 Agent', mode: 'execution', version: '1', availability: { status: 'available' }, models: [{ modelId: 'test-model', displayName: '测试模型', source: 'detected' }] }] })
+    if (url.pathname === '/api/local/agents' && request.method === 'GET') return responseJson(response, 200, { selections: [{ key: 'pi', executable: 'pi', source: 'PATH', selected: false }], capabilities: [] })
+    if (url.pathname === '/api/local/agents/pi' && request.method === 'PUT') {
+      const input = JSON.parse(await new Promise(resolve => { let text = ''; request.on('data', chunk => text += chunk); request.on('end', () => resolve(text)) }))
+      assert.equal(input.executable, '/usr/bin/pi')
+      return responseJson(response, 200, { selections: [{ key: 'pi', executable: '/usr/bin/pi', source: 'local', selected: true }], capabilities: [] })
+    }
+    if (url.pathname === '/api/local/agents/pi' && request.method === 'DELETE') return responseJson(response, 200, { selections: [{ key: 'pi', executable: 'pi', source: 'PATH', selected: false }], capabilities: [] })
+    if (url.pathname === '/api/local/connectors' && request.method === 'GET') return responseJson(response, 200, { items: [], credentialCapability: 'unavailable' })
+    if (url.pathname === '/api/local/cluster/discover' && request.method === 'POST') return responseJson(response, 200, { serverUrl: 'https://server.example', status: 200, ok: true, name: '测试 Server' })
+    if (url.pathname === '/api/local/cluster/enroll' && request.method === 'POST') {
+      const body = JSON.parse(await new Promise(resolve => { let text = ''; request.on('data', chunk => text += chunk); request.on('end', () => resolve(text)) }))
+      assert.equal(body.token, 'one-time-secret')
+      enrolled = true; connectionPhase = 'connecting'
+      return responseJson(response, 201, { identity: { workerId: 'cluster-worker' } })
+    }
+    if (url.pathname === '/api/local/cluster/resume' && request.method === 'POST') { connectionPhase = 'online'; return responseJson(response, 202, { status: 'connecting' }) }
+    if (url.pathname === '/api/local/cluster/pause' && request.method === 'POST') { connectionPhase = 'offline'; return responseJson(response, 200, { status: 'offline' }) }
+    if (url.pathname === '/api/local/cluster/enrollment' && request.method === 'DELETE') { enrolled = false; connectionPhase = 'offline'; return responseJson(response, 204, null) }
     if (url.pathname === '/api/local/workbench/directories' && request.method === 'GET') return responseJson(response, 200, { items: [{ workspaceId: 'dir-1', name: 'repo', path: '/tmp/repo' }] })
     if (url.pathname === '/api/local/workbench/sessions' && request.method === 'GET') return responseJson(response, 200, { items: session ? [session] : [] })
     if (url.pathname === '/api/local/workbench/sessions' && request.method === 'POST') {
@@ -120,11 +141,39 @@ try {
   await page.getByText('已取消', { exact: true }).first().waitFor()
   await page.reload()
   await page.getByText('本地对话请求').waitFor()
+  await page.goto(`${base}/local/settings`)
+  await page.getByRole('heading', { name: 'Agent 配置' }).waitFor()
+  await page.getByLabel(/pi（PATH/).fill('/usr/bin/pi')
+  await page.getByRole('button', { name: '使用此路径' }).click()
+  await page.getByText('已显式指定').waitFor()
+  await page.getByRole('button', { name: '恢复自动检测' }).click()
+  await page.getByText('pi（PATH，自动检测）').waitFor()
+  await page.goto(`${base}/local/cluster`)
+  await page.getByText('未加入集群，本地对话仍可使用。').waitFor()
+  await page.getByLabel('Server 地址').fill('https://server.example')
+  await page.getByRole('button', { name: '探测 Server' }).click()
+  await page.getByText(/探测成功/).waitFor()
+  await page.getByLabel('一次性注册口令').fill('one-time-secret')
+  await page.getByRole('checkbox', { name: /我已核对目标 Server/ }).check()
+  await page.getByRole('button', { name: '确认加入集群' }).click()
+  await page.getByText(/已注册：https:\/\/server.example/).waitFor()
+  await page.getByRole('button', { name: '暂停连接' }).click()
+  await page.getByText(/状态：offline/).waitFor()
+  await page.getByRole('button', { name: '重连' }).click()
+  await page.getByText(/状态：online/).waitFor()
+  await page.getByRole('button', { name: '退出集群' }).click()
+  await page.getByRole('button', { name: '确认退出' }).click()
+  await page.getByText('未加入集群，本地对话仍可使用。').waitFor()
+  await page.goto(`${base}/local/sessions/local-session`)
+  await page.getByText('本地对话请求').waitFor()
   assert.ok(requests.includes('POST /api/local/workbench/sessions/local-session/messages'))
   assert.ok(requests.includes('DELETE /api/local/workbench/sessions/local-session/queue/' + events.find(event => event.payload.kind === 'message.queued' && event.payload.content === '等待取消的消息').payload.commandId + '/cancel'))
   assert.ok(requests.includes('POST /api/local/workbench/sessions/local-session/approvals/approval-1/resolve'))
   assert.ok(requests.includes('POST /api/local/workbench/sessions/local-session/turns/turn-1/stop'))
   assert.ok(!requests.some(path => path.includes('/api/auth/') || path.includes('/api/projects')))
+  await page.getByRole('button', { name: '退出登录' }).click()
+  await page.getByRole('heading', { name: '管理员登录' }).waitFor()
+  assert.ok(requests.includes('DELETE /api/local/auth/session'))
   assert.deepEqual(errors, [])
   console.log('Local Session shared Web browser acceptance passed')
 } finally { await browser.close(); await new Promise(resolve => server.close(resolve)) }
