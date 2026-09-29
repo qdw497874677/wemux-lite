@@ -49,6 +49,19 @@ test('Session cleanup protects queued work, deletes Journal and survives restart
   } finally { store.close(); await rm(dir, { recursive: true, force: true }) }
 })
 
+test('Worker records a rejected receipt without creating a Session for unsupported storageMode', async () => {
+  const f = await fixture()
+  try {
+    const unsupported = { ...create, session: { ...create.session, storageMode: 'replicated' as const, sessionId: 'unsupported' as SessionId } }
+    await f.send('unsupported-storage', unsupported)
+    assert.equal(await f.store.sessions.get('unsupported' as SessionId), null)
+    const ack = f.events.filter(event => event.type === 'ack').at(-1)
+    assert.equal(ack?.type, 'ack')
+    if (ack?.type === 'ack') assert.equal(ack.receipt.status, 'rejected')
+    assert.equal((await f.store.commands.get('unsupported-storage' as CommandId))?.state, 'rejected')
+  } finally { await f.cleanup() }
+})
+
 test('accepts plain HTTP and WS Server URLs on trusted LANs', () => {
   assert.equal(serverUrl('http://192.168.3.22:8004').href, 'http://192.168.3.22:8004/')
   assert.equal(serverUrl('ws://10.0.0.5:3001/worker/ws').href, 'ws://10.0.0.5:3001/worker/ws')

@@ -463,7 +463,7 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
 // The current backend is explicitly a single-admin MVP. No implicit multi-user ACL fallback.
 // When summary/ACL views ship, replace this resource adapter rather than changing UI components.
 function toSummary(resource: SessionResourceDTO): SessionDTO {
-  return { id: resource.id, projectId: resource.projectId, ownerId: resource.ownerId, title: resource.title, workspaceId: resource.workspaceId,
+  return { id: resource.id, projectId: resource.projectId, ownerId: resource.ownerId, title: resource.title, storageMode: resource.storageMode ?? 'local', workspaceId: resource.workspaceId,
     workerId: resource.binding.agent.workerId, agentKey: resource.binding.agent.agentKey,
     modelId: resource.binding.modelId, runtimeState: resource.runtimeState, archivedAt: resource.archivedAt ?? null, activeTurnId: null,
     queuedMessageCount: null, freshness: { status: 'unknown' }, updatedAt: '',

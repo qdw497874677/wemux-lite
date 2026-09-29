@@ -163,6 +163,7 @@ export class SessionLineageService {
         modelId: command.targetModelId,
         title: forkTitle(source.title),
         ownerId: input.operator,
+        storageMode: source.storageMode ?? 'local',
         requestId: command.requestId,
       })
       const record: SessionForkRecord = {

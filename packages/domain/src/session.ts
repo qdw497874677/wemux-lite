@@ -30,9 +30,13 @@ export interface SessionBinding {
   readonly modelId: ModelId | null
 }
 
+export type SessionStorageMode = 'local' | 'replicated' | 'central'
+
+/** An absent mode on an older command means local; only local is executable today. */
 export interface SessionExecutionSpec {
   readonly sessionId: SessionId
   readonly binding: SessionBinding
+  readonly storageMode?: SessionStorageMode
 }
 
 export interface UserMessageInput {

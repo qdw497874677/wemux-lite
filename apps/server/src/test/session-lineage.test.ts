@@ -75,6 +75,7 @@ test('fork creates the target Session, binding snapshot, durable cursor and audi
   assert.deepEqual(target.binding, { workspaceId: f.workspace.id, agent: { workerId: f.worker.id, agentKey: 'pi' }, modelId: 'pi-model' })
   assert.equal(target.ownerId, f.user.id)
   assert.equal(target.title, 'source（分支）')
+  assert.equal(target.storageMode, 'local', 'Fork 继承来源的存储模式')
   const audit = await f.store.identity.listAudit(10)
   assert.equal(audit[0]!.action, 'session.fork')
   assert.equal(audit[0]!.resource.id, target.id)
@@ -89,7 +90,9 @@ test('fork creates the target Session, binding snapshot, durable cursor and audi
 
 test('replayed forks are idempotent and a changed payload under the same requestId is rejected', async t => {
   const f = await fixture(); t.after(() => f.close())
+  await f.store.putRecord('session', f.source.id, (({ storageMode: _mode, ...legacy }) => legacy)(f.source))
   const first = await f.fork({ sourceEventCursor: 1 })
+  assert.equal((await f.sessions()).find(session => session.id === first.targetSessionId)?.storageMode, 'local', '旧来源缺省 local')
   const replay = await f.fork({ sourceEventCursor: 1 })
   assert.equal(replay.replayed, true)
   assert.equal(replay.targetSessionId, first.targetSessionId)

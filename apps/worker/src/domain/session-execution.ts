@@ -5,6 +5,7 @@ import type {
   SessionBinding,
   SessionId,
   SessionRuntimeState,
+  SessionStorageMode,
   Timestamp,
   Turn,
   TurnId,
@@ -13,6 +14,8 @@ import type { WorkerCommand } from '@wemux/wire-protocol'
 
 export interface SessionExecution {
   readonly sessionId: SessionId
+  /** Older rows omit this field; read as local without rewriting the row. */
+  readonly storageMode?: SessionStorageMode
   readonly binding: SessionBinding
   readonly runtimeState: SessionRuntimeState
   readonly activeTurnId: TurnId | null

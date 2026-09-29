@@ -95,7 +95,7 @@ export function createLocalWorkbenchService(store: WorkerStore & LocalState, run
       if (!workspace || workspace.projectId !== localProjectId || workspace.workerId !== workerId || workspace.status !== 'ready') throw new LocalWorkbenchError('本地目录不存在或不可用')
       const commandId = identity('create', input.requestId)
       const sessionId = identity('session', commandId) as SessionId
-      const receipt = await execute({ kind: 'session.create', session: { sessionId, binding: { workspaceId: workspace.id, agent: { workerId, agentKey: input.agentKey as AgentKey }, modelId: (input.modelId ?? null) as ModelId | null } } }, commandId)
+      const receipt = await execute({ kind: 'session.create', session: { sessionId, storageMode: 'local', binding: { workspaceId: workspace.id, agent: { workerId, agentKey: input.agentKey as AgentKey }, modelId: (input.modelId ?? null) as ModelId | null } } }, commandId)
       if (receipt.status === 'rejected') throw new LocalWorkbenchError(receipt.error.message)
       const session = await store.sessions.get(sessionId)
       if (!session) throw new LocalWorkbenchError('本地会话创建失败')

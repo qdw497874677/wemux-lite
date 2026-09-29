@@ -176,14 +176,14 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
     await this.tail
     return (this.db.prepare('SELECT body FROM connector_executions WHERE session_id=? AND state=? ORDER BY created_at').all(sessionId, 'completed') as { body?: unknown }[]).map(row => JSON.parse(String(row.body)) as ConnectorExecutionRecord)
   }
-  listSessions = async () => { await this.tail; return this.list<SessionExecution>('sessions') }
+  listSessions = async () => { await this.tail; return this.list<SessionExecution>('sessions').map(session => ({ ...session, storageMode: session.storageMode ?? 'local' as const })) }
   listWorkspaces = async () => { await this.tail; return this.list<LocalWorkspace>('workspaces') }
   workspaces: WorkerStore['workspaces'] = {
     get: async id => { await this.tail; return this.getDocument('workspaces', id) },
     listRepositoryCheckouts: async id => { await this.tail; return this.list<RepositoryCheckout>('checkouts').filter(item => item.workspaceId === id) },
   }
   sessions: WorkerStore['sessions'] = {
-    get: async id => { await this.tail; return this.getDocument('sessions', id) },
+    get: async id => { await this.tail; const session = this.getDocument<SessionExecution>('sessions', id); return session ? { ...session, storageMode: session.storageMode ?? 'local' as const } : null },
     getTurn: async id => { await this.tail; return this.getDocument('turns', id) },
     listQueued: async id => { await this.tail; return this.queued(id) },
   }
@@ -268,10 +268,11 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
         this.db.prepare('DELETE FROM journal WHERE session_id=?').run(id)
         this.db.prepare("DELETE FROM documents WHERE (bucket='sessions' AND id=?) OR (bucket IN ('queue','turns') AND json_extract(body,'$.sessionId')=?)").run(id, id)
       },
-      createSession: async (id, binding) => {
+      createSession: async (id, binding, storageMode = 'local') => {
+        if (storageMode !== 'local') throw new Error('Session storage mode is not available')
         if (this.getDocument('deleted-sessions', id)) throw new Error('Session deleted')
         if (this.getDocument('sessions', id)) throw new Error('Session already exists')
-        this.put('sessions', id, { sessionId: id, binding, runtimeState: 'idle', activeTurnId: null, nativeSession: null, updatedAt: now() })
+        this.put('sessions', id, { sessionId: id, storageMode, binding, runtimeState: 'idle', activeTurnId: null, nativeSession: null, updatedAt: now() })
         this.append(id, [{ occurredAt: now(), payload: { kind: 'session.runtime.changed', state: 'idle', reason: null } }])
       },
       enqueue: async input => {

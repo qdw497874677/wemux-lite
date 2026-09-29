@@ -38,6 +38,7 @@ export interface ForkTargetSessionInput {
   readonly modelId: ModelId | null
   readonly title: string
   readonly ownerId: UserId
+  readonly storageMode?: import('@wemux/domain').SessionStorageMode
   /** 发起 Fork 的 requestId；目标 Session 的创建身份由它派生，不另开一套幂等键。 */
   readonly requestId: string
 }
@@ -249,7 +250,7 @@ export class ServerService {
   sessionView(id: SessionId, actor?: UserId) {
     return this.store.transaction(async tx => {
       const session = actor && this.sessionAccess ? await this.sessionAccess.requireInTx(tx, actor, id) : await this.getSession(id, tx.resources)
-      return { ...session, archivedAt: session.archivedAt ?? null, ...await this.executionState(tx, id), sendCapability: await sendCapability(tx, session) }
+      return { ...session, storageMode: session.storageMode ?? 'local', archivedAt: session.archivedAt ?? null, ...await this.executionState(tx, id), sendCapability: await sendCapability(tx, session) }
     })
   }
   private async executionState(tx: ServerStoreTx, id: SessionId) {
@@ -287,7 +288,7 @@ export class ServerService {
   async getSession(id: SessionId, resources = this.store.resources): Promise<Session> {
     const s = requireValue(await resources.getSession(id)); await this.getProject(s.projectId, resources)
     if (s.deletedAt) throw new AppError(404, 'Session deleted')
-    return s
+    return { ...s, storageMode: s.storageMode ?? 'local' }
   }
   async createProject(input: unknown, actor?: UserId, requireExplicitTeam = false) {
     const b = object(input)
@@ -361,14 +362,16 @@ export class ServerService {
     if (workspace.deletedAt !== null) throw new AppError(409, 'Fork target Workspace is deleted', 'fork_target_deleted')
     // Session 级幂等键必须与 Fork 自己的键分开命名空间，否则一个客户端用同一个 requestId
     // 创建普通 Session 时会与 Fork 目标撞车。
-    const created = await this.createSessionInTx(tx, { requestId: `fork:${input.requestId}`, workspaceId: input.workspaceId, workerId: input.workerId, agentKey: input.agentKey, modelId: input.modelId, title: input.title }, { ownerId: input.ownerId })
+    const created = await this.createSessionInTx(tx, { requestId: `fork:${input.requestId}`, workspaceId: input.workspaceId, workerId: input.workerId, agentKey: input.agentKey, modelId: input.modelId, title: input.title, storageMode: input.storageMode ?? 'local' }, { ownerId: input.ownerId })
     // 走到这里说明 Fork 记录还不存在却已有同 requestId 的目标：宁可失败，也不能给同一个目标补第二条边。
     if (!created.created) throw new AppError(409, 'Fork target Session already exists for this requestId', 'request_id_conflict')
     return created.session
   }
   /** Internal composition seam; never opens a transaction or notifies. */
   async createSessionInTx(tx: ServerStoreTx, input: unknown, provenance?: SessionProvenance) {
-    const b = object(input), workspace = await this.getWorkspace(text(b.workspaceId, 'workspaceId') as WorkspaceId, tx.resources)
+    const b = object(input)
+    if (b.storageMode !== undefined && b.storageMode !== 'local') throw new AppError(409, 'Session storage mode is not available', 'storage_mode_unavailable')
+    const workspace = await this.getWorkspace(text(b.workspaceId, 'workspaceId') as WorkspaceId, tx.resources)
     if (provenance?.ownerId && this.projectAccess) await this.projectAccess.requireInTx(tx, provenance.ownerId, workspace.projectId, 'contributor')
     const source = provenance === undefined || (provenance.taskId === undefined && provenance.runId === undefined) ? undefined : { taskId: provenance.taskId ?? null, runId: provenance.runId ?? null }
     const requestedWorkerId = b.workerId === undefined ? undefined : text(b.workerId, 'workerId') as WorkerId
@@ -383,7 +386,7 @@ export class ServerService {
     // both require a concrete modelId on the Session binding.
     const requestedModelId = b.modelId === undefined || b.modelId === null ? null : text(b.modelId, 'modelId') as ModelId
     const title = text(b.title, 'title', 200)
-    if (!source && Object.keys(b).some(key => !['requestId', 'workspaceId', 'workerId', 'title', 'agentKey', 'modelId', 'shareScope'].includes(key))) throw new AppError(400, 'Invalid Session creation request')
+    if (!source && Object.keys(b).some(key => !['requestId', 'workspaceId', 'workerId', 'title', 'agentKey', 'modelId', 'shareScope', 'storageMode'].includes(key))) throw new AppError(400, 'Invalid Session creation request')
     if (!source && b.shareScope !== undefined && b.shareScope !== 'owner-only') throw new AppError(400, 'Invalid Session shareScope')
     const requestId = source || b.requestId === undefined ? undefined : text(b.requestId, 'requestId', 200)
     if (!source && !requestId) throw new AppError(400, 'Invalid requestId')
@@ -399,13 +402,13 @@ export class ServerService {
       const previous = await tx.resources.getSessionByCreateRequest(ownerId, workspace.projectId, requestId)
       if (previous) {
         if (previous.creation?.fingerprint !== fingerprint) throw new AppError(409, 'requestId already belongs to a different Session request', 'request_id_conflict')
-        return { session: previous, commandId: previous.creation.commandId as CommandId, created: false }
+        return { session: { ...previous, storageMode: previous.storageMode ?? 'local' }, commandId: previous.creation.commandId as CommandId, created: false }
       }
     }
     const sessionId = newId<'SessionId'>(), commandId = newId<'CommandId'>()
-    const session: Session = { id: sessionId, projectId: workspace.projectId, ownerId, workspaceId: workspace.id, title, shareScope, binding: { workspaceId: workspace.id, agent: { workerId: worker.id, agentKey }, modelId }, runtimeState: 'idle', archivedAt: null, deletedAt: null, ...(requestId ? { creation: { requestId, fingerprint, commandId } } : {}), ...source }
+    const session: Session = { id: sessionId, projectId: workspace.projectId, ownerId, workspaceId: workspace.id, title, shareScope, storageMode: 'local', binding: { workspaceId: workspace.id, agent: { workerId: worker.id, agentKey }, modelId }, runtimeState: 'idle', archivedAt: null, deletedAt: null, ...(requestId ? { creation: { requestId, fingerprint, commandId } } : {}), ...source }
     await tx.resources.saveSession(session)
-    await this.command(tx, worker.id, { kind: 'session.create', session: { sessionId: session.id, binding: session.binding } }, commandId)
+    await this.command(tx, worker.id, { kind: 'session.create', session: { sessionId: session.id, binding: session.binding, storageMode: session.storageMode ?? 'local' } }, commandId)
     await this.audit(tx, 'session.create', { kind: 'session', id: session.id })
     return { session, commandId, created: true }
   }
@@ -578,7 +581,7 @@ export class ServerService {
     const projectIds = new Set((await this.listProjects()).map(project => project.id))
     return (await this.store.resources.listSessions()).filter(
       session => projectIds.has(session.projectId) && !session.deletedAt && (filter.archived === undefined || Boolean(session.archivedAt) === filter.archived),
-    )
+    ).map(session => ({ ...session, storageMode: session.storageMode ?? 'local' }))
   }
 }
 

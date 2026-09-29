@@ -56,6 +56,11 @@ test('transaction rollback, expired enrollment, revocation and worker ownership'
     await tx.resources.saveWorker({ ...first.worker, capabilities: [{ agentKey: 'pi' as import('@wemux/domain').AgentKey, displayName: 'Pi', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'custom' as import('@wemux/domain').ModelId, displayName: 'Custom', source: 'detected' }] }] })
   })
   const { session } = await service.createSession({ requestId: 'storage-create', workspaceId: workspace.id, title: 'Chat', agentKey: 'pi', modelId: 'custom' })
+  const { storageMode: _mode, ...legacySession } = (await store.getRecord<import('@wemux/server-domain').Session>('session', session.id))!
+  await store.putRecord('session', session.id, legacySession)
+  assert.equal((await service.getSession(session.id)).storageMode, 'local')
+  assert.equal((await service.sessionView(session.id)).storageMode, 'local')
+  assert.equal((await store.getRecord<import('@wemux/server-domain').Session>('session', session.id))?.storageMode, undefined, '读取旧会话不能隐式改写存储')
   const event = { sessionId: session.id, seq: 1 as EventSeq, occurredAt: now(), payload: { kind: 'session.runtime.changed' as const, state: 'running' as const, reason: null } }
   await assert.rejects(workers.receive(second.workerId, { ...envelope(), type: 'event', scope: 'session', event }), /another worker/)
   assert.deepEqual((await service.events(session.id, 1, 100)).events, [])

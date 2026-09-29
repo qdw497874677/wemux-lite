@@ -329,6 +329,16 @@ test('HTTP + SQLite + Worker WS + SSE durable end-to-end loop', { timeout: 20000
   assert.equal(replayedCreate.data.session.id, created.data.session.id)
   assert.equal(replayedCreate.data.commandId, created.data.commandId)
   assert.equal((await request('/sessions', 'POST', { ...createBody, title: 'Different' })).status, 409)
+  assert.equal(created.data.session.storageMode, 'local')
+  assert.equal(replayedCreate.data.session.storageMode, 'local')
+  assert.equal((await request('/sessions', 'POST', { ...createBody, storageMode: 'local' })).data.session.id, created.data.session.id, '显式 local 与旧请求指纹兼容')
+  assert.equal((await request('/sessions', 'POST', { ...createBody, requestId: 'unsupported-storage', storageMode: 'replicated' })).status, 409)
+  assert.equal((await request('/sessions', 'POST', { ...createBody, requestId: 'unknown-storage', storageMode: 'mystery' })).status, 409)
+  const unsupportedMode = await request('/sessions', 'POST', { ...createBody, requestId: 'unsupported-storage-error', storageMode: 'central' })
+  assert.equal(unsupportedMode.status, 409)
+  assert.equal(unsupportedMode.data.error.code, 'storage_mode_unavailable')
+  assert.equal((await request(`/sessions/${created.data.session.id}`)).data.storageMode, 'local')
+  assert.equal((await request('/sessions')).data.items.find((item: { id: string }) => item.id === created.data.session.id)?.storageMode, 'local')
   const session = created.data.session
   await peer.wait(m => m.type === 'command' && m.commandId === created.data.commandId)
   peer.send({ type: 'ack', receipt: { commandId: created.data.commandId, status: 'accepted' } })
@@ -337,7 +347,10 @@ test('HTTP + SQLite + Worker WS + SSE durable end-to-end loop', { timeout: 20000
   assert.equal(defaultModelCreate.status, 201)
   assert.equal(defaultModelCreate.data.session.binding.modelId, 'test-model')
   const defaultModelCommand = await peer.wait(m => m.type === 'command' && m.commandId === defaultModelCreate.data.commandId)
-  if (defaultModelCommand.type === 'command' && defaultModelCommand.command.kind === 'session.create') assert.equal(defaultModelCommand.command.session.binding.modelId, 'test-model')
+  if (defaultModelCommand.type === 'command' && defaultModelCommand.command.kind === 'session.create') {
+    assert.equal(defaultModelCommand.command.session.binding.modelId, 'test-model')
+    assert.equal(defaultModelCommand.command.session.storageMode, 'local')
+  }
   else assert.fail('expected session.create command')
   peer.send({ type: 'ack', receipt: { commandId: defaultModelCreate.data.commandId, status: 'accepted' } })
   const assets = await request(`/projects/${project.id}/capability-assets`, 'PUT', { items: [

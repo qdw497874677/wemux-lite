@@ -76,7 +76,7 @@ export interface SessionExecutionReader {
 }
 
 export interface SessionExecutionWriter {
-  createSession(sessionId: SessionId, binding: SessionBinding): Promise<void>
+  createSession(sessionId: SessionId, binding: SessionBinding, storageMode?: import('@wemux/domain').SessionStorageMode): Promise<void>
   enqueue(message: EnqueueMessage): Promise<import('@wemux/domain').QueuedMessage>
   cancelQueued(sessionId: SessionId, submissionCommandId: CommandId): Promise<CancelQueuedResult>
   claimNext(sessionId: SessionId): Promise<Turn | null>

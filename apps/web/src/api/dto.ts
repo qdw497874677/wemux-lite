@@ -70,6 +70,7 @@ export interface SessionDTO {
   sendCapability?: import('@wemux/web-contract/task-platform').ActionCapability
   access?: { canRead: boolean; canWrite: boolean; canControl: boolean; projectRole: 'owner' | 'manager' | 'contributor' | 'viewer' | null }
   shareScope?: 'owner-only' | 'selected-members' | 'project'
+  storageMode?: 'local' | 'replicated' | 'central'
   id: string
   projectId?: string
   ownerId?: string
@@ -172,7 +173,7 @@ export interface SessionResourceDTO {
   sendCapability?: import('@wemux/web-contract/task-platform').ActionCapability
   access?: { canRead: boolean; canWrite: boolean; canControl: boolean; projectRole: 'owner' | 'manager' | 'contributor' | 'viewer' | null }
   shareScope?: 'owner-only' | 'selected-members' | 'project'
-  id: string; projectId: string; ownerId: string; workspaceId: string; title: string; runtimeState: RuntimeState; archivedAt?: string | null
+  id: string; projectId: string; ownerId: string; workspaceId: string; title: string; runtimeState: RuntimeState; archivedAt?: string | null; storageMode?: 'local' | 'replicated' | 'central'
   binding: { agent: { workerId: string; agentKey: string }; modelId: string | null }
 }
 export interface ServerEventsPageDTO { events: JournalEventDTO[]; nextSeq: number | null; freshness: FreshnessDTO }
@@ -180,7 +181,7 @@ export interface CreateProjectDTO { teamId: string; name: string; shareScope: 'o
 export type CreateWorkspaceDTO =
   | { workerId: string; name: string; source: 'empty' }
   | { workerId: string; name: string; source: 'git'; repository: { name: string; gitUrl: string; revision: string } }
-export interface CreateSessionDTO { requestId: string; workspaceId: string; workerId: string; title: string; agentKey: string; modelId: string | null; shareScope: 'owner-only' }
+export interface CreateSessionDTO { requestId: string; workspaceId: string; workerId: string; title: string; agentKey: string; modelId: string | null; shareScope: 'owner-only'; storageMode?: 'local' }
 export interface RuntimeCommandDTO { commandId: string; operationId: string; name: 'compact' | 'set_model' | 'set_thinking_level'; arguments?: Record<string, unknown> }
 export interface ApprovalDecisionDTO { commandId: string; decision: 'approve' | 'deny' }
 export interface PatchSessionDTO { title?: string; archived?: boolean }

@@ -83,6 +83,8 @@ export interface Workspace extends WorkspaceDefinition {
 }
 
 export interface Session {
+  /** Resolved at creation; absent only on legacy records, interpreted as local on read. */
+  readonly storageMode?: import('@wemux/domain').SessionStorageMode
   /** Immutable creation provenance; absent only on legacy standalone Sessions. */
   readonly taskId?: string | null
   readonly runId?: string | null

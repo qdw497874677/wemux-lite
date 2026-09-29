@@ -204,7 +204,7 @@ export class WorkerRuntime {
       await this.store.transaction(async tx => {
         await tx.commands.record({ commandId, command, payloadFingerprint }, receipt)
         switch (command.kind) {
-          case 'session.create': await tx.sessions.createSession(command.session.sessionId, command.session.binding); break
+          case 'session.create': await tx.sessions.createSession(command.session.sessionId, command.session.binding, command.session.storageMode); break
           case 'session.enqueue': await tx.sessions.enqueue({ sessionId: command.sessionId, submissionCommandId: commandId, message: command.message, capabilities: command.capabilities, queuedAt: now() }); break
           case 'session.delete': await tx.sessions.deleteSession(command.sessionId); break
           case 'session.cancel-queued': await tx.sessions.cancelQueued(command.sessionId, command.submissionCommandId); break
@@ -264,6 +264,7 @@ export class WorkerRuntime {
       return
     }
     if (command.kind === 'session.create') {
+      if (command.session.storageMode !== undefined && command.session.storageMode !== 'local') throw new Error('Session storage mode is not available')
       const { binding } = command.session
       const workspace = await this.store.workspaces.get(binding.workspaceId)
       if (!workspace || workspace.status !== 'ready') throw new Error('Workspace is not ready')
