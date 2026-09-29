@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import { chmod, mkdir, open, readFile, realpath, rm, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { chmod, mkdir, open, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { config } from './config.js'
 import { SqliteWorkerStore } from './storage/sqlite-store.js'
 import { defaultAgents } from './agents/detection.js'
@@ -181,7 +181,10 @@ export async function main(args = process.argv.slice(2)) {
         onNotice: message => console.error(`[connect] ${message}`),
       })
       const workbench = createLocalWorkbenchService(store, lifecycle)
-      const localControl = admin ? await startLocalControlServer({ host: options.host, port: options.port, state: store, secureCookies: options.secureCookies }, { shutdown: requestStop, workbench, cluster: lifecycle }) : null
+      const webStaticPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'web')
+      const hasWebBundle = await stat(join(webStaticPath, 'index.html')).then(file => file.isFile()).catch(() => false)
+      if (admin && !hasWebBundle) console.error('[local] 未找到构建的共享 Web，暂时使用内联 Worker 工作台')
+      const localControl = admin ? await startLocalControlServer({ host: options.host, port: options.port, state: store, secureCookies: options.secureCookies, webStaticPath: hasWebBundle ? webStaticPath : undefined }, { shutdown: requestStop, workbench, cluster: lifecycle }) : null
       if (localControl) {
         console.error(`[local] Worker Web：${localControl.url}`)
         if (!['127.0.0.1', '::1', 'localhost'].includes(options.host)) console.error('[local] 警告：当前监听非 loopback 地址；首批版本尚未提供完整公网 HTTPS/受信代理配置，请勿直接暴露到公网')

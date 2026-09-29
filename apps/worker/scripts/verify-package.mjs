@@ -42,6 +42,11 @@ try {
   const packageRoot = join(prefix, 'lib', 'node_modules', '@wemux', 'worker')
   const installedManifest = JSON.parse(readFileSync(join(packageRoot, 'package.json'), 'utf8'))
   if (installedManifest.dependencies?.['@earendil-works/pi-coding-agent']) fail('Worker must not install a Pi runtime')
+  accessSync(join(packageRoot, 'web', 'index.html'))
+  const webEntry = readFileSync(join(packageRoot, 'web', 'index.html'), 'utf8')
+  const webAsset = webEntry.match(/\/assets\/([^"']+\.js)/)?.[1]
+  if (!webAsset) fail('bundled Web entry point has no hashed JavaScript asset')
+  accessSync(join(packageRoot, 'web', 'assets', webAsset))
   accessSync(join(packageRoot, 'node_modules', 'ws', 'package.json'))
   accessSync(join(packageRoot, 'node_modules', '@modelcontextprotocol', 'sdk', 'package.json'))
   const missingAgents = JSON.parse(execFileSync(process.execPath, [join(packageRoot, 'dist', 'cli.js'), 'detect', '--home', join(temporaryDirectory, 'no-agents')], {

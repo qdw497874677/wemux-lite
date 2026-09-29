@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { cpSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
 // Builds a self-contained @wemux/worker tarball.
@@ -11,6 +11,10 @@ import { join, resolve } from 'node:path'
 export function buildWorkerTarball({ repositoryRoot, packDestination }) {
   const workerRoot = join(repositoryRoot, 'apps', 'worker')
   const staging = mkdtempSync(join(packDestination, 'wemux-pack-'))
+  const webRoot = join(repositoryRoot, 'apps', 'web', 'dist')
+  if (!existsSync(join(webRoot, 'index.html')) || !existsSync(join(webRoot, 'assets'))) throw new Error('Web dist is missing; run npm run build --workspace @wemux/web first')
+  rmSync(join(workerRoot, 'web'), { recursive: true, force: true })
+  cpSync(webRoot, join(workerRoot, 'web'), { recursive: true })
   execFileSync('npm', ['pack', '--workspace', '@wemux/worker', '--pack-destination', staging], { cwd: repositoryRoot, stdio: 'inherit' })
   const candidates = readdirSync(staging).filter(entry => /^wemux-worker-.*\.tgz$/.test(entry))
   if (candidates.length !== 1) throw new Error(`npm pack created ${candidates.length} Worker tarballs`)

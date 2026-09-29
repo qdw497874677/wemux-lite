@@ -1,5 +1,6 @@
 node_modules/
 dist/
+/apps/worker/web/
 *.tsbuildinfo
 *.log
 .env

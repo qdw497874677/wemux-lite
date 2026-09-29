@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { request } from 'node:http'
@@ -85,6 +85,34 @@ test('local control rejects anonymous access and supports login, status and logo
     assert.equal((await fetch(`${f.server.url}/api/local/auth/session`, { method: 'DELETE', headers: { cookie: session, 'x-wemux-csrf': loginBody.csrf } })).status, 204)
     assert.equal((await fetch(`${f.server.url}/api/local/status`, { headers: { cookie: session } })).status, 401)
   } finally { await f.cleanup() }
+})
+
+test('built shared Web serves deep links and hashed assets without exposing files or APIs', async () => {
+  const web = await mkdtemp(join(tmpdir(), 'wemux-worker-web-'))
+  const f = await fixture()
+  try {
+    const html = '<!doctype html><script>window.__web=1</script><script type="module" src="/assets/main-abc.js"></script>'
+    await mkdir(join(web, 'assets'))
+    await writeFile(join(web, 'index.html'), html)
+    await writeFile(join(web, 'assets', 'main-abc.js'), 'console.log("web")')
+    const served = await startLocalControlServer({ host: '127.0.0.1', port: 0, state: f.store, webStaticPath: web })
+    try {
+      const entry = await fetch(`${served.url}/local/settings`, { headers: { accept: 'text/html' } })
+      assert.equal(entry.status, 200)
+      assert.equal(await entry.text(), html)
+      assert.equal(entry.headers.get('cache-control'), 'no-cache')
+      assert.match(entry.headers.get('content-security-policy') ?? '', /script-src 'self' 'sha256-/)
+      assert.doesNotMatch((entry.headers.get('content-security-policy') ?? '').split('style-src')[0], /unsafe-inline/)
+      const asset = await fetch(`${served.url}/assets/main-abc.js`)
+      assert.equal(asset.status, 200)
+      assert.match(asset.headers.get('content-type') ?? '', /text\/javascript/)
+      assert.equal(asset.headers.get('cache-control'), 'public, max-age=3600')
+      assert.equal((await fetch(`${served.url}/api/local/status`)).status, 401)
+      assert.equal((await fetch(`${served.url}/api/missing`, { headers: { accept: 'text/html' } })).status, 404)
+      assert.equal((await fetch(`${served.url}/assets/missing.js`)).status, 404)
+      assert.equal((await fetch(`${served.url}/%2e%2e/%2e%2e/etc/passwd`)).status, 404)
+    } finally { await served.close() }
+  } finally { await f.cleanup(); await rm(web, { recursive: true, force: true }) }
 })
 
 test('local control marks session cookies Secure behind an HTTPS reverse proxy', async () => {

@@ -13,12 +13,12 @@ wemux-lite-worker start
 
 默认地址是 `http://127.0.0.1:3002`。本机管理员和安装 ID 独立于集群身份；`admin init` 不接受 Enrollment Token 或 Worker Credential。也可用 `WEMUX_LOCAL_ADMIN_PASSWORD` 初始化自动化环境，但不要把密码写进命令参数。
 
-当前入口已提供：本机登录、Agent/模型检测结果、允许目录管理、本地 Session 创建/切换/删除、消息发送、Journal 实时事件流与停止当前回合。目录会解析为规范绝对路径并只作为本地执行授权边界，它不是文件系统沙箱。本地 Session 使用独立安装身份，不会因加入集群自动上传正文、目录或历史；同一 Worker 进程复用唯一持久队列、Journal 和 Agent runtime。
+发布 tgz 内含共用 Web 构建，Worker 默认由自身 HTTP 服务提供 `/local`、`/local/settings` 和 `/local/cluster`；不含 Web 构建的仓库开发启动则回退到 `/` 内联工作台。构建发布包前必须先构建 Web（根目录 `npm run build` 已按此顺序执行）。当前入口已提供：本机登录、Agent/模型检测结果、允许目录管理、本地 Session 创建/切换/删除、消息发送、Journal 实时事件流与停止当前回合。目录会解析为规范绝对路径并只作为本地执行授权边界，它不是文件系统沙箱。本地 Session 使用独立安装身份，不会因加入集群自动上传正文、目录或历史；同一 Worker 进程复用唯一持久队列、Journal 和 Agent runtime。
 
 Worker Web 已支持探测 Server、主动加入、连接、暂停和退出集群；注册口令仅用于一次性凭据交换。公网 HTTPS 仍应由同机受信反向代理终止，并通过 `--secure-cookies` 或 `WEMUX_WORKER_SECURE_COOKIES=1` 启用 Secure Cookie。`--host 0.0.0.0` 是显式高风险设置，不应把明文 Worker Web 直接暴露到公网。
 
 Wemux Lite Worker is the managed execution node of the AI Agent cluster platform. Product scope and delivery gates are defined in [product direction](../../docs/product-direction.md) and [roadmap](../../docs/roadmap.md), not by an MVP label. Node **>=22.13** (`node:sqlite`); Node 24+ recommended.
-The Worker now has an independently authenticated local Web/API and can run local sessions without joining a Server. Optional HTTPS remote access and opt-in cluster enrollment from the Web remain planned; see [Worker Web design](../../docs/design/worker-web-workbench.md). Enrollment must not automatically publish local sessions.
+The Worker now has an independently authenticated local Web/API and can run local sessions without joining a Server. Optional HTTPS remote access still needs a trusted reverse proxy; opt-in cluster enrollment is available in the shared Web; see [Worker Web design](../../docs/design/worker-web-workbench.md). Enrollment must not automatically publish local sessions.
 
 ## Install and run
 

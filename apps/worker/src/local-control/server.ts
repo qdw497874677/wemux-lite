@@ -8,6 +8,7 @@ import { LocalWorkbenchError, type LocalWorkbenchService } from '../application/
 import type { ClusterLifecycle } from '../application/cluster-lifecycle.js'
 import { parseLocalConnector, redactLocalConnector } from './connector-input.js'
 import { installWarning } from '../runtimes/management.js'
+import { serveWorkerStatic } from './static-site.js'
 
 const sessionCookie = 'wemux_worker_session'
 const sessionLifetimeMs = 8 * 60 * 60 * 1000
@@ -23,6 +24,7 @@ export interface LocalControlServerOptions {
   readonly port: number
   readonly state: LocalState
   readonly secureCookies?: boolean
+  readonly webStaticPath?: string
   readonly now?: () => number
 }
 
@@ -132,9 +134,9 @@ export async function startLocalControlServer(options: LocalControlServerOptions
     const authenticated = active && active.expiresAt > now() ? active : undefined
 
     try {
-      if (request.method === 'GET' && request.url === '/') return text(response, 200, 'text/html; charset=utf-8', page())
-      if (request.method === 'GET' && request.url === '/local.css') return text(response, 200, 'text/css; charset=utf-8', stylesheet)
-      if (request.method === 'GET' && request.url === '/local.js') return text(response, 200, 'text/javascript; charset=utf-8', script)
+      if (!options.webStaticPath && request.method === 'GET' && request.url === '/') return text(response, 200, 'text/html; charset=utf-8', page())
+      if (!options.webStaticPath && request.method === 'GET' && request.url === '/local.css') return text(response, 200, 'text/css; charset=utf-8', stylesheet)
+      if (!options.webStaticPath && request.method === 'GET' && request.url === '/local.js') return text(response, 200, 'text/javascript; charset=utf-8', script)
       if (request.method === 'GET' && request.url === '/api/host') return json(response, 200, { hostKind: 'local-worker', contractVersion: 1, capabilities: ['local-session', 'directories', 'cluster-connection'] })
       if (request.method === 'GET' && request.url === '/api/local/bootstrap') return json(response, 200, { initialized: Boolean(options.state.localAdmin()) })
       if (request.method === 'POST' && request.url === '/api/local/auth/session') {
@@ -386,6 +388,10 @@ export async function startLocalControlServer(options: LocalControlServerOptions
             sessions: localSessions.filter(session => session.binding.agent.workerId === localWorkerId).length,
           },
         })
+      }
+      if (request.method === 'GET' && options.webStaticPath && request.url && !request.url.startsWith('/api/')) {
+        const path = new URL(request.url, `http://${request.headers.host}`).pathname
+        if (await serveWorkerStatic(response, path, request.headers.accept, options.webStaticPath)) return
       }
       return json(response, 404, { error: 'Not found' })
     } catch (error) {
