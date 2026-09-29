@@ -220,6 +220,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
     if (!child.stdout) throw new Error('Pi runtime output unavailable')
     let emittedText = ''
     let sawToolActivity = false
+    let pendingOutcome: Extract<AgentSignal, { kind: 'finished' }> | null = null
     const dedupeText = (signal: AgentSignal): AgentSignal | null => {
       if (signal.kind !== 'event' || signal.event.kind !== 'assistant.text.delta') return signal
       const text = signal.event.text
@@ -236,11 +237,23 @@ class PiRuntimeSession implements AgentRuntimeSession {
         // may replay it in full. A new message_start opens a fresh dedupe
         // baseline; otherwise a multi-message turn would mis-diff the second
         // message against the first message's text and drop it entirely.
-        if (record.type === 'message_start') emittedText = ''
+        if (record.type === 'message_start') {
+          emittedText = ''
+          pendingOutcome = null
+        }
+        if (record.type === 'auto_retry_start') pendingOutcome = null
         const mapped = mapRuntimeRecord('pi', operationId, record)
         for (const signal of mapped) {
+          // turn_end closes one assistant response (including a tool call), not
+          // the prompt. agent_end can still be followed by recovery or follow-up.
+          // Only agent_settled ends Pi's complete session-level run.
+          if (record.type === 'turn_end' || record.type === 'agent_end') {
+            if (signal.kind === 'finished' && signal.outcome.status !== 'completed') pendingOutcome = signal
+            continue
+          }
+          const completed = record.type === 'agent_settled' && signal.kind === 'finished' ? pendingOutcome ?? signal : signal
           if (signal.kind === 'event' && signal.event.kind.startsWith('tool.')) sawToolActivity = true
-          const deduped = dedupeText(signal)
+          const deduped = dedupeText(completed)
           if (!deduped) continue
           // Pi 在模型拒绝、额度用尽或凭据失效时会结束回合但不产生任何正文；把它当成完成会让界面
           // 空白（历史 P0：发送消息一直没有响应）。宁可显式失败，也不要假成功。
@@ -258,7 +271,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
             return
           }
           yield deduped
-          if (signal.kind === 'finished') return
+          if (deduped.kind === 'finished') return
         }
       }
       // stdout closed without a terminal record — wait for the child to fully close

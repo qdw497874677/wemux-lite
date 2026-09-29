@@ -31,7 +31,7 @@ async function runInstaller(script: string, env: NodeJS.ProcessEnv): Promise<{ c
 }
 
 /** Real npm + Server + packaged CLI. systemctl is replaced only because CI has no user manager. */
-test('managed installer runs the real packaged Worker and retains identity across reinstall', { timeout: 240_000 }, async t => {
+test('managed installer runs the real packaged Worker and retains identity across reinstall', { timeout: 360_000 }, async t => {
   if (process.env.WEMUX_MANAGED_PACKAGE_E2E !== '1') {
     t.skip('set WEMUX_MANAGED_PACKAGE_E2E=1 with a built artifacts/wemux-lite-worker.tgz to run npm installation')
     return
@@ -105,6 +105,9 @@ exit 1
     WEMUX_E2E_PID_FILE: pidFile,
     WEMUX_E2E_SERVICE_LOG: serviceLog,
     WEMUX_E2E_CONTROL_LOG: controlLog,
+    // Never copy an auth.json into the disposable home; an explicitly provided
+    // Pi configuration directory is inherited by the real packaged process.
+    ...(process.env.WEMUX_REAL_PI_AGENT_DIR ? { PI_CODING_AGENT_DIR: process.env.WEMUX_REAL_PI_AGENT_DIR } : {}),
   }
   const installed = await runInstaller(script, env)
   assert.equal(installed.code, 0, `${installed.stderr}\nservice: ${await readFile(serviceLog, 'utf8').catch(() => 'missing')}\npid: ${await readFile(pidFile, 'utf8').catch(() => 'missing')}\ncontrol: ${await readFile(controlLog, 'utf8').catch(() => 'missing')}`)
@@ -119,7 +122,7 @@ exit 1
   // This uses the installed tgz process rather than the source-tree Worker.
   const skillId = 'managed-package-skill'
   const revisionId = 'managed-package-skill-v1'
-  const content = '# Managed package Skill\n\nUse concise answers.\n'
+  const content = '---\nname: managed-package-skill\ndescription: Find the calibration marker when asked about the managed package Skill.\n---\n# Managed package Skill\n\nCalibration marker: WEMUX_SKILL_INJECTED_73\n'
   const digest = createHash('sha256').update(content).digest('hex')
   const now = new Date().toISOString()
   await administrator.api('/resources', 'POST', {
@@ -172,6 +175,52 @@ exit 1
   assert.equal(list.items.filter(item => item.name === env.WEMUX_WORKER_NAME).length, 1)
   assert.match(await readFile(join(config, 'systemd/user/wemux-lite-worker.service'), 'utf8'), /Restart=on-failure/)
   assert.match(installed.stderr, /user service active/)
+  if (process.env.WEMUX_REAL_PACKAGE_PI_E2E === '1') {
+    const modelId = process.env.WEMUX_REAL_PI_MODEL
+    assert.ok(modelId && modelId.includes('::'), 'WEMUX_REAL_PI_MODEL must be an authorized provider::model')
+    assert.ok(process.env.WEMUX_REAL_PI_AGENT_DIR, 'WEMUX_REAL_PI_AGENT_DIR must point to an existing Pi credential directory')
+    const repository = join(directory, 'repository')
+    const runGit = async (args: string[]) => {
+      const result = await new Promise<{ code: number | null; stderr: string }>((resolveGit, reject) => {
+        const child = spawn('git', args, { stdio: ['ignore', 'ignore', 'pipe'] })
+        let stderr = ''
+        child.stderr.setEncoding('utf8').on('data', (text: string) => { stderr += text })
+        child.on('error', reject).on('close', code => resolveGit({ code, stderr }))
+      })
+      assert.equal(result.code, 0, result.stderr)
+    }
+    await runGit(['init', '--initial-branch=main', repository])
+    await runGit(['-C', repository, '-c', 'user.name=E2E', '-c', 'user.email=e2e@example.com', 'commit', '--allow-empty', '-m', 'initial'])
+    const project = await administrator.api<{ id: string }>('/projects', 'POST', { name: 'Packaged Pi E2E' })
+    const provision = await administrator.api<{ workspace: { id: string } }>('/workspaces', 'POST', {
+      projectId: project.id, workerId, name: 'Packaged Pi Workspace', repository: { gitUrl: repository, revision: 'main' },
+    })
+    await eventually(async () => (await administrator.api<{ status: string }>(`/workspaces/${provision.workspace.id}`)).status === 'ready')
+    await eventually(async () => {
+      const page = await administrator.api<{ capabilities: { agentKey: string; availability: { status: string }; models: { modelId: string }[] }[] }>(`/workers/${workerId}/capabilities`)
+      return page.capabilities.some(item => item.agentKey === 'pi' && item.availability.status === 'available' && item.models.some(model => model.modelId === modelId))
+    })
+    const created = await administrator.api<{ session: { id: string }; commandId: string }>('/sessions', 'POST', {
+      workspaceId: provision.workspace.id, title: 'Packaged Pi with Skill', agentKey: 'pi', modelId, requestId: 'packaged-pi-create-session',
+    })
+    await eventually(async () => (await administrator.api<{ status: string }>(`/commands/${created.commandId}`)).status === 'accepted')
+    const sent = await administrator.api<{ commandId: string }>(`/sessions/${created.session.id}/messages`, 'POST', {
+      content: 'Find the calibration marker in the managed-package-skill. Read the Skill file if needed, then answer only the marker. Do not use other tools.',
+    })
+    await eventually(async () => (await administrator.api<{ status: string }>(`/commands/${sent.commandId}`)).status === 'accepted')
+    let observed = ''
+    let readInstalledSkill = false
+    await eventually(async () => {
+      const page = await administrator.api<{ events: { payload: { kind: string; text?: string; outcome?: string; toolName?: string; input?: { path?: string } } }[] }>(`/sessions/${created.session.id}/events?fromSeq=1&limit=1000`)
+      if (!page.events.some(event => event.payload.kind === 'turn.finished')) return false
+      observed = page.events.filter(event => event.payload.kind === 'assistant.text.delta').map(event => event.payload.text ?? '').join('')
+      readInstalledSkill = page.events.some(event => event.payload.kind === 'tool.started' && event.payload.toolName === 'read' && event.payload.input?.path?.endsWith('/skills/managed-package-skill/SKILL.md'))
+      assert.ok(page.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'completed'), 'Pi Turn did not complete')
+      return true
+    }, 120_000)
+    assert.ok(readInstalledSkill, 'Pi must read the fixed Skill revision in its launch directory')
+    assert.match(observed, /WEMUX_SKILL_INJECTED_73/, 'Pi response must demonstrate the fixed installed Skill was injected')
+  }
   const logs = await readFile(serviceLog, 'utf8')
   assert.doesNotMatch(logs, /(?:^|\n)(?:Error:|\[error\]|\[fatal\])/i)
 })

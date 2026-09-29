@@ -42,7 +42,7 @@ test('pi runtime session maps native json events', async () => {
 test('pi runtime session maps new pi RPC protocol without duplicating assistant text', async () => {
   // Regression: pi ≥0.85 RPC emits streaming `message_update` records plus a final
   // `message_end` carrying the full message, then `turn_end`/`agent_end`/`agent_settled`.
-  // Full-text replays must be deduped and turn_end must finish the turn (used to hang).
+  // Full-text replays must be deduped; only agent_settled completes the prompt.
   const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"session\",\"sessionId\":\"pi-new\"}' '{\"type\":\"message_start\"}' '{\"type\":\"message_update\",\"usage\":{\"input\":9,\"output\":1}}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"收到\"}]}}' '{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\"}}' '{\"type\":\"agent_end\"}' '{\"type\":\"agent_settled\"}'")
   const adapter = new PiRuntimeSessionAdapter(cli)
   const session = await adapter.openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
@@ -53,6 +53,15 @@ test('pi runtime session maps new pi RPC protocol without duplicating assistant 
   const last = signals.at(-1)
   assert.equal(last?.kind, 'finished')
   if (last?.kind === 'finished') assert.deepEqual(last.outcome, { status: 'completed' })
+})
+
+test('pi waits for agent_settled after a tool turn and preserves the final model answer', async () => {
+  const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"toolCall\",\"name\":\"read\"}]}}' '{\"type\":\"tool_execution_start\",\"toolCallId\":\"call-1\",\"toolName\":\"read\"}' '{\"type\":\"tool_execution_end\",\"toolCallId\":\"call-1\"}' '{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\"}}' '{\"type\":\"agent_end\",\"messages\":[]}' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"WEMUX_SKILL_INJECTED_73\"}]}}' '{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\"}}' '{\"type\":\"agent_end\",\"messages\":[]}' '{\"type\":\"agent_settled\"}'")
+  const session = await new PiRuntimeSessionAdapter(cli).openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  const handle = await session.execute({ operationId: 'turn-tool' as TurnId, message: { content: 'read and answer' } })
+  const signals = await collect(handle.signals)
+  assert.deepEqual(signals.flatMap(s => s.kind === 'event' && s.event.kind === 'assistant.text.delta' ? [s.event.text] : []), ['WEMUX_SKILL_INJECTED_73'])
+  assert.deepEqual(signals.at(-1), { kind: 'finished', outcome: { status: 'completed' } })
 })
 
 test('pi runtime session 把自动重试变成用户可见事件，且重试后的正文与回合结果不受影响', async () => {
