@@ -38,22 +38,22 @@ try {
   page.on('request', request => { if (new URL(request.url()).pathname.startsWith('/api/')) calls.push(new URL(request.url()).pathname) })
   await page.goto(`${base}/projects`)
   await page.getByText('链接不存在。', { exact: false }).waitFor()
-  assert.deepEqual(calls, ['/api/host'], 'forbidden cluster route must not ask for cluster identity or data')
+  assert.deepEqual(calls, ['/api/host'], 'forbidden local route must not even request local or cluster credentials')
   await page.goto(`${base}/local`)
-  await page.getByText('本地工作台仍由 Worker 提供。', { exact: false }).waitFor()
+  await page.getByRole('heading', { name: '本机工作台' }).waitFor()
   assert.deepEqual(errors, [])
   host.contractVersion = 99
   await page.reload()
   await page.getByRole('alert').getByText(/版本与服务端不兼容/).waitFor()
   host.contractVersion = 1
   await page.getByRole('button', { name: '重试' }).click()
-  await page.getByText('本地工作台仍由 Worker 提供。', { exact: false }).waitFor()
+  await page.getByRole('heading', { name: '本机工作台' }).waitFor()
   offline = true
   await page.reload()
   await page.getByRole('alert').getByText(/无法连接工作台宿主/).waitFor()
   assert.deepEqual(errors, [])
   offline = false
   await page.getByRole('button', { name: '重试' }).click()
-  await page.getByText('本地工作台仍由 Worker 提供。', { exact: false }).waitFor()
+  await page.getByRole('heading', { name: '本机工作台' }).waitFor()
   console.log('Host bootstrap browser acceptance passed')
 } finally { await browser.close(); await new Promise(resolve => server.close(resolve)) }

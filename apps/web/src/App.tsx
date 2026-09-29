@@ -25,8 +25,8 @@ import { resolveSelection } from './app/selection'
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import { RouterProvider, useRouterState, useNavigate } from '@tanstack/react-router'
 import { makeRouter } from './app/router'
-import { isHostPathAllowed } from './app/host-paths.ts'
 import { discoverHost, type HostBootstrap } from './hosts/bootstrap.ts'
+import { LocalWorkbench } from './hosts/local-workbench.tsx'
 import { useResources } from './app/resources'
 import { TimelineEntry, Composer, OptimisticMessages, useMessageActions } from './features/sessions/conversation'
 import { Conversation, ConversationContent, ConversationEmptyState, ConversationScrollButton } from './components/ai-elements/conversation.tsx'
@@ -110,18 +110,13 @@ function RouterApp() {
     return () => abort.abort()
   }, [attempt])
   const router = useMemo(() => host && makeRouter(
-    host.hostKind === 'cluster' ? AuthScope : LocalHostPlaceholder,
-    host.hostKind === 'cluster' ? RoutedWorkbench : LocalHostPlaceholder,
+    host.hostKind === 'cluster' ? AuthScope : LocalWorkbench,
+    host.hostKind === 'cluster' ? RoutedWorkbench : LocalWorkbench,
     host.hostKind,
   ), [host])
   if (failure) return <main role="alert" className="p-6">{failure} <button type="button" onClick={() => { setFailure(''); setAttempt(value => value + 1) }}>重试</button></main>
   if (!router) return <main role="status" className="p-6">正在识别工作台宿主…</main>
   return <ConfirmDialogProvider><RouterProvider router={router} /></ConfirmDialogProvider>
-}
-function LocalHostPlaceholder() {
-  const pathname = useRouterState({ select: state => state.location.pathname })
-  if (!isHostPathAllowed('local-worker', pathname)) return <main role="alert" className="p-6">链接不存在。<a href="/local">返回本地工作台</a></main>
-  return <main role="status" className="p-6">本地工作台仍由 Worker 提供。共享会话界面尚未启用，请使用 Worker 当前页面。</main>
 }
 type BootState = 'checking' | 'ready' | 'signed-out' | 'unreachable'
 const ConnectionContext = createContext<{ config: AccountSession; onSettings: () => void; onUnauthorized: () => void; onSignOut: () => void } | null>(null)

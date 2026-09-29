@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { Api } from './client'
+import type { SessionJournal } from '../hosts/session-journal.ts'
 import type { FreshnessDTO, JournalEventDTO, SessionDTO } from './dto'
 import { appendPage, projectJournal } from './journal'
 
-export function useSession(api: Api, sessionId: string, revision: number) {
+export function useSession(api: SessionJournal, sessionId: string, revision: number) {
   const [data, setData] = useState<{ id: string; events: JournalEventDTO[]; freshness?: FreshnessDTO; error: string; stream: string; checkedAt: number }>({ id: '', events: [], error: '', stream: 'connecting', checkedAt: 0 })
   useEffect(() => {
     setData({ id: sessionId, events: [], error: '', stream: 'connecting', checkedAt: 0 })
@@ -42,7 +42,7 @@ export function useSession(api: Api, sessionId: string, revision: number) {
           }
         } while (dirty && !controller.signal.aborted)
       } catch (error) {
-        if (!controller.signal.aborted) setData(current => ({ ...current, error: error instanceof Error ? error.message : '历史加载失败' }))
+        if (!controller.signal.aborted) setData(current => ({ ...current, freshness: { status: 'unknown' }, error: error instanceof Error ? error.message : '历史加载失败' }))
       } finally { syncing = false }
     }
     void sync()
