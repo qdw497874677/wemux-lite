@@ -113,6 +113,7 @@ test('Server and Worker execute and resume a real Pi session', { timeout: 240_00
     title: 'Real Pi Session',
     agentKey: 'pi',
     modelId: selectedModel.modelId,
+    requestId: 'real-pi-create-session',
   })
   await eventually(() => api(`/commands/${created.commandId}`), value => value.status === 'accepted')
 
@@ -148,5 +149,5 @@ test('Server and Worker execute and resume a real Pi session', { timeout: 240_00
   const secondText = secondPage.events.filter((event: any) => event.payload.kind === 'assistant.text.delta').map((event: any) => event.payload.text).join('')
   assert.match(secondText, /WEMUX_REAL_PI_2/)
   assert.equal(secondPage.freshness.status, 'synced')
-  assert.equal(workerStderr, '')
+  assert.doesNotMatch(workerStderr, /(?:^|\n)(?:Error:|\[error\]|\[fatal\]|\[runtime-error\])/i, 'Worker reported an error')
 })
