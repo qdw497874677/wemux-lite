@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -114,6 +115,43 @@ exit 1
     workerId = online?.id ?? ''
     return !!workerId
   })
+  // Publish a static Skill and manually apply a Preset through real Server APIs.
+  // This uses the installed tgz process rather than the source-tree Worker.
+  const skillId = 'managed-package-skill'
+  const revisionId = 'managed-package-skill-v1'
+  const content = '# Managed package Skill\n\nUse concise answers.\n'
+  const digest = createHash('sha256').update(content).digest('hex')
+  const now = new Date().toISOString()
+  await administrator.api('/resources', 'POST', {
+    id: skillId, kind: 'skill', name: 'Managed Skill', description: '',
+    definition: { entryFile: 'SKILL.md', compatibleAgents: [], containsExecutableFiles: false },
+    createdAt: now, updatedAt: now,
+  })
+  await administrator.api(`/resource-blobs/${digest}`, 'PUT', { base64Content: Buffer.from(content).toString('base64') })
+  await administrator.api(`/resources/${skillId}/revisions`, 'POST', {
+    id: revisionId, resourceId: skillId, kind: 'skill', version: 1, state: 'published',
+    manifest: {
+      schemaVersion: 1, name: 'Managed Skill', description: '',
+      compatibility: { workerProtocol: '2', platforms: [], architectures: [], agentKeys: [] },
+      bytes: Buffer.byteLength(content), fileCount: 1, sha256: digest, materializerVersion: 1, restartPolicy: 'none',
+    },
+    payload: { mode: 'blobs', files: [{ path: 'SKILL.md', size: Buffer.byteLength(content), mediaType: 'text/markdown', sha256: digest, blobSha256: digest }] },
+    contentSha256: digest, supplyChain: { mode: 'static-content', manifestSha256: digest }, createdAt: now,
+  })
+  const preset = await administrator.api<{ id: string; revision: number }>('/resource-presets', 'POST', {
+    id: 'managed-package-preset', name: 'Managed package preset', description: '', expectedRevision: 0,
+    autoApply: { enabled: false }, entries: [{ resourceId: skillId, resourceRevisionId: revisionId, agentKey: null, projectId: null, required: true }],
+  })
+  const set = await administrator.api<{ revision: number }>(`/workers/${workerId}/resource-set`)
+  const application = await administrator.api<{ id: string }>(`/resource-presets/${preset.id}/applications`, 'POST', {
+    presetRevision: preset.revision, workerId, requestId: 'managed-package-preset-apply', expectedSetRevision: set.revision,
+  })
+  await eventually(async () => {
+    const items = await administrator.api<{ items: { application: { id: string }; items: { binding: { resourceRevisionId: string; status: string }; reconcile: { phase: string } | null }[] }[] }>(`/resource-preset-applications?workerId=${workerId}`)
+    return items.items.some(item => item.application.id === application.id && item.items.some(value => value.binding.resourceRevisionId === revisionId && value.binding.status === 'installed' && value.reconcile?.phase === 'ready'))
+  })
+  const skillFile = join(workerHome, 'resources', 'skill', skillId, 'current', 'SKILL.md')
+  assert.equal(await readFile(skillFile, 'utf8'), content)
   const previousCredential = await readFile(join(workerHome, 'credential'))
   await stopService()
   await eventually(async () => {
@@ -127,6 +165,9 @@ exit 1
     return list.items.some(item => item.id === workerId && item.connectionState === 'online')
   })
   assert.deepEqual(await readFile(join(workerHome, 'credential')), previousCredential, 'reinstallation preserves the enrolled Worker identity')
+  assert.equal(await readFile(skillFile, 'utf8'), content, 'reinstallation preserves the active Preset Skill')
+  const resumed = await administrator.api<{ items: { application: { id: string }; items: { binding: { resourceRevisionId: string; status: string }; reconcile: { phase: string } | null }[] }[] }>(`/resource-preset-applications?workerId=${workerId}`)
+  assert.ok(resumed.items.some(item => item.application.id === application.id && item.items.some(value => value.binding.resourceRevisionId === revisionId && value.binding.status === 'installed' && value.reconcile?.phase === 'ready')), 'Preset projection remains ready after Worker reconnect')
   const list = await administrator.api<{ items: { name: string }[] }>('/workers')
   assert.equal(list.items.filter(item => item.name === env.WEMUX_WORKER_NAME).length, 1)
   assert.match(await readFile(join(config, 'systemd/user/wemux-lite-worker.service'), 'utf8'), /Restart=on-failure/)
