@@ -33,6 +33,6 @@ npm run typecheck
 
 ## 尚未验证/已知限制
 
-- `systemctl --user is-active` 检测进程活跃，不保证 Worker 成功登录 Server 或完成第一个 WebSocket 握手；本用例另从 Server 核对在线，但使用进程桩而非真实 manager。没有真实用户服务、机器重启后的持续在线证据时不声称完成裸机部署。
+- `systemctl --user is-active` 检测进程活跃，不保证 Worker 成功登录 Server 或完成第一个 WebSocket 握手；本用例另从 Server 核对在线，但使用进程桩而非真实 manager。2026-09-29 再检查当前沙箱：PID 1 为 `entrypoint-cust`，无 `/run/user/10000` 和用户 bus，`systemctl --user is-system-running` 返回 `offline`，`loginctl show-user` 提示 `System has not been booted with systemd as init system (PID 1). Can't operate.`；因此这里不能伪造真实用户 manager 验收。没有真实用户服务、机器重启后的持续在线证据时不声称完成裸机部署。
 - release 包的依赖由 npm registry 安装，即使禁用 npm lifecycle scripts 仍需要信任其依赖分发；当前没有离线签名/透明证明、依赖离线镜像与平台兼容 manifest。
 - 本测试可选组合已串联临时 home 的打包安装、真实浏览器 Web 手动 Preset、静态 Skill + 官方 Pi runtime 物化、手动停机重装后的激活及有权限模型 Turn。模型认证仍依赖操作者显式提供的现有 Pi 凭证；尚未串联真实用户级 systemd manager、由用户服务自动重启及机器重启后恢复。这仍是 R2 完整裸机验收的剩余工作。
