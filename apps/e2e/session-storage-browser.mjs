@@ -26,6 +26,7 @@ try {
     const path = new URL(route.request().url()).pathname
     const headers = { 'content-type': 'application/json' }
     const fulfill = body => route.fulfill({ status: 200, headers, body: JSON.stringify(body) })
+    if (path === '/api/host') return fulfill({ hostKind: 'cluster', contractVersion: 1, capabilities: ['cluster-session', 'projects', 'workers'] })
     if (path === '/api/auth/me') return fulfill({ user: { id: 'owner', username: 'owner', email: 'browser@example.com' }, teamId: 'team', session: { id: 'login', current: true, authenticationMethod: 'password', client: 'Playwright', authenticatedAt: '2026-01-01T00:00:00Z', createdAt: '2026-01-01T00:00:00Z', lastSeenAt: '2026-01-01T00:00:00Z', idleExpiresAt: '2026-01-01T00:00:00Z', absoluteExpiresAt: null, revokedAt: null }, instanceAdministrator: true, csrfToken: 'csrf' })
     if (path === '/api/projects') return fulfill({ items: [{ id: 'project', teamId: 'team', ownerId: 'owner', name: '存储模式项目', shareScope: 'team', accessRole: 'owner', createdAt: '2026-01-01T00:00:00Z' }] })
     if (path === '/api/workers') return fulfill({ items: [] })

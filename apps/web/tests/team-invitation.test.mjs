@@ -41,7 +41,7 @@ test('团队管理页包含创建、邀请、成员与待处理邀请能力', as
 })
 
 test('join 与 teams 是正式 Web 路由并进入对应页面', async () => {
-  const [app, router] = await Promise.all([read('App.tsx'), read('app/router.tsx')])
+  const [app, router] = await Promise.all([read('App.tsx'), read('app/host-paths.ts')])
   assert.match(app, /<TeamInvitationScreen/)
   assert.match(app, /<TeamPage api=\{api\}/)
   assert.match(router, /'\/join'/)

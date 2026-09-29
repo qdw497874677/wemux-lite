@@ -5,6 +5,7 @@ import type { RouteDescriptor } from './types.ts'
 
 export const publicRoutes: readonly RouteDescriptor[] = [
   { method: 'GET', pattern: '/health', auth: 'public', handler: ({ json }) => json(200, { status: 'ok' }) },
+  { method: 'GET', pattern: '/host', auth: 'public', handler: ({ json }) => json(200, { hostKind: 'cluster', contractVersion: 1, capabilities: ['cluster-session', 'projects', 'workers'] }) },
   {
     method: 'GET', pattern: '/downloads/worker.tgz', auth: 'public', handler: async ({ response, path, downloads }) => {
       if (!await serveWorkerDownload(response, path, downloads)) throw new AppError(404, 'Not found')

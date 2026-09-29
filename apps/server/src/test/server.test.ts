@@ -85,6 +85,10 @@ test('serves the web UI bundle with SPA fallback without masking API 404s', asyn
   const base = await app.listen(0)
   t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }) })
 
+  const host = await fetch(`${base}/api/host`)
+  assert.equal(host.status, 200)
+  assert.equal(host.headers.get('cache-control'), 'no-store')
+  assert.deepEqual(await host.json(), { hostKind: 'cluster', contractVersion: 1, capabilities: ['cluster-session', 'projects', 'workers'] })
   const index = await fetch(`${base}/`)
   assert.equal(index.status, 200)
   assert.match(index.headers.get('content-type') ?? '', /text\/html/)

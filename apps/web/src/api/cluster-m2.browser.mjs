@@ -30,7 +30,8 @@ try {
     const request = route.request(), path = new URL(request.url()).pathname
     if (request.method() !== 'GET') { calls.push({ path, method: request.method(), body: request.postDataJSON() }); await route.fulfill({ json: { commandId: request.postDataJSON()?.commandId } }); return }
     let json = { items: [] }
-    if (path === '/api/projects') json = { items: [{ id: 'p', name: '项目' }] }
+    if (path === '/api/host') json = { hostKind: 'cluster', contractVersion: 1, capabilities: ['cluster-session', 'projects', 'workers'] }
+    else if (path === '/api/projects') json = { items: [{ id: 'p', name: '项目' }] }
     else if (path === '/api/workspaces') json = { items: [workspace] }
     else if (path === '/api/workers') json = { items: workers }
     else if (path.endsWith('/capabilities')) json = { capabilities: [agent] }

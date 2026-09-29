@@ -21,6 +21,7 @@ try {
   page.on('pageerror', error => errors.push(error.message))
   await page.route('**/api/**', async route => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname
+    if (path === '/api/host') { await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ hostKind: 'cluster', contractVersion: 1, capabilities: ['cluster-session', 'projects', 'workers'] }) }); return }
     if (path === '/api/auth/me') { await route.fulfill({ contentType: 'application/json', body: JSON.stringify(account) }); return }
     if (path === '/api/projects') { await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ items: [{ id: 'project-browser', name: '浏览器项目', teamId: 'team-browser', shareScope: 'team', accessRole: 'owner' }] }) }); return }
     if (path === '/api/workers') { await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ items: [] }) }); return }

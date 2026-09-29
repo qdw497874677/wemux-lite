@@ -56,6 +56,10 @@ test('local installation and administrator persist separately from cluster ident
 test('local control rejects anonymous access and supports login, status and logout', async () => {
   const f = await fixture()
   try {
+    const host = await fetch(`${f.server.url}/api/host`)
+    assert.equal(host.status, 200)
+    assert.equal(host.headers.get('cache-control'), 'no-store')
+    assert.deepEqual(await host.json(), { hostKind: 'local-worker', contractVersion: 1, capabilities: ['local-session', 'directories', 'cluster-connection'] })
     assert.equal((await fetch(`${f.server.url}/api/local/status`)).status, 401)
     const failed = await fetch(`${f.server.url}/api/local/auth/session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'owner', password: 'wrong password value' }) })
     assert.equal(failed.status, 401)

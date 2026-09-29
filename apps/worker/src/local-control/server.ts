@@ -133,6 +133,7 @@ export async function startLocalControlServer(options: LocalControlServerOptions
       if (request.method === 'GET' && request.url === '/') return text(response, 200, 'text/html; charset=utf-8', page())
       if (request.method === 'GET' && request.url === '/local.css') return text(response, 200, 'text/css; charset=utf-8', stylesheet)
       if (request.method === 'GET' && request.url === '/local.js') return text(response, 200, 'text/javascript; charset=utf-8', script)
+      if (request.method === 'GET' && request.url === '/api/host') return json(response, 200, { hostKind: 'local-worker', contractVersion: 1, capabilities: ['local-session', 'directories', 'cluster-connection'] })
       if (request.method === 'GET' && request.url === '/api/local/bootstrap') return json(response, 200, { initialized: Boolean(options.state.localAdmin()) })
       if (request.method === 'POST' && request.url === '/api/local/auth/session') {
         const address = source(request)

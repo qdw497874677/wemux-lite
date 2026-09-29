@@ -1,6 +1,9 @@
 import { createRootRoute, createRoute, createRouter, useBlocker } from '@tanstack/react-router'
 import { useCallback, type RefObject } from 'react'
 import { useConfirmDialog } from '../components/ui/confirm-dialog.tsx'
+import type { HostKind } from '../hosts/bootstrap.ts'
+import { clusterPaths, hostRoutes } from './host-paths.ts'
+export { hostRoutes } from './host-paths.ts'
 
 /** All router navigation (links, imperative navigation and history POP) shares this boundary. */
 export function useTaskNavigationGuard(dirty: RefObject<boolean>) {
@@ -14,9 +17,11 @@ export function useTaskNavigationGuard(dirty: RefObject<boolean>) {
   })
 }
 
-export const paths = ['/', '/attention', '/approvals', '/timeline', '/projects', '/projects/$projectId', '/projects/$projectId/overview', '/projects/$projectId/canvas', '/projects/$projectId/board', '/projects/$projectId/tasks', '/projects/$projectId/tasks/$taskId', '/projects/$projectId/activity', '/projects/$projectId/connectors', '/projects/$projectId/skills', '/projects/$projectId/channels', '/projects/$projectId/settings', '/projects/$projectId/workspaces', '/projects/$projectId/workspaces/$workspaceId', '/projects/$projectId/sessions', '/projects/$projectId/sessions/$sessionId', '/runtime', '/runtimes', '/cluster', '/teams', '/components', '/settings', '/join', '/auth/verify-email', '/auth/password/reset', '/auth/confirm-email-change'] as const
-export function makeRouter(component: () => React.ReactNode, page: () => React.ReactNode) {
-  const root = createRootRoute({ component, errorComponent: () => <p role="alert">链接无效。<a href="/projects">返回项目列表</a></p>, notFoundComponent: () => <p role="alert">链接不存在。<a href="/projects">返回项目列表</a></p> })
-  const layout = createRoute({ getParentRoute: () => root, id: 'workbench', component: page, notFoundComponent: page })
-  return createRouter({ routeTree: root.addChildren([layout.addChildren(paths.map(path => createRoute({ getParentRoute: () => layout, path, component: () => null })))]), defaultPreload: false })
+export const paths = clusterPaths
+
+export function makeRouter(component: () => React.ReactNode, page: () => React.ReactNode, hostKind: HostKind = 'cluster') {
+  const home = hostKind === 'local-worker' ? '/local' : '/projects'
+  const root = createRootRoute({ component, errorComponent: () => <p role="alert">链接无效。<a href={home}>返回工作台</a></p>, notFoundComponent: () => <p role="alert">链接不存在。<a href={home}>返回工作台</a></p> })
+  const layout = createRoute({ getParentRoute: () => root, id: 'workbench', component: page, notFoundComponent: () => <p role="alert">链接不存在。<a href={home}>返回工作台</a></p> })
+  return createRouter({ routeTree: root.addChildren([layout.addChildren(hostRoutes(hostKind).map(path => createRoute({ getParentRoute: () => layout, path, component: () => null })))]), defaultPreload: false })
 }

@@ -25,11 +25,11 @@ test('邮件里的三个链接都落在 Web 控制台自己渲染的路径上', 
 
 test('Web 路由清单与 Server 声明的控制台路径逐个一致', async () => {
   const [router, app] = await Promise.all([
-    readFile(resolve(repositoryRoot, 'apps/web/src/app/router.tsx'), 'utf8'),
+    readFile(resolve(repositoryRoot, 'apps/web/src/app/host-paths.ts'), 'utf8'),
     readFile(resolve(repositoryRoot, 'apps/web/src/App.tsx'), 'utf8'),
   ])
   for (const path of Object.values(WEB_CONSOLE_AUTH_PATHS)) {
-    assert.ok(router.includes(`'${path}'`), `apps/web/src/app/router.tsx 的 paths 缺少 ${path}`)
+    assert.ok(router.includes(`'${path}'`), `apps/web/src/app/host-paths.ts 的 clusterPaths 缺少 ${path}`)
     assert.ok(app.includes(`'${path}'`), `apps/web/src/App.tsx 的链接落地页判定缺少 ${path}`)
   }
 })

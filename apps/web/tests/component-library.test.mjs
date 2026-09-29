@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 
 const page = await readFile(new URL('../src/components/component-library.tsx', import.meta.url), 'utf8')
 const app = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8')
-const router = await readFile(new URL('../src/app/router.tsx', import.meta.url), 'utf8')
+const router = await readFile(new URL('../src/app/host-paths.ts', import.meta.url), 'utf8')
 
 test('component library has a routed production entry', () => {
   assert.match(router, /'\/components'/)

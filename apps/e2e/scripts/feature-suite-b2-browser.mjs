@@ -52,6 +52,7 @@ try {
   page.on('console', message => { if (message.type() === 'error') errors.push(`console: ${message.text()}`) })
   await page.route('**/api/**', async route => {
     const request = route.request(), url = new URL(request.url()), pathname = url.pathname
+    if (pathname === '/api/host') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ hostKind: 'cluster', contractVersion: 1, capabilities: ['cluster-session', 'projects', 'workers'] }) })
     if (pathname === '/api/auth/me') return route.fulfill({ contentType: 'application/json', body: JSON.stringify(account) })
     if (pathname === '/api/projects') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ items: [project] }) })
     if (pathname === '/api/workers') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ items: [] }) })

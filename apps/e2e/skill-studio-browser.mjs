@@ -34,6 +34,7 @@ try {
   const fulfill = (route, value, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(value) })
   await page.route('**/api/**', async route => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname, method = request.method()
+    if (path === '/api/host') return fulfill(route, { hostKind: 'cluster', contractVersion: 1, capabilities: ['cluster-session', 'projects', 'workers'] })
     if (path === '/api/auth/me') return fulfill(route, { ...account, instanceAdministrator: administrator })
     if (path === '/api/projects') return fulfill(route, { items: [project] })
     if (path === '/api/workers') return fulfill(route, { items: [worker] })

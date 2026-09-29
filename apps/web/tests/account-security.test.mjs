@@ -8,7 +8,7 @@ const link = await source('components/auth-link.tsx')
 const client = await source('api/client.ts')
 const dto = await source('api/dto.ts')
 const app = await source('App.tsx')
-const router = await source('app/router.tsx')
+const router = await source('app/host-paths.ts')
 
 // Ticket 08 验收：绑定结果只展示一次，刷新不复现，链接被分享出去也不带别人的绑定结果。
 test('link results become readable text exactly once and the address bar is cleaned', async () => {

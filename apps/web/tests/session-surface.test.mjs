@@ -32,7 +32,7 @@ test('canvas React Flow adapter renders only the selected interactive Surface an
 
 test('canvas and focus navigation encode the active session in URL state', async () => {
   const app = await read('../src/App.tsx')
-  const router = await read('../src/app/router.tsx')
+  const router = await read('../src/app/host-paths.ts')
   assert.match(app, /canvasSearch\.get\('session'\)/)
   assert.match(app, /view=canvas/)
   assert.match(app, /from=canvas/)
