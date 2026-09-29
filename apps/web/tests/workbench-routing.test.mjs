@@ -20,6 +20,11 @@ test('unknown, inaccessible and cross-project resources never select first item'
   assert.match(resolveSelection('/', '?session=s', projects, workspaces, [{ ...sessions[0], canRead: false }]).error, /无权限/)
 })
 
+test('Skill Studio accepts its project route and rejects nested paths', () => {
+  assert.deepEqual(resolve('/projects/p/skills'), {})
+  assert.ok(resolve('/projects/p/skills/extra').error)
+})
+
 test('invalid sections, extra segments and malformed URI are rejected; indexes replace', () => {
   for (const path of ['/projects/p/nonsense', '/projects/p/overview/extra', '/runtime/extra', '/projects/%ZZ']) assert.ok(resolve(path).error)
   assert.deepEqual(resolve('/'), { redirect: '/projects' })

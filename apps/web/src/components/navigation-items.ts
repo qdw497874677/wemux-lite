@@ -1,8 +1,8 @@
-import { Activity, FolderGit2, LayoutDashboard, MessageSquarePlus, PlugZap, Settings2, SquareKanban, Webhook } from 'lucide-react'
+import { Activity, FolderGit2, LayoutDashboard, MessageSquarePlus, PlugZap, Settings2, SquareKanban, Sparkles, Webhook } from 'lucide-react'
 import type { ComponentType } from 'react'
 
 export interface ProjectNavigationItem {
-  path: 'sessions' | 'overview' | 'board' | 'workspaces' | 'activity' | 'connectors' | 'channels' | 'settings'
+  path: 'sessions' | 'overview' | 'board' | 'workspaces' | 'activity' | 'connectors' | 'skills' | 'channels' | 'settings'
   label: string
   shortLabel: string
   icon: ComponentType<{ className?: string }>
@@ -16,6 +16,7 @@ export const projectNavigationItems: readonly ProjectNavigationItem[] = [
   { path: 'workspaces', label: '工作区', shortLabel: '工作区', icon: FolderGit2 },
   { path: 'activity', label: '活动', shortLabel: '活动', icon: Activity },
   { path: 'connectors', label: '连接器', shortLabel: '连接器', icon: PlugZap },
+  { path: 'skills', label: '技能', shortLabel: '技能', icon: Sparkles },
   { path: 'channels', label: 'Channel', shortLabel: 'Channel', icon: Webhook },
   { path: 'settings', label: '项目设置', shortLabel: '设置', icon: Settings2 },
 ]

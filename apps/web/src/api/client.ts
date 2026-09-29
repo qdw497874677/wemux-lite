@@ -1,3 +1,4 @@
+import type { Resource, ResourceBinding, ResourceBindingStatus, ResourceRevision, ReconcileReport } from '@wemux/domain'
 import type { Run, LaunchRequest, LaunchResponse, TaskSummary, TaskDetail, TaskCreate, TaskPatch, TaskActivity, AssignmentRequest, CreateTaskWorkspaceRequest, UnbindWorkspaceRequest } from '@wemux/web-contract/task-platform'
 import type { CanvasLayoutResponse, CanvasLayoutSaveRequest, CanvasLayoutSaveResponse, CanvasLayoutScope, SessionGraphResponse } from '@wemux/web-contract/session-graph'
 import type { ConnectorDTO, ConnectorListDTO, ConnectorTestDTO, ConnectorWriteDTO } from '@wemux/web-contract/connectors'
@@ -52,6 +53,12 @@ export const routes = {
   enrollmentTokens: '/api/enrollment-tokens',
   tailnet: '/api/cluster/tailnet',
   workers: '/api/workers',
+  resources: '/api/resources',
+  resource: (resourceId: string) => `/api/resources/${id(resourceId)}`,
+  resourceRevisions: (resourceId: string) => `/api/resources/${id(resourceId)}/revisions`,
+  resourceBlob: (sha256: string) => `/api/resource-blobs/${id(sha256)}`,
+  resourceBindings: '/api/resource-bindings',
+  resourceBinding: (bindingId: string) => `/api/resource-bindings/${id(bindingId)}`,
   capabilities: (workerId: string) => `/api/workers/${id(workerId)}/capabilities`,
   workerAccess: (workerId: string) => `/api/workers/${id(workerId)}/access`,
   workerGrants: (workerId: string) => `/api/workers/${id(workerId)}/grants`,
@@ -284,6 +291,14 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     logoutAll: async () => { const result = await request<{ revoked: number }>(routes.authLogoutAll, {}); csrfToken = ''; return result },
     createEnrollmentToken: (body: CreateEnrollmentTokenDTO) => request<EnrollmentTokenDTO>(routes.enrollmentTokens, body),
     tailnet: (signal?: AbortSignal) => request<TailnetInfoDTO>(routes.tailnet, undefined, signal),
+    resources: (signal?: AbortSignal) => list<Resource>(routes.resources, signal),
+    resourceDetail: (resourceId: string, signal?: AbortSignal) => request<{ resource: Resource; revisions: ResourceRevision[] }>(routes.resource(resourceId), undefined, signal),
+    createResource: (resource: Resource) => request<Resource>(routes.resources, resource),
+    putResourceBlob: (sha256: string, base64Content: string) => request<{ sha256: string; deduplicated: boolean }>(routes.resourceBlob(sha256), { base64Content }, undefined, 'PUT'),
+    publishResourceRevision: (resourceId: string, revision: ResourceRevision) => request<ResourceRevision>(routes.resourceRevisions(resourceId), revision),
+    resourceBindings: (signal?: AbortSignal) => list<{ binding: ResourceBinding; reconcile: ReconcileReport | null }>(routes.resourceBindings, signal),
+    bindResource: (body: { id: string; workerId: string; resourceRevisionId: string; agentKey: string | null; projectId: string | null }) => request<ResourceBinding>(routes.resourceBindings, body),
+    transitionResourceBinding: (bindingId: string, status: ResourceBindingStatus, expectedRevision: number) => request<ResourceBinding>(routes.resourceBinding(bindingId), { status, expectedRevision }, undefined, 'PATCH'),
     workers: async (signal?: AbortSignal) => {
       const workers = await list<WorkerDTO>(routes.workers, signal)
       return Promise.all(workers.map(async worker => {

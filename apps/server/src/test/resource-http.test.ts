@@ -49,6 +49,16 @@ test('resource management routes are administrator-only and expose catalog, bind
   assert.deepEqual(desired.output.body, { workerId: 'worker-1', revision: 1, bindings: [] })
 })
 
+test('catalog and published revision derive creator from the authenticated administrator', async () => {
+  const captured: unknown[] = []
+  const resource = context({ readBody: async () => ({ id: 'resource-1', createdBy: 'forged-user' }), resources: { createResource: (value: unknown) => { captured.push(value); return value } } })
+  await route('POST', '/resources').handler(resource.value)
+  assert.deepEqual(captured[0], { id: 'resource-1', createdBy: 'user-1' })
+  const revision = context({ params: { resourceId: 'resource-1' }, readBody: async () => ({ resourceId: 'resource-1', createdBy: 'forged-user' }), resources: { createRevision: (value: unknown) => { captured.push(value); return value } } })
+  await route('POST', '/resources/:resourceId/revisions').handler(revision.value)
+  assert.deepEqual(captured[1], { resourceId: 'resource-1', createdBy: 'user-1' })
+})
+
 test('binding route derives creator from the authenticated administrator', async () => {
   let received: unknown
   const fixture = context({

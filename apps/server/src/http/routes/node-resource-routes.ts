@@ -15,8 +15,8 @@ const object = (value: unknown): Record<string, unknown> => {
 export const nodeResourceRoutes: readonly RouteDescriptor[] = [
   { method: 'GET', pattern: '/resources', auth: 'admin', handler: context => context.json(200, { items: service(context).resources() }) },
   { method: 'POST', pattern: '/resources', auth: 'admin', handler: async context => {
-    await context.operator()
-    context.json(201, service(context).createResource(object(await context.readBody()) as unknown as Resource))
+    const actor = await context.operator()
+    context.json(201, service(context).createResource({ ...object(await context.readBody()), createdBy: actor } as unknown as Resource))
   } },
   { method: 'GET', pattern: '/resources/:resourceId', auth: 'admin', handler: async context => {
     await context.operator()
@@ -36,8 +36,8 @@ export const nodeResourceRoutes: readonly RouteDescriptor[] = [
     context.json(200, { ok: true })
   } },
   { method: 'POST', pattern: '/resources/:resourceId/revisions', auth: 'admin', handler: async context => {
-    await context.operator()
-    const revision = object(await context.readBody()) as unknown as ResourceRevision
+    const actor = await context.operator()
+    const revision = { ...object(await context.readBody()), createdBy: actor } as unknown as ResourceRevision
     if (revision.resourceId !== context.params.resourceId) throw new AppError(400, 'Resource id mismatch', 'invalid_request')
     context.json(201, service(context).createRevision(revision))
   } },

@@ -22,7 +22,9 @@ async function rawBody(request: IncomingMessage, maximumBytes: number): Promise<
   return Buffer.concat(chunks)
 }
 async function body(request: IncomingMessage): Promise<unknown> {
-  const maximumBytes = request.method === 'POST' && /^\/api\/sessions\/[^/]+\/fs\/write\/?$/.test(request.url?.split('?')[0] ?? '') ? 14 * 1024 * 1024 : 1024 * 1024
+  const maximumBytes = request.method === 'POST' && /^\/api\/sessions\/[^/]+\/fs\/write\/?$/.test(request.url?.split('?')[0] ?? '') ? 14 * 1024 * 1024
+    : request.method === 'PUT' && /^\/api\/resource-blobs\/[a-f0-9]{64}\/?$/.test(request.url?.split('?')[0] ?? '') ? 2 * 1024 * 1024
+      : 1024 * 1024
   const raw = await rawBody(request, maximumBytes)
   try { return raw.length ? JSON.parse(raw.toString('utf8')) : {} }
   catch { throw new AppError(400, 'Invalid JSON') }
