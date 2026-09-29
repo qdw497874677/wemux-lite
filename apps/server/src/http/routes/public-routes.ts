@@ -11,6 +11,11 @@ export const publicRoutes: readonly RouteDescriptor[] = [
     },
   },
   {
+    method: 'GET', pattern: '/downloads/worker-manifest.json', auth: 'public', handler: async ({ response, path, downloads }) => {
+      if (!await serveWorkerDownload(response, path, downloads)) throw new AppError(404, 'Not found')
+    },
+  },
+  {
     method: 'GET', pattern: '/downloads/install-worker.sh', auth: 'public', handler: async ({ response, path, downloads }) => {
       if (!await serveWorkerDownload(response, path, downloads)) throw new AppError(404, 'Not found')
     },

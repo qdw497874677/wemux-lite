@@ -43,7 +43,7 @@ fs.writeFileSync(process.env.MARKER,'installed');
   const address = server.address()
   assert.ok(address && typeof address !== 'string')
   const url = `http://127.0.0.1:${address.port}`
-  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, WEMUX_TS_SOCKET: '/custom/socket', EXPECTED: join(dir, 'package.tgz'), MARKER: join(dir, 'marker'), WEMUX_SERVER_URL: url, WEMUX_TRANSPORT: 'nc', WEMUX_ENROLLMENT_TOKEN: '' }
+  const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, WEMUX_TS_SOCKET: '/custom/socket', EXPECTED: join(dir, 'package.tgz'), MARKER: join(dir, 'marker'), WEMUX_SERVER_URL: url, WEMUX_TRANSPORT: 'nc', WEMUX_ENROLLMENT_TOKEN: '', WEMUX_INSTALL_MODE: 'global' }
   async function run(command: string, extra = {}, timeout = 10000) {
     return await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
       const child = spawn('sh', ['-c', command], { env: { ...env, ...extra }, cwd: dir, detached: true })
@@ -66,7 +66,7 @@ test('nc generated bootstrap executes installer only after a complete response; 
     assert.equal(result.code, 0, result.stderr)
     assert.equal(await readFile(join(f.dir, 'marker'), 'utf8'), 'installed')
     assert.match(result.stdout, /Wemux Worker installed/)
-    assert.match(result.stderr, /Download complete.*no Agent runtime/)
+    assert.match(result.stderr, /Verified package SHA-256.*no Agent runtime/)
     assert.match(result.stderr, /Worker installed/)
   } finally { await f.close() }
 })

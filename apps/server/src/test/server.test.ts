@@ -3,12 +3,13 @@ import { administratorEmail, seedAdministrator, seedLocalAccount } from './fixtu
 import { migrationCount } from '../storage/sqlite/migrations.js'
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { chmodSync, readFileSync, writeFileSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import { chmodSync, readFileSync, readlinkSync, writeFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
 import { DatabaseSync } from 'node:sqlite'
+import { createHash } from 'node:crypto'
 import { WebSocket } from 'ws'
 import { createWemuxServer } from '../server.js'
 import { TransportV2Peer } from './transport-v2-peer.js'
@@ -36,7 +37,8 @@ test('serves an installer and configured Worker tarball without exposing enrollm
   assert.match(script, /WEMUX_SERVER_URL \(or WEMUX_SERVER_URLS\) is required/)
   assert.match(script, /\/downloads\/worker\.tgz/)
   assert.match(script, /server addresses must start with http:\/\/ or https:\//)
-  assert.match(script, /--proto '=http,https' --proto-redir '=http,https' -fsS --connect-timeout 10/)
+  assert.match(script, /--proto "\$candidate_protocol" --proto-redir "\$candidate_protocol" -fsS --connect-timeout 10/)
+  assert.match(script, /https:\/\/\*\) candidate_protocol='=https'/)
   assert.match(script, /no_proxy_extra=.*100\.64\.0\.0\/10/, '内网/tailnet 网段默认绕过全局代理')
   assert.match(script, /for candidate in .*tr ',' ' /, '逐候选地址下载 worker 包')
   assert.equal(script.includes(token), false)
@@ -46,6 +48,9 @@ test('serves an installer and configured Worker tarball without exposing enrollm
   assert.equal(packageResponse.status, 200)
   assert.equal(await packageResponse.text(), 'fake-worker-package')
   assert.match(packageResponse.headers.get('content-disposition') ?? '', /attachment/)
+  const manifestResponse = await fetch(`${base}/downloads/worker-manifest.json`)
+  assert.equal(manifestResponse.status, 200)
+  assert.deepEqual(await manifestResponse.json(), { schemaVersion: 1, filename: 'worker.tgz', bytes: 19, sha256: createHash('sha256').update('fake-worker-package').digest('hex') })
 })
 
 test('rejects a directory configured as the Worker package', async t => {
@@ -125,29 +130,39 @@ test('installer downloads, installs, registers and starts with stubbed tools', {
     chmodSync(path, 0o755)
   }
   const path = () => `${dir}:${process.env.PATH ?? ''}`
+  const fixtureHash = createHash('sha256').update('fake-tarball').digest('hex')
   stub('curl', [
     `printf 'curl\\n' >> '${log}'`,
-    "previous=''",
+    "previous=''", "url=''",
     'for argument in "$@"; do',
-    `  if [ "$previous" = '-o' ]; then printf 'fake-tarball' > "$argument"; fi`,
-    '  previous="$argument"',
+    `  if [ "$previous" = '-o' ]; then case "$url" in */worker-manifest.json) printf '%s' '{"schemaVersion":1,"filename":"worker.tgz","sha256":"${fixtureHash}","bytes":12}' > "$argument" ;; *) printf 'fake-tarball' > "$argument" ;; esac; fi`,
+    '  case "$argument" in http://*|https://*) url="$argument" ;; esac; previous="$argument"',
     'done',
   ])
   stub('npm', [`printf 'npm %s\\n' "$*" >> '${log}'`])
   stub('wemux-lite-worker', [`[ "$1" = version ] && printf 'wemux-lite-worker 0.1.0\\n'`, `printf 'wemux-lite-worker %s\\n' "$*" >> '${log}'`])
   const run = (extra: Record<string, string> = {}) => spawnSync('sh', [scriptPath], {
-    env: { ...process.env, PATH: path(), WEMUX_SERVER_URL: base, WEMUX_ENROLLMENT_TOKEN: 'stub-enrollment-token', WEMUX_WORKER_NAME: 'Stub node', ...extra },
+    env: { ...process.env, PATH: path(), WEMUX_INSTALL_MODE: 'global', WEMUX_SERVER_URL: base, WEMUX_ENROLLMENT_TOKEN: 'stub-enrollment-token', WEMUX_WORKER_NAME: 'Stub node', ...extra },
   })
   const lines = () => readFileSync(log, 'utf8').split('\n').filter(Boolean)
 
   const completed = run()
   assert.equal(completed.status, 0, completed.stderr.toString())
   const executed = lines()
-  assert.equal(executed[0], 'curl')
-  assert.match(executed[1] ?? '', /^npm install --global .+\/wemux-lite-worker\.[^/]+\/worker\.tgz$/)
-  assert.match(executed[2] ?? '', /^wemux-lite-worker version$/)
-  assert.equal(executed[3], `wemux-lite-worker register --server ${base} --servers ${base} --name Stub node`)
-  assert.equal(executed[4], 'wemux-lite-worker start')
+  assert.deepEqual(executed.slice(0, 2), ['curl', 'curl'])
+  assert.match(executed[2] ?? '', /^npm install --global .+\/wemux-lite-worker\.[^/]+\/worker\.tgz$/)
+  assert.match(executed[3] ?? '', /^wemux-lite-worker version$/)
+  assert.equal(executed[4], `wemux-lite-worker register --server ${base} --servers ${base} --name Stub node`)
+  assert.equal(executed[5], 'wemux-lite-worker start')
+
+  writeFileSync(log, '')
+  stub('curl', [`printf 'curl\\n' >> '${log}'`, "previous=''", 'for argument in "$@"; do', `if [ "$previous" = '-o' ]; then case "$argument" in */worker-manifest.json) printf '%s' '{"schemaVersion":1,"filename":"worker.tgz","sha256":"${'0'.repeat(64)}","bytes":12}' > "$argument" ;; *) printf 'fake-tarball' > "$argument" ;; esac; fi`, 'previous="$argument"', 'done'])
+  const tampered = run()
+  assert.equal(tampered.status, 65)
+  assert.match(tampered.stderr.toString(), /integrity verification failed/)
+  assert.equal(lines().some(line => line.startsWith('npm ')), false)
+  // Restore the valid download stub for registration and manual-install cases.
+  stub('curl', [ `printf 'curl\\n' >> '${log}'`, "previous=''", "url=''", 'for argument in "$@"; do', `if [ "$previous" = '-o' ]; then case "$url" in */worker-manifest.json) printf '%s' '{"schemaVersion":1,"filename":"worker.tgz","sha256":"${fixtureHash}","bytes":12}' > "$argument" ;; *) printf 'fake-tarball' > "$argument" ;; esac; fi`, 'case "$argument" in http://*|https://*) url="$argument" ;; esac; previous="$argument"', 'done' ])
 
   writeFileSync(log, '')
   stub('wemux-lite-worker', [`[ "$1" = version ] && printf 'wemux-lite-worker 0.1.0\\n'`, `printf 'wemux-lite-worker %s\\n' "$*" >> '${log}'`, '[ "$1" != register ]'])
@@ -177,12 +192,13 @@ test('installer downloads, installs, registers and starts with stubbed tools', {
   writeFileSync(log, '')
   stub('tailscale', [`printf 'tailscale %s\\n' "$*" >> '${log}'`])
   stub('node', [
-    `previous=''`,
-    'for argument in "$@"; do',
-    "  if [ \"$previous\" = '-o' ]; then printf 'fake-tarball' > \"$argument\"; fi",
-    '  previous="$argument"',
-    'done',
-    `printf 'node tunnel %s:%s%s \\n' \"$3\" \"$4\" \"$5\" >> '${log}'`,
+    'case "$1" in -e) ;; *) exit 1 ;; esac',
+    'case "$5" in',
+    `*/worker-manifest.json) printf '%s' '{"schemaVersion":1,"filename":"worker.tgz","sha256":"${fixtureHash}","bytes":12}' > "$6" ;;`,
+    `*/worker.tgz) printf 'fake-tarball' > "$6" ;;`,
+    `*) exec "${process.execPath}" "$@" ;;`,
+    'esac',
+    `printf 'node tunnel %s:%s%s \\n' "$3" "$4" "$5" >> '${log}'`,
   ])
   stub('wemux-lite-worker', [`[ "$1" = version ] && printf 'wemux-lite-worker 0.1.0\\n'`, `printf 'wemux-lite-worker %s\\n' "$*" >> '${log}'`])
   const viaNc = run({ WEMUX_TRANSPORT: 'nc' })
@@ -192,6 +208,69 @@ test('installer downloads, installs, registers and starts with stubbed tools', {
   assert.equal(ncLines.some(line => /^wemux-lite-worker register .+ --transport nc$/.test(line)), true, JSON.stringify(ncLines))
   assert.equal(ncLines.includes('wemux-lite-worker start --transport nc'), true)
   assert.equal(ncLines.some(line => line.startsWith('curl')), false)
+})
+
+test('managed installer stages immutable releases, preserves identity and rolls back failed service starts', { timeout: 45000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'wemux-managed-installer-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const packageBody = { value: 'package-v1' }
+  const workerPackage = join(dir, 'worker.tgz')
+  await writeFile(workerPackage, packageBody.value)
+  const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail], workerPackagePath: workerPackage })
+  const base = await app.listen(0)
+  t.after(() => app.close())
+  const script = join(dir, 'install.sh')
+  await writeFile(script, await (await fetch(`${base}/downloads/install-worker.sh`)).text())
+  const log = join(dir, 'calls.log')
+  const stub = (name: string, lines: string[]) => {
+    const path = join(dir, name)
+    writeFileSync(path, ['#!/bin/sh', ...lines].join('\n') + '\n')
+    chmodSync(path, 0o755)
+  }
+  stub('npm', [
+    `printf 'npm %s\\n' "$*" >> '${log}'`,
+    'prefix="$3"; mkdir -p "$prefix/node_modules/@wemux/worker/dist"',
+    `printf '%s\\n' 'const fs=require("node:fs"); const path=require("node:path"); const args=process.argv.slice(2); if(args[0]==="version")console.log("wemux-lite-worker 0.1.0"); else if(args[0]==="register"){ const home=args[args.indexOf("--home")+1]; fs.mkdirSync(home,{recursive:true}); fs.writeFileSync(path.join(home,"credential"),"fixture",{mode:0o600}); fs.appendFileSync("${log}","register\\n") }' > "$prefix/node_modules/@wemux/worker/dist/cli.js"`,
+  ])
+  stub('systemctl', [
+    `printf 'systemctl %s\\n' "$*" >> '${log}'`,
+    'if [ "$2" = is-active ] && [ "${WEMUX_STUB_FAIL_ACTIVE:-0}" = 1 ]; then exit 1; fi',
+    'if [ "$2" = enable ] && [ "${WEMUX_STUB_FAIL_ENABLE:-0}" = 1 ]; then exit 1; fi',
+    'exit 0',
+  ])
+  const root = join(dir, 'managed')
+  const home = join(dir, 'worker-home')
+  const config = join(dir, 'config')
+  const run = (extra: Record<string, string> = {}) => new Promise<{ status: number | null; stderr: string }>((resolve, reject) => {
+    const child = spawn('sh', [script], { env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, HOME: dir, XDG_CONFIG_HOME: config, WEMUX_INSTALL_ROOT: root, WEMUX_WORKER_HOME: home, WEMUX_SERVER_URL: base, WEMUX_ENROLLMENT_TOKEN: 'fixture-token', WEMUX_WORKER_NAME: 'Node one', ...extra } })
+    let stderr = ''
+    child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk })
+    child.on('error', reject).on('close', status => resolve({ status, stderr }))
+  })
+  const first = await run()
+  assert.equal(first.status, 0, first.stderr)
+  const release1 = readlinkSync(join(root, 'current'))
+  assert.match(release1, /^releases\/[a-f0-9]{64}$/)
+  const unit = readFileSync(join(config, 'systemd/user/wemux-lite-worker.service'), 'utf8')
+  assert.match(unit, /ExecStart=.*current\/node_modules\/@wemux\/worker\/dist\/cli.js.*start --home/)
+  const unitFile = join(config, 'systemd/user/wemux-lite-worker.service')
+  const verify = spawnSync('systemd-analyze', ['verify', unitFile], { encoding: 'utf8' })
+  assert.equal(verify.status, 0, verify.stderr)
+  assert.doesNotMatch(verify.stderr, /Unknown lvalue|Failed to parse|not an absolute path|unbalanced quoting/)
+  assert.ok(readFileSync(log, 'utf8').includes('register\n'))
+  const repeat = await run({ WEMUX_ENROLLMENT_TOKEN: '' })
+  assert.equal(repeat.status, 0, repeat.stderr)
+  assert.equal(readFileSync(log, 'utf8').split('register\n').length - 1, 1, 'upgrade never re-enrolls a registered identity')
+  await writeFile(workerPackage, 'package-v2')
+  const enableFailure = await run({ WEMUX_STUB_FAIL_ENABLE: '1', WEMUX_ENROLLMENT_TOKEN: '' })
+  assert.notEqual(enableFailure.status, 0, 'a service enable failure must not report success')
+  assert.equal(readlinkSync(join(root, 'current')), release1, 'enable failure restores previous release')
+  assert.equal(readFileSync(unitFile, 'utf8'), unit)
+  const broken = await run({ WEMUX_STUB_FAIL_ACTIVE: '1', WEMUX_ENROLLMENT_TOKEN: '' })
+  assert.equal(broken.status, 70, broken.stderr)
+  assert.equal(readlinkSync(join(root, 'current')), release1, 'service health failure restores previous release')
+  assert.equal(readFileSync(unitFile, 'utf8'), unit, 'rollback restores the service unit')
+  assert.ok(readFileSync(log, 'utf8').includes('systemctl --user restart wemux-lite-worker.service'), 'rollback restarts the previous release')
 })
 
 test('管理员登录会话持久化在服务端，并随空闲过期失效', async () => {
