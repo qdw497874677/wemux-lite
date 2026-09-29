@@ -112,7 +112,7 @@ export class ResourceService {
         const revision = this.repository.revision(binding.resourceRevisionId)
         if (!revision) throw new Error('resource_revision_not_found')
         return {
-          bindingId: binding.id, bindingRevision: binding.revision,
+          bindingId: binding.id, bindingRevision: binding.revision, agentKey: binding.agentKey, projectId: binding.projectId,
           resourceRevisionId: revision.id, resourceId: revision.resourceId, kind: revision.kind,
           contentSha256: revision.contentSha256,
           files: revision.payload.mode === 'blobs' ? revision.payload.files : [],

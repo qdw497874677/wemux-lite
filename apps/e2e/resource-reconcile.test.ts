@@ -37,13 +37,13 @@ async function createAccount(databasePath: string, email: string, password: stri
 function revision(resourceId: string, id: string, version: number, content: string): { revision: ResourceRevision; blobHash: string } { const blobHash = sha(content); const manifestHash = sha(`manifest-${id}`); return { blobHash, revision: { id, resourceId, kind: 'skill', version, state: 'published', manifest: { schemaVersion: 1, name: 'E2E Skill', description: '', compatibility: { workerProtocol: '2', platforms: [], architectures: [], agentKeys: [] }, bytes: Buffer.byteLength(content), fileCount: 1, sha256: manifestHash, materializerVersion: 1, restartPolicy: 'none' }, payload: { mode: 'blobs', files: [{ path: 'SKILL.md', size: Buffer.byteLength(content), mediaType: 'text/markdown', sha256: blobHash, blobSha256: blobHash }] }, contentSha256: manifestHash, supplyChain: { mode: 'static-content', manifestSha256: manifestHash }, createdBy: 'e2e-admin' as never, createdAt: new Date().toISOString() as never } } }
 
 async function runScenario() {
-  const scratch = join(root, '.scratch/r1-stage2')
+  const scratch = join(root, '.scratch/r1-stage4')
   await mkdir(scratch, { recursive: true })
   const temp = await mkdtemp(join(tmpdir(), 'wemux-resource-e2e-'))
-  const databasePath = join(temp, 'server.sqlite'), workerHome = join(temp, 'worker')
+  const databasePath = join(temp, 'server.sqlite'), workerHome = join(temp, 'worker'), secondHome = join(temp, 'worker-2')
   const port = await freePort(), base = `http://127.0.0.1:${port}`
   const email = 'admin@example.com', password = 'resource-e2e-password'
-  let server: ChildProcess | null = null, worker: ChildProcess | null = null
+  let server: ChildProcess | null = null, worker: ChildProcess | null = null, secondWorker: ChildProcess | null = null
   const output: string[] = []
   try {
     server = spawn(process.execPath, [serverEntry], { cwd: root, env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', WEMUX_ADMIN_EMAILS: email, WEMUX_DATABASE_PATH: databasePath, WEMUX_CAPABILITY_SECRET: 'resource-e2e-capability-secret-long-enough' }, stdio: ['ignore', 'pipe', 'pipe'] })
@@ -60,14 +60,23 @@ async function runScenario() {
       workerId = workers.body.items.find((item: { name: string }) => item.name === 'resource-e2e-worker')?.id ?? ''
       return !!workerId
     })
+    const secondToken = await request(base, '/api/enrollment-tokens', { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify({ expiresInSeconds: 3600 }) }); assert.equal(secondToken.response.status, 201)
+    const registerSecond = spawn(process.execPath, [workerEntry, 'register', '--home', secondHome, '--server', base, '--token', secondToken.body.token, '--name', 'resource-e2e-worker-2'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }); await once(registerSecond, 'exit'); assert.equal(registerSecond.exitCode, 0)
+    secondWorker = spawn(process.execPath, [workerEntry, 'start', '--home', secondHome], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }); secondWorker.stdout!.on('data', chunk => output.push(`[worker-2] ${chunk}`)); secondWorker.stderr!.on('data', chunk => output.push(`[worker-2-err] ${chunk}`))
+    let secondWorkerId = ''
+    await waitFor(async () => { const result = await request(base, '/api/workers', { headers: { cookie: auth.cookie } }); secondWorkerId = result.body.items.find((item: { name: string }) => item.name === 'resource-e2e-worker-2')?.id ?? ''; return !!secondWorkerId })
     const resourceId = 'e2e-skill', resource: Resource = { id: resourceId, kind: 'skill', name: 'E2E Skill', description: '', definition: { entryFile: 'SKILL.md', compatibleAgents: [], containsExecutableFiles: false }, createdBy: 'e2e-admin' as never, createdAt: new Date().toISOString() as never, updatedAt: new Date().toISOString() as never }
     assert.equal((await request(base, '/api/resources', { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify(resource) })).response.status, 201)
     const first = revision(resourceId, 'e2e-rev-1', 1, '# revision one')
     assert.equal((await request(base, `/api/resource-blobs/${first.blobHash}`, { method: 'PUT', headers: adminHeaders(auth), body: JSON.stringify({ base64Content: Buffer.from('# revision one').toString('base64') }) })).response.status, 201)
     assert.equal((await request(base, `/api/resources/${resourceId}/revisions`, { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify(first.revision) })).response.status, 201)
     assert.equal((await request(base, '/api/resource-bindings', { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify({ id: 'e2e-binding-1', workerId, resourceRevisionId: first.revision.id }) })).response.status, 201)
+    assert.equal((await request(base, '/api/resource-bindings', { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify({ id: 'e2e-binding-worker-2', workerId: secondWorkerId, resourceRevisionId: first.revision.id }) })).response.status, 201)
     const current = join(workerHome, 'resources', 'skill', resourceId, 'current', 'SKILL.md')
+    const secondCurrent = join(secondHome, 'resources', 'skill', resourceId, 'current', 'SKILL.md')
     await waitFor(async () => readFile(current, 'utf8').then(value => value === '# revision one').catch(() => false))
+    await waitFor(async () => readFile(secondCurrent, 'utf8').then(value => value === '# revision one').catch(() => false))
+    await waitFor(async () => { const result = await request(base, '/api/resource-bindings', { headers: { cookie: auth.cookie } }); return ['e2e-binding-1', 'e2e-binding-worker-2'].every(id => result.body.items.some((item: { binding: { id: string; status: string }; reconcile: { phase: string } | null }) => item.binding.id === id && item.binding.status === 'installed' && item.reconcile?.phase === 'ready')) })
     await stop(worker); worker = null
     const second = revision(resourceId, 'e2e-rev-2', 2, '# revision two')
     assert.equal((await request(base, `/api/resource-blobs/${second.blobHash}`, { method: 'PUT', headers: adminHeaders(auth), body: JSON.stringify({ base64Content: Buffer.from('# revision two').toString('base64') }) })).response.status, 201)
@@ -79,15 +88,16 @@ async function runScenario() {
     worker = spawn(process.execPath, [workerEntry, 'start', '--home', workerHome], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }); worker.stdout!.on('data', chunk => output.push(`[worker-reconnect] ${chunk}`)); worker.stderr!.on('data', chunk => output.push(`[worker-reconnect-err] ${chunk}`))
     await waitFor(async () => readFile(current, 'utf8').then(value => value === '# revision two').catch(() => false))
     await waitFor(async () => { const result = await request(base, `/api/resource-bindings?workerId=${workerId}`, { headers: { cookie: auth.cookie } }); return result.body.items.some((item: { binding: { id: string; status: string }; reconcile: { phase: string } | null }) => item.binding.id === 'e2e-binding-2' && item.binding.status === 'installed' && item.reconcile?.phase === 'ready') })
-    const tree = await import('node:child_process').then(({ execFile }) => new Promise<string>((resolveTree, reject) => execFile('find', [join(workerHome, 'resources'), '-maxdepth', '6', '-printf', '%y %p -> %l\n'], (error, stdout) => error ? reject(error) : resolveTree(stdout))))
+    assert.equal(await readFile(secondCurrent, 'utf8'), '# revision one', '第二个 Worker 未更新绑定时保持旧版本')
+    const tree = await import('node:child_process').then(({ execFile }) => new Promise<string>((resolveTree, reject) => execFile('find', [join(workerHome, 'resources'), join(secondHome, 'resources'), '-maxdepth', '6', '-printf', '%y %p -> %l\n'], (error, stdout) => error ? reject(error) : resolveTree(stdout))))
     const bindings = await request(base, `/api/resource-bindings?workerId=${workerId}`, { headers: { cookie: auth.cookie } })
     const statuses = bindings.body.items.map((item: { binding: { id: string; status: string }; reconcile: { phase: string } | null }) => `${item.binding.id}: ${item.binding.status} (${item.reconcile?.phase ?? 'none'})`)
-    const evidence = ['real Server + Worker processes: succeeded', 'first convergence: revision one', 'offline update: revision two assigned while Worker stopped', 'reconnect convergence: revision two', `bindings: ${statuses.join(', ')}`].join('\n') + '\n'
-    const safeTree = tree.replaceAll(workerHome, '<worker-home>')
+    const evidence = ['real Server + two Worker processes: succeeded', 'first convergence: revision one installed and reported ready on both Workers', 'offline update: revision two assigned only to Worker one while it was stopped', 'reconnect convergence: Worker one revision two, Worker two revision one', `bindings: ${statuses.join(', ')}`].join('\n') + '\n'
+    const safeTree = tree.replaceAll(secondHome, '<worker-2-home>').replaceAll(workerHome, '<worker-1-home>')
     await writeFile(join(scratch, 'resource-reconcile-e2e.txt'), evidence)
     await writeFile(join(scratch, 'worker-resource-tree.txt'), safeTree)
   } catch (error) { console.error('E2E process output (diagnostic):', output.join('').replaceAll(temp, '<temp>').slice(-5000)); throw error }
-  finally { await stop(worker); await stop(server); if (!process.env.WEMUX_RESOURCE_E2E_KEEP) await rm(temp, { recursive: true, force: true }); else console.error(`KEEP dir: ${temp}`) }
+  finally { await stop(worker); await stop(secondWorker); await stop(server); if (!process.env.WEMUX_RESOURCE_E2E_KEEP) await rm(temp, { recursive: true, force: true }); else console.error(`KEEP dir: ${temp}`) }
 }
 
-test('真实 Server + Worker 完成 skill 收敛、断线追赶和二次收敛', { timeout: 60_000 }, runScenario)
+test('真实 Server + 两 Worker 完成独立 skill 分发、断线追赶和二次收敛', { timeout: 90_000 }, runScenario)

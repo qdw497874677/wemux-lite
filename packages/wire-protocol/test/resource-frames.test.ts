@@ -16,7 +16,17 @@ test('parses resource set notify without blobs', () => {
 
 test('parses worker pulls and complete snapshots with file hashes', () => {
   assert.doesNotThrow(() => parseWorkerTransportFrame(durable({ type: 'resource.set.pull', action: 'request', requestId: 'pull-1', workerId: 'worker-1', knownSetRevision: 1 })))
-  assert.doesNotThrow(() => parseServerTransportFrame(durable({ type: 'resource.set.pull', action: 'snapshot', requestId: 'pull-1', resourceSet: { workerId: 'worker-1', revision: 2, fingerprint: hash, createdAt: now, bindings: [{ bindingId: 'binding-1', bindingRevision: 1, resourceRevisionId: 'revision-1', resourceId: 'resource-1', kind: 'skill', contentSha256: hash, files: [{ path: 'SKILL.md', size: 3, mediaType: 'text/markdown', sha256: hash, blobSha256: hash }] }] } })))
+  assert.doesNotThrow(() => parseServerTransportFrame(durable({ type: 'resource.set.pull', action: 'snapshot', requestId: 'pull-1', resourceSet: { workerId: 'worker-1', revision: 2, fingerprint: hash, createdAt: now, bindings: [{ bindingId: 'binding-1', bindingRevision: 1, agentKey: null, projectId: null, resourceRevisionId: 'revision-1', resourceId: 'resource-1', kind: 'skill', contentSha256: hash, files: [{ path: 'SKILL.md', size: 3, mediaType: 'text/markdown', sha256: hash, blobSha256: hash }] }] } })))
+})
+
+test('resource snapshot scope must explicitly carry project and Agent filters', () => {
+  const binding = { bindingId: 'binding-1', bindingRevision: 1, agentKey: 'pi', projectId: 'project-1', resourceRevisionId: 'revision-1', resourceId: 'resource-1', kind: 'skill', contentSha256: hash, files: [] }
+  const payload = (item: unknown) => durable({ type: 'resource.set.pull', action: 'snapshot', requestId: 'pull-1', resourceSet: { workerId: 'worker-1', revision: 2, fingerprint: hash, createdAt: now, bindings: [item] } })
+  assert.doesNotThrow(() => parseServerTransportFrame(payload(binding)))
+  assert.throws(() => parseServerTransportFrame(payload({ ...binding, agentKey: 42 })), /Invalid Server/)
+  assert.throws(() => parseServerTransportFrame(payload({ ...binding, projectId: 42 })), /Invalid Server/)
+  const { agentKey: _, ...missing } = binding
+  assert.throws(() => parseServerTransportFrame(payload(missing)), /Invalid Server/)
 })
 
 test('parses blob fetch and reconcile report in their correct directions', () => {

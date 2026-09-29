@@ -11,6 +11,11 @@ export interface SkillBlobFetcher {
 export interface ResourceGcPolicy { readonly maxRetainedRevisions: number }
 export interface ResourceGcReport { readonly removed: readonly string[]; readonly retained: readonly string[] }
 
+function safeSegment(value: string): string {
+  if (!value || value === '.' || value === '..' || value.includes('/') || value.includes('\\') || value.includes('\0')) throw new Error('invalid_resource_path')
+  return value
+}
+
 function safePath(root: string, path: string): string {
   if (!path || path.includes('\\') || path.includes('\0') || path.startsWith('/') || path.split('/').some(part => part === '' || part === '.' || part === '..')) throw new Error('invalid_resource_path')
   const target = resolve(root, path)
@@ -38,9 +43,15 @@ export class SkillMaterializer {
   }
 
   async verify(binding: ResourceBindingSnapshot): Promise<boolean> {
+    safeSegment(binding.resourceId)
+    safeSegment(binding.resourceRevisionId)
     const installed = this.state.installed(binding.resourceId)
     if (!installed || installed.resourceRevisionId !== binding.resourceRevisionId || installed.integrity !== binding.contentSha256) return false
+    const resourceRoot = resolve(this.home, 'resources', 'skill', binding.resourceId, 'revisions')
+    const canonical = await realpath(installed.path).catch(() => null)
+    if (!canonical || !canonical.startsWith(resourceRoot + '/')) return false
     for (const file of binding.files) {
+      if (!(await realpath(safePath(installed.path, file.path)).catch(() => '')).startsWith(canonical + '/')) return false
       const expected = installed.files[file.path]
       if (expected !== file.sha256 || await hashFile(safePath(installed.path, file.path)).catch(() => '') !== file.sha256) return false
     }
@@ -50,7 +61,8 @@ export class SkillMaterializer {
   async materialize(binding: ResourceBindingSnapshot, blobs: SkillBlobFetcher): Promise<InstalledResourceState> {
     if (binding.kind !== 'skill') throw new Error('unsupported_resource_kind')
     if (!binding.files.some(file => file.path === 'SKILL.md')) throw new Error('skill_entry_missing')
-    const resourceRoot = join(this.home, 'resources', 'skill', binding.resourceId)
+    const resourceRoot = join(this.home, 'resources', 'skill', safeSegment(binding.resourceId))
+    safeSegment(binding.resourceRevisionId)
     const installedBefore = this.state.installed(binding.resourceId)
     const revisionsRoot = join(resourceRoot, 'revisions')
     const revisionRoot = join(revisionsRoot, binding.resourceRevisionId)
@@ -106,14 +118,15 @@ export class SkillMaterializer {
   async resolveSkillPath(resourceId: string): Promise<string | null> {
     const installed = this.state.installed(resourceId)
     if (!installed) return null
+    const resourceRoot = resolve(this.home, 'resources', 'skill', safeSegment(resourceId), 'revisions')
     const path = await realpath(installed.path).catch(() => null)
-    if (!path) return null
+    if (!path || !path.startsWith(resourceRoot + '/')) return null
     this.state.touch(resourceId, this.now())
     return path
   }
 
   async collectGarbage(resourceId: string, policy: ResourceGcPolicy): Promise<ResourceGcReport> {
-    const resourceRoot = join(this.home, 'resources', 'skill', resourceId)
+    const resourceRoot = join(this.home, 'resources', 'skill', safeSegment(resourceId))
     const revisionsRoot = join(resourceRoot, 'revisions')
     const protectedTargets = new Set<string>()
     for (const name of ['current', 'previous']) {

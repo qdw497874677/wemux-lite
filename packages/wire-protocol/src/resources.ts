@@ -91,7 +91,7 @@ function file(value: unknown): boolean {
 
 function binding(value: unknown): boolean {
   const item = object(value)
-  return Boolean(item && exact(item, ['bindingId', 'bindingRevision', 'resourceRevisionId', 'resourceId', 'kind', 'contentSha256', 'files']) && text(item.bindingId) && integer(item.bindingRevision, 1) && text(item.resourceRevisionId) && text(item.resourceId) && kind(item.kind) && hash(item.contentSha256) && Array.isArray(item.files) && item.files.length <= 64 && item.files.every(file))
+  return Boolean(item && exact(item, ['bindingId', 'bindingRevision', 'agentKey', 'projectId', 'resourceRevisionId', 'resourceId', 'kind', 'contentSha256', 'files']) && text(item.bindingId) && integer(item.bindingRevision, 1) && (item.agentKey === null || text(item.agentKey)) && (item.projectId === null || text(item.projectId)) && text(item.resourceRevisionId) && text(item.resourceId) && kind(item.kind) && hash(item.contentSha256) && Array.isArray(item.files) && item.files.length <= 64 && item.files.every(file))
 }
 
 function snapshot(value: unknown): boolean {

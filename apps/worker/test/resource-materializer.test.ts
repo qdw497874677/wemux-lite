@@ -10,7 +10,7 @@ import { SkillMaterializer } from '../src/resources/skill-materializer.ts'
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const binding = (revision: string, content: string): ResourceBindingSnapshot => ({
-  bindingId: 'binding-1', bindingRevision: 1, resourceId: 'skill-1', resourceRevisionId: revision,
+  bindingId: 'binding-1', bindingRevision: 1, agentKey: null, projectId: null, resourceId: 'skill-1', resourceRevisionId: revision,
   kind: 'skill', contentSha256: hash(`manifest-${revision}`),
   files: [{ path: 'SKILL.md', size: Buffer.byteLength(content), mediaType: 'text/markdown', sha256: hash(content), blobSha256: hash(content) }],
 })
@@ -33,6 +33,15 @@ test('SkillMaterializer 原子切换 current 并保留 previous', async () => {
     assert.equal(await readFile(join(root, 'current', 'SKILL.md'), 'utf8'), '# two')
     assert.equal(await readFile(join(root, 'previous', 'SKILL.md'), 'utf8'), '# one')
     assert.equal(await f.materializer.resolveSkillPath('skill-1'), join(root, 'revisions', 'rev-2'))
+  } finally { await f.close() }
+})
+
+test('拒绝跨资源目录 ID 和 revision 路径，保护 Worker home', async () => {
+  const f = await fixture()
+  try {
+    const target = binding('revision-1', '# safe')
+    await assert.rejects(f.materializer.materialize({ ...target, resourceId: '../outside' }, { fetch: async () => Buffer.from('# safe') }), /invalid_resource_path/)
+    await assert.rejects(f.materializer.materialize({ ...target, resourceRevisionId: '../outside' }, { fetch: async () => Buffer.from('# safe') }), /invalid_resource_path/)
   } finally { await f.close() }
 })
 

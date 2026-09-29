@@ -1,26 +1,40 @@
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, normalize, relative, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
-import type { CapabilityAsset, Turn } from '@wemux/domain'
+import type { AgentKey, CapabilityAsset, ProjectId, Turn } from '@wemux/domain'
 import type { AgentLaunchContextProvider, PreparedAgentLaunchContext } from './ports/agent-launch-context.js'
 
 export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextProvider {
   private readonly active = new Set<string>()
+  private readonly workerDataDir: string
+  private readonly capabilityEndpoint: string | null
+  private readonly prepareConnectors?: (turn: Turn) => Promise<{ readonly token: string; readonly snapshot: import('@wemux/domain').CapabilitySnapshot; release(): Promise<void> }>
+  private readonly resolveSkills?: (projectId: ProjectId, agentKey: AgentKey) => Promise<readonly { resourceId: string; revisionId: string; content: Uint8Array }[]>
+  private readonly sessionScope?: (turn: Turn) => Promise<{ projectId: ProjectId; agentKey: AgentKey } | null>
   constructor(
-    private readonly workerDataDir: string,
-    private readonly capabilityEndpoint: string | null,
-    private readonly prepareConnectors?: (turn: Turn) => Promise<{ readonly token: string; readonly snapshot: import('@wemux/domain').CapabilitySnapshot; release(): Promise<void> }>,
-  ) {}
+    workerDataDir: string,
+    capabilityEndpoint: string | null,
+    prepareConnectors?: (turn: Turn) => Promise<{ readonly token: string; readonly snapshot: import('@wemux/domain').CapabilitySnapshot; release(): Promise<void> }>,
+    resolveSkills?: (projectId: ProjectId, agentKey: AgentKey) => Promise<readonly { resourceId: string; revisionId: string; content: Uint8Array }[]>,
+    sessionScope?: (turn: Turn) => Promise<{ projectId: ProjectId; agentKey: AgentKey } | null>,
+  ) {
+    this.workerDataDir = workerDataDir
+    this.capabilityEndpoint = capabilityEndpoint
+    this.prepareConnectors = prepareConnectors
+    this.resolveSkills = resolveSkills
+    this.sessionScope = sessionScope
+  }
 
   async prepare(turn: Turn): Promise<PreparedAgentLaunchContext> {
     if (this.active.has(turn.sessionId)) throw new Error(`Capability context is already active for session ${turn.sessionId}`)
     const connectorContext = this.prepareConnectors ? await this.prepareConnectors(turn) : null
     const snapshot = connectorContext?.snapshot ?? turn.capabilitySnapshot
-    if (!snapshot) return empty()
+    if (!snapshot) { await connectorContext?.release(); return empty() }
     const root = join(this.workerDataDir, 'runtime', snapshot.sessionId, turn.id)
     this.active.add(turn.sessionId)
     const skillsRoot = join(root, 'skills')
     const promptParts: string[] = []
+    let hasSkills = false
     try {
       await rm(root, { recursive: true, force: true })
       await mkdir(root, { recursive: true, mode: 0o700 })
@@ -30,12 +44,22 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
           const target = safePath(skillsRoot, asset.targetPath ?? `${asset.name}/SKILL.md`)
           await mkdir(dirname(target), { recursive: true })
           await writeFile(target, asset.content, 'utf8')
+          hasSkills = true
         } else if (asset.kind === 'prompt' || asset.kind === 'instruction') {
           promptParts.push(asset.content)
         } else {
           const target = safePath(root, asset.targetPath ?? `files/${asset.name}`)
           await mkdir(dirname(target), { recursive: true })
           await writeFile(target, asset.content, 'utf8')
+        }
+      }
+      const scope = this.sessionScope ? await this.sessionScope(turn) : null
+      if (scope && this.resolveSkills && snapshot.projectId === scope.projectId) {
+        for (const skill of await this.resolveSkills(scope.projectId, scope.agentKey)) {
+          const target = safePath(skillsRoot, `${skill.resourceId}/SKILL.md`)
+          await mkdir(dirname(target), { recursive: true })
+          await writeFile(target, skill.content, { flag: 'wx' })
+          hasSkills = true
         }
       }
       if (snapshot.collaboration) promptParts.push(snapshot.collaboration.instructions)
@@ -56,7 +80,7 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
         context: {
           assetsRoot: root,
           instructions,
-          skillsRoot: snapshot.assets.some((asset) => asset.kind === 'skill') ? skillsRoot : null,
+          skillsRoot: hasSkills ? skillsRoot : null,
           capabilityEndpoint: this.capabilityEndpoint,
           capabilityToken,
           capabilitySnapshot: snapshot,

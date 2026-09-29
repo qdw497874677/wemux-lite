@@ -1,5 +1,7 @@
-import { randomUUID } from 'node:crypto'
-import type { ReconcileReport, ResourceBindingSnapshot, ResourceReconcilePhase, ResourceSetSnapshot, Timestamp, WorkerId } from '@wemux/domain'
+import { createHash, randomUUID } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import type { AgentKey, ProjectId, ReconcileReport, ResourceBindingSnapshot, ResourceReconcilePhase, ResourceSetSnapshot, Timestamp, WorkerId } from '@wemux/domain'
 import type { ResourceBlobFetchPayload, ServerResourcePayload, WorkerPayload } from '@wemux/wire-protocol'
 import { ResourceStateStore } from './resource-state-store.ts'
 import { SkillMaterializer } from './skill-materializer.ts'
@@ -48,6 +50,9 @@ export class ResourceReconciler {
   private readonly flights = new Map<string, Promise<void>>()
   private tail: Promise<void> = Promise.resolve()
   private closed = false
+  private snapshotFresh = false
+  private connectionEpoch = 0
+  private announcedRevision = 0
 
   constructor(options: ResourceReconcilerOptions) {
     this.workerId = options.workerId
@@ -62,7 +67,12 @@ export class ResourceReconciler {
     if (payload.type === 'resource.set.notify') {
       if (payload.workerId !== this.workerId) return true
       const current = this.state.desired()
-      if (!current || current.revision !== payload.setRevision || current.fingerprint !== payload.fingerprint) this.schedule(() => this.pullAndReconcile())
+      if (!current || current.revision < payload.setRevision || current.revision === payload.setRevision && current.fingerprint !== payload.fingerprint) {
+        this.announcedRevision = Math.max(this.announcedRevision, payload.setRevision)
+        this.snapshotFresh = false
+        this.connectionEpoch += 1
+        void this.schedule(() => this.pullAndReconcile())
+      }
       return true
     }
     if (payload.type === 'resource.set.pull') {
@@ -85,6 +95,7 @@ export class ResourceReconciler {
   }
 
   connected(): Promise<void> {
+    this.disconnected()
     return this.schedule(async () => {
       const desired = this.state.desired()
       if (desired) await this.reconcileInternal(desired)
@@ -92,14 +103,46 @@ export class ResourceReconciler {
     })
   }
 
+  disconnected(): void { this.snapshotFresh = false; this.connectionEpoch += 1 }
+
   reconcile(snapshot: ResourceSetSnapshot): Promise<void> {
-    return this.schedule(() => this.reconcileInternal(snapshot))
+    return this.schedule(async () => {
+      const epoch = this.connectionEpoch
+      await this.reconcileInternal(snapshot)
+      if (!this.closed && this.connectionEpoch === epoch && snapshot.revision >= this.announcedRevision && this.state.desired()?.revision === snapshot.revision) this.snapshotFresh = true
+    })
   }
 
   async resolveSkillPath(resourceId: string): Promise<string | null> { return this.materializer.resolveSkillPath(resourceId) }
 
+  /** Freeze authorized installed Skill bytes at launch; later binding changes cannot mutate this Invocation. */
+  async skillsForLaunch(projectId: ProjectId, agentKey: AgentKey): Promise<readonly { resourceId: string; revisionId: string; content: Uint8Array }[]> {
+    if (this.closed || !this.snapshotFresh) return []
+    const desired = this.state.desired()
+    if (!desired) return []
+    const selected: { resourceId: string; revisionId: string; content: Uint8Array }[] = []
+    for (const binding of desired.bindings) {
+      if (binding.kind !== 'skill') continue
+      const installed = this.state.installed(binding.resourceId)
+      if (!installed || installed.bindingId !== binding.bindingId || installed.resourceRevisionId !== binding.resourceRevisionId || installed.integrity !== binding.contentSha256) continue
+      if (binding.projectId !== null && binding.projectId !== projectId || binding.agentKey !== null && binding.agentKey !== agentKey) continue
+      const path = await this.materializer.resolveSkillPath(binding.resourceId)
+      if (!path) continue
+      const entry = binding.files.find(file => file.path === 'SKILL.md')
+      if (!entry) continue
+      const content = await readFile(join(path, 'SKILL.md')).catch(() => null)
+      if (!content || createHash('sha256').update(content).digest('hex') !== entry.sha256) continue
+      if (this.closed || !this.snapshotFresh) return []
+      if (!this.state.desired()?.bindings.some(current => current.bindingId === binding.bindingId && current.bindingRevision === binding.bindingRevision && current.resourceRevisionId === binding.resourceRevisionId)) continue
+      selected.push({ resourceId: binding.resourceId, revisionId: binding.resourceRevisionId, content })
+    }
+    if (this.closed || !this.snapshotFresh || this.state.desired()?.revision !== desired.revision) return []
+    return selected
+  }
+
   async close(): Promise<void> {
     this.closed = true
+    this.snapshotFresh = false
     for (const pending of [...this.pulls.values(), ...this.blobs.values()]) {
       clearTimeout(pending.timer)
       pending.reject(new Error('resource_reconciler_closed'))
@@ -119,10 +162,12 @@ export class ResourceReconciler {
 
   private async pullAndReconcile(): Promise<void> {
     const requestId = randomUUID()
+    const epoch = this.connectionEpoch
     const snapshot = this.pending(this.pulls, requestId)
     try {
       await this.transport.send({ type: 'resource.set.pull', action: 'request', requestId, workerId: this.workerId, knownSetRevision: this.state.desired()?.revision ?? null })
       await this.reconcileInternal(await snapshot)
+      if (!this.closed && this.connectionEpoch === epoch && (this.state.desired()?.revision ?? -1) >= this.announcedRevision) this.snapshotFresh = true
     } finally { this.release(this.pulls, requestId) }
   }
 
@@ -162,6 +207,7 @@ export class ResourceReconciler {
       return
     }
     if (await this.materializer.verify(binding)) {
+      if (installed && installed.bindingId !== binding.bindingId) this.state.saveInstalled({ ...installed, bindingId: binding.bindingId })
       await this.report(snapshot, binding, 'installed', 'ready', null, null)
       return
     }

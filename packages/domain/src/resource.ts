@@ -136,6 +136,8 @@ export interface ResourceBinding {
 export interface ResourceBindingSnapshot {
   readonly bindingId: ResourceBindingId
   readonly bindingRevision: number
+  readonly agentKey: AgentKey | null
+  readonly projectId: ProjectId | null
   readonly resourceRevisionId: ResourceRevisionId
   readonly resourceId: ResourceId
   readonly kind: ResourceKind

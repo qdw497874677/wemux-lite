@@ -246,6 +246,7 @@ export class ClusterLifecycle {
         onNotice: message => this.options.onNotice?.(message),
         onStateChange: change => {
           if (this.transport !== transport) return
+          if (change.current !== 'open') resources?.disconnected()
           if (change.current === 'connecting') this.state = { phase: 'connecting', retryAt: null, failure: null }
           if (change.current === 'backoff') this.state = { phase: 'degraded', retryAt: change.retryInMs == null ? null : new Date(Date.now() + change.retryInMs).toISOString(), failure: change.reason }
           if (change.current === 'needs-attention') {
@@ -273,7 +274,11 @@ export class ClusterLifecycle {
         ])
       }
       resources = new ResourceReconciler({ workerId: identity.workerId, home: this.options.home, databasePath: join(this.options.home, 'resources.sqlite'), transport, concurrency: Number(process.env.WEMUX_RESOURCE_CONCURRENCY ?? '2') })
-      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint, turn => this.connectors.registerTurn(turn, identity.workerId)), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), await loadNodePty(), this.connectors)
+      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint, turn => this.connectors.registerTurn(turn, identity.workerId), (projectId, agentKey) => resources!.skillsForLaunch(projectId, agentKey), async turn => {
+        const session = await this.store.sessions.get(turn.sessionId)
+        const workspace = session ? await this.store.workspaces.get(session.binding.workspaceId) : null
+        return session && workspace ? { projectId: workspace.projectId, agentKey: session.binding.agent.agentKey } : null
+      }), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), await loadNodePty(), this.connectors)
       this.runtime = runtime
       this.resources = resources
       await runtime.initialize()
