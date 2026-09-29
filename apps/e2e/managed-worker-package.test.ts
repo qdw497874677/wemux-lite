@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createWemuxServer } from '../server/src/server.ts'
-import { provisionAdministrator } from './session.ts'
+import { login, provisionAdministrator } from './session.ts'
 
 const repositoryRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)))
 const packagePath = join(repositoryRoot, 'artifacts/wemux-lite-worker.tgz')
@@ -45,7 +45,7 @@ test('managed installer runs the real packaged Worker and retains identity acros
   const serviceLog = join(directory, 'service.log')
   const controlLog = join(directory, 'control.log')
   const administratorEmail = 'managed-package-owner@example.com'
-  const server = createWemuxServer({ databasePath: join(directory, 'server.sqlite'), administratorEmails: [administratorEmail], workerPackagePath: packagePath })
+  const server = createWemuxServer({ databasePath: join(directory, 'server.sqlite'), administratorEmails: [administratorEmail], workerPackagePath: packagePath, webStaticPath: join(repositoryRoot, 'apps/web/dist') })
   let baseUrl = ''
   const stopService = async () => {
     const pid = await readFile(pidFile, 'utf8').catch(() => '')
@@ -141,17 +141,50 @@ exit 1
     payload: { mode: 'blobs', files: [{ path: 'SKILL.md', size: Buffer.byteLength(content), mediaType: 'text/markdown', sha256: digest, blobSha256: digest }] },
     contentSha256: digest, supplyChain: { mode: 'static-content', manifestSha256: digest }, createdAt: now,
   })
-  const preset = await administrator.api<{ id: string; revision: number }>('/resource-presets', 'POST', {
-    id: 'managed-package-preset', name: 'Managed package preset', description: '', expectedRevision: 0,
-    autoApply: { enabled: false }, entries: [{ resourceId: skillId, resourceRevisionId: revisionId, agentKey: null, projectId: null, required: true }],
-  })
-  const set = await administrator.api<{ revision: number }>(`/workers/${workerId}/resource-set`)
-  const application = await administrator.api<{ id: string }>(`/resource-presets/${preset.id}/applications`, 'POST', {
-    presetRevision: preset.revision, workerId, requestId: 'managed-package-preset-apply', expectedSetRevision: set.revision,
-  })
+  let applicationId = ''
+  if (process.env.WEMUX_REAL_PACKAGE_WEB_E2E === '1') {
+    const playwright = await import(process.env.PLAYWRIGHT_CORE_PATH ?? '/tmp/wemux-tailnet-pw/node_modules/playwright-core/index.mjs')
+    const browser = await playwright.chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH ?? '/opt/data/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome', args: ['--no-sandbox', '--disable-dev-shm-usage'] })
+    try {
+      const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
+      const [name, value] = administrator.cookie.split(';')[0]!.split('=')
+      await context.addCookies([{ name, value, url: baseUrl, httpOnly: true }])
+      const page = await context.newPage()
+      const errors: string[] = []
+      page.on('pageerror', (error: Error) => { errors.push(error.message) })
+      await page.goto(`${baseUrl}/cluster`)
+      await page.getByRole('heading', { name: '集群运行状态' }).waitFor()
+      await page.getByRole('button', { name: /节点预设/ }).click()
+      await page.getByLabel('预设资源').selectOption(skillId)
+      await page.getByLabel('预设版本').selectOption(revisionId)
+      await page.getByRole('button', { name: '添加资源' }).click()
+      await page.getByLabel('预设名称').fill('Managed package preset')
+      await page.getByRole('button', { name: '发布预设', exact: true }).click()
+      await page.getByText('已发布预设 v1').waitFor()
+      await page.getByLabel('应用工作节点').selectOption(workerId)
+      await page.getByRole('button', { name: '应用到节点' }).click()
+      await page.getByRole('dialog').getByText(/Managed Skill v1.*静态 Skill/).waitFor()
+      await page.getByRole('dialog').getByRole('button', { name: '确认应用' }).click()
+      await page.getByText('已提交手工应用').waitFor()
+      const posted = await administrator.api<{ items: { application: { id: string } }[] }>(`/resource-preset-applications?workerId=${workerId}`)
+      applicationId = posted.items[0]?.application.id ?? ''
+      assert.ok(applicationId, 'browser must create a real Preset application')
+      assert.deepEqual(errors, [], 'browser must not throw')
+    } finally { await browser.close() }
+  } else {
+    const preset = await administrator.api<{ id: string; revision: number }>('/resource-presets', 'POST', {
+      id: 'managed-package-preset', name: 'Managed package preset', description: '', expectedRevision: 0,
+      autoApply: { enabled: false }, entries: [{ resourceId: skillId, resourceRevisionId: revisionId, agentKey: null, projectId: null, required: true }],
+    })
+    const set = await administrator.api<{ revision: number }>(`/workers/${workerId}/resource-set`)
+    const application = await administrator.api<{ id: string }>(`/resource-presets/${preset.id}/applications`, 'POST', {
+      presetRevision: preset.revision, workerId, requestId: 'managed-package-preset-apply', expectedSetRevision: set.revision,
+    })
+    applicationId = application.id
+  }
   await eventually(async () => {
     const items = await administrator.api<{ items: { application: { id: string }; items: { binding: { resourceRevisionId: string; status: string }; reconcile: { phase: string } | null }[] }[] }>(`/resource-preset-applications?workerId=${workerId}`)
-    return items.items.some(item => item.application.id === application.id && item.items.some(value => value.binding.resourceRevisionId === revisionId && value.binding.status === 'installed' && value.reconcile?.phase === 'ready'))
+    return items.items.some(item => item.application.id === applicationId && item.items.some(value => value.binding.resourceRevisionId === revisionId && value.binding.status === 'installed' && value.reconcile?.phase === 'ready'))
   })
   const skillFile = join(workerHome, 'resources', 'skill', skillId, 'current', 'SKILL.md')
   assert.equal(await readFile(skillFile, 'utf8'), content)
@@ -170,7 +203,7 @@ exit 1
   assert.deepEqual(await readFile(join(workerHome, 'credential')), previousCredential, 'reinstallation preserves the enrolled Worker identity')
   assert.equal(await readFile(skillFile, 'utf8'), content, 'reinstallation preserves the active Preset Skill')
   const resumed = await administrator.api<{ items: { application: { id: string }; items: { binding: { resourceRevisionId: string; status: string }; reconcile: { phase: string } | null }[] }[] }>(`/resource-preset-applications?workerId=${workerId}`)
-  assert.ok(resumed.items.some(item => item.application.id === application.id && item.items.some(value => value.binding.resourceRevisionId === revisionId && value.binding.status === 'installed' && value.reconcile?.phase === 'ready')), 'Preset projection remains ready after Worker reconnect')
+  assert.ok(resumed.items.some(item => item.application.id === applicationId && item.items.some(value => value.binding.resourceRevisionId === revisionId && value.binding.status === 'installed' && value.reconcile?.phase === 'ready')), 'Preset projection remains ready after Worker reconnect')
   const list = await administrator.api<{ items: { name: string }[] }>('/workers')
   assert.equal(list.items.filter(item => item.name === env.WEMUX_WORKER_NAME).length, 1)
   assert.match(await readFile(join(config, 'systemd/user/wemux-lite-worker.service'), 'utf8'), /Restart=on-failure/)
@@ -191,8 +224,12 @@ exit 1
     }
     await runGit(['init', '--initial-branch=main', repository])
     await runGit(['-C', repository, '-c', 'user.name=E2E', '-c', 'user.email=e2e@example.com', 'commit', '--allow-empty', '-m', 'initial'])
-    const project = await administrator.api<{ id: string }>('/projects', 'POST', { name: 'Packaged Pi E2E' })
-    const provision = await administrator.api<{ workspace: { id: string } }>('/workspaces', 'POST', {
+    // Browser /auth/me may rotate the CSRF token; obtain a fresh session for API setup.
+    const operator = process.env.WEMUX_REAL_PACKAGE_WEB_E2E === '1'
+      ? await login(baseUrl, administrator.username, administrator.password)
+      : administrator
+    const project = await operator.api<{ id: string }>('/projects', 'POST', { name: 'Packaged Pi E2E' })
+    const provision = await operator.api<{ workspace: { id: string } }>('/workspaces', 'POST', {
       projectId: project.id, workerId, name: 'Packaged Pi Workspace', repository: { gitUrl: repository, revision: 'main' },
     })
     await eventually(async () => (await administrator.api<{ status: string }>(`/workspaces/${provision.workspace.id}`)).status === 'ready')
@@ -200,11 +237,11 @@ exit 1
       const page = await administrator.api<{ capabilities: { agentKey: string; availability: { status: string }; models: { modelId: string }[] }[] }>(`/workers/${workerId}/capabilities`)
       return page.capabilities.some(item => item.agentKey === 'pi' && item.availability.status === 'available' && item.models.some(model => model.modelId === modelId))
     })
-    const created = await administrator.api<{ session: { id: string }; commandId: string }>('/sessions', 'POST', {
+    const created = await operator.api<{ session: { id: string }; commandId: string }>('/sessions', 'POST', {
       workspaceId: provision.workspace.id, title: 'Packaged Pi with Skill', agentKey: 'pi', modelId, requestId: 'packaged-pi-create-session',
     })
     await eventually(async () => (await administrator.api<{ status: string }>(`/commands/${created.commandId}`)).status === 'accepted')
-    const sent = await administrator.api<{ commandId: string }>(`/sessions/${created.session.id}/messages`, 'POST', {
+    const sent = await operator.api<{ commandId: string }>(`/sessions/${created.session.id}/messages`, 'POST', {
       content: 'Find the calibration marker in the managed-package-skill. Read the Skill file if needed, then answer only the marker. Do not use other tools.',
     })
     await eventually(async () => (await administrator.api<{ status: string }>(`/commands/${sent.commandId}`)).status === 'accepted')
