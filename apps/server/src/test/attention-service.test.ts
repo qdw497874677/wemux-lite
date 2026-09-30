@@ -33,6 +33,18 @@ test('attention applies A3 project visibility and hides dead letters from non-ad
   assert.equal(result.groups.flatMap(group => group.items).some(item => item.projectId === 'project-hidden'), false)
 })
 
+test('attention reads approval pages within the real projection limit', async () => {
+  const calls: (string | undefined)[] = []
+  const paginated = { ...projections, approvals: async (_actor: unknown, query: { limit: number; cursor?: string }) => {
+    assert.ok(query.limit <= 100, 'real ProjectionService rejects larger limits')
+    calls.push(query.cursor)
+    return query.cursor ? { items: [{ ...approval, projectionKey: 'second' }], nextCursor: null } : { items: [approval], nextCursor: 'next' }
+  } }
+  const result = await new AttentionService(paginated as never, source as never).query('actor-1' as never, false, { actorId: 'actor-1' as never })
+  assert.deepEqual(calls, [undefined, 'next'])
+  assert.equal(result.groups[0]?.count, 2)
+})
+
 test('attention kind and project filters preserve grouped response shape', async () => {
   const result = await new AttentionService(projections as never, source as never).query('actor-1' as never, true, { actorId: 'actor-1' as never, projectId: 'project-1' as never, kind: 'run_problem' })
   assert.equal(result.total, 1)

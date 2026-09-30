@@ -24,7 +24,7 @@ export class AttentionService {
 
   async query(actorId: UserId, isAdministrator: boolean, query: AttentionQuery): Promise<AttentionResult> {
     const [approvals, tasks, runs, deadLetters] = await Promise.all([
-      this.projections.approvals(actorId, { status: 'pending', ...(query.projectId ? { projectId: query.projectId } : {}), limit: 200 }),
+      this.pendingApprovals(actorId, query.projectId),
       this.source.listTasks(),
       this.source.listRuns(),
       isAdministrator ? this.source.listDeadLetters() : Promise.resolve([]),
@@ -32,7 +32,7 @@ export class AttentionService {
     const allowedProjects = new Set(await this.projections.allowedProjectIds(actorId))
     const projectAllowed = (projectId: ProjectId) => allowedProjects.has(projectId) && (!query.projectId || query.projectId === projectId)
     const items: AttentionView[] = [
-      ...approvals.items.filter(item => projectAllowed(item.projectId)).map(item => this.approvalItem(item)),
+      ...approvals.filter(item => projectAllowed(item.projectId)).map(item => this.approvalItem(item)),
       ...tasks.filter(item => projectAllowed(item.projectId) && item.assigneeUserIds.includes(actorId)).map(item => ({
         projectionKey: `task_assignment:${item.taskId}`,
         kind: 'task_assignment' as const,
@@ -70,6 +70,17 @@ export class AttentionService {
     const visibleItems = query.kind ? items.filter(item => item.kind === query.kind) : items
     const groups: AttentionGroup[] = order.map(kind => ({ kind, label: labels[kind], count: visibleItems.filter(item => item.kind === kind).length, items: visibleItems.filter(item => item.kind === kind) }))
     return { total: visibleItems.length, generatedAt: this.clock().toISOString() as Timestamp, groups }
+  }
+
+  private async pendingApprovals(actorId: UserId, projectId?: ProjectId): Promise<ApprovalView[]> {
+    const items: ApprovalView[] = []
+    let cursor: string | undefined
+    do {
+      const page = await this.projections.approvals(actorId, { status: 'pending', ...(projectId ? { projectId } : {}), limit: 100, cursor })
+      items.push(...page.items)
+      cursor = page.nextCursor ?? undefined
+    } while (cursor)
+    return items
   }
 
   private approvalItem(item: ApprovalView): AttentionView {
