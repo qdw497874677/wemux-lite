@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { projectAgentEventToSessionPayload, type AgentEvent } from '@wemux/agent-interchange'
-import type { CommandId, EventSeq, SessionId, Timestamp, Turn, TurnId, WorkerId } from '@wemux/domain'
+import type { CommandId, EventSeq, ModelId, ModelProviderResourceDefinition, ProjectId, SessionId, Timestamp, Turn, TurnId, WorkerId } from '@wemux/domain'
 import type { CommandReceipt, ConnectorRevisionReport, FileRequestPayload, ServerToWorker, TerminalRequestPayload, WorkerCommand, WorkerToServer } from '@wemux/wire-protocol'
 import type { AgentAdapter, AgentTurnEvent, AgentTurnOutcome } from './ports/agent-adapter.js'
 import type { AgentLaunchContextProvider } from './ports/agent-launch-context.js'
@@ -9,6 +9,14 @@ import type { WorkerStore } from './ports/worker-store.js'
 import { WorkerAgentRunner } from './agent-runner.js'
 import { runtimeAdaptersFor } from './runtime-adapters.js'
 import type { RuntimeSessionAdapter } from './ports/runtime-session.js'
+
+/** Trusted Worker-only resolver; credentials must never enter RunRequest or transport. */
+export type PiProviderResolver = (projectId: ProjectId, modelId: ModelId) => Promise<{
+  readonly definition: ModelProviderResourceDefinition
+  readonly environment: Readonly<Record<string, string>>
+  readonly credentialStamp: string | null
+  readonly bindingId: string
+} | null>
 import { diffWorkspaceFile, listWorkspaceFiles, readWorkspaceFile, writeWorkspaceFile } from '../files/workspace-files.js'
 import { TerminalManager, type PtyAdapter } from '../terminal/terminal-manager.js'
 
@@ -32,6 +40,8 @@ export class WorkerRuntime {
   private commands: Promise<unknown> = Promise.resolve()
   private publishing: Promise<unknown> = Promise.resolve()
   private closing = false
+  private providerConnectionOpen = false
+  private providerGeneration = 0
   /** shutdown 可能因 agent 子进程或 in-flight turn 挂起；abort 同步强制终止，供接管方超时后调用。 */
   private aborted = false
   constructor(private readonly store: WorkerStore & LocalState & import('@wemux/agent-interchange').SessionStore, private readonly provisioner: WorkspaceProvisioner,
@@ -45,7 +55,9 @@ export class WorkerRuntime {
       syncClusterDefinition(definition: Extract<WorkerCommand, { kind: 'connector.definition.sync' }>['definition'], workerId: string): Promise<{ status: ConnectorRevisionReport['status']; credentialAvailability: ConnectorRevisionReport['credentialAvailability']; message: string }>
       testClusterDefinition(connectorId: string, revision: number): Promise<{ status: ConnectorRevisionReport['status']; credentialAvailability: ConnectorRevisionReport['credentialAvailability']; message: string }>
       resolveApproval?(approvalId: string, decision: 'approve' | 'deny'): boolean
-    }) {
+    },
+    private readonly piProviderResolver?: PiProviderResolver) {
+    this.providerConnectionOpen = !piProviderResolver
     this.agentRunner = new WorkerAgentRunner({ agents, runtimeAdapters, sessionStore: store })
     this.terminals = terminalPty ? new TerminalManager(
       terminalPty,
@@ -63,6 +75,17 @@ export class WorkerRuntime {
   }
 
   private readonly terminalSessions = new Map<string, SessionId>()
+
+  /** A disconnected cluster must not keep a private credential in an idle Pi child. */
+  providerDisconnected(): void {
+    this.providerConnectionOpen = false
+    this.providerGeneration++
+    this.agentRunner.abortProviderSessions()
+  }
+
+  providerConnected(): void { if (this.piProviderResolver) this.providerConnectionOpen = true }
+
+  providerCredentialChanged(): void { this.providerGeneration++; this.agentRunner.abortProviderSessions() }
 
   async initialize() {
     this.store.saveCapabilities(await Promise.all(this.agents.map(agent => agent.detect())))
@@ -269,6 +292,7 @@ export class WorkerRuntime {
       const workspace = await this.store.workspaces.get(binding.workspaceId)
       if (!workspace || workspace.status !== 'ready') throw new Error('Workspace is not ready')
       if (this.isLocalWorkspace(workspace) !== (source === 'local')) throw new Error('Session host scope mismatch')
+      if (source === 'local' && binding.agent.agentKey === 'pi' && binding.modelId?.startsWith('openai-compatible::')) throw new Error('Pi Provider 模型只允许在授权集群 Session 使用')
       if (!this.available(binding)) throw new Error('Agent or model unavailable')
       return
     }
@@ -282,6 +306,7 @@ export class WorkerRuntime {
     }
     if (command.kind === 'turn.stop' && (await this.store.sessions.getTurn(command.turnId))?.sessionId !== command.sessionId) throw new Error('Turn not found')
     if (command.kind === 'runtime.command') {
+      if (session.binding.agent.agentKey === 'pi' && (session.binding.modelId?.startsWith('openai-compatible::') || command.name === 'set_model' && typeof command.arguments.modelId === 'string' && command.arguments.modelId.startsWith('openai-compatible::'))) throw new Error('Pi Provider 模型已固定，不能在原 Session 中使用运行时命令')
       if (command.name === 'set_model') {
         if (session.activeTurnId) throw new Error('Model cannot be changed while a turn is active')
         const modelId = command.arguments.modelId
@@ -375,13 +400,28 @@ export class WorkerRuntime {
   private async execute(turn: Turn) {
     let outcome: AgentTurnOutcome = { status: 'failed', failure: { code: 'agent-error', message: 'Agent ended without a terminal event' } }
     let iterator: AsyncIterator<AgentEvent> | null = null
+    let privateProvider = false
+    const launchGeneration = this.providerGeneration
     try {
       const session = (await this.store.sessions.get(turn.sessionId))!
       const workspace = (await this.store.workspaces.get(session.binding.workspaceId))!
       const prepared = await this.launchContexts.prepare(turn)
       try {
         const fingerprint = createHash('sha256').update(canonical({ cwd: workspace.rootPath, modelId: session.binding.modelId, nativeSession: session.nativeSession })).digest('hex')
-        iterator = this.agentRunner.run({
+        const customPi = session.binding.agent.agentKey === 'pi' && session.binding.modelId?.startsWith('openai-compatible::')
+        // This branch is intentionally cluster-only; local Web Sessions never
+        // inherit a Server binding or credentials from a connected cluster.
+        privateProvider = Boolean(customPi)
+        let provider: Awaited<ReturnType<PiProviderResolver>> = null
+        if (privateProvider) {
+          if (this.isLocalWorkspace(workspace) || !this.providerConnectionOpen || !this.piProviderResolver || !session.binding.modelId || session.nativeSession) throw new Error('pi_provider_unavailable')
+          // Errors from the resolver may contain local credentials. Never copy
+          // their messages to the durable Session Journal or Server.
+          try { provider = await this.piProviderResolver(workspace.projectId, session.binding.modelId) }
+          catch { throw new Error('pi_provider_unavailable') }
+          if (!provider || !this.providerConnectionOpen || this.providerGeneration !== launchGeneration) throw new Error('pi_provider_unavailable')
+        }
+        const runRequest = {
           appName: 'wemux-worker',
           userId: this.workerId,
           sessionId: turn.sessionId,
@@ -390,13 +430,17 @@ export class WorkerRuntime {
           modelId: session.binding.modelId,
           cwd: workspace.rootPath,
           messageId: turn.message.messageId,
-          message: { role: 'user', parts: [{ text: turn.message.content }] },
+          message: { role: 'user' as const, parts: [{ text: turn.message.content }] },
           resume: session.nativeSession,
           configurationFingerprint: fingerprint,
           launchContext: prepared.context,
-        })[Symbol.asyncIterator]()
+        }
+        if (privateProvider && (!this.providerConnectionOpen || this.providerGeneration !== launchGeneration)) throw new Error('pi_provider_unavailable')
+        iterator = (privateProvider && provider
+          ? this.agentRunner.runWithPiProvider({ ...runRequest, resume: null }, provider, `${provider.bindingId}:${provider.credentialStamp ?? ''}`)
+          : this.agentRunner.run(runRequest))[Symbol.asyncIterator]()
         const stoppingBeforeRun = (await this.store.sessions.getTurn(turn.id))?.state === 'stopping'
-        if (this.closing || stoppingBeforeRun) await this.agentRunner.stop(turn.sessionId, turn.id)
+        if (this.closing || stoppingBeforeRun || (privateProvider && (!this.providerConnectionOpen || this.providerGeneration !== launchGeneration))) await this.agentRunner.stop(turn.sessionId, turn.id)
         const startedAt = Date.now()
         while (true) {
           const remainingMs = Math.max(1, this.agentTimeouts.maxMs - (Date.now() - startedAt))
@@ -435,7 +479,9 @@ export class WorkerRuntime {
         await prepared.cleanup()
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Agent failed'
+      const message = privateProvider
+        ? 'Pi Provider 不可用或执行失败，请检查 Worker 本地配置'
+        : error instanceof Error ? error.message : 'Agent failed'
       outcome = { status: 'failed', failure: {
         code: 'agent-error',
         message,

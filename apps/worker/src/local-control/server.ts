@@ -38,7 +38,7 @@ export interface LocalControlServer {
 export interface LocalControlHandlers {
   readonly shutdown?: () => Promise<void>
   readonly workbench?: LocalWorkbenchService
-  readonly cluster?: Pick<ClusterLifecycle, 'connection' | 'discover' | 'enroll' | 'connect' | 'pause' | 'resume' | 'leave' | 'agentSettings' | 'selectAgent' | 'resetAgent' | 'listConnectors' | 'saveConnector' | 'deleteConnector' | 'putConnectorCredential' | 'connectorCredentialAvailable' | 'agentInstallation' | 'beginAgentInstallation' | 'listConnectorApprovals' | 'resolveConnectorApproval'>
+  readonly cluster?: Pick<ClusterLifecycle, 'connection' | 'discover' | 'enroll' | 'connect' | 'pause' | 'resume' | 'leave' | 'agentSettings' | 'selectAgent' | 'resetAgent' | 'listConnectors' | 'saveConnector' | 'deleteConnector' | 'putConnectorCredential' | 'connectorCredentialAvailable' | 'agentInstallation' | 'beginAgentInstallation' | 'listConnectorApprovals' | 'resolveConnectorApproval' | 'providerCredentialChanged'>
 }
 
 function json(response: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
@@ -179,12 +179,15 @@ export async function startLocalControlServer(options: LocalControlServerOptions
           if (request.method === 'PUT') {
             const body = await readJson(request)
             if (Object.keys(body).some(key => !['variableNames', 'secret', 'expectedRevision'].includes(key)) || typeof body.expectedRevision !== 'number') return json(response, 400, { error: '模型凭据参数无效' })
-            return json(response, 200, await credentials.put({ id, variableNames: body.variableNames as string[], secret: body.secret as Record<string, string>, expectedRevision: body.expectedRevision }))
+            const saved = await credentials.put({ id, variableNames: body.variableNames as string[], secret: body.secret as Record<string, string>, expectedRevision: body.expectedRevision })
+            handlers.cluster?.providerCredentialChanged()
+            return json(response, 200, saved)
           }
           if (request.method === 'DELETE') {
             const body = await readJson(request)
             if (Object.keys(body).some(key => key !== 'expectedRevision') || typeof body.expectedRevision !== 'number') return json(response, 400, { error: '模型凭据参数无效' })
             await credentials.delete(id, body.expectedRevision)
+            handlers.cluster?.providerCredentialChanged()
             return json(response, 204, null)
           }
         }

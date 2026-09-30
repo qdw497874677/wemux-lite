@@ -267,19 +267,29 @@ export class ClusterLifecycle {
         architecture: process.arch,
         store: transportStore,
         onMessage: message => {
-          if (message.type === 'resource.set.notify' || message.type === 'resource.set.pull' || message.type === 'resource.blob.fetch') resources.receive(message)
+          if (message.type === 'resource.set.notify' || message.type === 'resource.set.pull' || message.type === 'resource.blob.fetch') {
+            const refresh = message.type === 'resource.set.notify' && resources.needsProviderRefresh(message.setRevision, message.fingerprint)
+            if (refresh) runtime.providerDisconnected()
+            resources.receive(message)
+            if (refresh && this.transport === transport) {
+              // A notify invalidates the old lease immediately. The authoritative
+              // pull/reconcile must complete before accepting any new launch.
+              const ticket = resources.whenIdle()
+              void ticket.then(() => { if (this.transport === transport && resources.readyForProviderLaunch() && resources.whenIdle() === ticket) runtime.providerConnected() }).catch(error => this.options.onNotice?.(`资源刷新失败：${error instanceof Error ? error.message : String(error)}`))
+            }
+          }
           else void runtime.receive(message)
         },
         onConnected: () => {
           if (this.transport !== transport) return
           this.state = { phase: 'online', retryAt: null, failure: null }
-          void resources.connected().catch(error => this.options.onNotice?.(`资源收敛失败：${error instanceof Error ? error.message : String(error)}`))
+          void resources.connected().then(() => { if (this.transport === transport && resources.readyForProviderLaunch()) runtime.providerConnected() }).catch(error => this.options.onNotice?.(`资源收敛失败：${error instanceof Error ? error.message : String(error)}`))
           void runtime.connected()
         },
         onNotice: message => this.options.onNotice?.(message),
         onStateChange: change => {
           if (this.transport !== transport) return
-          if (change.current !== 'open') resources?.disconnected()
+          if (change.current !== 'open') { resources?.disconnected(); runtime?.providerDisconnected() }
           if (change.current === 'connecting') this.state = { phase: 'connecting', retryAt: null, failure: null }
           if (change.current === 'backoff') this.state = { phase: 'degraded', retryAt: change.retryInMs == null ? null : new Date(Date.now() + change.retryInMs).toISOString(), failure: change.reason }
           if (change.current === 'needs-attention') {
@@ -311,7 +321,7 @@ export class ClusterLifecycle {
         const session = await this.store.sessions.get(turn.sessionId)
         const workspace = session ? await this.store.workspaces.get(session.binding.workspaceId) : null
         return session && workspace ? { projectId: workspace.projectId, agentKey: session.binding.agent.agentKey } : null
-      }), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), await loadNodePty(), this.connectors)
+      }), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), await loadNodePty(), this.connectors, (projectId, modelId) => resources!.piProviderForLaunch(projectId, modelId))
       this.runtime = runtime
       this.resources = resources
       await runtime.initialize()
@@ -324,6 +334,8 @@ export class ClusterLifecycle {
       throw error
     }
   }
+
+  providerCredentialChanged(): void { this.runtime?.providerCredentialChanged() }
 
   pause() {
     return this.transition(async () => {
@@ -379,6 +391,7 @@ export class ClusterLifecycle {
 
   private async stopRuntime() {
     const transport = this.transport
+    this.runtime?.providerDisconnected()
     this.transport = null
     transport?.stop()
     const runtime = this.runtime

@@ -219,7 +219,8 @@ test('local connector writes reject malformed and cross-scope definitions before
 })
 
 test('local provider credentials require local login and CSRF, redact values, and respect revision CAS', async () => {
-  const f = await fixture({}, { providerKey: 'local-provider-test-key' })
+  let credentialChanges = 0
+  const f = await fixture({ cluster: { providerCredentialChanged: () => { credentialChanges++ } } as never }, { providerKey: 'local-provider-test-key' })
   const path = `${f.server.url}/api/local/providers/credentials`
   const secret = 'provider-secret-sentinel-9183'
   try {
@@ -247,6 +248,7 @@ test('local provider credentials require local login and CSRF, redact values, an
     assert.doesNotMatch(await rotation.text(), /provider-secret-sentinel/)
     assert.equal((await fetch(endpoint, { method: 'DELETE', headers, body: JSON.stringify({ expectedRevision: 1 }) })).status, 409)
     assert.equal((await fetch(endpoint, { method: 'DELETE', headers, body: JSON.stringify({ expectedRevision: 2 }) })).status, 204)
+    assert.equal(credentialChanges, 3, 'save, rotation and revocation invalidate private Pi sessions; rejected writes do not')
     assert.deepEqual((await (await fetch(path, { headers: { cookie: session } })).json() as { items: unknown[] }).items, [])
   } finally { await f.cleanup() }
 })

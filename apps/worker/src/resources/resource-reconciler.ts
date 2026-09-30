@@ -119,6 +119,16 @@ export class ResourceReconciler {
 
   disconnected(): void { this.snapshotFresh = false; this.connectionEpoch += 1 }
 
+  /** Wait until queued resource notices finish before reopening private Provider launch. */
+  whenIdle(): Promise<void> { return this.tail }
+
+  needsProviderRefresh(revision: number, fingerprint: string): boolean {
+    const current = this.state.desired()
+    return !current || current.revision < revision || current.revision === revision && current.fingerprint !== fingerprint
+  }
+
+  readyForProviderLaunch(): boolean { return !this.closed && this.snapshotFresh && this.state.desired() !== null }
+
   reconcile(snapshot: ResourceSetSnapshot): Promise<void> {
     return this.schedule(async () => {
       const epoch = this.connectionEpoch

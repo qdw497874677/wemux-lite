@@ -106,6 +106,28 @@ test('private Pi Provider runner restarts on credential stamp change without per
   } finally { await runner.close() }
 })
 
+test('disconnect aborts only private Pi provider sessions without touching ordinary Pi sessions', async () => {
+  const key = 'pi' as AgentKey
+  const definition = { providerKey: 'openai-compatible' as const, endpoint: 'https://example.invalid/v1', modelIds: ['offline-model'], agentKeys: [key], credential: { kind: 'environment' as const, variableNames: ['OPENAI_API_KEY'] } }
+  let ordinaryKilled = 0
+  let privateKilled = 0
+  const adapter: RuntimeSessionAdapter = { async openSession(input) {
+    const privateChild = Boolean(input.piProvider)
+    return { async execute() { return { signals: (async function* () { yield { kind: 'finished' as const, outcome: { status: 'completed' as const } } })(), async stop() {} } }, async close() {}, kill() { if (privateChild) privateKilled++; else ordinaryKilled++ } }
+  } }
+  const runner = new WorkerAgentRunner({ agents: [{ ...executionAgent, agentKey: key }], runtimeAdapters: new Map([[key, adapter]]) })
+  const normal = request({ agentKey: key, modelId: 'fixture::model' as ModelId, sessionId: 'ordinary' as SessionId, invocationId: 'normal-1' as TurnId })
+  const provider = request({ agentKey: key, modelId: 'openai-compatible::offline-model' as ModelId, sessionId: 'private' as SessionId, invocationId: 'provider-1' as TurnId })
+  try {
+    await collect(runner.run(normal))
+    await collect(runner.runWithPiProvider(provider, { definition, environment: { OPENAI_API_KEY: 'private-secret' } }, 'stamp'))
+    runner.abortProviderSessions()
+    assert.equal(privateKilled, 1)
+    assert.equal(ordinaryKilled, 0)
+    await collect(runner.run({ ...normal, invocationId: 'normal-2' as TurnId }))
+  } finally { await runner.close() }
+})
+
 test('private Pi Provider runner redacts secrets from adapter failures and persisted events', async () => {
   const secret = 'private-error-secret-sentinel'
   const key = 'pi' as AgentKey
