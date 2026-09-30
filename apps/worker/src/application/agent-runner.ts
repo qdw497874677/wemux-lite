@@ -1,8 +1,8 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { AgentContent, AgentEvent, AgentRunner, ApprovalDecision, CommandRequest, RunRequest, SessionStore } from '@wemux/agent-interchange'
 import { classifyAgentError, type AgentKey, type RuntimeOperationId, type SessionId, type Timestamp } from '@wemux/domain'
 import type { AgentAdapter, AgentLaunchContext, AgentSignal, AgentTurnEvent, AgentTurnOutcome } from './ports/agent-adapter.js'
-import type { RuntimeSessionAdapter } from './ports/runtime-session.js'
+import type { RuntimeSessionAdapter, RuntimeSessionOpenInput } from './ports/runtime-session.js'
 import { RuntimeSessionManager } from './runtime-session-manager.js'
 
 const occurredAt = () => new Date().toISOString() as Timestamp
@@ -31,7 +31,16 @@ export class WorkerAgentRunner implements AgentRunner {
     this.runtimeAdapters = options.runtimeAdapters ?? new Map()
   }
 
-  async *run(request: RunRequest): AsyncIterable<AgentEvent> {
+  run(request: RunRequest): AsyncIterable<AgentEvent> { return this.runInternal(request, null) }
+
+  /** Trusted Worker-only entry. Provider secrets never belong in a RunRequest or SessionStore. */
+  runWithPiProvider(request: RunRequest, provider: NonNullable<RuntimeSessionOpenInput['piProvider']>, fingerprint: string): AsyncIterable<AgentEvent> {
+    if (request.agentKey !== 'pi' || request.resume || !fingerprint || !provider.environment.OPENAI_API_KEY?.trim() || Object.keys(provider.environment).length !== 1 || provider.definition.providerKey !== 'openai-compatible' || provider.definition.modelIds.length !== 1 || request.modelId !== `openai-compatible::${provider.definition.modelIds[0]}`) throw new Error('pi_provider_launch_invalid')
+    const processHash = createHash('sha256').update(JSON.stringify(provider.definition)).update('\0').update(provider.environment.OPENAI_API_KEY).digest('hex')
+    return this.runInternal(request, { provider, fingerprint: `${processHash}:${fingerprint}` })
+  }
+
+  private async *runInternal(request: RunRequest, privateProvider: { provider: NonNullable<RuntimeSessionOpenInput['piProvider']>; fingerprint: string } | null): AsyncIterable<AgentEvent> {
     const agent = this.options.agents.find(candidate => candidate.agentKey === request.agentKey)
     if (!agent || agent.mode !== 'execution' || !this.runtimeAdapters.has(request.agentKey)) {
       yield this.terminal(request, { status: 'failed', failure: { code: 'agent-unavailable', message: `Agent runtime unavailable: ${request.agentKey}` } })
@@ -56,7 +65,8 @@ export class WorkerAgentRunner implements AgentRunner {
         cwd: request.cwd,
         modelId: request.modelId,
         resume: request.resume,
-      }, request.configurationFingerprint)
+        ...(privateProvider ? { piProvider: privateProvider.provider } : {}),
+      }, privateProvider ? `${request.configurationFingerprint}:${privateProvider.fingerprint}` : request.configurationFingerprint)
       handle = await lease.session.execute({
         operationId: request.invocationId,
         message: { messageId: request.messageId, content: textOf(request.message) },
@@ -64,7 +74,11 @@ export class WorkerAgentRunner implements AgentRunner {
       })
       active.stop = handle.stop
       if (active.stopRequested) await handle.stop()
-      for await (const signal of handle.signals) {
+      const signals = privateProvider ? this.checkedPiProviderSignals(handle.signals, privateProvider.provider.environment.OPENAI_API_KEY) : handle.signals
+      for await (const signal of signals) {
+        // The isolated Provider process cannot create a resumable native Pi
+        // Session: its config and authentication belong to this child only.
+        if (privateProvider && signal.kind === 'native-session') continue
         const event = this.toEvent(request, signal)
         if (!event) continue
         terminalSeen ||= event.customMetadata?.wemux?.terminal !== undefined
@@ -80,7 +94,11 @@ export class WorkerAgentRunner implements AgentRunner {
     } catch (error) {
       faulted = true
       if (!terminalSeen) {
-        const event = this.terminal(request, { status: 'failed', failure: { code: 'agent-error', message: error instanceof Error ? error.message : 'Agent failed' } })
+        // Adapter/child errors can echo launch environment. In private
+        // Provider mode no diagnostic from an untrusted subprocess may enter
+        // Journal, Web, or Server; the local operator can inspect process logs.
+        const message = privateProvider ? 'Pi Provider 启动或执行失败，请检查 Worker 本地配置' : error instanceof Error ? error.message : 'Agent failed'
+        const event = this.terminal(request, { status: 'failed', failure: { code: 'agent-error', message } })
         await this.persist(sessionKey, event)
         yield event
       }
@@ -89,6 +107,35 @@ export class WorkerAgentRunner implements AgentRunner {
       await handle?.stop()
       if (lease) await (faulted ? lease.fault() : lease.release())
     }
+  }
+
+  /** Hold private Provider output until every field can be checked across deltas. */
+  private async *checkedPiProviderSignals(source: AsyncIterable<AgentSignal>, secret: string): AsyncIterable<AgentSignal> {
+    const buffered: AgentSignal[] = []
+    let size = 0
+    try {
+      for await (const signal of source) {
+        const encoded = JSON.stringify(signal)
+        size += Buffer.byteLength(encoded)
+        if (size > 1024 * 1024) throw new Error('provider_output_limit')
+        buffered.push(signal)
+      }
+    } catch {
+      yield { kind: 'finished', outcome: { status: 'failed', failure: { code: 'agent-error', message: 'Pi Provider 输出无法安全验证' } } }
+      return
+    }
+    const strings: string[] = []
+    const collect = (value: unknown): void => {
+      if (typeof value === 'string') strings.push(value)
+      else if (Array.isArray(value)) value.forEach(collect)
+      else if (value && typeof value === 'object') Object.values(value).forEach(collect)
+    }
+    collect(buffered)
+    if (strings.join('').includes(secret)) {
+      yield { kind: 'finished', outcome: { status: 'failed', failure: { code: 'agent-error', message: 'Provider 输出包含本机凭据，已阻止发布 [redacted]' } } }
+      return
+    }
+    for (const signal of buffered) yield signal
   }
 
   async command(request: CommandRequest): Promise<void> {

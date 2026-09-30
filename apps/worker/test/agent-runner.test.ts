@@ -71,6 +71,77 @@ test('Pi-like and OpenCode-like providers satisfy the same public AgentRunner co
   }
 })
 
+test('private Pi Provider runner restarts on credential stamp change without persisting native session or secret', async () => {
+  const key = 'pi' as AgentKey
+  const definition = { providerKey: 'openai-compatible' as const, endpoint: 'https://example.invalid/v1', modelIds: ['offline-model'], agentKeys: [key], credential: { kind: 'worker-credential' as const, credentialRef: 'local-ref', variableNames: ['OPENAI_API_KEY'] } }
+  const store = new MemorySessionStore()
+  const opened: string[] = []
+  let closed = 0
+  const adapter: RuntimeSessionAdapter = { async openSession(input) {
+    assert.equal(input.resume, null)
+    const value = input.piProvider?.environment.OPENAI_API_KEY
+    assert.ok(value)
+    opened.push(value)
+    return {
+      async execute() { return { signals: (async function* () { yield { kind: 'native-session' as const, nativeSession: 'private-native' as never }; yield { kind: 'event' as const, event: { kind: 'assistant.text.delta' as const, text: 'public-answer' } }; yield { kind: 'finished' as const, outcome: { status: 'completed' as const } } })(), async stop() {} } },
+      async close() { closed++ },
+    }
+  } }
+  const runner = new WorkerAgentRunner({ agents: [{ ...executionAgent, agentKey: key }], runtimeAdapters: new Map([[key, adapter]]), sessionStore: store })
+  const run = (secret: string, stamp: string, index: number) => collect(runner.runWithPiProvider(request({ agentKey: key, modelId: 'openai-compatible::offline-model' as ModelId, invocationId: `private-${index}` as TurnId, messageId: `private-message-${index}` as MessageId }), { definition, environment: { OPENAI_API_KEY: secret } }, stamp))
+  try {
+    await run('first-private-secret', 'revision-one', 1)
+    await run('first-private-secret', 'revision-one', 2)
+    assert.deepEqual(opened, ['first-private-secret'])
+    await run('rotated-private-secret', 'revision-two', 3)
+    assert.deepEqual(opened, ['first-private-secret', 'rotated-private-secret'])
+    assert.equal(closed, 1)
+    await run('rotated-with-same-stamp', 'revision-two', 4)
+    assert.equal(opened.length, 3, 'an environment locator can change without a credential revision')
+    await collect(runner.runWithPiProvider(request({ agentKey: key, modelId: 'openai-compatible::offline-model' as ModelId, invocationId: 'private-5' as TurnId, messageId: 'private-message-5' as MessageId }), { definition: { ...definition, endpoint: 'https://other.invalid/v1' }, environment: { OPENAI_API_KEY: 'rotated-with-same-stamp' } }, 'revision-two'))
+    assert.equal(opened.length, 4, 'a new provider endpoint must not reuse the old child with the same credential stamp')
+    const saved = await store.get({ appName: 'wemux', userId: 'local', sessionId })
+    assert.doesNotMatch(JSON.stringify(saved), /first-private-secret|rotated-private-secret|private-native/)
+    assert.throws(() => runner.runWithPiProvider(request({ agentKey: key, resume: 'old' }), { definition, environment: { OPENAI_API_KEY: 'secret' } }, 'old'), /pi_provider_launch_invalid/)
+  } finally { await runner.close() }
+})
+
+test('private Pi Provider runner redacts secrets from adapter failures and persisted events', async () => {
+  const secret = 'private-error-secret-sentinel'
+  const key = 'pi' as AgentKey
+  const store = new MemorySessionStore()
+  const definition = { providerKey: 'openai-compatible' as const, endpoint: 'https://example.invalid/v1', modelIds: ['offline-model'], agentKeys: [key], credential: { kind: 'environment' as const, variableNames: ['OPENAI_API_KEY'] } }
+  const adapter: RuntimeSessionAdapter = { async openSession() { throw new Error(`spawn failed: ${secret}`) } }
+  const runner = new WorkerAgentRunner({ agents: [{ ...executionAgent, agentKey: key }], runtimeAdapters: new Map([[key, adapter]]), sessionStore: store })
+  try {
+    const events = await collect(runner.runWithPiProvider(request({ agentKey: key, modelId: 'openai-compatible::offline-model' as ModelId }), { definition, environment: { OPENAI_API_KEY: secret } }, 'opaque-stamp'))
+    assert.equal(events.at(-1)?.customMetadata?.wemux?.terminal, 'failed')
+    assert.doesNotMatch(JSON.stringify(events), /private-error-secret-sentinel/)
+    assert.doesNotMatch(JSON.stringify(await store.get({ appName: 'wemux', userId: 'local', sessionId })), /private-error-secret-sentinel/)
+  } finally { await runner.close() }
+})
+
+test('private Pi Provider runner never publishes a child event containing its credential', async () => {
+  const secret = 'private-event-secret-sentinel'
+  const key = 'pi' as AgentKey
+  const store = new MemorySessionStore()
+  const definition = { providerKey: 'openai-compatible' as const, endpoint: 'https://example.invalid/v1', modelIds: ['offline-model'], agentKeys: [key], credential: { kind: 'environment' as const, variableNames: ['OPENAI_API_KEY'] } }
+  const adapter: RuntimeSessionAdapter = { async openSession() { return {
+    async execute() { return { signals: (async function* () {
+      yield { kind: 'event' as const, event: { kind: 'assistant.text.delta' as const, text: secret } }
+      yield { kind: 'finished' as const, outcome: { status: 'completed' as const } }
+    })(), async stop() {} } },
+    async close() {},
+  } } }
+  const runner = new WorkerAgentRunner({ agents: [{ ...executionAgent, agentKey: key }], runtimeAdapters: new Map([[key, adapter]]), sessionStore: store })
+  try {
+    const events = await collect(runner.runWithPiProvider(request({ agentKey: key, modelId: 'openai-compatible::offline-model' as ModelId }), { definition, environment: { OPENAI_API_KEY: secret } }, 'opaque-stamp'))
+    assert.equal(events.at(-1)?.customMetadata?.wemux?.terminal, 'failed')
+    assert.doesNotMatch(JSON.stringify(events), /private-event-secret-sentinel/)
+    assert.doesNotMatch(JSON.stringify(await store.get({ appName: 'wemux', userId: 'local', sessionId })), /private-event-secret-sentinel/)
+  } finally { await runner.close() }
+})
+
 test('runner owns the lease, maps signals, persists non-partial events, and reuses provider session', async () => {
   let opens = 0
   let closes = 0
