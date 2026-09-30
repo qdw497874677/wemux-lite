@@ -42,7 +42,10 @@ try {
     if (path === `/api/projects/${project.id}/workspaces` || path === '/api/workspaces') return fulfill(route, { items: [workspace] })
     if (path.endsWith('/provider-candidates')) {
       candidateQueries.push({ path, agentKey: url.searchParams.get('agentKey') })
-      return fulfill(route, { items: [{ modelId: 'openai-compatible::candidate', resourceId: 'provider-1', bindingId: 'binding-1', status: 'not-verified' }] })
+      return fulfill(route, { items: [
+        { modelId: 'openai-compatible::candidate', resourceId: 'provider-1', bindingId: 'binding-1', status: 'not-verified' },
+        { modelId: 'pi::available', resourceId: 'provider-2', bindingId: 'binding-2', status: 'not-verified' },
+      ] })
     }
     if (path === '/api/sessions' && request.method() === 'POST') { creations.push(request.postDataJSON()); return fulfill(route, { error: { message: 'must not create' } }, 409) }
     return fulfill(route, { items: [] })
@@ -58,6 +61,7 @@ try {
   await list.getByText('已绑定，尚未验证模型与凭据；暂不可用于对话').waitFor()
   const available = list.getByRole('button', { name: /可用模型/ })
   assert.equal(await available.isDisabled(), false, 'authenticated Agent model remains selectable')
+  assert.equal(await list.getByRole('button', { name: /pi::available/ }).count(), 0, 'an unverified duplicate must not shadow an advertised Agent model')
   await available.click()
   assert.equal(creations.length, 0)
   assert.ok(candidateQueries.some(item => item.path === `/api/workers/${worker.id}/projects/${project.id}/provider-candidates` && item.agentKey === 'pi'))

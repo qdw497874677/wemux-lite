@@ -71,7 +71,7 @@ export function QuickConversation({ api, controller, projectId, workers, workspa
     staleTime: 2000, refetchInterval: connected ? 5000 : false,
   })
   const modelChoices: Choice[] = [{ id: '', label: '智能体默认模型' }, ...(agent?.models.map(item => ({ id: item.modelId, label: item.displayName })) ?? []),
-    ...(candidates.data ?? []).map(item => ({ id: `candidate:${item.bindingId}:${item.modelId}`, label: item.modelId, description: '已绑定，尚未验证模型与凭据；暂不可用于对话', disabled: true }))]
+    ...(candidates.data ?? []).filter(item => !agent?.models.some(model => model.modelId === item.modelId)).map(item => ({ id: `candidate:${item.bindingId}:${item.modelId}`, label: item.modelId, description: '已绑定，尚未验证模型与凭据；暂不可用于对话', disabled: true }))]
   const runtimeIssues = worker?.capabilities.filter(item => !isExecutable(item) || !item.models.length) ?? []
   const placementIssues = ws?.placements.filter(item => item.status !== 'ready' || item.failureReason) ?? []
   const hasDiagnostics = runtimeIssues.length > 0 || placementIssues.length > 0
