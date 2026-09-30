@@ -1,0 +1,7 @@
+# R3 Worker 本地模型凭据界面（局部完成）
+
+在共享 Worker Web 的「设置 → 本地模型凭据」中查看本机 `model-provider` 凭据 ID、所需变量名、版本及可解密状态；新增、轮换、撤销均使用同源 Worker API `/api/local/providers/credentials` 和本地登录/CSRF。轮换时不回填 Secret，所有字段都须重输；写入/撤销带 revision CAS，服务端只返回状态，页面不显示任何 Secret。界面明确提示“本机加密保存 ≠ 模型可用”，且加密密钥不可从浏览器录入。Web 不联络集群 Server 的资源 API 来传输 Secret。
+
+验证：`npm run build --workspace @wemux/web`、`npm run build --workspace @wemux/worker`、`npm run typecheck` 均通过。真实 Chromium + 临时独立 Worker home 完成登录、设置读取、保存与脱敏、轮换无明文回填、撤销及零页面异常；脚本 `/tmp/wemux-provider-local-browser.mjs`，结果 `/tmp/provider-local-browser-passed.log`，截图 `.scratch/r3-provider/worker-local-provider-empty.png` 与 `.scratch/r3-provider/worker-local-provider-saved.png`（不含密钥）。Web 行为测试 `apps/web/tests/local-session-api.test.mjs` 覆盖 Worker origin、CSRF/CAS 与响应脱敏。`npm test` 全量 Node 844 tests / 838 pass / 0 fail / 6 skipped、package 10 pass、Web 291 pass，日志 `/tmp/provider-ui-full-test-final.log`。由于 schema v5 的迁移测试需还原真实 v2 形态，已修正 `apps/server/src/test/retention-destination.test.ts` 回退前删除 `provider_credentials`；不是放宽运行时迁移。
+
+**未实现**：Provider 资源的 Agent 子进程环境物化、模型认证/探测、Pi 自定义端点配置、真实模型 Turn。操作页面的可解密状态不可当成集群 Provider `ready`；设计门槛详见 `docs/design/r3-pi-provider-process-materialization.md`。接下来 Web 需添加引导 Server 资源配置与本地凭据 ref 匹配/错误状态，并在 Worker 实现模型执行。实机 Mac 验收及 Linux Pi 激活仍分离。

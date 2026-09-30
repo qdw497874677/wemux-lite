@@ -29,6 +29,9 @@ import { loadNodePty } from '../terminal/terminal-manager.js'
 import { WorkerConnectorRuntime } from '../connectors/runtime.js'
 import type { McpConnectorDefinition } from '@wemux/connector'
 import { ResourceReconciler } from '../resources/resource-reconciler.ts'
+import { WorkerProviderCredentialStore } from '../providers/credential-store.ts'
+import type { ProviderCredentialRepository } from '../providers/credential-store.ts'
+import type { WorkerConnectorStore } from '../connectors/store.js'
 
 export type WorkerConnectionState = {
   readonly phase: 'offline' | 'connecting' | 'online' | 'degraded'
@@ -74,10 +77,10 @@ export class ClusterLifecycle {
   private installation: { key: string; phase: 'installing' | 'ready' | 'failed'; message: string } | null = null
 
   constructor(
-    private readonly store: WorkerStore & LocalState & SessionStore,
+    private readonly store: WorkerStore & LocalState & SessionStore & ProviderCredentialRepository & WorkerConnectorStore,
     private agents: readonly AgentAdapter[],
     private readonly options: ClusterLifecycleOptions,
-  ) { this.connectors = new WorkerConnectorRuntime(store as WorkerStore & LocalState & SessionStore & import('../connectors/store.js').WorkerConnectorStore, { onApproval: event => this.publishConnectorApproval(event) }) }
+  ) { this.connectors = new WorkerConnectorRuntime(store, { onApproval: event => this.publishConnectorApproval(event) }) }
 
   connection() { return this.state }
 
@@ -303,7 +306,7 @@ export class ClusterLifecycle {
           new Promise<void>(resolve => setTimeout(resolve, 1000)),
         ])
       }
-      resources = new ResourceReconciler({ workerId: identity.workerId, home: this.options.home, databasePath: join(this.options.home, 'resources.sqlite'), transport, concurrency: Number(process.env.WEMUX_RESOURCE_CONCURRENCY ?? '2') })
+      resources = new ResourceReconciler({ workerId: identity.workerId, home: this.options.home, databasePath: join(this.options.home, 'resources.sqlite'), transport, concurrency: Number(process.env.WEMUX_RESOURCE_CONCURRENCY ?? '2'), providerCredentials: WorkerProviderCredentialStore.fromEnvironment(this.store) })
       runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint, turn => this.connectors.registerTurn(turn, identity.workerId), (projectId, agentKey) => resources!.skillsForLaunch(projectId, agentKey), async turn => {
         const session = await this.store.sessions.get(turn.sessionId)
         const workspace = session ? await this.store.workspaces.get(session.binding.workspaceId) : null

@@ -1,4 +1,4 @@
-import type { ReconcileReport, ResourceFile, ResourceKind, ResourceSetSnapshot, WorkerId } from '@wemux/domain'
+import { assertModelProviderConfig, type ReconcileReport, type ResourceFile, type ResourceKind, type ResourceSetSnapshot, type WorkerId } from '@wemux/domain'
 
 export interface ResourceSetSummary {
   readonly bindingId: string
@@ -78,6 +78,12 @@ const integer = (value: unknown, min = 0): value is number => typeof value === '
 const exact = (value: Record<string, unknown>, keys: readonly string[]) => Object.keys(value).every(key => keys.includes(key)) && keys.every(key => key in value)
 const hash = (value: unknown): value is string => typeof value === 'string' && SHA256.test(value)
 const kind = (value: unknown): value is ResourceKind => value === 'skill' || value === 'agent-runtime' || value === 'model-provider' || value === 'connector-config'
+const provider = (value: unknown): boolean => {
+  const item = object(value)
+  if (!item || !exact(item, ['mode', 'contentSha256', 'config']) || item.mode !== 'inline-config' || !hash(item.contentSha256)) return false
+  try { assertModelProviderConfig(item.config) } catch { return false }
+  return true
+}
 const artifact = (value: unknown): boolean => {
   const item = object(value)
   return Boolean(item && exact(item, ['mode', 'packageName', 'packageVersion', 'registryOrigin', 'packageIntegrity']) && item.mode === 'artifact' && text(item.packageName) && text(item.packageVersion) && item.registryOrigin === 'https://registry.npmjs.org' && typeof item.packageIntegrity === 'string' && /^sha512-[A-Za-z0-9+/]+={0,2}$/.test(item.packageIntegrity))
@@ -95,8 +101,8 @@ function file(value: unknown): boolean {
 
 function binding(value: unknown): boolean {
   const item = object(value)
-  if (!item || !Object.keys(item).every(key => ['bindingId', 'bindingRevision', 'agentKey', 'projectId', 'resourceRevisionId', 'resourceId', 'kind', 'contentSha256', 'files', 'artifact'].includes(key)) || !['bindingId', 'bindingRevision', 'agentKey', 'projectId', 'resourceRevisionId', 'resourceId', 'kind', 'contentSha256', 'files'].every(key => key in item)) return false
-  return Boolean(text(item.bindingId) && integer(item.bindingRevision, 1) && (item.agentKey === null || text(item.agentKey)) && (item.projectId === null || text(item.projectId)) && text(item.resourceRevisionId) && text(item.resourceId) && kind(item.kind) && hash(item.contentSha256) && Array.isArray(item.files) && item.files.length <= 64 && item.files.every(file) && (item.kind === 'agent-runtime' ? artifact(item.artifact) && item.files.length === 0 : item.artifact === undefined))
+  if (!item || !Object.keys(item).every(key => ['bindingId', 'bindingRevision', 'agentKey', 'projectId', 'resourceRevisionId', 'resourceId', 'kind', 'contentSha256', 'files', 'artifact', 'provider'].includes(key)) || !['bindingId', 'bindingRevision', 'agentKey', 'projectId', 'resourceRevisionId', 'resourceId', 'kind', 'contentSha256', 'files'].every(key => key in item)) return false
+  return Boolean(text(item.bindingId) && integer(item.bindingRevision, 1) && (item.agentKey === null || text(item.agentKey)) && (item.projectId === null || text(item.projectId)) && text(item.resourceRevisionId) && text(item.resourceId) && kind(item.kind) && hash(item.contentSha256) && Array.isArray(item.files) && item.files.length <= 64 && item.files.every(file) && (item.kind === 'agent-runtime' ? artifact(item.artifact) && item.files.length === 0 && item.provider === undefined : item.kind === 'model-provider' ? provider(item.provider) && item.files.length === 0 && item.artifact === undefined && item.contentSha256 === (item.provider as Record<string, unknown>).contentSha256 : item.artifact === undefined && item.provider === undefined))
 }
 
 function snapshot(value: unknown): boolean {

@@ -30,6 +30,28 @@ test('local settings and cluster adapter uses Worker cookie/CSRF and handles 204
   assert.ok(requests.every(request => request.url.startsWith('/api/local/')))
 })
 
+test('local Provider credentials stay on Worker origin, use CSRF/CAS and never echo Secret', async () => {
+  const requests = []
+  const api = createLocalSessionApi(async (url, init) => {
+    requests.push({ url, ...init })
+    if (url.endsWith('/status')) return Response.json({ csrf: 'local-csrf' })
+    if (url.endsWith('/providers/credentials') && init.method === 'GET') return Response.json({ items: [{ id: 'my-provider', variableNames: ['OPENAI_API_KEY'], revision: 1, availability: 'available' }], credentialCapability: 'available' })
+    if (url.endsWith('/providers/credentials/my-provider') && init.method === 'PUT') return Response.json({ id: 'my-provider', variableNames: ['OPENAI_API_KEY'], revision: 2, availability: 'available' })
+    if (url.endsWith('/providers/credentials/my-provider') && init.method === 'DELETE') return new Response(null, { status: 204 })
+    throw new Error(`unexpected URL ${url}`)
+  })
+  await api.status()
+  assert.deepEqual((await api.providerCredentials()).items[0], { id: 'my-provider', variableNames: ['OPENAI_API_KEY'], revision: 1, availability: 'available' })
+  await api.putProviderCredential('my-provider', ['OPENAI_API_KEY'], { OPENAI_API_KEY: 'secret-not-for-server' }, 1)
+  await api.deleteProviderCredential('my-provider', 2)
+  assert.deepEqual(requests.map(({ url }) => url), ['/api/local/status', '/api/local/providers/credentials', '/api/local/providers/credentials/my-provider', '/api/local/providers/credentials/my-provider'])
+  assert.ok(!('x-wemux-csrf' in requests[1].headers))
+  assert.deepEqual(JSON.parse(requests[2].body), { variableNames: ['OPENAI_API_KEY'], secret: { OPENAI_API_KEY: 'secret-not-for-server' }, expectedRevision: 1 })
+  assert.deepEqual(JSON.parse(requests[3].body), { expectedRevision: 2 })
+  assert.ok(requests.slice(2).every(request => request.headers['x-wemux-csrf'] === 'local-csrf' && request.credentials === 'same-origin' && request.cache === 'no-store'))
+  assert.doesNotMatch(JSON.stringify(await api.providerCredentials()), /secret-not-for-server/)
+})
+
 test('local adapter writes with Worker CSRF and stable caller message identities', async () => {
   const requests = []
   const api = createLocalSessionApi(async (url, init) => {

@@ -1,4 +1,4 @@
-import type { Resource, ResourceBindingStatus, ResourceRevision, WorkerId } from '@wemux/domain'
+import { assertModelProviderConfig, type Resource, type ResourceBindingStatus, type ResourceRevision, type WorkerId } from '@wemux/domain'
 import { AppError } from '../../application/errors.ts'
 import type { RouteDescriptor } from './types.ts'
 
@@ -13,7 +13,7 @@ const object = (value: unknown): Record<string, unknown> => {
 }
 
 const presetConflict = new Set(['preset_revision_conflict', 'preset_application_request_conflict', 'resource_set_revision_conflict', 'preset_binding_conflict'])
-const presetInvalid = new Set(['invalid_preset', 'invalid_preset_entry', 'invalid_preset_application', 'preset_auto_apply_unavailable', 'preset_revision_not_published', 'invalid_runtime_binding', 'preset_resource_kind_unavailable', 'duplicate_preset_entry'])
+const presetInvalid = new Set(['invalid_preset', 'invalid_preset_entry', 'invalid_preset_application', 'preset_auto_apply_unavailable', 'preset_revision_not_published', 'invalid_runtime_binding', 'preset_resource_kind_unavailable', 'invalid_provider_binding', 'duplicate_preset_entry'])
 function presetError(error: unknown): Error {
   if (!(error instanceof Error)) return new Error('Preset operation failed')
   if (error.message === 'preset_not_found') return new AppError(404, 'Preset revision not found', error.message)
@@ -46,7 +46,12 @@ export const nodeResourceRoutes: readonly RouteDescriptor[] = [
   { method: 'GET', pattern: '/resources', auth: 'admin', handler: context => context.json(200, { items: service(context).resources() }) },
   { method: 'POST', pattern: '/resources', auth: 'admin', handler: async context => {
     const actor = await context.operator()
-    context.json(201, service(context).createResource({ ...object(await context.readBody()), createdBy: actor } as unknown as Resource))
+    const body = object(await context.readBody())
+    if (body.kind === 'model-provider') {
+      try { assertModelProviderConfig(body.definition) } catch { throw new AppError(400, 'Invalid model provider configuration', 'invalid_provider_config') }
+      if (Object.keys(body).some(key => !['id', 'kind', 'name', 'description', 'definition', 'createdAt', 'updatedAt'].includes(key))) throw new AppError(400, 'Invalid model provider request', 'invalid_provider_config')
+    }
+    context.json(201, service(context).createResource({ ...body, createdBy: actor } as unknown as Resource))
   } },
   { method: 'GET', pattern: '/resources/:resourceId', auth: 'admin', handler: async context => {
     await context.operator()
@@ -58,6 +63,10 @@ export const nodeResourceRoutes: readonly RouteDescriptor[] = [
     await context.operator()
     const resource = object(await context.readBody()) as unknown as Resource
     if (resource.id !== context.params.resourceId) throw new AppError(400, 'Resource id mismatch', 'invalid_request')
+    if (resource.kind === 'model-provider') {
+      try { assertModelProviderConfig(resource.definition) } catch { throw new AppError(400, 'Invalid model provider configuration', 'invalid_provider_config') }
+      if (Object.keys(resource).some(key => !['id', 'kind', 'name', 'description', 'definition', 'createdBy', 'createdAt', 'updatedAt'].includes(key))) throw new AppError(400, 'Invalid model provider request', 'invalid_provider_config')
+    }
     context.json(200, service(context).updateResource(resource))
   } },
   { method: 'DELETE', pattern: '/resources/:resourceId', auth: 'admin', handler: async context => {
@@ -69,6 +78,10 @@ export const nodeResourceRoutes: readonly RouteDescriptor[] = [
     const actor = await context.operator()
     const revision = { ...object(await context.readBody()), createdBy: actor } as unknown as ResourceRevision
     if (revision.resourceId !== context.params.resourceId) throw new AppError(400, 'Resource id mismatch', 'invalid_request')
+    if (revision.kind === 'model-provider') {
+      try { context.json(201, service(context).createRevision(revision)) } catch (error) { if (error instanceof Error && /^(invalid_provider|provider_config)/.test(error.message)) throw new AppError(400, 'Invalid model provider revision', error.message); throw error }
+      return
+    }
     context.json(201, service(context).createRevision(revision))
   } },
   { method: 'PUT', pattern: '/resource-blobs/:sha256', auth: 'admin', handler: async context => {
@@ -87,7 +100,9 @@ export const nodeResourceRoutes: readonly RouteDescriptor[] = [
   { method: 'POST', pattern: '/resource-bindings', auth: 'admin', handler: async context => {
     const actor = await context.operator(), body = object(await context.readBody())
     if (typeof body.workerId !== 'string' || typeof body.resourceRevisionId !== 'string') throw new AppError(400, 'Missing binding fields', 'invalid_request')
-    context.json(201, service(context).createBinding({ id: typeof body.id === 'string' ? body.id : undefined, workerId: body.workerId as WorkerId, resourceRevisionId: body.resourceRevisionId, agentKey: typeof body.agentKey === 'string' ? body.agentKey as never : null, projectId: typeof body.projectId === 'string' ? body.projectId as never : null, createdBy: actor }))
+    try {
+      context.json(201, service(context).createBinding({ id: typeof body.id === 'string' ? body.id : undefined, workerId: body.workerId as WorkerId, resourceRevisionId: body.resourceRevisionId, agentKey: typeof body.agentKey === 'string' ? body.agentKey as never : null, projectId: typeof body.projectId === 'string' ? body.projectId as never : null, createdBy: actor }))
+    } catch (error) { if (error instanceof Error && error.message === 'invalid_provider_binding') throw new AppError(400, 'Invalid provider binding', error.message); throw error }
   } },
   { method: 'PATCH', pattern: '/resource-bindings/:bindingId', auth: 'admin', handler: async context => {
     await context.operator(); const body = object(await context.readBody())

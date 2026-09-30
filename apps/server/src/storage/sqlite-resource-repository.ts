@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import type {
   Resource,
@@ -13,7 +14,7 @@ import type {
   UserId,
   WorkerId,
 } from '@wemux/domain'
-import { assertResourceBindingTransition, assertResourceRevisionImmutable, assertResourceRevisionValid } from '@wemux/domain'
+import { assertModelProviderConfig, assertResourceBindingTransition, assertResourceRevisionImmutable, assertResourceRevisionValid } from '@wemux/domain'
 import { resolveSqliteDatabase, type SqliteDatabaseSource } from './sqlite/shared-database.ts'
 
 type RevisionRow = { data: string }
@@ -137,11 +138,19 @@ export class SqliteResourceRepository {
   }
 
   createResource(resource: Resource): Resource {
+    if (resource.kind === 'model-provider') {
+      if (Object.keys(resource).sort().join(',') !== 'createdAt,createdBy,definition,description,id,kind,name,updatedAt') throw new Error('invalid_provider_resource')
+      assertModelProviderConfig(resource.definition)
+    }
     this.db.prepare('INSERT INTO resources(id,kind,name,description,data,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)').run(resource.id, resource.kind, resource.name, resource.description, JSON.stringify(resource), resource.createdBy, resource.createdAt, resource.updatedAt)
     return resource
   }
 
   updateResource(resource: Resource): Resource {
+    if (resource.kind === 'model-provider') {
+      if (Object.keys(resource).sort().join(',') !== 'createdAt,createdBy,definition,description,id,kind,name,updatedAt') throw new Error('invalid_provider_resource')
+      assertModelProviderConfig(resource.definition)
+    }
     const result = this.db.prepare('UPDATE resources SET name=?,description=?,data=?,updated_at=? WHERE id=? AND kind=?').run(resource.name, resource.description, JSON.stringify(resource), resource.updatedAt, resource.id, resource.kind)
     if (result.changes !== 1) throw new Error('resource_not_found')
     return resource
@@ -163,6 +172,10 @@ export class SqliteResourceRepository {
 
   createRevision(revision: ResourceRevision): ResourceRevision {
     assertResourceRevisionValid(revision)
+    if (revision.kind === 'model-provider') {
+      if (Object.keys(revision).sort().join(',') !== 'contentSha256,createdAt,createdBy,id,kind,manifest,payload,resourceId,state,supplyChain,version') throw new Error('invalid_provider_revision')
+      if (revision.payload.mode !== 'inline-config' || createHash('sha256').update(JSON.stringify(revision.payload.config)).digest('hex') !== revision.contentSha256) throw new Error('provider_config_hash_mismatch')
+    }
     const existing = this.revision(revision.id)
     if (existing) {
       assertResourceRevisionImmutable(existing, revision)
@@ -170,6 +183,7 @@ export class SqliteResourceRepository {
     }
     const resource = this.resource(revision.resourceId)
     if (!resource || resource.kind !== revision.kind) throw new Error('resource_kind_mismatch')
+    if (revision.kind === 'model-provider' && (revision.payload.mode !== 'inline-config' || JSON.stringify(resource.definition) !== JSON.stringify(revision.payload.config))) throw new Error('provider_config_revision_mismatch')
     this.db.prepare('INSERT INTO resource_revisions(id,resource_id,kind,version,content_sha256,data,created_at) VALUES(?,?,?,?,?,?,?)').run(revision.id, revision.resourceId, revision.kind, revision.version, revision.contentSha256, JSON.stringify(revision), revision.createdAt)
     return revision
   }

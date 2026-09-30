@@ -30,8 +30,15 @@ export interface SkillResourceDefinition {
 
 /** 首批仅保留类型边界，字段由后续批次补齐。 */
 export type AgentRuntimeResourceDefinition = Readonly<Record<never, never>>
-/** 首批仅保留类型边界，字段由后续批次补齐。 */
-export type ModelProviderResourceDefinition = Readonly<Record<never, never>>
+export interface ModelProviderResourceDefinition {
+  readonly providerKey: 'openai-compatible' | 'anthropic'
+  readonly endpoint: string
+  readonly modelIds: readonly string[]
+  readonly agentKeys: readonly AgentKey[]
+  readonly credential:
+    | { readonly kind: 'environment'; readonly variableNames: readonly string[] }
+    | { readonly kind: 'worker-credential'; readonly credentialRef: string; readonly variableNames: readonly string[] }
+}
 /** 继续由既有 Connector domain 承担运行时语义。 */
 export type ConnectorConfigResourceDefinition = Readonly<Record<never, never>>
 
@@ -93,7 +100,7 @@ export type ResourceSupplyChain =
 export type ResourceRevisionPayload =
   | { readonly mode: 'blobs'; readonly files: readonly ResourceFile[] }
   | { readonly mode: 'artifact'; readonly packageName: string; readonly packageVersion: string; readonly registryOrigin: string; readonly packageIntegrity: string }
-  | { readonly mode: 'inline-config'; readonly contentSha256: string }
+  | { readonly mode: 'inline-config'; readonly contentSha256: string; readonly config: ModelProviderResourceDefinition }
   | { readonly mode: 'domain-ref'; readonly domainId: string; readonly domainRevision: number }
 
 export interface ResourceRevision {
@@ -145,6 +152,8 @@ export interface ResourceBindingSnapshot {
   readonly files: readonly ResourceFile[]
   /** Immutable registry artifact metadata, required for agent-runtime bindings. */
   readonly artifact?: Extract<ResourceRevisionPayload, { readonly mode: 'artifact' }>
+  /** Only non-secret locator metadata; never resolved credential values. */
+  readonly provider?: Extract<ResourceRevisionPayload, { readonly mode: 'inline-config' }>
 }
 
 export interface ResourceSetSnapshot {
@@ -219,7 +228,45 @@ export function assertResourceRevisionValid(revision: ResourceRevision): void {
     return
   }
 
+  if (revision.kind === 'model-provider') {
+    if (Object.keys(revision).sort().join(',') !== 'contentSha256,createdAt,createdBy,id,kind,manifest,payload,resourceId,state,supplyChain,version') throw new Error('invalid_provider_revision')
+    if (Object.keys(revision.manifest).sort().join(',') !== 'bytes,compatibility,description,fileCount,materializerVersion,name,restartPolicy,schemaVersion,sha256' || Object.keys(revision.manifest.compatibility).sort().join(',') !== 'agentKeys,architectures,platforms,workerProtocol') throw new Error('invalid_provider_manifest')
+    if (revision.payload.mode !== 'inline-config' || revision.supplyChain.mode !== 'static-content' || Object.keys(revision.supplyChain).sort().join(',') !== 'manifestSha256,mode') throw new Error('invalid_provider_supply_chain')
+    assertModelProviderConfig(revision.payload.config)
+    if (Object.keys(revision.payload).sort().join(',') !== 'config,contentSha256,mode') throw new Error('invalid_provider_payload')
+    if (JSON.stringify(revision.manifest.compatibility.agentKeys) !== JSON.stringify(revision.payload.config.agentKeys)) throw new Error('invalid_provider_agents')
+    if (revision.payload.contentSha256 !== revision.contentSha256 || revision.manifest.sha256 !== revision.contentSha256 || revision.supplyChain.manifestSha256 !== revision.contentSha256 || revision.manifest.fileCount !== 0 || revision.manifest.bytes !== new TextEncoder().encode(JSON.stringify(revision.payload.config)).byteLength) throw new Error('provider_config_hash_mismatch')
+    return
+  }
   if (revision.kind === 'connector-config' && (revision.payload.mode !== 'domain-ref' || revision.supplyChain.mode !== 'domain-reference')) throw new Error('invalid_connector_reference')
+}
+
+const providerKeys = ['openai-compatible', 'anthropic']
+const providerFields = ['providerKey', 'endpoint', 'modelIds', 'agentKeys', 'credential']
+// Provider values must never be usable as process loader, agent-config or shell controls.
+// The first Pi materializer only consumes a single OpenAI-compatible key; expand
+// deliberately alongside each Agent adapter, never by accepting arbitrary names.
+const providerEnvironmentNames = new Set(['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'AZURE_OPENAI_API_KEY'])
+const credentialRef = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+/** Reject unknown fields at the Server boundary so secrets cannot ride inline-config or wire. */
+export function assertModelProviderConfig(value: unknown): asserts value is ModelProviderResourceDefinition {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_provider_config')
+  const config = value as Record<string, unknown>
+  if (Object.keys(config).sort().join(',') !== [...providerFields].sort().join(',') || !providerKeys.includes(String(config.providerKey))) throw new Error('invalid_provider_config')
+  if (typeof config.endpoint !== 'string' || config.endpoint.length > 2048 || !config.endpoint.startsWith('https://')) throw new Error('invalid_provider_endpoint')
+  try { const endpoint = new URL(config.endpoint); if (!endpoint.hostname || endpoint.username || endpoint.password || endpoint.hash || endpoint.search || endpoint.protocol !== 'https:') throw new Error('invalid_provider_endpoint') }
+  catch { throw new Error('invalid_provider_endpoint') }
+  if (!Array.isArray(config.modelIds) || !config.modelIds.length || config.modelIds.length > 64 || config.modelIds.some(item => typeof item !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/.test(item)) || new Set(config.modelIds).size !== config.modelIds.length) throw new Error('invalid_provider_models')
+  if (!Array.isArray(config.agentKeys) || !config.agentKeys.length || config.agentKeys.length > 3 || config.agentKeys.some(item => !['pi', 'claude-code', 'opencode'].includes(String(item))) || new Set(config.agentKeys).size !== config.agentKeys.length) throw new Error('invalid_provider_agents')
+  const locator = config.credential
+  if (!locator || typeof locator !== 'object' || Array.isArray(locator)) throw new Error('invalid_provider_locator')
+  const credential = locator as Record<string, unknown>
+  if (credential.kind === 'environment') {
+    if (Object.keys(credential).sort().join(',') !== 'kind,variableNames') throw new Error('invalid_provider_locator')
+  } else if (credential.kind === 'worker-credential') {
+    if (Object.keys(credential).sort().join(',') !== 'credentialRef,kind,variableNames' || typeof credential.credentialRef !== 'string' || !credentialRef.test(credential.credentialRef)) throw new Error('invalid_provider_locator')
+  } else throw new Error('invalid_provider_locator')
+  if (!Array.isArray(credential.variableNames) || !credential.variableNames.length || credential.variableNames.length > 4 || credential.variableNames.some(item => typeof item !== 'string' || !providerEnvironmentNames.has(item)) || new Set(credential.variableNames).size !== credential.variableNames.length) throw new Error('invalid_provider_locator')
 }
 
 export function assertTrustedRegistryPackage(metadata: RegistryResourceSupplyChain): void {

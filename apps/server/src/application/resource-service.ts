@@ -65,8 +65,9 @@ export class ResourceService {
       if (!entry || typeof entry.resourceId !== 'string' || !entry.resourceId || typeof entry.resourceRevisionId !== 'string' || !entry.resourceRevisionId || typeof entry.required !== 'boolean' || (entry.agentKey !== null && typeof entry.agentKey !== 'string') || (entry.projectId !== null && typeof entry.projectId !== 'string')) throw new Error('invalid_preset_entry')
       const revision = this.repository.revision(entry.resourceRevisionId)
       if (!revision || revision.state !== 'published' || revision.resourceId !== entry.resourceId) throw new Error('preset_revision_not_published')
-      if (revision.kind !== 'skill' && revision.kind !== 'agent-runtime') throw new Error('preset_resource_kind_unavailable')
+      if (revision.kind !== 'skill' && revision.kind !== 'agent-runtime' && revision.kind !== 'model-provider') throw new Error('preset_resource_kind_unavailable')
       if (revision.kind === 'agent-runtime' && (entry.projectId !== null || !entry.agentKey || revision.payload.mode !== 'artifact' || runtimePackages[entry.agentKey] !== revision.payload.packageName)) throw new Error('invalid_runtime_binding')
+      if (revision.kind === 'model-provider' && (revision.payload.mode !== 'inline-config' || !entry.agentKey || !revision.payload.config.agentKeys.includes(entry.agentKey))) throw new Error('invalid_provider_binding')
       const key = `${entry.resourceId}:${entry.agentKey ?? ''}:${entry.projectId ?? ''}`
       if (keys.has(key) || revisionIds.has(entry.resourceRevisionId)) throw new Error('duplicate_preset_entry')
       keys.add(key)
@@ -93,8 +94,9 @@ export class ResourceService {
       for (const entry of preset.entries) {
         const revision = this.repository.revision(entry.resourceRevisionId)
         if (!revision || revision.state !== 'published' || revision.resourceId !== entry.resourceId) throw new Error('preset_revision_not_published')
-        if (revision.kind !== 'skill' && revision.kind !== 'agent-runtime') throw new Error('preset_resource_kind_unavailable')
+        if (revision.kind !== 'skill' && revision.kind !== 'agent-runtime' && revision.kind !== 'model-provider') throw new Error('preset_resource_kind_unavailable')
         if (revision.kind === 'agent-runtime' && (entry.projectId !== null || !entry.agentKey || revision.payload.mode !== 'artifact' || runtimePackages[entry.agentKey] !== revision.payload.packageName)) throw new Error('invalid_runtime_binding')
+        if (revision.kind === 'model-provider' && (revision.payload.mode !== 'inline-config' || !entry.agentKey || !revision.payload.config.agentKeys.includes(entry.agentKey))) throw new Error('invalid_provider_binding')
         if (active.has(`${entry.resourceId}:${entry.agentKey ?? ''}:${entry.projectId ?? ''}`) || activeRevisions.has(entry.resourceRevisionId)) throw new Error('preset_binding_conflict')
       }
       const at = this.now()
@@ -136,6 +138,7 @@ export class ResourceService {
     const revision = this.repository.revision(input.resourceRevisionId)
     if (!revision) throw new Error('resource_revision_not_found')
     if (revision.kind === 'agent-runtime' && (input.projectId != null || !input.agentKey || revision.payload.mode !== 'artifact' || runtimePackages[input.agentKey] !== revision.payload.packageName)) throw new Error('invalid_runtime_binding')
+    if (revision.kind === 'model-provider' && (revision.payload.mode !== 'inline-config' || !input.agentKey || !revision.payload.config.agentKeys.includes(input.agentKey))) throw new Error('invalid_provider_binding')
     const at = input.createdAt ?? this.now()
     const binding: ResourceBinding = {
       id: input.id ?? randomUUID(), workerId: input.workerId, resourceRevisionId: revision.id,
@@ -191,6 +194,7 @@ export class ResourceService {
           contentSha256: revision.contentSha256,
           files: revision.payload.mode === 'blobs' ? revision.payload.files : [],
           ...(revision.payload.mode === 'artifact' ? { artifact: revision.payload } : {}),
+          ...(revision.payload.mode === 'inline-config' ? { provider: revision.payload } : {}),
         }
       }).sort((left, right) => left.bindingId.localeCompare(right.bindingId))
     const fingerprint = createHash('sha256').update(JSON.stringify(desired)).digest('hex')

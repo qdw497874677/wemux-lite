@@ -7,15 +7,16 @@ import { request } from 'node:http'
 import { SqliteWorkerStore } from '../src/storage/sqlite-store.js'
 import { createLocalAdmin, ensureLocalInstallation, verifyLocalAdmin } from '../src/application/local-installation.js'
 import { startLocalControlServer, type LocalControlHandlers } from '../src/local-control/server.js'
+import { WorkerProviderCredentialStore } from '../src/providers/credential-store.js'
 import type { LocalWorkbenchService } from '../src/application/local-workbench.js'
 import type { ProjectId, SessionId, Timestamp, WorkerId, WorkspaceId } from '@wemux/domain'
 
-async function fixture(handlers: LocalControlHandlers = {}, options: { secureCookies?: boolean } = {}) {
+async function fixture(handlers: LocalControlHandlers = {}, options: { secureCookies?: boolean; providerKey?: string } = {}) {
   const home = await mkdtemp(join(tmpdir(), 'wemux-local-control-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
   const installation = ensureLocalInstallation(store, 'local-node')
   const admin = await createLocalAdmin(store, { username: 'owner', password: 'correct horse battery staple' })
-  const server = await startLocalControlServer({ host: '127.0.0.1', port: 0, state: store, secureCookies: options.secureCookies }, handlers)
+  const server = await startLocalControlServer({ host: '127.0.0.1', port: 0, state: store, secureCookies: options.secureCookies, providerCredentials: new WorkerProviderCredentialStore(store, { key: options.providerKey }) }, handlers)
   return { home, store, installation, admin, server, cleanup: async () => { await server.close(); store.close(); await rm(home, { recursive: true, force: true }) } }
 }
 
@@ -214,6 +215,39 @@ test('local connector writes reject malformed and cross-scope definitions before
     assert.equal((await fetch(`${f.server.url}/api/local/connectors/cluster-foreign`, { method: 'DELETE', headers })).status, 404)
     assert.equal((await fetch(`${f.server.url}/api/local/connectors/local-example`, { method: 'DELETE', headers })).status, 204)
     assert.equal(saved.length, 0)
+  } finally { await f.cleanup() }
+})
+
+test('local provider credentials require local login and CSRF, redact values, and respect revision CAS', async () => {
+  const f = await fixture({}, { providerKey: 'local-provider-test-key' })
+  const path = `${f.server.url}/api/local/providers/credentials`
+  const secret = 'provider-secret-sentinel-9183'
+  try {
+    assert.equal((await fetch(path)).status, 401)
+    const login = await fetch(`${f.server.url}/api/local/auth/session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'owner', password: 'correct horse battery staple' }) })
+    const session = cookie(login)
+    const csrf = (await login.json() as { csrf: string }).csrf
+    const headers = { cookie: session, 'x-wemux-csrf': csrf, 'content-type': 'application/json' }
+    const endpoint = `${path}/ref-1`
+    const first = { variableNames: ['OPENAI_API_KEY'], secret: { OPENAI_API_KEY: secret }, expectedRevision: 0 }
+    assert.equal((await fetch(endpoint, { method: 'PUT', headers: { ...headers, 'x-wemux-csrf': '' }, body: JSON.stringify(first) })).status, 403)
+    assert.equal((await fetch(endpoint, { method: 'PUT', headers, body: JSON.stringify({ ...first, token: secret }) })).status, 400)
+    assert.equal((await fetch(endpoint, { method: 'PUT', headers, body: JSON.stringify({ ...first, secret: { ...first.secret, extra: secret } }) })).status, 400)
+    assert.equal((await fetch(endpoint, { method: 'PUT', headers, body: JSON.stringify(first) })).status, 200)
+    const listed = await fetch(path, { headers: { cookie: session } })
+    assert.equal(listed.status, 200)
+    const body = await listed.text()
+    assert.doesNotMatch(body, /provider-secret-sentinel|ciphertext/)
+    assert.deepEqual(JSON.parse(body), { items: [{ id: 'ref-1', variableNames: first.variableNames, revision: 1, availability: 'available' }], credentialCapability: 'available' })
+    const stale = await fetch(endpoint, { method: 'PUT', headers, body: JSON.stringify(first) })
+    assert.equal(stale.status, 409)
+    assert.doesNotMatch(await stale.text(), /provider-secret-sentinel/)
+    const rotation = await fetch(endpoint, { method: 'PUT', headers, body: JSON.stringify({ ...first, expectedRevision: 1 }) })
+    assert.equal(rotation.status, 200)
+    assert.doesNotMatch(await rotation.text(), /provider-secret-sentinel/)
+    assert.equal((await fetch(endpoint, { method: 'DELETE', headers, body: JSON.stringify({ expectedRevision: 1 }) })).status, 409)
+    assert.equal((await fetch(endpoint, { method: 'DELETE', headers, body: JSON.stringify({ expectedRevision: 2 }) })).status, 204)
+    assert.deepEqual((await (await fetch(path, { headers: { cookie: session } })).json() as { items: unknown[] }).items, [])
   } finally { await f.cleanup() }
 })
 

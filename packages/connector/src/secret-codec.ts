@@ -10,6 +10,7 @@ export interface SecretCodecContext {
   readonly owner:
     | { readonly kind: 'connector'; readonly id: string }
     | { readonly kind: 'channel'; readonly id: string }
+    | { readonly kind: 'model-provider'; readonly id: string }
   readonly credentialId: string
   readonly authType: 'api_key' | 'custom_credential'
   readonly revision: number

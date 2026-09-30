@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { parseServerTransportFrame, parseWorkerTransportFrame } from '../src/index.js'
@@ -32,6 +33,23 @@ test('resource snapshot scope must explicitly carry project and Agent filters', 
   assert.throws(() => parseServerTransportFrame(payload({ ...runtime, artifact: undefined })), /Invalid Server/)
   const { agentKey: _, ...missing } = binding
   assert.throws(() => parseServerTransportFrame(payload(missing)), /Invalid Server/)
+})
+
+test('provider snapshots carry only safe locator metadata, not secrets', () => {
+  const config = { providerKey: 'openai-compatible', endpoint: 'https://models.example.test/v1', modelIds: ['test-model'], agentKeys: ['pi'], credential: { kind: 'environment', variableNames: ['OPENAI_API_KEY'] } }
+  const contentSha256 = createHash('sha256').update(JSON.stringify(config)).digest('hex')
+  const binding = { bindingId: 'binding-provider', bindingRevision: 1, agentKey: 'pi', projectId: null, resourceRevisionId: 'provider-rev', resourceId: 'provider', kind: 'model-provider', contentSha256, files: [], provider: { mode: 'inline-config', contentSha256, config } }
+  const payload = (item: unknown) => durable({ type: 'resource.set.pull', action: 'snapshot', requestId: 'pull-1', resourceSet: { workerId: 'worker-1', revision: 2, fingerprint: hash, createdAt: now, bindings: [item] } })
+  assert.doesNotThrow(() => parseServerTransportFrame(payload(binding)))
+  assert.throws(() => parseServerTransportFrame(payload({ ...binding, provider: { ...binding.provider, config: { ...config, apiKey: 'sentinel-secret' } } })), /Invalid Server/)
+  assert.throws(() => parseServerTransportFrame(payload({ ...binding, provider: { ...binding.provider, config: { ...config, credential: { kind: 'environment', variableNames: ['WEMUX_INTERNAL_KEY'] } } } })), /Invalid Server/)
+  assert.throws(() => parseServerTransportFrame(payload({ ...binding, provider: undefined })), /Invalid Server/)
+  const local = { ...config, credential: { kind: 'worker-credential', credentialRef: 'worker-ref', variableNames: ['OPENAI_API_KEY'] } }
+  const localHash = createHash('sha256').update(JSON.stringify(local)).digest('hex')
+  const localBinding = { ...binding, contentSha256: localHash, provider: { mode: 'inline-config', contentSha256: localHash, config: local } }
+  assert.doesNotThrow(() => parseServerTransportFrame(payload(localBinding)))
+  assert.throws(() => parseServerTransportFrame(payload({ ...localBinding, provider: { ...localBinding.provider, config: { ...local, credential: { ...local.credential, token: 'sentinel-secret' } } } })), /Invalid Server/)
+  assert.throws(() => parseServerTransportFrame(payload({ ...localBinding, provider: { ...localBinding.provider, config: { ...local, credential: { ...local.credential, credentialRef: '../escape' } } } })), /Invalid Server/)
 })
 
 test('parses blob fetch and reconcile report in their correct directions', () => {

@@ -12,6 +12,7 @@ import { ClusterLifecycle } from './application/cluster-lifecycle.js'
 import { createLocalAdmin, ensureLocalInstallation } from './application/local-installation.js'
 import { createLocalWorkbenchService } from './application/local-workbench.js'
 import { startLocalControlServer } from './local-control/server.js'
+import { WorkerProviderCredentialStore } from './providers/credential-store.js'
 import { enroll } from './transport/enrollment.js'
 import { defaultProbe, preflightServer, probeCli, reportTailscale } from './transport/tailscale.js'
 import { openTunnels, type TunnelPool } from './transport/tailscale-tunnel.js'
@@ -184,7 +185,7 @@ export async function main(args = process.argv.slice(2)) {
       const webStaticPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'web')
       const hasWebBundle = await stat(join(webStaticPath, 'index.html')).then(file => file.isFile()).catch(() => false)
       if (admin && !hasWebBundle) console.error('[local] 未找到构建的共享 Web，暂时使用内联 Worker 工作台')
-      const localControl = admin ? await startLocalControlServer({ host: options.host, port: options.port, state: store, secureCookies: options.secureCookies, webStaticPath: hasWebBundle ? webStaticPath : undefined }, { shutdown: requestStop, workbench, cluster: lifecycle }) : null
+      const localControl = admin ? await startLocalControlServer({ host: options.host, port: options.port, state: store, secureCookies: options.secureCookies, webStaticPath: hasWebBundle ? webStaticPath : undefined, providerCredentials: WorkerProviderCredentialStore.fromEnvironment(store) }, { shutdown: requestStop, workbench, cluster: lifecycle }) : null
       if (localControl) {
         console.error(`[local] Worker Web：${localControl.url}`)
         if (!['127.0.0.1', '::1', 'localhost'].includes(options.host)) console.error('[local] 警告：当前监听非 loopback 地址；首批版本尚未提供完整公网 HTTPS/受信代理配置，请勿直接暴露到公网')

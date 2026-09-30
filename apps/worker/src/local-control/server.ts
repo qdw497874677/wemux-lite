@@ -9,6 +9,7 @@ import type { ClusterLifecycle } from '../application/cluster-lifecycle.js'
 import { parseLocalConnector, redactLocalConnector } from './connector-input.js'
 import { installWarning } from '../runtimes/management.js'
 import { serveWorkerStatic } from './static-site.js'
+import { ProviderCredentialError, type WorkerProviderCredentialStore } from '../providers/credential-store.js'
 
 const sessionCookie = 'wemux_worker_session'
 const sessionLifetimeMs = 8 * 60 * 60 * 1000
@@ -25,6 +26,7 @@ export interface LocalControlServerOptions {
   readonly state: LocalState
   readonly secureCookies?: boolean
   readonly webStaticPath?: string
+  readonly providerCredentials?: WorkerProviderCredentialStore
   readonly now?: () => number
 }
 
@@ -161,6 +163,32 @@ export async function startLocalControlServer(options: LocalControlServerOptions
         if (!authenticated || request.headers['x-wemux-csrf'] !== authenticated.csrf) return json(response, 403, { error: 'Forbidden' })
         if (token) sessions.delete(token)
         return json(response, 204, null, { 'Set-Cookie': `${sessionCookie}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0` })
+      }
+      if (request.url?.startsWith('/api/local/providers/credentials')) {
+        if (!authenticated) return json(response, 401, { error: 'Authentication required' })
+        const credentials = options.providerCredentials
+        if (!credentials) return json(response, 409, { error: 'Provider credential control is unavailable' })
+        const target = new URL(request.url, `http://${request.headers.host}`)
+        const segments = target.pathname.split('/').filter(Boolean)
+        if (segments[0] !== 'api' || segments[1] !== 'local' || segments[2] !== 'providers' || segments[3] !== 'credentials') return json(response, 404, { error: 'Not found' })
+        if (request.method === 'GET' && target.pathname === '/api/local/providers/credentials') return json(response, 200, { items: await credentials.list(), credentialCapability: credentials.available ? 'available' : 'unavailable' })
+        if (request.headers['x-wemux-csrf'] !== authenticated.csrf) return json(response, 403, { error: 'Forbidden' })
+        if (segments.length === 5) {
+          const id = segments[4]!
+          if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)) return json(response, 400, { error: '模型凭据标识无效' })
+          if (request.method === 'PUT') {
+            const body = await readJson(request)
+            if (Object.keys(body).some(key => !['variableNames', 'secret', 'expectedRevision'].includes(key)) || typeof body.expectedRevision !== 'number') return json(response, 400, { error: '模型凭据参数无效' })
+            return json(response, 200, await credentials.put({ id, variableNames: body.variableNames as string[], secret: body.secret as Record<string, string>, expectedRevision: body.expectedRevision }))
+          }
+          if (request.method === 'DELETE') {
+            const body = await readJson(request)
+            if (Object.keys(body).some(key => key !== 'expectedRevision') || typeof body.expectedRevision !== 'number') return json(response, 400, { error: '模型凭据参数无效' })
+            await credentials.delete(id, body.expectedRevision)
+            return json(response, 204, null)
+          }
+        }
+        return json(response, 404, { error: 'Not found' })
       }
       if (request.url?.startsWith('/api/local/connectors')) {
         if (!authenticated) return json(response, 401, { error: 'Authentication required' })
@@ -398,6 +426,7 @@ export async function startLocalControlServer(options: LocalControlServerOptions
       if (error instanceof Error && error.message === 'request-too-large') return json(response, 413, { error: 'Request too large' })
       if (error instanceof Error && error.message === 'invalid-json') return json(response, 400, { error: 'Invalid JSON' })
       if (error instanceof LocalWorkbenchError) return json(response, 400, { error: error.message })
+      if (error instanceof ProviderCredentialError) return json(response, error.code === 'revision_conflict' ? 409 : error.code === 'credential_unavailable' ? 503 : 400, { error: error.message, code: error.code })
       console.error('Local control request failed:', error)
       return json(response, 500, { error: 'Internal error' })
     }

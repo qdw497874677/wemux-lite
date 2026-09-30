@@ -24,6 +24,7 @@ for (const side of ['server', 'worker'] as const) test(`built ${side} UPDATE OR 
       if (side === 'server') db.prepare("INSERT INTO records(kind,id,data) VALUES('session','live',?)").run(JSON.stringify({ id: 'live', deletedAt: null }))
       // Reconstruct the previous version to exercise upgrade installation too.
       db.exec(`DROP TRIGGER IF EXISTS ${side === 'server' ? 'session_record_destination' : 'tombstone_destination'}`)
+      if (side === 'worker') db.exec('DROP TABLE provider_credentials') // v5 table did not exist in v2.
       db.exec(side === 'server' ? 'DELETE FROM schema_migrations WHERE version=10' : 'PRAGMA user_version=2')
       for (let restart = 0; restart < 2; restart++) {
         new Store(path).close()

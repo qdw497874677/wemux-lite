@@ -23,6 +23,8 @@ export interface LocalConnectorDefinition {
   config: { transport: 'stdio'; command: string; args: string[]; cwd: string | null; publicEnvironment: Record<string, string>; secretEnvironmentNames: string[] } | { transport: 'streamable_http'; url: string; publicHeaders: Record<string, string>; authentication: 'none' | 'api_key' | 'custom_credential'; allowPrivateNetwork: boolean }
 }
 export interface LocalConnectorList { items: LocalConnectorDefinition[]; credentialCapability: 'available' | 'unavailable' }
+export interface LocalProviderCredential { id: string; variableNames: string[]; revision: number; availability: 'available' | 'unavailable' }
+export interface LocalProviderCredentialList { items: LocalProviderCredential[]; credentialCapability: 'available' | 'unavailable' }
 export interface LocalAgentInstallation { installation: { key: string; phase: 'installing' | 'ready' | 'failed'; message: string } | null }
 export interface LocalClusterDiscovery { serverUrl: string; ok: boolean; status: number; name?: string; error?: string }
 export interface LocalSendReceipt { commandId: string; status: string; messageId: string }
@@ -62,6 +64,9 @@ export function createLocalSessionApi(fetcher: typeof fetch = fetch, onUnauthori
     saveConnector: (definition: LocalConnectorDefinition) => request<LocalConnectorDefinition>('connectors', 'POST', definition),
     deleteConnector: (id: string) => request<void>(`connectors/${encodeURIComponent(id)}`, 'DELETE'),
     putConnectorCredential: (connectorId: string, id: string, secret: Record<string, string>, authType: 'api_key' | 'custom_credential') => request<{ id: string; revision: number }>(`connectors/${encodeURIComponent(connectorId)}/credential`, 'PUT', { id, authType, secret }),
+    providerCredentials: () => request<LocalProviderCredentialList>('providers/credentials'),
+    putProviderCredential: (id: string, variableNames: string[], secret: Record<string, string>, expectedRevision: number) => request<LocalProviderCredential>(`providers/credentials/${encodeURIComponent(id)}`, 'PUT', { variableNames, secret, expectedRevision }),
+    deleteProviderCredential: (id: string, expectedRevision: number) => request<void>(`providers/credentials/${encodeURIComponent(id)}`, 'DELETE', { expectedRevision }),
     discoverCluster: (serverUrl: string) => request<LocalClusterDiscovery>('cluster/discover', 'POST', { serverUrl }),
     enrollCluster: (serverUrl: string, token: string, name: string) => request<{ identity: { workerId: string } }>('cluster/enroll', 'POST', { serverUrl, token, name }),
     resumeCluster: () => request('cluster/resume', 'POST'),

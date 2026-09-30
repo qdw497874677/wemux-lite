@@ -63,6 +63,35 @@ test('manual Preset application creates one atomic ResourceSet revision and idem
   } finally { repository.close() }
 })
 
+test('model-provider preset only binds mapped Agent and distributes locator without a secret', async () => {
+  const { repository, service } = setup()
+  try {
+    const config = { providerKey: 'openai-compatible' as const, endpoint: 'https://models.example.test/v1', modelIds: ['test-model'], agentKeys: ['pi' as AgentKey], credential: { kind: 'environment' as const, variableNames: ['OPENAI_API_KEY'] } }
+    const integrity = createHash('sha256').update(JSON.stringify(config)).digest('hex')
+    const provider: Resource = { id: 'provider-1', kind: 'model-provider', name: 'Test model', description: '', definition: config, createdBy: admin, createdAt: at, updatedAt: at }
+    const published: ResourceRevision = { id: 'provider-rev', resourceId: provider.id, kind: 'model-provider', version: 1, state: 'published', manifest: { ...revision.manifest, bytes: Buffer.byteLength(JSON.stringify(config)), fileCount: 0, sha256: integrity, compatibility: { ...revision.manifest.compatibility, agentKeys: ['pi' as AgentKey] } }, payload: { mode: 'inline-config', contentSha256: integrity, config }, contentSha256: integrity, supplyChain: { mode: 'static-content', manifestSha256: integrity }, createdBy: admin, createdAt: at }
+    repository.createResource(provider); repository.createRevision(published)
+    const entry = { resourceId: provider.id, resourceRevisionId: published.id, agentKey: 'pi' as AgentKey, projectId: null, required: true }
+    assert.throws(() => service.createPreset({ name: 'Wrong Agent', description: '', expectedRevision: 0, entries: [{ ...entry, agentKey: 'claude-code' as AgentKey }], createdBy: admin }), /invalid_provider_binding/)
+    assert.throws(() => service.createBinding({ workerId: worker, resourceRevisionId: published.id, agentKey: 'claude-code' as AgentKey, createdBy: admin }), /invalid_provider_binding/)
+    service.createPreset({ id: 'models', name: 'Model provider', description: '', expectedRevision: 0, entries: [entry], createdBy: admin })
+    await service.applyPreset({ presetId: 'models', presetRevision: 1, workerId: worker, requestId: 'apply-models', expectedSetRevision: 0, createdBy: admin })
+    const binding = service.desiredSet(worker).bindings[0]
+    assert.equal(binding?.kind, 'model-provider')
+    assert.deepEqual(binding?.provider?.config.credential, { kind: 'environment', variableNames: ['OPENAI_API_KEY'] })
+    assert.doesNotMatch(JSON.stringify(service.desiredSet(worker)), /sentinel-secret/)
+    const localConfig = { ...config, credential: { kind: 'worker-credential' as const, credentialRef: 'worker-ref-1', variableNames: ['OPENAI_API_KEY'] } }
+    const localHash = createHash('sha256').update(JSON.stringify(localConfig)).digest('hex')
+    const localProvider: Resource = { ...provider, id: 'provider-local', definition: localConfig }
+    const localRevision: ResourceRevision = { ...published, id: 'provider-local-rev', resourceId: localProvider.id, contentSha256: localHash, payload: { mode: 'inline-config', contentSha256: localHash, config: localConfig }, manifest: { ...published.manifest, bytes: Buffer.byteLength(JSON.stringify(localConfig)), sha256: localHash }, supplyChain: { mode: 'static-content', manifestSha256: localHash } }
+    repository.createResource(localProvider); repository.createRevision(localRevision)
+    service.createPreset({ id: 'models-local', name: 'Local model credential', description: '', expectedRevision: 0, entries: [{ ...entry, resourceId: localProvider.id, resourceRevisionId: localRevision.id }], createdBy: admin })
+    await service.applyPreset({ presetId: 'models-local', presetRevision: 1, workerId: worker, requestId: 'apply-models-local', expectedSetRevision: 1, createdBy: admin })
+    assert.deepEqual(service.desiredSet(worker).bindings.find(item => item.resourceId === localProvider.id)?.provider?.config.credential, localConfig.credential)
+    assert.doesNotMatch(JSON.stringify(service.desiredSet(worker)), /sentinel-secret/)
+  } finally { repository.close() }
+})
+
 test('a failed multi-entry apply rolls back all bindings and emits no notification', async () => {
   const { repository, service, notifications } = setup()
   try {

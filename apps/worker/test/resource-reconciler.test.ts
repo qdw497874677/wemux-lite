@@ -11,6 +11,8 @@ import { ResourceReconciler } from '../src/resources/resource-reconciler.ts'
 import { activateStagedRuntimes, checkActivatedRuntimes } from '../src/resources/runtime-materializer.ts'
 import { readAgentSettings, saveAgentSelection } from '../src/config/agent-settings.ts'
 import { installCatalog } from '../src/runtimes/management.ts'
+import { WorkerProviderCredentialStore } from '../src/providers/credential-store.ts'
+import { SqliteWorkerStore } from '../src/storage/sqlite-store.ts'
 import type { AgentAdapter, LocalAgentDetection } from '../src/application/ports/agent-adapter.ts'
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex')
@@ -36,6 +38,121 @@ async function fixture() {
   reconciler = new ResourceReconciler({ workerId, home, databasePath: join(home, 'resources.sqlite'), transport, now: () => '2026-01-01T00:00:00.000Z' as never })
   return { home, sent, blobs, reconciler, close: async () => { await reconciler.close(); await rm(home, { recursive: true, force: true }) } }
 }
+
+test('model-provider environment probe is fail closed and never reports ready or leaks values', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'wemux-provider-probe-'))
+  const sent: WorkerPayload[] = []
+  const environment: NodeJS.ProcessEnv = {}
+  const config = { providerKey: 'openai-compatible' as const, endpoint: 'https://models.example.test/v1', modelIds: ['test-model'], agentKeys: ['pi' as never], credential: { kind: 'environment' as const, variableNames: ['OPENAI_API_KEY'] } }
+  const contentSha256 = sha(JSON.stringify(config))
+  const binding = { bindingId: 'provider-binding', bindingRevision: 1, agentKey: 'pi' as never, projectId: null, resourceRevisionId: 'provider-rev', resourceId: 'provider-1', kind: 'model-provider' as const, contentSha256, files: [], provider: { mode: 'inline-config' as const, contentSha256, config } }
+  const desired: ResourceSetSnapshot = { workerId, revision: 1, fingerprint: sha('provider-set'), bindings: [binding], createdAt: '2026-01-01T00:00:00Z' as never }
+  const reconciler = new ResourceReconciler({ workerId, home, databasePath: join(home, 'resources.sqlite'), transport: { send: payload => { sent.push(payload) } }, environment })
+  try {
+    await reconciler.reconcile(desired)
+    assert.equal(sent.at(-1)?.type === 'resource.reconcile.report' && sent.at(-1).report.errorCode, 'credential_required')
+    environment.OPENAI_API_KEY = 'sentinel-secret'
+    await reconciler.reconcile(desired)
+    assert.equal(sent.at(-1)?.type === 'resource.reconcile.report' && sent.at(-1).report.phase, 'credential-required', 'configured environment alone is not a model probe')
+    assert.equal(sent.at(-1)?.type === 'resource.reconcile.report' && sent.at(-1).report.errorCode, null)
+    assert.doesNotMatch(JSON.stringify(sent) + await readFile(join(home, 'resources.sqlite')).then(bytes => bytes.toString('utf8')), /sentinel-secret/)
+    assert.ok(sent.every(item => item.type !== 'resource.reconcile.report' || item.report.phase !== 'ready'))
+  } finally { await reconciler.close(); await rm(home, { recursive: true, force: true }) }
+})
+
+test('model-provider local encrypted locator checks exact fields, revocation and invalid keys without leaking Secret', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'wemux-provider-local-probe-'))
+  const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
+  const credentials = new WorkerProviderCredentialStore(store, { key: 'provider-probe-key' })
+  const sent: WorkerPayload[] = []
+  const config = { providerKey: 'openai-compatible' as const, endpoint: 'https://models.example.test/v1', modelIds: ['test-model'], agentKeys: ['pi' as never], credential: { kind: 'worker-credential' as const, credentialRef: 'local-ref', variableNames: ['OPENAI_API_KEY'] } }
+  const contentSha256 = sha(JSON.stringify(config))
+  const binding = { bindingId: 'provider-local-binding', bindingRevision: 1, agentKey: 'pi' as never, projectId: null, resourceRevisionId: 'provider-local-rev', resourceId: 'provider-local', kind: 'model-provider' as const, contentSha256, files: [], provider: { mode: 'inline-config' as const, contentSha256, config } }
+  const desired: ResourceSetSnapshot = { workerId, revision: 1, fingerprint: sha('provider-local-set'), bindings: [binding], createdAt: '2026-01-01T00:00:00Z' as never }
+  const reconciler = new ResourceReconciler({ workerId, home, databasePath: join(home, 'resources.sqlite'), transport: { send: payload => { sent.push(payload) } }, providerCredentials: credentials })
+  const last = () => { const payload = sent.at(-1); assert.equal(payload?.type, 'resource.reconcile.report'); return payload.report }
+  const sentinel = 'encrypted-model-secret-8142'
+  try {
+    await reconciler.reconcile(desired)
+    assert.equal(last().errorCode, 'credential_required')
+    await credentials.put({ id: 'local-ref', variableNames: ['ANTHROPIC_API_KEY'], secret: { ANTHROPIC_API_KEY: sentinel }, expectedRevision: 0 })
+    await reconciler.reconcile(desired)
+    assert.equal(last().errorCode, 'credential_required', 'a different declared field must not count as configured')
+    await credentials.put({ id: 'local-ref', variableNames: ['OPENAI_API_KEY'], secret: { OPENAI_API_KEY: sentinel }, expectedRevision: 1 })
+    await reconciler.reconcile(desired)
+    assert.equal(last().phase, 'credential-required', 'resolvable secret is not a model probe')
+    assert.equal(last().errorCode, null)
+    const unavailable = new ResourceReconciler({ workerId, home, databasePath: join(home, 'resources-missing-key.sqlite'), transport: { send: payload => { sent.push(payload) } }, providerCredentials: new WorkerProviderCredentialStore(store, { key: 'wrong-key' }) })
+    try { await unavailable.reconcile(desired); assert.equal(last().errorCode, 'credential_required') } finally { await unavailable.close() }
+    await credentials.delete('local-ref', 2)
+    await reconciler.reconcile(desired)
+    assert.equal(last().errorCode, 'credential_required')
+    assert.doesNotMatch(JSON.stringify(sent) + await readFile(join(home, 'resources.sqlite')).then(bytes => bytes.toString('utf8')), /encrypted-model-secret-8142/)
+    assert.ok(sent.every(item => item.type !== 'resource.reconcile.report' || item.report.phase !== 'ready'))
+  } finally { await reconciler.close(); store.close(); await rm(home, { recursive: true, force: true }) }
+})
+
+test('Provider launch selection requires fresh exact Project, Agent and model match; conflicts and revoked credentials fail closed', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'wemux-provider-selection-'))
+  const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
+  const credentials = new WorkerProviderCredentialStore(store, { key: 'selection-encryption-key' })
+  const sent: WorkerPayload[] = []
+  const make = (resourceId: string, projectId: string | null, agentKey: string | null, modelIds = ['model-x']) => {
+    const config = { providerKey: 'openai-compatible' as const, endpoint: 'https://models.example.test/v1', modelIds, agentKeys: ['pi' as never], credential: { kind: 'worker-credential' as const, credentialRef: resourceId, variableNames: ['OPENAI_API_KEY'] } }
+    const contentSha256 = sha(JSON.stringify(config))
+    return { bindingId: `${resourceId}-binding`, bindingRevision: 1, resourceId, resourceRevisionId: `${resourceId}-rev`, projectId: projectId as never, agentKey: agentKey as never, kind: 'model-provider' as const, contentSha256, files: [], provider: { mode: 'inline-config' as const, contentSha256, config } }
+  }
+  const global = make('global-provider', null, 'pi')
+  const project = make('project-provider', 'project-a', 'pi')
+  const makeSet = (revision: number, bindings: ReturnType<typeof make>[]): ResourceSetSnapshot => ({ workerId, revision, fingerprint: sha(`provider-select-${revision}`), createdAt: '2026-01-01T00:00:00Z' as never, bindings })
+  const reconciler = new ResourceReconciler({ workerId, home, databasePath: join(home, 'resources.sqlite'), transport: { send: payload => { sent.push(payload) } }, providerCredentials: credentials })
+  const select = (projectId = 'project-a', agentKey = 'pi', modelId = 'openai-compatible::model-x') => reconciler.providerForLaunch(projectId as never, agentKey as never, modelId as never)
+  try {
+    await credentials.put({ id: 'global-provider', variableNames: ['OPENAI_API_KEY'], secret: { OPENAI_API_KEY: 'sentinel-global-123' }, expectedRevision: 0 })
+    await credentials.put({ id: 'project-provider', variableNames: ['OPENAI_API_KEY'], secret: { OPENAI_API_KEY: 'sentinel-project-456' }, expectedRevision: 0 })
+    await reconciler.reconcile(makeSet(1, [global, project]))
+    assert.deepEqual(await select(), { resourceId: 'project-provider', resourceRevisionId: 'project-provider-rev', bindingId: 'project-provider-binding', providerKey: 'openai-compatible', modelId: 'model-x' })
+    assert.equal((await select('project-b'))?.resourceId, 'global-provider')
+    assert.equal(await select('project-a', 'claude-code'), null)
+    assert.equal(await select('project-a', 'pi', 'openai-compatible::another'), null)
+    assert.equal(await select('project-a', 'pi', null as never), null)
+    await reconciler.reconcile(makeSet(2, [global, project, make('project-other', 'project-a', 'pi')]))
+    await assert.rejects(select(), /provider_binding_conflict/)
+    await reconciler.reconcile(makeSet(3, [global, project]))
+    const invalidProject = { ...project, provider: { ...project.provider, config: { ...project.provider.config, endpoint: 'https://changed.example.test/v1' } } }
+    await reconciler.reconcile(makeSet(4, [global, invalidProject]))
+    await assert.rejects(select(), /provider_binding_invalid/, 'tampered revision cannot silently fall back to global Provider')
+    await reconciler.reconcile(makeSet(5, [global, project]))
+    await credentials.delete('project-provider', 1)
+    await assert.rejects(select(), /provider_credential_unavailable/)
+    assert.notEqual((await select('project-b'))?.resourceId, 'project-provider')
+    const pending = makeSet(6, [global, project])
+    let finishResolution!: (value: Readonly<Record<string, string>>) => void
+    let hold = false
+    const delayed = new ResourceReconciler({ workerId, home, databasePath: join(home, 'resources-race.sqlite'), transport: { send: payload => { sent.push(payload) } }, providerCredentials: { resolve: () => hold ? new Promise(resolve => { finishResolution = resolve }) : Promise.resolve({ OPENAI_API_KEY: 'sentinel-before-disconnect' }) } })
+    try {
+      await delayed.reconcile(pending)
+      hold = true
+      const launch = delayed.providerForLaunch('project-a' as never, 'pi' as never, 'openai-compatible::model-x' as never)
+      delayed.disconnected()
+      finishResolution({ OPENAI_API_KEY: 'sentinel-after-disconnect' })
+      await assert.rejects(launch, /provider_snapshot_unavailable/)
+      // A reconnect with the same desired revision must not revive the old selection.
+      hold = false
+      await delayed.reconcile(pending)
+      hold = true
+      const reconnected = delayed.providerForLaunch('project-a' as never, 'pi' as never, 'openai-compatible::model-x' as never)
+      delayed.disconnected()
+      hold = false
+      await delayed.reconcile(pending)
+      finishResolution({ OPENAI_API_KEY: 'sentinel-after-reconnect' })
+      await assert.rejects(reconnected, /provider_snapshot_unavailable/)
+    } finally { await delayed.close() }
+    reconciler.disconnected()
+    await assert.rejects(select('project-b'), /provider_snapshot_unavailable/)
+    assert.doesNotMatch(JSON.stringify(sent) + await readFile(join(home, 'resources.sqlite')).then(bytes => bytes.toString('utf8')), /sentinel-global-123|sentinel-project-456/)
+  } finally { await reconciler.close(); store.close(); await rm(home, { recursive: true, force: true }) }
+})
 
 test('Agent runtime: pinned artifact stages without changing selection; repeated snapshot reprobes; failed update retains previous', async () => {
   const home = await mkdtemp(join(tmpdir(), 'wemux-runtime-resource-'))

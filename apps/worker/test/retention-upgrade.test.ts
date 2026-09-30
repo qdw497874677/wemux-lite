@@ -21,7 +21,8 @@ test('Worker v1 retention upgrade rolls back failed backfill, cleans deleted pay
     db.exec('DROP TRIGGER fail_cleanup')
     for (let i = 0; i < 2; i++) {
       const store = new SqliteWorkerStore(path); store.close()
-      assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 4)
+      assert.equal(db.prepare('PRAGMA user_version').get()!.user_version, 5)
+      assert.equal(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='provider_credentials'").get()?.name, 'provider_credentials')
       assert.deepEqual(db.prepare('SELECT bucket,id,body FROM documents').all().map(r => ({ ...r })), [{ bucket: 'deleted-sessions', id: 'gone', body: '{"deletedAt":"then"}' }])
       assert.deepEqual(db.prepare('SELECT * FROM journal').all(), [])
       assert.throws(() => db.exec("UPDATE documents SET bucket='sessions'"), /Session deleted/)

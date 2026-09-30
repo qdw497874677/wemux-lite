@@ -1,13 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { AgentKey, ProjectId, ReconcileReport, ResourceBindingSnapshot, ResourceReconcilePhase, ResourceSetSnapshot, Timestamp, WorkerId } from '@wemux/domain'
+import { assertModelProviderConfig, type AgentKey, type ModelId, type ProjectId, type ReconcileReport, type ResourceBindingSnapshot, type ResourceReconcilePhase, type ResourceSetSnapshot, type Timestamp, type WorkerId } from '@wemux/domain'
 import type { ResourceBlobFetchPayload, ServerResourcePayload, WorkerPayload } from '@wemux/wire-protocol'
 import { ResourceStateStore } from './resource-state-store.ts'
 import { SkillMaterializer } from './skill-materializer.ts'
 import { RuntimeMaterializer } from './runtime-materializer.ts'
 import { stageAgentRuntime } from '../runtimes/management.ts'
 import type { RuntimeProcess } from '../runtimes/management.ts'
+import type { WorkerProviderCredentialStore } from '../providers/credential-store.ts'
 
 interface ResourceTransport { send(payload: WorkerPayload): Promise<void> | void }
 
@@ -41,6 +42,8 @@ export interface ResourceReconcilerOptions {
   readonly now?: () => Timestamp
   readonly runtimeProcess?: RuntimeProcess
   readonly stageRuntime?: typeof stageAgentRuntime
+  readonly environment?: NodeJS.ProcessEnv
+  readonly providerCredentials?: Pick<WorkerProviderCredentialStore, 'resolve'>
 }
 
 export class ResourceReconciler {
@@ -49,6 +52,8 @@ export class ResourceReconciler {
   private readonly state: ResourceStateStore
   private readonly materializer: SkillMaterializer
   private readonly runtimes: RuntimeMaterializer
+  private readonly environment: NodeJS.ProcessEnv
+  private readonly providerCredentials?: Pick<WorkerProviderCredentialStore, 'resolve'>
   private readonly now: () => Timestamp
   private readonly semaphore: Semaphore
   private readonly pulls = new Map<string, PendingRequest<ResourceSetSnapshot>>()
@@ -67,6 +72,8 @@ export class ResourceReconciler {
     this.now = options.now ?? (() => new Date().toISOString() as Timestamp)
     this.materializer = new SkillMaterializer(options.home, this.state, this.now)
     this.runtimes = new RuntimeMaterializer(options.home, this.state, this.now, options.runtimeProcess, options.stageRuntime)
+    this.environment = options.environment ?? process.env
+    this.providerCredentials = options.providerCredentials
     this.semaphore = new Semaphore(options.concurrency ?? 2)
   }
 
@@ -121,6 +128,40 @@ export class ResourceReconciler {
   }
 
   async resolveSkillPath(resourceId: string): Promise<string | null> { return this.materializer.resolveSkillPath(resourceId) }
+
+  /** Select only a fresh, exact binding. This returns no Secret and is not a model-availability probe. */
+  async providerForLaunch(projectId: ProjectId, agentKey: AgentKey, modelId: ModelId | null): Promise<{ resourceId: string; resourceRevisionId: string; bindingId: string; providerKey: string; modelId: string } | null> {
+    if (!modelId) return null
+    const divider = modelId.indexOf('::')
+    if (divider < 1 || divider === modelId.length - 2) return null
+    const providerKey = modelId.slice(0, divider)
+    const selectedModel = modelId.slice(divider + 2)
+    if (this.closed || !this.snapshotFresh) throw new Error('provider_snapshot_unavailable')
+    const desired = this.state.desired()
+    if (!desired) throw new Error('provider_snapshot_unavailable')
+    const epoch = this.connectionEpoch
+    const matches = desired.bindings.filter(binding => binding.kind === 'model-provider' && (binding.projectId === null || binding.projectId === projectId) && (binding.agentKey === null || binding.agentKey === agentKey) && binding.provider?.config.providerKey === providerKey && binding.provider.config.modelIds.includes(selectedModel))
+    if (!matches.length) return null
+    const priority = Math.max(...matches.map(binding => Number(binding.projectId !== null) * 2 + Number(binding.agentKey !== null)))
+    const candidates = matches.filter(binding => Number(binding.projectId !== null) * 2 + Number(binding.agentKey !== null) === priority)
+    if (candidates.length !== 1) throw new Error('provider_binding_conflict')
+    const binding = candidates[0]!
+    const provider = binding.provider!
+    if (provider.mode !== 'inline-config' || provider.contentSha256 !== binding.contentSha256 || binding.files.length || binding.artifact || createHash('sha256').update(JSON.stringify(provider.config)).digest('hex') !== binding.contentSha256) throw new Error('provider_binding_invalid')
+    try { assertModelProviderConfig(provider.config) } catch { throw new Error('provider_binding_invalid') }
+    if (!provider.config.agentKeys.includes(agentKey)) throw new Error('provider_binding_invalid')
+    const locator = provider.config.credential
+    if (locator.kind === 'environment') {
+      if (!locator.variableNames.every(name => typeof this.environment[name] === 'string' && Boolean(this.environment[name]?.trim()))) throw new Error('provider_credential_unavailable')
+    } else {
+      if (!this.providerCredentials) throw new Error('provider_credential_unavailable')
+      try { await this.providerCredentials.resolve(locator.credentialRef, locator.variableNames) }
+      catch { throw new Error('provider_credential_unavailable') }
+    }
+    // A revocation, reconnect or new desired set during async decryption invalidates selection.
+    if (this.closed || !this.snapshotFresh || this.connectionEpoch !== epoch || this.announcedRevision > desired.revision || this.state.desired()?.revision !== desired.revision || this.state.desired()?.fingerprint !== desired.fingerprint || !this.state.desired()?.bindings.some(current => current.bindingId === binding.bindingId && current.bindingRevision === binding.bindingRevision && current.resourceRevisionId === binding.resourceRevisionId && current.contentSha256 === binding.contentSha256)) throw new Error('provider_snapshot_unavailable')
+    return { resourceId: binding.resourceId, resourceRevisionId: binding.resourceRevisionId, bindingId: binding.bindingId, providerKey, modelId: selectedModel }
+  }
 
   /** Freeze authorized installed Skill bytes at launch; later binding changes cannot mutate this Invocation. */
   async skillsForLaunch(projectId: ProjectId, agentKey: AgentKey): Promise<readonly { resourceId: string; revisionId: string; content: Uint8Array }[]> {
@@ -209,6 +250,32 @@ export class ResourceReconciler {
   private async reconcileBinding(snapshot: ResourceSetSnapshot, binding: ResourceBindingSnapshot): Promise<void> {
     if (binding.kind === 'agent-runtime') {
       await this.reconcileRuntime(snapshot, binding)
+      return
+    }
+    if (binding.kind === 'model-provider') {
+      const provider = binding.provider
+      try {
+        if (!provider || provider.mode !== 'inline-config' || provider.contentSha256 !== binding.contentSha256 || createHash('sha256').update(JSON.stringify(provider.config)).digest('hex') !== binding.contentSha256 || binding.files.length || binding.artifact) throw new Error('invalid_provider_config')
+        assertModelProviderConfig(provider.config)
+        if (binding.agentKey && !provider.config.agentKeys.includes(binding.agentKey)) throw new Error('invalid_provider_binding')
+      } catch {
+        await this.report(snapshot, binding, 'failed', null, 'invalid_provider_config', '模型供应商配置无效')
+        return
+      }
+      const locator = provider.config.credential
+      const names = locator.variableNames
+      let configured = false
+      if (locator.kind === 'environment') configured = names.every(name => typeof this.environment[name] === 'string' && Boolean(this.environment[name]?.trim()))
+      else if (this.providerCredentials) {
+        try {
+          // Only check whether the local owner can resolve the declared fields;
+          // never persist, transmit or report the resolved values.
+          await this.providerCredentials.resolve(locator.credentialRef, names)
+          configured = true
+        } catch { /* Missing key, stale fields, revoked or tampered credentials fail closed. */ }
+      }
+      if (configured) await this.report(snapshot, binding, 'installed', 'credential-required', null, '本地模型凭据已配置；尚未验证模型探测或 Agent 注入')
+      else await this.report(snapshot, binding, 'installed', 'credential-required', 'credential_required', '需要在 Worker 本地配置模型凭据')
       return
     }
     if (binding.kind !== 'skill') {

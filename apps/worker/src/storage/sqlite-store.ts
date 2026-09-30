@@ -10,11 +10,12 @@ import type { LocalWorkspace, RepositoryCheckout } from '../domain/local-workspa
 import type { LocalAdminRecord, LocalInstallationIdentity } from '../domain/local-installation.ts'
 import type { ConnectorDefinition, CredentialRecord, ExecutionResult } from '@wemux/connector'
 import type { ConnectorExecutionRecord, WorkerConnectorStore } from '../connectors/store.ts'
+import type { ProviderCredentialRecord, ProviderCredentialRepository } from '../providers/credential-store.ts'
 
 export const now = () => new Date().toISOString() as Timestamp
 
 /** Serialized transactions also isolate async port callbacks from other transactions. */
-export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore, WorkerConnectorStore {
+export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore, WorkerConnectorStore, ProviderCredentialRepository {
   private readonly db: DatabaseSync
   private tail: Promise<unknown> = Promise.resolve()
 
@@ -22,12 +23,12 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
     this.db = new DatabaseSync(path)
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;')
     const version = this.db.prepare('PRAGMA user_version').get()?.user_version
-    if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== 4) { this.db.close(); throw new Error('Unsupported Worker database schema') }
+    if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5) { this.db.close(); throw new Error('Unsupported Worker database schema') }
     if (version === 0) this.db.exec(`BEGIN;
       CREATE TABLE documents (bucket TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(bucket,id));
       CREATE TABLE journal (session_id TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(session_id,seq));
       PRAGMA user_version=1; COMMIT;`)
-    if (version !== 3 && version !== 4) {
+    if (version !== 3 && version !== 4 && version !== 5) {
       this.db.exec('BEGIN IMMEDIATE')
       try {
         if (version !== 2) this.db.exec(retentionInvariants)
@@ -36,12 +37,17 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
       }
       catch (error) { this.db.exec('ROLLBACK'); this.db.close(); throw error }
     }
-    if (version !== 4) {
+    if (version !== 4 && version !== 5) {
       this.db.exec(`BEGIN IMMEDIATE;
         CREATE TABLE IF NOT EXISTS connector_credentials (id TEXT PRIMARY KEY, owner_kind TEXT NOT NULL CHECK(owner_kind='connector'), owner_id TEXT NOT NULL, auth_type TEXT NOT NULL, ciphertext TEXT NOT NULL, profile_json TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS connector_executions (request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, state TEXT NOT NULL, session_id TEXT NOT NULL, body TEXT NOT NULL, journal_summary TEXT, created_at TEXT NOT NULL, completed_at TEXT);
         CREATE INDEX IF NOT EXISTS connector_execution_session ON connector_executions(session_id, created_at);
         PRAGMA user_version=4; COMMIT;`)
+    }
+    if (version !== 5) {
+      this.db.exec(`BEGIN IMMEDIATE;
+        CREATE TABLE provider_credentials (id TEXT PRIMARY KEY, owner_kind TEXT NOT NULL CHECK(owner_kind='model-provider'), variable_names_json TEXT NOT NULL, ciphertext TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        PRAGMA user_version=5; COMMIT;`)
     }
   }
   close() { this.db.close() }
@@ -154,6 +160,22 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
     this.db.prepare(`INSERT INTO connector_credentials VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET owner_kind=excluded.owner_kind,owner_id=excluded.owner_id,auth_type=excluded.auth_type,ciphertext=excluded.ciphertext,profile_json=excluded.profile_json,revision=excluded.revision,updated_at=excluded.updated_at`).run(record.id, 'connector', record.owner.connectorId, record.authType, record.ciphertext, JSON.stringify(record.profile), record.revision, record.createdAt, record.updatedAt)
   }
   async deleteConnectorCredential(id: string): Promise<void> { await this.tail; this.db.prepare('DELETE FROM connector_credentials WHERE id=?').run(id) }
+  async getProviderCredential(id: string): Promise<ProviderCredentialRecord | null> {
+    await this.tail
+    const row = this.db.prepare('SELECT * FROM provider_credentials WHERE id=?').get(id) as Record<string, unknown> | undefined
+    return row ? { id: String(row.id), variableNames: JSON.parse(String(row.variable_names_json)) as string[], ciphertext: String(row.ciphertext), revision: Number(row.revision), createdAt: String(row.created_at), updatedAt: String(row.updated_at) } : null
+  }
+  async listProviderCredentials(): Promise<readonly ProviderCredentialRecord[]> {
+    await this.tail
+    return (this.db.prepare('SELECT * FROM provider_credentials ORDER BY id').all() as Record<string, unknown>[]).map(row => ({ id: String(row.id), variableNames: JSON.parse(String(row.variable_names_json)) as string[], ciphertext: String(row.ciphertext), revision: Number(row.revision), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }))
+  }
+  async saveProviderCredential(record: ProviderCredentialRecord, expectedRevision: number): Promise<boolean> {
+    await this.tail
+    if (!record.ciphertext.startsWith('enc:v2:')) throw new Error('Provider ciphertext must use enc:v2')
+    if (expectedRevision === 0) return this.db.prepare(`INSERT OR IGNORE INTO provider_credentials VALUES (?,'model-provider',?,?,?,?,?)`).run(record.id, JSON.stringify(record.variableNames), record.ciphertext, record.revision, record.createdAt, record.updatedAt).changes === 1
+    return this.db.prepare('UPDATE provider_credentials SET variable_names_json=?, ciphertext=?, revision=?, updated_at=? WHERE id=? AND revision=?').run(JSON.stringify(record.variableNames), record.ciphertext, record.revision, record.updatedAt, record.id, expectedRevision).changes === 1
+  }
+  async deleteProviderCredential(id: string, expectedRevision: number): Promise<boolean> { await this.tail; return this.db.prepare('DELETE FROM provider_credentials WHERE id=? AND revision=?').run(id, expectedRevision).changes === 1 }
   async getConnectorExecution(requestId: string): Promise<ConnectorExecutionRecord | null> {
     await this.tail
     const row = this.db.prepare('SELECT body FROM connector_executions WHERE request_id=?').get(requestId) as { body?: unknown } | undefined

@@ -81,6 +81,18 @@ test('catalog and published revision derive creator from the authenticated admin
   assert.deepEqual(captured[1], { resourceId: 'resource-1', createdBy: 'user-1' })
 })
 
+test('provider routes reject inline secrets before calling the catalog and reject unmapped bindings', async () => {
+  const definition = { providerKey: 'openai-compatible', endpoint: 'https://models.example.test/v1', modelIds: ['test-model'], agentKeys: ['pi'], credential: { kind: 'environment', variableNames: ['OPENAI_API_KEY'] } }
+  const create = context({ readBody: async () => ({ id: 'provider-1', kind: 'model-provider', name: 'test', description: '', definition: { ...definition, apiKey: 'sentinel-secret' } }), resources: { createResource: () => { throw new Error('must_not_write_secret') } } })
+  await assert.rejects(async () => route('POST', '/resources').handler(create.value), (error: { status: number; code: string }) => error.status === 400 && error.code === 'invalid_provider_config')
+  const unknown = context({ readBody: async () => ({ id: 'provider-1', kind: 'model-provider', name: 'test', description: '', definition, token: 'sentinel-secret' }), resources: { createResource: () => { throw new Error('must_not_write_secret') } } })
+  await assert.rejects(async () => route('POST', '/resources').handler(unknown.value), (error: { status: number; code: string }) => error.status === 400 && error.code === 'invalid_provider_config')
+  const patched = context({ params: { resourceId: 'provider-1' }, readBody: async () => ({ id: 'provider-1', kind: 'model-provider', name: 'test', description: '', definition, createdAt: '2026-01-01', updatedAt: '2026-01-01', token: 'sentinel-secret' }), resources: { updateResource: () => { throw new Error('must_not_write_secret') } } })
+  await assert.rejects(async () => route('PATCH', '/resources/:resourceId').handler(patched.value), (error: { status: number; code: string }) => error.status === 400 && error.code === 'invalid_provider_config')
+  const binding = context({ readBody: async () => ({ workerId: 'worker-1', resourceRevisionId: 'provider-rev', agentKey: 'claude-code' }), resources: { createBinding: () => { throw new Error('invalid_provider_binding') } } })
+  await assert.rejects(async () => route('POST', '/resource-bindings').handler(binding.value), (error: { status: number; code: string }) => error.status === 400 && error.code === 'invalid_provider_binding')
+})
+
 test('binding route derives creator from the authenticated administrator', async () => {
   let received: unknown
   const fixture = context({

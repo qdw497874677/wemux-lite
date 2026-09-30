@@ -60,6 +60,26 @@ test('service updates desired set once per bounded domain event and enforces bin
   repository.close()
 })
 
+test('model provider resource rejects secret fields and its revision is immutable', () => {
+  const repository = new SqliteResourceRepository(':memory:')
+  const config = { providerKey: 'openai-compatible' as const, endpoint: 'https://models.example.test/v1', modelIds: ['test-model'], agentKeys: ['pi' as never], credential: { kind: 'environment' as const, variableNames: ['OPENAI_API_KEY'] } }
+  const digest = createHash('sha256').update(JSON.stringify(config)).digest('hex')
+  const provider: Resource = { ...resource, id: 'provider-1', kind: 'model-provider', definition: config }
+  const published: ResourceRevision = { ...revision, id: 'provider-rev-1', resourceId: provider.id, kind: 'model-provider', contentSha256: digest, payload: { mode: 'inline-config', contentSha256: digest, config }, manifest: { ...revision.manifest, bytes: Buffer.byteLength(JSON.stringify(config)), fileCount: 0, sha256: digest, compatibility: { ...revision.manifest.compatibility, agentKeys: ['pi' as never] } }, supplyChain: { mode: 'static-content', manifestSha256: digest } }
+  try {
+    assert.throws(() => repository.createResource({ ...provider, definition: { ...config, apiKey: 'sentinel-secret' } } as unknown as Resource), /invalid_provider_config/)
+    repository.createResource(provider)
+    assert.throws(() => repository.createRevision({ ...published, payload: { mode: 'inline-config', contentSha256: digest, config: { ...config, modelIds: ['other'] } } }), /provider_config_hash_mismatch/)
+    assert.throws(() => repository.createRevision({ ...published, payload: { mode: 'inline-config', contentSha256: digest, config: { ...config, modelIds: ['other'] } }, manifest: { ...published.manifest, bytes: Buffer.byteLength(JSON.stringify({ ...config, modelIds: ['other'] })) } }), /provider_config_hash_mismatch/, 'repository checks the actual digest even if bytes are internally consistent')
+    assert.throws(() => repository.createRevision({ ...published, manifest: { ...published.manifest, credentialValue: 'sentinel-secret' } } as unknown as ResourceRevision), /invalid_provider_manifest/)
+    assert.throws(() => repository.createRevision({ ...published, supplyChain: { ...published.supplyChain, credentialValue: 'sentinel-secret' } } as unknown as ResourceRevision), /invalid_provider_supply_chain/)
+    assert.throws(() => repository.createRevision({ ...published, manifest: { ...published.manifest, compatibility: { ...published.manifest.compatibility, credentialValue: 'sentinel-secret' } } } as unknown as ResourceRevision), /invalid_provider_manifest/)
+    assert.deepEqual(repository.createRevision(published), published)
+    assert.throws(() => repository.createRevision({ ...published, version: 2 }), /resource_revision_immutable/)
+    assert.doesNotMatch(JSON.stringify(repository.resources()) + JSON.stringify(repository.revisions(provider.id)), /sentinel-secret/)
+  } finally { repository.close() }
+})
+
 test('filesystem blob store verifies hashes and deduplicates by content address', async t => {
   const root = await mkdtemp(join(tmpdir(), 'wemux-resource-blobs-'))
   t.after(() => rm(root, { recursive: true, force: true }))
