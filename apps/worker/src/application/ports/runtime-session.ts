@@ -1,4 +1,4 @@
-import type { ApprovalId, ModelId, NativeSessionRef, RuntimeOperationId, SessionId, UserMessageInput } from '@wemux/domain'
+import type { ApprovalId, ModelId, ModelProviderResourceDefinition, NativeSessionRef, RuntimeOperationId, SessionId, UserMessageInput } from '@wemux/domain'
 import type { AgentLaunchContext, AgentTurnHandle } from './agent-adapter.js'
 
 export interface RuntimeSessionOpenInput {
@@ -7,6 +7,11 @@ export interface RuntimeSessionOpenInput {
   /** Optional: null lets the Agent CLI use its own default model. */
   readonly modelId: ModelId | null
   readonly resume: NativeSessionRef | null
+  /** Process-scoped Pi config; supplied only after a fresh binding/credential check. */
+  readonly piProvider?: {
+    readonly definition: ModelProviderResourceDefinition
+    readonly environment: Readonly<Record<string, string>>
+  }
 }
 
 export interface RuntimeOperationInput {

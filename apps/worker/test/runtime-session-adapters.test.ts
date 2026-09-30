@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { access, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -24,6 +24,73 @@ async function executable(name: string, body: string) {
 
 const sessionId = 'session-adapter' as SessionId
 const modelId = 'model-adapter' as ModelId
+
+test('Pi process-scoped model config uses isolated agent directory, explicit key and closes on Session replacement', async () => {
+  const source = await executable('pi-provider', `node -e 'const fs=require("node:fs");const rd=require("node:readline").createInterface({input:process.stdin});rd.on("line",()=>{const dir=process.env.PI_CODING_AGENT_DIR;const config=JSON.parse(fs.readFileSync(dir+"/models.json"));process.stdout.write(JSON.stringify({type:"message_update",assistantMessageEvent:{type:"text_delta",delta:JSON.stringify({dir,model:config.providers["openai-compatible"].models[0].id,first:process.env.OPENAI_API_KEY==="model-secret-first",rotated:process.env.OPENAI_API_KEY==="model-secret-rotated",other:process.env.ANTHROPIC_API_KEY??null,auth:fs.existsSync(dir+"/auth.json")})}})+"\\n"+JSON.stringify({type:"agent_settled"})+"\\n");});'`)
+  const original = process.env.ANTHROPIC_API_KEY
+  process.env.ANTHROPIC_API_KEY = 'must-not-inherit-another-key'
+  const definition = { providerKey: 'openai-compatible' as const, endpoint: 'https://example.invalid/v1', modelIds: ['offline-model'], agentKeys: ['pi' as never], credential: { kind: 'worker-credential' as const, credentialRef: 'id', variableNames: ['OPENAI_API_KEY'] } }
+  try {
+    const adapter = new PiRuntimeSessionAdapter(source)
+    const first = await adapter.openSession({ sessionId, cwd: process.cwd(), modelId: 'openai-compatible::offline-model' as ModelId, resume: null, piProvider: { definition, environment: { OPENAI_API_KEY: 'model-secret-first' } } })
+    const signals = await collect((await first.execute({ operationId: 'pi-provider-first' as TurnId, message: { content: 'hi' }, launchContext: null })).signals)
+    const delta = signals.find(signal => signal.kind === 'event' && signal.event.kind === 'assistant.text.delta')
+    assert.equal(delta?.kind, 'event')
+    if (delta?.kind !== 'event' || delta.event.kind !== 'assistant.text.delta') throw new Error('No Pi output')
+    const values = JSON.parse(delta.event.text)
+    assert.equal(values.model, 'offline-model')
+    assert.equal(values.first, true)
+    assert.equal(values.other, null)
+    assert.equal(values.auth, false)
+    await assert.rejects(first.command({ name: 'set_model', operationId: 'pi-provider-model-change' as TurnId, arguments: { modelId: 'other::model' } }), /pi_provider_model_locked/)
+    assert.match(await readFile(join(values.dir, 'models.json'), 'utf8'), /\$OPENAI_API_KEY/)
+    assert.doesNotMatch(await readFile(join(values.dir, 'models.json'), 'utf8'), /model-secret-first/)
+    await first.close()
+    await assert.rejects(access(values.dir), { code: 'ENOENT' })
+    const rotated = await adapter.openSession({ sessionId, cwd: process.cwd(), modelId: 'openai-compatible::offline-model' as ModelId, resume: null, piProvider: { definition, environment: { OPENAI_API_KEY: 'model-secret-rotated' } } })
+    try {
+      const again = await collect((await rotated.execute({ operationId: 'pi-provider-next' as TurnId, message: { content: 'hi' }, launchContext: null })).signals)
+      assert(again.some(signal => signal.kind === 'event' && signal.event.kind === 'assistant.text.delta' && JSON.parse(signal.event.text).rotated === true))
+    } finally { await rotated.close() }
+  } finally { if (original === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = original }
+})
+
+test('Pi process Provider redacts credential echoed in RPC output before it reaches Journal', async () => {
+  const source = await executable('pi-provider-echo', `node -e 'const rd=require("node:readline").createInterface({input:process.stdin});rd.on("line",()=>{process.stdout.write(JSON.stringify({type:"message_update",assistantMessageEvent:{type:"text_delta",delta:"echo " + process.env.OPENAI_API_KEY}})+"\\n"+JSON.stringify({type:"agent_settled"})+"\\n")})'`)
+  const secret = 'provider-stdout-secret-3981'
+  const definition = { providerKey: 'openai-compatible' as const, endpoint: 'https://example.invalid/v1', modelIds: ['offline-model'], agentKeys: ['pi' as never], credential: { kind: 'worker-credential' as const, credentialRef: 'id', variableNames: ['OPENAI_API_KEY'] } }
+  const session = await new PiRuntimeSessionAdapter(source).openSession({ sessionId, cwd: process.cwd(), modelId: 'openai-compatible::offline-model' as ModelId, resume: null, piProvider: { definition, environment: { OPENAI_API_KEY: secret } } })
+  try {
+    const signals = await collect((await session.execute({ operationId: 'pi-provider-echo' as TurnId, message: { content: 'hi' }, launchContext: null })).signals)
+    assert.doesNotMatch(JSON.stringify(signals), new RegExp(secret))
+    assert.match(JSON.stringify(signals), /\[redacted\]/)
+  } finally { await session.close() }
+})
+
+test('Pi process Provider blocks credentials split across RPC deltas and native session references', async () => {
+  const source = await executable('pi-provider-split', `node -e 'const rd=require("node:readline").createInterface({input:process.stdin});rd.on("line",()=>{const s=process.env.OPENAI_API_KEY;for(const value of [{type:"session",sessionId:"native-"+s},{type:"message_update",assistantMessageEvent:{type:"text_delta",delta:s.slice(0,8)}},{type:"message_update",assistantMessageEvent:{type:"text_delta",delta:s.slice(8)}},{type:"agent_settled"}])process.stdout.write(JSON.stringify(value)+"\\n")})'`)
+  const secret = 'provider-split-secret-3912'
+  const definition = { providerKey: 'openai-compatible' as const, endpoint: 'https://example.invalid/v1', modelIds: ['offline-model'], agentKeys: ['pi' as never], credential: { kind: 'worker-credential' as const, credentialRef: 'id', variableNames: ['OPENAI_API_KEY'] } }
+  const session = await new PiRuntimeSessionAdapter(source).openSession({ sessionId, cwd: process.cwd(), modelId: 'openai-compatible::offline-model' as ModelId, resume: null, piProvider: { definition, environment: { OPENAI_API_KEY: secret } } })
+  try {
+    const signals = await collect((await session.execute({ operationId: 'pi-provider-split' as TurnId, message: { content: 'hi' }, launchContext: null })).signals)
+    assert.deepEqual(signals.map(signal => signal.kind), ['finished'])
+    assert.doesNotMatch(JSON.stringify(signals), new RegExp(secret))
+  } finally { await session.close() }
+})
+
+test('Pi process Provider redacts child stderr containing credential on failure', async () => {
+  const source = await executable('pi-provider-crash', 'read _; echo "failed with $OPENAI_API_KEY" >&2; exit 1')
+  const secret = 'unique-provider-credential-never-journal-9248'
+  const definition = { providerKey: 'openai-compatible' as const, endpoint: 'https://example.invalid/v1', modelIds: ['offline-model'], agentKeys: ['pi' as never], credential: { kind: 'worker-credential' as const, credentialRef: 'id', variableNames: ['OPENAI_API_KEY'] } }
+  const session = await new PiRuntimeSessionAdapter(source).openSession({ sessionId, cwd: process.cwd(), modelId: 'openai-compatible::offline-model' as ModelId, resume: null, piProvider: { definition, environment: { OPENAI_API_KEY: secret } } })
+  try {
+    const signals = await collect((await session.execute({ operationId: 'pi-provider-error' as TurnId, message: { content: 'hi' }, launchContext: null })).signals)
+    assert.equal(signals.at(-1)?.kind, 'finished')
+    assert.doesNotMatch(JSON.stringify(signals), new RegExp(secret))
+    assert.match(JSON.stringify(signals), /\[redacted\]/)
+  } finally { await session.close() }
+})
 
 test('pi runtime session maps native json events', async () => {
   const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"session\",\"sessionId\":\"native-pi\"}' '{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"hello\"}}' '{\"type\":\"usage\",\"inputTokens\":2,\"outputTokens\":3}' '{\"type\":\"done\"}'")

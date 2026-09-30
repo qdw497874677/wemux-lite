@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import type { ApprovalId } from '@wemux/domain'
 import type { AgentRuntimeSession, RuntimeCommand, RuntimeOperationInput, RuntimeSessionAdapter, RuntimeSessionOpenInput } from '../application/ports/runtime-session.js'
 import type { AgentSignal, AgentTurnHandle } from '../application/ports/agent-adapter.js'
+import { preparePiProviderDirectory } from '../providers/pi-provider-directory.js'
 import { parseJsonLines } from './json-lines.js'
 import { mapRuntimeRecord } from './runtime-event-mapper.js'
 import { splitModelId } from '../domain/model-id.js'
@@ -54,6 +55,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
   private launchKey: string | null = null
   private extensionDir: string | null = null
   private capabilityReadyPath: string | null = null
+  private providerDirectory: { readonly directory: string; cleanup(): Promise<void> } | null = null
 
   constructor(private readonly executable: string, private readonly input: RuntimeSessionOpenInput) {}
 
@@ -67,6 +69,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
   }
 
   async command(command: RuntimeCommand): Promise<void> {
+    if (this.input.piProvider && command.name === 'set_model') throw new Error('pi_provider_model_locked')
     const child = await this.ensureChild(null)
     const type = command.name === 'interrupt' ? 'abort' : command.name
     if (command.name === 'set_model') {
@@ -85,7 +88,11 @@ class PiRuntimeSession implements AgentRuntimeSession {
 
   async close(): Promise<void> {
     const child = this.child
-    if (!child || child.exitCode !== null || child.signalCode !== null) { await this.cleanupExtension(); return }
+    if (!child || child.exitCode !== null || child.signalCode !== null) {
+      await this.childClosed
+      await this.cleanupExtension()
+      return
+    }
     child.kill('SIGTERM')
     const forceTimer = setTimeout(() => {
       if (child.exitCode === null && child.signalCode === null) {
@@ -124,40 +131,69 @@ class PiRuntimeSession implements AgentRuntimeSession {
     }) : this.launchKey
     if (this.child && !this.child.killed && !this.exitInfo && nextLaunchKey === this.launchKey) return this.child
     if (this.child && !this.child.killed && !this.exitInfo) await this.close()
-    else await this.cleanupExtension()
+    else { await this.childClosed; await this.cleanupExtension() }
 
     // Reset per-child diagnostic state before spawning.
     this.childFailure = null
     this.stderrTail = ''
     this.exitInfo = null
 
+    const provider = this.input.piProvider
+    if (provider) {
+      if (this.input.resume) throw new Error('pi_provider_resume_unsupported')
+      if (this.input.modelId !== `openai-compatible::${provider.definition.modelIds[0]}`) throw new Error('pi_provider_model_mismatch')
+      const names = Object.keys(provider.environment)
+      if (names.length !== 1 || names[0] !== 'OPENAI_API_KEY' || !provider.environment.OPENAI_API_KEY?.trim()) throw new Error('pi_provider_credential_unavailable')
+      if (context?.environment && Object.keys(context.environment).some(key => !key.startsWith('WEMUX_'))) throw new Error('pi_provider_environment_conflict')
+    }
     const args = ['--mode', 'rpc']
     if (this.input.modelId) args.push('--model', piModelArgument(this.input.modelId))
     if (this.input.resume) args.push('--session', this.input.resume)
     if (context?.skillsRoot) args.push('--skill', context.skillsRoot)
     if (context?.instructions) args.push('--append-system-prompt', context.instructions)
-    if (context?.capabilityEndpoint || context?.capabilityToken) {
-      if (!context.capabilityEndpoint || !context.capabilityToken) throw new Error('Pi capability injection requires both endpoint and token')
-      this.extensionDir = await mkdtemp(join(tmpdir(), 'wemux-pi-runtime-extension-'))
-      this.capabilityReadyPath = join(this.extensionDir, 'ready')
-      const extensionPath = join(this.extensionDir, 'capabilities.mjs')
-      await writeFile(extensionPath, piCapabilityExtension(this.capabilityReadyPath), { mode: 0o600 })
-      args.push('--extension', extensionPath)
+    try {
+      if (context?.capabilityEndpoint || context?.capabilityToken) {
+        if (!context.capabilityEndpoint || !context.capabilityToken) throw new Error('Pi capability injection requires both endpoint and token')
+        this.extensionDir = await mkdtemp(join(tmpdir(), 'wemux-pi-runtime-extension-'))
+        this.capabilityReadyPath = join(this.extensionDir, 'ready')
+        const extensionPath = join(this.extensionDir, 'capabilities.mjs')
+        await writeFile(extensionPath, piCapabilityExtension(this.capabilityReadyPath), { mode: 0o600 })
+        args.push('--extension', extensionPath)
+      }
+      if (provider) this.providerDirectory = await preparePiProviderDirectory(provider.definition)
+    } catch (error) {
+      await this.cleanupExtension()
+      throw error
     }
     this.launchKey = nextLaunchKey
-    const child = spawn(this.executable, args, {
-      cwd: this.input.cwd,
-      env: { ...process.env, ...context?.environment, WEMUX_PI_CAPABILITY_ENDPOINT: context?.capabilityEndpoint ?? '', WEMUX_PI_CAPABILITY_TOKEN: context?.capabilityToken ?? '' },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
-    if (!child.stdin || !child.stdout || !child.stderr) throw new Error('Pi runtime streams unavailable')
+    // A configured Provider deliberately opts out of the user's Pi auth/settings
+    // and every ambient model credential. Passing through process.env would
+    // silently expose unrelated accounts to this Agent (and its shell tools).
+    const environment: NodeJS.ProcessEnv = provider ? {
+      PATH: process.env.PATH, LANG: process.env.LANG,
+      HOME: this.providerDirectory!.directory,
+      PI_CODING_AGENT_DIR: this.providerDirectory!.directory,
+      OPENAI_API_KEY: provider.environment.OPENAI_API_KEY,
+    } : { ...process.env }
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(this.executable, args, {
+        cwd: this.input.cwd,
+        env: { ...environment, ...context?.environment, WEMUX_PI_CAPABILITY_ENDPOINT: context?.capabilityEndpoint ?? '', WEMUX_PI_CAPABILITY_TOKEN: context?.capabilityToken ?? '' },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+      if (!child.stdin || !child.stdout || !child.stderr) throw new Error('Pi runtime streams unavailable')
+    } catch (error) {
+      await this.cleanupExtension()
+      throw error
+    }
 
     // Persistent listeners — never removed while the child lives.
     child.stdin.on('error', error => {
-      if (!this.childFailure) this.childFailure = { code: 'stdin-error', message: error.message }
+      if (!this.childFailure) this.childFailure = { code: 'stdin-error', message: this.redactProviderSecret(error.message) }
     })
     child.on('error', error => {
-      if (!this.childFailure) this.childFailure = { code: 'spawn-error', message: error.message }
+      if (!this.childFailure) this.childFailure = { code: 'spawn-error', message: this.redactProviderSecret(error.message) }
     })
     child.stderr.setEncoding('utf8')
     child.stderr.on('data', (chunk: string) => {
@@ -177,7 +213,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
           const stderr = this.stderrTail.trim()
           this.childFailure = {
             code: 'child-exited',
-            message: `Pi runtime exited unexpectedly${detail ? ` (${detail})` : ''}${stderr ? `: ${stderr}` : ''}`,
+            message: this.redactProviderSecret(`Pi runtime exited unexpectedly${detail ? ` (${detail})` : ''}${stderr ? `: ${stderr}` : ''}`),
           }
         }
         resolve()
@@ -186,6 +222,11 @@ class PiRuntimeSession implements AgentRuntimeSession {
 
     this.child = child
     return child
+  }
+
+  private redactProviderSecret(message: string): string {
+    const secret = this.input.piProvider?.environment.OPENAI_API_KEY
+    return secret ? message.replaceAll(secret, '[redacted]') : message
   }
 
   private async requireCapabilityToolsReady(): Promise<void> {
@@ -208,6 +249,9 @@ class PiRuntimeSession implements AgentRuntimeSession {
     this.capabilityReadyPath = null
     this.launchKey = null
     if (directory) await rm(directory, { recursive: true, force: true })
+    const provider = this.providerDirectory
+    this.providerDirectory = null
+    if (provider) await provider.cleanup()
   }
 
   private async interrupt(operationId: RuntimeOperationInput['operationId']) {
@@ -217,6 +261,37 @@ class PiRuntimeSession implements AgentRuntimeSession {
   }
 
   private async *signals(operationId: RuntimeOperationInput['operationId'], child: ReturnType<typeof spawn>): AsyncIterable<AgentSignal> {
+    if (!this.input.piProvider) { yield* this.rawSignals(operationId, child); return }
+    // Provider-mode output cannot be published incrementally: a secret may be
+    // split across multiple RPC deltas. Buffer one turn, then inspect *all*
+    // string fields before allowing even a native Session reference to escape.
+    const buffered: AgentSignal[] = []
+    let bytes = 0
+    for await (const signal of this.rawSignals(operationId, child)) {
+      bytes += Buffer.byteLength(JSON.stringify(signal))
+      if (bytes > 1024 * 1024) {
+        this.kill()
+        yield { kind: 'finished', outcome: { status: 'failed', failure: { code: 'agent-error', message: 'Provider 输出超过安全检查上限' } } }
+        return
+      }
+      buffered.push(signal)
+    }
+    const secret = this.input.piProvider.environment.OPENAI_API_KEY
+    const strings: string[] = []
+    const collect = (value: unknown): void => {
+      if (typeof value === 'string') strings.push(value)
+      else if (Array.isArray(value)) value.forEach(collect)
+      else if (value && typeof value === 'object') Object.values(value).forEach(collect)
+    }
+    collect(buffered)
+    if (secret && strings.join('').includes(secret)) {
+      yield { kind: 'finished', outcome: { status: 'failed', failure: { code: 'agent-error', message: 'Provider 输出包含本机凭据，已阻止发布 [redacted]' } } }
+      return
+    }
+    for (const signal of buffered) yield signal
+  }
+
+  private async *rawSignals(operationId: RuntimeOperationInput['operationId'], child: ReturnType<typeof spawn>): AsyncIterable<AgentSignal> {
     if (!child.stdout) throw new Error('Pi runtime output unavailable')
     let emittedText = ''
     let sawToolActivity = false
@@ -284,12 +359,12 @@ class PiRuntimeSession implements AgentRuntimeSession {
           status: 'failed',
           failure: {
             code: 'agent-error',
-            message: failure?.message ?? 'Pi RPC stream closed before completion',
+            message: this.redactProviderSecret(failure?.message ?? 'Pi RPC stream closed before completion'),
           },
         },
       }
     } catch (error) {
-      yield { kind: 'finished', outcome: { status: 'failed', failure: { code: 'agent-error', message: error instanceof Error ? error.message : 'Pi runtime failed' } } }
+      yield { kind: 'finished', outcome: { status: 'failed', failure: { code: 'agent-error', message: this.redactProviderSecret(error instanceof Error ? error.message : 'Pi runtime failed') } } }
     } finally { if (this.activeOperation === operationId) this.activeOperation = null }
   }
 }
