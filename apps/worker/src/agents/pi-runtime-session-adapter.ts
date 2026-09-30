@@ -171,6 +171,9 @@ class PiRuntimeSession implements AgentRuntimeSession {
     // silently expose unrelated accounts to this Agent (and its shell tools).
     const environment: NodeJS.ProcessEnv = provider ? {
       PATH: process.env.PATH, LANG: process.env.LANG,
+      // Operator-provided trust bundle for private HTTPS endpoints; do not
+      // inherit the rest of the Worker's ambient model credentials.
+      NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS,
       HOME: this.providerDirectory!.directory,
       PI_CODING_AGENT_DIR: this.providerDirectory!.directory,
       OPENAI_API_KEY: provider.environment.OPENAI_API_KEY,
