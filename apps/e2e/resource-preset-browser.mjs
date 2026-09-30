@@ -30,6 +30,8 @@ try {
   const worker = { id: 'worker-1', teamId: 'team', ownerId: 'preset-admin', name: '预设工作节点', shareScope: 'team', accessRole: 'owner', connectionState: 'online', capabilities: [], lastSeenAt: now }
   const resource = { id: 'skill-1', kind: 'skill', name: '审核 Skill', description: '' }
   const revision = { id: 'skill-rev-1', resourceId: resource.id, kind: 'skill', version: 1, state: 'published', manifest: { bytes: 128 } }
+  const provider = { id: 'provider-1', kind: 'model-provider', name: '受限模型供应商', description: '' }
+  const providerRevision = { id: 'provider-rev-1', resourceId: provider.id, kind: 'model-provider', version: 1, state: 'published', payload: { mode: 'inline-config', config: { providerKey: 'openai-compatible', endpoint: 'https://models.example.test/v1', modelIds: ['test-model'], agentKeys: ['pi'], credential: { kind: 'worker-credential', credentialRef: 'local-ref', variableNames: ['OPENAI_API_KEY'] } } }, manifest: { bytes: 64 } }
   const fulfill = (route, body, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
   await page.route('**/api/**', async route => {
     const request = route.request(), path = new URL(request.url()).pathname, method = request.method()
@@ -38,8 +40,9 @@ try {
     if (path === '/api/workers') return fulfill(route, { items: [worker] })
     if (path === '/api/workers/worker-1/capabilities') return fulfill(route, { workerId: worker.id, capabilities: [] })
     if (path === '/api/projects' || path === '/api/workspaces' || path === '/api/sessions' || path === '/api/commands' || path === '/api/workers/worker-1/grants' || path === '/api/teams/team/members') return fulfill(route, { items: [] })
-    if (path === '/api/resources') return fulfill(route, { items: [resource] })
+    if (path === '/api/resources') return fulfill(route, { items: [resource, provider] })
     if (path === '/api/resources/skill-1') return fulfill(route, { resource, revisions: [revision] })
+    if (path === '/api/resources/provider-1') return fulfill(route, { resource: provider, revisions: [providerRevision] })
     if (path === '/api/resource-presets') {
       if (method === 'POST') {
         const body = request.postDataJSON()
@@ -64,6 +67,13 @@ try {
   await page.goto(`${base}/cluster`)
   await page.getByRole('heading', { name: '集群运行状态' }).waitFor()
   await page.getByRole('button', { name: /节点预设/ }).click({ timeout: 10000 }).catch(async error => { console.error('browser diagnostics:', await page.locator('#root').innerText(), errors); throw error })
+  await page.getByLabel('预设资源').selectOption(provider.id)
+  await page.getByLabel('预设版本').selectOption(providerRevision.id)
+  await page.getByLabel('预设 Agent').selectOption('claude-code')
+  await page.getByRole('button', { name: '添加资源' }).click()
+  await page.getByText('所选 Agent 不在模型供应商版本的适配范围内').waitFor()
+  await page.getByLabel('预设 Agent').selectOption('pi')
+  await page.getByRole('button', { name: '添加资源' }).click()
   await page.getByLabel('预设资源').selectOption(resource.id)
   await page.getByLabel('预设版本').selectOption(revision.id)
   await page.getByRole('button', { name: '添加资源' }).click()
@@ -72,11 +82,14 @@ try {
   await page.getByText('已发布预设 v1').waitFor()
   assert.equal(writes[0].csrf, 'preset-csrf')
   assert.deepEqual(writes[0].body.autoApply, { enabled: false })
-  assert.equal(writes[0].body.entries[0].resourceRevisionId, revision.id)
+  assert.equal(writes[0].body.entries[0].resourceRevisionId, providerRevision.id)
+  assert.equal(writes[0].body.entries[0].agentKey, 'pi')
+  assert.equal(writes[0].body.entries[1].resourceRevisionId, revision.id)
   await page.getByLabel('应用工作节点').selectOption(worker.id)
   await page.getByRole('button', { name: '应用到节点' }).click()
   await page.getByRole('dialog').waitFor({ timeout: 5000 }).catch(async error => { console.error('apply diagnostics:', await page.locator('#root').innerText(), errors); throw error })
   await page.getByRole('dialog').getByText(/审核 Skill v1.*128 字节/).waitFor()
+  await page.getByRole('dialog').getByText(/受限模型供应商 v1.*凭据须在 Worker 本地录入或预置环境变量.*待认证/).waitFor()
   assert.equal(writes.length, 1, 'confirmation must precede application write')
   await page.getByRole('dialog').getByRole('button', { name: '确认应用' }).click()
   await page.getByText('已提交手工应用').waitFor()
@@ -94,6 +107,6 @@ try {
   await page.getByRole('heading', { name: '集群运行状态' }).waitFor()
   assert.equal(await page.getByRole('button', { name: /节点预设/ }).count(), 0)
   assert.deepEqual(errors, [])
-  await writeFile(join(output, 'browser-result.json'), JSON.stringify({ passed: true, checked: ['生产集群路由与资源表单', 'CSRF 发布不可变 v1/v2', '展示版本、大小与副作用的确认', '手工应用 CAS', '应用进度', '非管理员不可访问预设入口', '无页面异常'], screenshot: 'preset-studio.png' }, null, 2))
+  await writeFile(join(output, 'browser-result.json'), JSON.stringify({ passed: true, checked: ['生产集群路由与资源表单', 'Provider 版本 Agent 适配检查、仅引用本地密钥的说明', 'CSRF 发布不可变 v1/v2', '展示版本、大小与副作用的确认', '手工应用 CAS', '应用进度', '非管理员不可访问预设入口', '无页面异常'], screenshot: 'preset-studio.png' }, null, 2))
   console.log('Preset Studio browser acceptance passed')
 } finally { await browser?.close(); server.kill('SIGTERM'); await rm(temp, { recursive: true, force: true }) }

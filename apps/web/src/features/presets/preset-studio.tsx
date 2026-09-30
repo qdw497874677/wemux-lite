@@ -8,6 +8,7 @@ import { useConfirmDialog } from '../../components/ui/confirm-dialog.tsx'
 
 type Projection = { binding: ResourceBinding; reconcile: ReconcileReport | null }
 type Application = { application: NodeResourcePresetApplication; items: Projection[] }
+const resourceKindLabel: Record<string, string> = { skill: 'Skill', 'agent-runtime': 'Agent', 'model-provider': '模型供应商' }
 const phaseLabel: Record<string, string> = { queued: '排队中', downloading: '下载中', verifying: '校验中', installing: '安装中', ready: '已就绪', 'restart-required': '待重启', 'credential-required': '待认证', failed: '失败', gc: '回收中' }
 const statusLabel: Record<string, string> = { assigned: '待通知', notified: '待安装', installed: '已安装', failed: '失败', 'pending-gc': '待回收', "gc'd": '已回收' }
 function statusOf(item: Projection) {
@@ -35,7 +36,7 @@ export function PresetStudio({ api, workers }: { api: Api; workers: WorkerDTO[] 
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const latest = useMemo(() => [...presets].reverse().filter((preset, index, items) => items.findIndex(item => item.id === preset.id) === index).reverse(), [presets])
-  const available = useMemo(() => resources.filter(resource => resource.kind === 'skill' || resource.kind === 'agent-runtime'), [resources])
+  const available = useMemo(() => resources.filter(resource => resource.kind === 'skill' || resource.kind === 'agent-runtime' || resource.kind === 'model-provider'), [resources])
   const chosen = resources.find(resource => resource.id === resourceId)
   const eligibleRevisions = revisions.filter(revision => revision.resourceId === resourceId && revision.state === 'published')
   const selected = latest.find(preset => preset.id === presetId)
@@ -43,7 +44,7 @@ export function PresetStudio({ api, workers }: { api: Api; workers: WorkerDTO[] 
   async function refresh() {
     const [presetResponse, applicationResponse, resourceResponse] = await Promise.all([api.resourcePresets(), api.resourcePresetApplications(), api.resources()])
     setPresets(presetResponse.items); setApplications(applicationResponse.items); setResources(resourceResponse)
-    const details = await Promise.all(resourceResponse.filter(item => item.kind === 'skill' || item.kind === 'agent-runtime').map(item => api.resourceDetail(item.id)))
+    const details = await Promise.all(resourceResponse.filter(item => item.kind === 'skill' || item.kind === 'agent-runtime' || item.kind === 'model-provider').map(item => api.resourceDetail(item.id)))
     setRevisions(details.flatMap(item => item.revisions))
   }
   useEffect(() => {
@@ -57,10 +58,11 @@ export function PresetStudio({ api, workers }: { api: Api; workers: WorkerDTO[] 
 
   function addEntry() {
     setError('')
-    if (!chosen || !revisionId || (chosen.kind === 'agent-runtime' && !agentKey)) { setError('请选择已发布版本；Agent runtime 还需选择 Agent'); return }
+    if (!chosen || !revisionId || ((chosen.kind === 'agent-runtime' || chosen.kind === 'model-provider') && !agentKey)) { setError('请选择已发布版本；Agent runtime 和模型供应商还需选择 Agent'); return }
     const revision = eligibleRevisions.find(item => item.id === revisionId)
     if (!revision) { setError('资源版本详情不可用，请刷新后重试'); return }
     if (chosen.kind === 'agent-runtime' && (revision.payload.mode !== 'artifact' || ({ pi: '@earendil-works/pi-coding-agent', 'claude-code': '@anthropic-ai/claude-code', opencode: 'opencode-ai' } as Record<string, string>)[agentKey] !== revision.payload.packageName)) { setError('Agent 与受信任的 runtime 包不匹配'); return }
+    if (chosen.kind === 'model-provider' && (revision.payload.mode !== 'inline-config' || !revision.payload.config.agentKeys.includes(agentKey as AgentKey))) { setError('所选 Agent 不在模型供应商版本的适配范围内'); return }
     if (entries.some(item => item.resourceRevisionId === revisionId || (item.resourceId === resourceId && item.agentKey === (agentKey || null)))) { setError('同一资源版本或资源与 Agent 不可重复添加'); return }
     setEntries(items => [...items, { resourceId, resourceRevisionId: revisionId, agentKey: agentKey ? agentKey as AgentKey : null, projectId: null, required: true }])
     setResourceId(''); setRevisionId(''); setAgentKey('')
@@ -84,6 +86,7 @@ export function PresetStudio({ api, workers }: { api: Api; workers: WorkerDTO[] 
       const revision = revisions.find(item => item.id === entry.resourceRevisionId)
       if (!resource || !revision) return `${entry.resourceId}：版本详情不可用，请刷新后重试`
       if (revision.kind === 'agent-runtime') return `${resource.name} v${revision.version}（${revision.payload.mode === 'artifact' ? `${revision.payload.packageName}@${revision.payload.packageVersion}` : '制品未知'}）：npm 安装依赖时可能执行安装脚本；安装后需重启 Worker、单独配置凭证和模型`
+      if (revision.kind === 'model-provider') return `${resource.name} v${revision.version}：只下发非秘密配置；凭据须在 Worker 本地录入或预置环境变量，当前仅显示待认证，不代表模型可用`
       return `${resource.name} v${revision.version}：静态 Skill，不执行脚本；约 ${revision.manifest?.bytes ?? '未知'} 字节`
     })
     if (contents.some(item => item.includes('版本详情不可用'))) { setError('资源版本详情不可用，请刷新后重试'); return }
@@ -112,9 +115,9 @@ export function PresetStudio({ api, workers }: { api: Api; workers: WorkerDTO[] 
         <input aria-label="预设名称" className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" value={name} onChange={event => setName(event.target.value)} placeholder="预设名称" />
         <input aria-label="预设描述" className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm" value={description} onChange={event => setDescription(event.target.value)} placeholder="描述（可选）" />
         <div className="grid gap-2 sm:grid-cols-3">
-          <select aria-label="预设资源" className="min-w-0 rounded-lg border border-border bg-background px-2 py-2 text-xs" value={resourceId} onChange={event => { setResourceId(event.target.value); setRevisionId(''); setAgentKey('') }}><option value="">选择资源</option>{available.map(item => <option key={item.id} value={item.id}>{item.name}（{item.kind === 'skill' ? 'Skill' : 'Agent'}）</option>)}</select>
+          <select aria-label="预设资源" className="min-w-0 rounded-lg border border-border bg-background px-2 py-2 text-xs" value={resourceId} onChange={event => { setResourceId(event.target.value); setRevisionId(''); setAgentKey('') }}><option value="">选择资源</option>{available.map(item => <option key={item.id} value={item.id}>{item.name}（{resourceKindLabel[item.kind] ?? item.kind}）</option>)}</select>
           <select aria-label="预设版本" className="min-w-0 rounded-lg border border-border bg-background px-2 py-2 text-xs" value={revisionId} onChange={event => setRevisionId(event.target.value)}><option value="">选择版本</option>{eligibleRevisions.map(item => <option key={item.id} value={item.id}>v{item.version}</option>)}</select>
-          <select aria-label="预设 Agent" className="min-w-0 rounded-lg border border-border bg-background px-2 py-2 text-xs" value={agentKey} onChange={event => setAgentKey(event.target.value)}><option value="">{chosen?.kind === 'agent-runtime' ? '选择 Agent' : '任意 Agent'}</option>{['pi', 'claude-code', 'opencode'].map(key => <option key={key} value={key}>{key}</option>)}</select>
+          <select aria-label="预设 Agent" className="min-w-0 rounded-lg border border-border bg-background px-2 py-2 text-xs" value={agentKey} onChange={event => setAgentKey(event.target.value)}><option value="">{chosen?.kind === 'agent-runtime' || chosen?.kind === 'model-provider' ? '选择 Agent' : '任意 Agent'}</option>{['pi', 'claude-code', 'opencode'].map(key => <option key={key} value={key}>{key}</option>)}</select>
         </div>
         <button type="button" className="rounded-lg border border-border px-3 py-2 text-xs" onClick={addEntry}>添加资源</button>
         {entries.map((item, index) => <div key={`${item.resourceRevisionId}-${index}`} className="flex items-center justify-between rounded-lg border border-border px-3 py-2 text-xs"><span>{resources.find(resource => resource.id === item.resourceId)?.name ?? item.resourceId} · v{revisions.find(revision => revision.id === item.resourceRevisionId)?.version ?? '?'} · {item.agentKey ?? '任意 Agent'}</span><button type="button" className="text-muted-foreground hover:text-foreground" onClick={() => setEntries(old => old.filter((_, i) => i !== index))}>移除</button></div>)}
