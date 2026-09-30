@@ -9,6 +9,16 @@ test('legacy session deep link infers parents and replaces with canonical URL', 
   assert.deepEqual(resolve('/', '?session=s'), { redirect: '/projects/p/sessions/s' })
   assert.deepEqual(resolve('/', '?workspace=w'), { redirect: '/projects/p/workspaces/w' })
 })
+test('project-root query selection resolves to a canonical resource without dropping it', () => {
+  assert.deepEqual(resolve('/projects/p', '?session=s'), { redirect: '/projects/p/sessions/s' })
+  assert.deepEqual(resolve('/projects/p', '?workspace=w'), { redirect: '/projects/p/workspaces/w' })
+  assert.deepEqual(resolve('/projects/p', '?session=s&view=canvas'), { redirect: '/projects/p/overview?view=canvas&session=s' })
+  assert.match(resolve('/projects/other', '?session=s').error, /不属于/)
+  assert.match(resolve('/projects/p', '?session=missing').error, /不存在/)
+  assert.match(resolve('/projects/p', '?project=other&session=s').error, /冲突/)
+  assert.match(resolveSelection('/projects/p', '?session=s', projects, workspaces, [{ ...sessions[0], canRead: false }]).error, /无权限/)
+})
+
 test('canonical refresh preserves resource and rejects conflicting query input', () => {
   assert.deepEqual(resolve('/projects/p/sessions/s'), {})
   assert.match(resolve('/projects/p/sessions/s', '?session=other').error, /冲突/)

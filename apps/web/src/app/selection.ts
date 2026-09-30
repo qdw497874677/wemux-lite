@@ -9,8 +9,9 @@ export function resolveSelection(pathname: string, search: string, projects: { i
   const params = new URLSearchParams(search)
   const canonical = parts[0] === 'projects' && Boolean(parts[1])
   let project = canonical ? parts[1] : params.get('project') ?? ''
-  const session = canonical ? (parts[2] === 'sessions' ? parts[3] : parts[2] === 'canvas' || (parts[2] === 'overview' && params.get('view') === 'canvas') ? params.get('session') ?? '' : '') : params.get('session') ?? ''
-  let workspace = canonical ? (parts[2] === 'workspaces' ? parts[3] : '') : params.get('workspace') ?? ''
+  const projectRoot = canonical && parts.length === 2
+  const session = canonical ? (parts[2] === 'sessions' ? parts[3] : projectRoot || parts[2] === 'canvas' || (parts[2] === 'overview' && params.get('view') === 'canvas') ? params.get('session') ?? '' : '') : params.get('session') ?? ''
+  let workspace = canonical ? (parts[2] === 'workspaces' ? parts[3] : projectRoot ? params.get('workspace') ?? '' : '') : params.get('workspace') ?? ''
   if (canonical && (params.has('project') || params.has('session') || params.has('workspace'))) {
     if ((params.has('project') && params.get('project') !== project) || (params.has('session') && params.get('session') !== session) || (params.has('workspace') && params.get('workspace') !== workspace)) return { error: '路径与查询参数冲突。' }
   }
@@ -29,6 +30,7 @@ export function resolveSelection(pathname: string, search: string, projects: { i
   if (project && !projects.some(item => item.id === project)) return { error: '项目不存在或无权限。' }
   if (!canonical && pathname === '/' && project) return { redirect: `/projects/${encodeURIComponent(project)}/${session ? `sessions/${encodeURIComponent(session)}` : workspace ? `workspaces/${encodeURIComponent(workspace)}` : 'overview'}` }
   if (pathname === '/' && !params.size) return { redirect: '/projects' }
-  if (canonical && parts.length === 2) return { redirect: `/projects/${encodeURIComponent(project)}/overview` }
+  if (projectRoot && params.get('view') === 'canvas') return { redirect: `/projects/${encodeURIComponent(project)}/overview?view=canvas${session ? `&session=${encodeURIComponent(session)}` : ''}` }
+  if (projectRoot) return { redirect: `/projects/${encodeURIComponent(project)}/${session ? `sessions/${encodeURIComponent(session)}` : workspace ? `workspaces/${encodeURIComponent(workspace)}` : 'overview'}` }
   return {}
 }
