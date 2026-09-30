@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { AesGcmSecretCodec, type SecretCodec } from '@wemux/connector'
 
 export interface ProviderCredentialRecord {
@@ -36,6 +37,7 @@ function validateSecret(value: unknown, names: readonly string[]): asserts value
 }
 
 const context = (id: string, revision: number) => ({ owner: { kind: 'model-provider' as const, id }, credentialId: id, authType: 'api_key' as const, revision })
+const fingerprint = (record: ProviderCredentialRecord): string => createHash('sha256').update(JSON.stringify([record.id, record.revision, record.variableNames, record.ciphertext])).digest('hex')
 
 export class WorkerProviderCredentialStore {
   readonly available: boolean
@@ -87,7 +89,20 @@ export class WorkerProviderCredentialStore {
     return { id: record.id, variableNames: record.variableNames, revision, availability: 'available' }
   }
 
+  async stamp(id: string): Promise<string | null> {
+    const record = await this.repository.getProviderCredential(id)
+    return record ? fingerprint(record) : null
+  }
+
+  async resolveWithStamp(id: string, variableNames: readonly string[]): Promise<{ readonly environment: Readonly<Record<string, string>>; readonly stamp: string }> {
+    return this.readValidated(id, variableNames)
+  }
+
   async resolve(id: string, variableNames: readonly string[]): Promise<Readonly<Record<string, string>>> {
+    return (await this.readValidated(id, variableNames)).environment
+  }
+
+  private async readValidated(id: string, variableNames: readonly string[]): Promise<{ environment: Readonly<Record<string, string>>; stamp: string }> {
     if (!this.codec) throw new ProviderCredentialError('credential_unavailable', '模型凭据加密能力不可用')
     validateNames(variableNames)
     const record = await this.repository.getProviderCredential(id)
@@ -95,7 +110,7 @@ export class WorkerProviderCredentialStore {
     try {
       const parsed: unknown = JSON.parse(await this.codec.decode(record.ciphertext, context(record.id, record.revision)))
       validateSecret(parsed, variableNames)
-      return parsed
+      return { environment: parsed, stamp: fingerprint(record) }
     } catch { throw new ProviderCredentialError('credential_unavailable', '模型凭据不可解密') }
   }
 

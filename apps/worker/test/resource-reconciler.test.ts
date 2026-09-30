@@ -112,6 +112,18 @@ test('Provider launch selection requires fresh exact Project, Agent and model ma
     await credentials.put({ id: 'project-provider', variableNames: ['OPENAI_API_KEY'], secret: { OPENAI_API_KEY: 'sentinel-project-456' }, expectedRevision: 0 })
     await reconciler.reconcile(makeSet(1, [global, project]))
     assert.deepEqual(await select(), { resourceId: 'project-provider', resourceRevisionId: 'project-provider-rev', bindingId: 'project-provider-binding', providerKey: 'openai-compatible', modelId: 'model-x' })
+    const privateLaunch = await reconciler.piProviderForLaunch('project-a' as never, 'openai-compatible::model-x' as never)
+    assert.equal(privateLaunch?.environment.OPENAI_API_KEY, 'sentinel-project-456')
+    assert.equal(privateLaunch?.definition.endpoint, 'https://models.example.test/v1')
+    assert.match(privateLaunch?.credentialStamp ?? '', /^[a-f0-9]{64}$/)
+    assert.doesNotMatch(JSON.stringify({ ...privateLaunch, environment: undefined }), /sentinel-project-456/)
+    assert.equal(await reconciler.piProviderForLaunch('project-a' as never, 'openai-compatible::different' as never), null)
+    const beforeRotation = privateLaunch?.credentialStamp
+    await credentials.put({ id: 'project-provider', variableNames: ['OPENAI_API_KEY'], secret: { OPENAI_API_KEY: 'sentinel-project-rotated' }, expectedRevision: 1 })
+    const rotatedLaunch = await reconciler.piProviderForLaunch('project-a' as never, 'openai-compatible::model-x' as never)
+    assert.equal(rotatedLaunch?.environment.OPENAI_API_KEY, 'sentinel-project-rotated')
+    assert.notEqual(rotatedLaunch?.credentialStamp, beforeRotation)
+    await credentials.put({ id: 'project-provider', variableNames: ['OPENAI_API_KEY'], secret: { OPENAI_API_KEY: 'sentinel-project-456' }, expectedRevision: 2 })
     assert.equal((await select('project-b'))?.resourceId, 'global-provider')
     assert.equal(await select('project-a', 'claude-code'), null)
     assert.equal(await select('project-a', 'pi', 'openai-compatible::another'), null)
@@ -123,10 +135,25 @@ test('Provider launch selection requires fresh exact Project, Agent and model ma
     await reconciler.reconcile(makeSet(4, [global, invalidProject]))
     await assert.rejects(select(), /provider_binding_invalid/, 'tampered revision cannot silently fall back to global Provider')
     await reconciler.reconcile(makeSet(5, [global, project]))
-    await credentials.delete('project-provider', 1)
+    await credentials.delete('project-provider', 3)
     await assert.rejects(select(), /provider_credential_unavailable/)
     assert.notEqual((await select('project-b'))?.resourceId, 'project-provider')
     const pending = makeSet(6, [global, project])
+    const reset = await credentials.put({ id: 'project-provider', variableNames: ['OPENAI_API_KEY'], secret: { OPENAI_API_KEY: 'race-start' }, expectedRevision: 0 })
+    assert.equal(reset.revision, 1)
+    const raced = new ResourceReconciler({ workerId, home, databasePath: join(home, 'resources-rotate.sqlite'), transport: { send: payload => { sent.push(payload) } }, providerCredentials: {
+      resolve: (id, names) => credentials.resolve(id, names),
+      resolveWithStamp: async (id, names) => {
+        const resolved = await credentials.resolveWithStamp(id, names)
+        await credentials.put({ id, variableNames: names, secret: { OPENAI_API_KEY: 'race-rotated' }, expectedRevision: 1 })
+        return resolved
+      },
+      stamp: id => credentials.stamp(id),
+    } })
+    try {
+      await raced.reconcile(pending)
+      await assert.rejects(raced.piProviderForLaunch('project-a' as never, 'openai-compatible::model-x' as never), /provider_credential_unavailable/)
+    } finally { await raced.close() }
     let finishResolution!: (value: Readonly<Record<string, string>>) => void
     let hold = false
     const delayed = new ResourceReconciler({ workerId, home, databasePath: join(home, 'resources-race.sqlite'), transport: { send: payload => { sent.push(payload) } }, providerCredentials: { resolve: () => hold ? new Promise(resolve => { finishResolution = resolve }) : Promise.resolve({ OPENAI_API_KEY: 'sentinel-before-disconnect' }) } })

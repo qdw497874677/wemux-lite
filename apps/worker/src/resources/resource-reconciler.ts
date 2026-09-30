@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { assertModelProviderConfig, type AgentKey, type ModelId, type ProjectId, type ReconcileReport, type ResourceBindingSnapshot, type ResourceReconcilePhase, type ResourceSetSnapshot, type Timestamp, type WorkerId } from '@wemux/domain'
+import { assertModelProviderConfig, type AgentKey, type ModelId, type ModelProviderResourceDefinition, type ProjectId, type ReconcileReport, type ResourceBindingSnapshot, type ResourceReconcilePhase, type ResourceSetSnapshot, type Timestamp, type WorkerId } from '@wemux/domain'
 import type { ResourceBlobFetchPayload, ServerResourcePayload, WorkerPayload } from '@wemux/wire-protocol'
 import { ResourceStateStore } from './resource-state-store.ts'
 import { SkillMaterializer } from './skill-materializer.ts'
@@ -43,7 +43,7 @@ export interface ResourceReconcilerOptions {
   readonly runtimeProcess?: RuntimeProcess
   readonly stageRuntime?: typeof stageAgentRuntime
   readonly environment?: NodeJS.ProcessEnv
-  readonly providerCredentials?: Pick<WorkerProviderCredentialStore, 'resolve'>
+  readonly providerCredentials?: Pick<WorkerProviderCredentialStore, 'resolve'> & Partial<Pick<WorkerProviderCredentialStore, 'resolveWithStamp' | 'stamp'>>
 }
 
 export class ResourceReconciler {
@@ -53,7 +53,7 @@ export class ResourceReconciler {
   private readonly materializer: SkillMaterializer
   private readonly runtimes: RuntimeMaterializer
   private readonly environment: NodeJS.ProcessEnv
-  private readonly providerCredentials?: Pick<WorkerProviderCredentialStore, 'resolve'>
+  private readonly providerCredentials?: Pick<WorkerProviderCredentialStore, 'resolve'> & Partial<Pick<WorkerProviderCredentialStore, 'resolveWithStamp' | 'stamp'>>
   private readonly now: () => Timestamp
   private readonly semaphore: Semaphore
   private readonly pulls = new Map<string, PendingRequest<ResourceSetSnapshot>>()
@@ -161,6 +161,35 @@ export class ResourceReconciler {
     // A revocation, reconnect or new desired set during async decryption invalidates selection.
     if (this.closed || !this.snapshotFresh || this.connectionEpoch !== epoch || this.announcedRevision > desired.revision || this.state.desired()?.revision !== desired.revision || this.state.desired()?.fingerprint !== desired.fingerprint || !this.state.desired()?.bindings.some(current => current.bindingId === binding.bindingId && current.bindingRevision === binding.bindingRevision && current.resourceRevisionId === binding.resourceRevisionId && current.contentSha256 === binding.contentSha256)) throw new Error('provider_snapshot_unavailable')
     return { resourceId: binding.resourceId, resourceRevisionId: binding.resourceRevisionId, bindingId: binding.bindingId, providerKey, modelId: selectedModel }
+  }
+
+  /** Worker-only secret snapshot. Never serialize or attach to a Server/Journal payload. */
+  async piProviderForLaunch(projectId: ProjectId, modelId: ModelId): Promise<{ readonly definition: ModelProviderResourceDefinition; readonly environment: Readonly<Record<string, string>>; readonly bindingId: string; readonly credentialStamp: string | null } | null> {
+    const selected = await this.providerForLaunch(projectId, 'pi' as AgentKey, modelId)
+    if (!selected) return null
+    const desired = this.state.desired()
+    const epoch = this.connectionEpoch
+    const binding = desired?.bindings.find(item => item.bindingId === selected.bindingId)
+    if (!binding?.provider) throw new Error('provider_snapshot_unavailable')
+    const definition = binding.provider.config
+    const locator = definition.credential
+    let environment: Readonly<Record<string, string>>
+    let credentialStamp: string | null = null
+    if (locator.kind === 'environment') {
+      environment = Object.fromEntries(locator.variableNames.map(name => [name, this.environment[name]])) as Record<string, string>
+    } else {
+      if (!this.providerCredentials?.resolveWithStamp || !this.providerCredentials.stamp) throw new Error('provider_credential_unavailable')
+      try {
+        const result = await this.providerCredentials.resolveWithStamp(locator.credentialRef, locator.variableNames)
+        environment = result.environment
+        credentialStamp = result.stamp
+        if (await this.providerCredentials.stamp(locator.credentialRef) !== credentialStamp) throw new Error('stale')
+      } catch { throw new Error('provider_credential_unavailable') }
+    }
+    if (locator.kind === 'worker-credential' && await this.providerCredentials!.stamp!(locator.credentialRef) !== credentialStamp) throw new Error('provider_credential_unavailable')
+    if (locator.kind === 'environment' && locator.variableNames.some(name => this.environment[name] !== environment[name])) throw new Error('provider_credential_unavailable')
+    if (this.closed || !this.snapshotFresh || this.connectionEpoch !== epoch || this.announcedRevision > desired!.revision || this.state.desired()?.revision !== desired?.revision || this.state.desired()?.fingerprint !== desired?.fingerprint || !this.state.desired()?.bindings.some(current => current.bindingId === binding.bindingId && current.bindingRevision === binding.bindingRevision && current.resourceRevisionId === binding.resourceRevisionId && current.contentSha256 === binding.contentSha256)) throw new Error('provider_snapshot_unavailable')
+    return { definition, environment, bindingId: binding.bindingId, credentialStamp }
   }
 
   /** Freeze authorized installed Skill bytes at launch; later binding changes cannot mutate this Invocation. */
