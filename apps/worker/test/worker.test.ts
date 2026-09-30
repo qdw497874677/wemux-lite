@@ -19,7 +19,7 @@ import { WebSocketTransport } from '../src/transport/websocket.js'
 import { WorkerTransportStore } from '../src/transport/transport-store.js'
 import { parseServerMessage } from '../src/transport/validation.js'
 import { enroll } from '../src/transport/enrollment.js'
-import { serverUrl } from '../src/config.js'
+import { config, serverUrl } from '../src/config.js'
 
 const workerId = 'worker' as WorkerId
 const sessionId = 'session' as SessionId
@@ -63,6 +63,8 @@ test('Worker records a rejected receipt without creating a Session for unsupport
 })
 
 test('accepts plain HTTP and WS Server URLs on trusted LANs', () => {
+  assert.equal(config(['register', '--token=-leading-dash'], {}).token, '-leading-dash')
+  assert.equal(config(['register'], { WEMUX_ENROLLMENT_TOKEN: '-leading-dash' }).token, '-leading-dash')
   assert.equal(serverUrl('http://192.168.3.22:8004').href, 'http://192.168.3.22:8004/')
   assert.equal(serverUrl('ws://10.0.0.5:3001/worker/ws').href, 'ws://10.0.0.5:3001/worker/ws')
   assert.throws(() => serverUrl('ftp://192.168.3.22/'), /Invalid Server URL/)

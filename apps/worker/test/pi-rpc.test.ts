@@ -143,6 +143,19 @@ async function waitForFile(path: string) {
   throw new Error(`Fixture did not create ${path}`)
 }
 
+async function waitForDescendantPid(path: string): Promise<number> {
+  for (let i = 0; i < 100; i++) {
+    try {
+      const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
+      if (parsed && typeof parsed === 'object' && 'pid' in parsed && typeof parsed.pid === 'number' && Number.isSafeInteger(parsed.pid) && parsed.pid > 0) return parsed.pid
+    } catch (error) {
+      if (!(error instanceof SyntaxError) && !(error instanceof Error && 'code' in error && error.code === 'ENOENT')) throw error
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  throw new Error(`Fixture did not write complete descendant metadata to ${path}`)
+}
+
 for (const mode of ['remove-before', 'remove-after', 'remove-idle']) test(`Pi fails runtime capability removal without restoring restricted tools: ${mode}`, async () => {
   const f = await fixture(mode)
   try {
@@ -156,13 +169,27 @@ for (const mode of ['remove-before', 'remove-after', 'remove-idle']) test(`Pi fa
   } finally { await f.close() }
 })
 
+test('Pi fixture waits for complete descendant metadata rather than file creation', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'wemux-pi-metadata-'))
+  const path = join(dir, 'descendant.json')
+  let complete: Promise<void> | undefined
+  try {
+    await writeFile(path, '')
+    complete = new Promise<void>((resolve, reject) => setTimeout(() => { void writeFile(path, JSON.stringify({ pid: 123 })).then(resolve, reject) }, 50))
+    const pid = await waitForDescendantPid(path)
+    assert.equal(pid, 123)
+  } finally {
+    await complete
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 for (const mode of ['descendant', 'orphan-pipe']) test(`Pi teardown is bounded with detached inherited pipes: ${mode}`, { skip: process.platform !== 'linux', timeout: 5000 }, async () => {
   const f = await fixture(mode)
   let descendant: number | undefined
   const rpc = new PiRpc(f.executable, [], f.cwd, process.env, 1000)
   try {
-    await waitForFile(join(f.cwd, 'descendant.json'))
-    descendant = JSON.parse(await readFile(join(f.cwd, 'descendant.json'), 'utf8')).pid
+    descendant = await waitForDescendantPid(join(f.cwd, 'descendant.json'))
     if (mode === 'descendant') await rpc.request('get_state')
     const started = Date.now()
     await rpc.close(); await rpc.close()

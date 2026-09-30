@@ -60,17 +60,28 @@ export class WorkerTransportStore {
   }
 
   async acceptServerHello(frame: ServerHelloFrame): Promise<void> {
-    this.setMeta('logical_connection_id', frame.logicalConnectionId)
-    this.database.prepare('UPDATE transport_outbox SET last_sent_at = NULL').run()
     const serverCursor = frame.authoritativeCursors.workerToServer
-    if (serverCursor.deliveryEpoch !== this.outboundEpoch && serverCursor.ackThrough > 0) throw new Error('transport integrity error: server acknowledged unknown worker delivery epoch')
-    if (serverCursor.deliveryEpoch === this.outboundEpoch) this.setOutboundAckThrough(serverCursor.ackThrough)
     const inbound = frame.authoritativeCursors.serverToWorker
-    // Server 可能因自身数据库重建开启新的 serverToWorker 世代。恢复被拒绝时本端不得把旧的 ACK 水位当权威
-    // （docs/design/worker-reliable-connection.md 第 6 节），直接采用 Server 的权威水位；长期 messageId
-    // 仍是跨世代去重键，重放不会重复产生领域副作用。
-    this.setMeta('inbound_epoch', inbound.deliveryEpoch)
-    this.setMeta(`inbound_ack:${inbound.deliveryEpoch}`, String(inbound.ackThrough))
+    if (serverCursor.deliveryEpoch !== this.outboundEpoch && serverCursor.ackThrough > 0) throw new Error('transport integrity error: server acknowledged unknown worker delivery epoch')
+    const lastOutbound = Number(this.meta('outbound_last_seq') ?? '0')
+    if (serverCursor.deliveryEpoch === this.outboundEpoch && serverCursor.ackThrough > lastOutbound) throw new Error('transport integrity error: server cursor ahead of enqueued worker outbound')
+    // The receive cursor records locally committed durable frames. A Server
+    // cursor may lag when its ACK from us was lost; rolling this cursor back
+    // makes replay of the same messageId look like an integrity violation.
+    // Only a genuinely new epoch starts from the Server's advertised base.
+    const storedInbound = this.meta(`inbound_ack:${inbound.deliveryEpoch}`)
+    if (storedInbound !== null && inbound.ackThrough > Number(storedInbound)) throw new Error('transport integrity error: server cursor ahead of committed worker inbound cursor')
+    this.database.exec('BEGIN IMMEDIATE')
+    try {
+      this.setMeta('logical_connection_id', frame.logicalConnectionId)
+      this.database.prepare('UPDATE transport_outbox SET last_sent_at = NULL').run()
+      if (serverCursor.deliveryEpoch === this.outboundEpoch) this.setOutboundAckThrough(serverCursor.ackThrough)
+      if (this.meta('inbound_epoch') !== inbound.deliveryEpoch) {
+        this.setMeta('inbound_epoch', inbound.deliveryEpoch)
+        if (storedInbound === null) this.setMeta(`inbound_ack:${inbound.deliveryEpoch}`, String(inbound.ackThrough))
+      }
+      this.database.exec('COMMIT')
+    } catch (error) { this.database.exec('ROLLBACK'); throw error }
   }
 
   async enqueue(payload: WorkerPayload): Promise<MessageId> {
@@ -135,10 +146,7 @@ export class WorkerTransportStore {
     this.database.exec('BEGIN IMMEDIATE')
     try {
       const epoch = this.meta('inbound_epoch')
-      if (epoch !== frame.deliveryEpoch) {
-        this.setMeta('inbound_epoch', frame.deliveryEpoch)
-        this.setMeta(`inbound_ack:${frame.deliveryEpoch}`, '0')
-      }
+      if (epoch !== frame.deliveryEpoch) throw new Error('Unexpected delivery epoch')
       const current = this.inboundAckThrough(frame.deliveryEpoch)
       if (frame.directionSeq <= current) {
         this.database.exec('COMMIT')

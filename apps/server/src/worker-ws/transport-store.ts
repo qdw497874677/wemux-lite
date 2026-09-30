@@ -64,7 +64,7 @@ export class ServerTransportStore {
     // 旧世代的水位记录保留，便于诊断和审计。
     if (storedInboundEpoch !== inboundEpoch) {
       this.setMeta(workerId, 'inbound_epoch', inboundEpoch)
-      this.setMeta(workerId, `inbound_ack:${inboundEpoch}`, '0')
+      if (this.meta(workerId, `inbound_ack:${inboundEpoch}`) === null) this.setMeta(workerId, `inbound_ack:${inboundEpoch}`, '0')
     }
     return {
       frameType: 'transport.hello', side: 'server',
@@ -111,7 +111,7 @@ export class ServerTransportStore {
     }
   }
 
-  pending(workerId: WorkerId, limit: number): readonly ServerDataFrame[] {
+  pending(workerId: WorkerId, limit: number): readonly Extract<ServerDataFrame, { readonly durability: 'durable' }>[] {
     const epoch = this.meta(workerId, 'outbound_epoch') ?? this.setMeta(workerId, 'outbound_epoch', randomUUID())
     const ack = this.outboundAckThrough(workerId, epoch)
     const rows = this.db.prepare('SELECT seq,message_id,payload_json FROM transport_outbox WHERE worker_id=? AND delivery_epoch=? AND seq>? ORDER BY seq LIMIT ?').all(workerId, epoch, ack, limit) as Array<{seq:number;message_id:string;payload_json:string}>
@@ -185,21 +185,14 @@ export class ServerTransportStore {
     for (const row of keys) dropDedupe.run(workerId, row.dedupe_key)
   }
   /**
-   * 应用层已收据的 Command 不必再做传输重投：删掉它在 outbox 里的待发行与去重记录。
-   * 只删「尚未被传输确认」的行（已确认的行本来就不在表里），Worker 已处理过这条 Command，
-   * 删除不会在接收侧留下序号空洞。
+   * An application receipt cannot remove an unacknowledged transport frame:
+   * the transport ACK can be lost while the receipt arrives on the reverse
+   * stream. Deleting the frame would leave a permanent sequence hole on
+   * replay. The receiver deduplicates the original message and re-ACKs it;
+   * acknowledge() eventually removes both the frame and its dedupe key.
    */
-  discardCommand(workerId: WorkerId, commandId: string): void {
-    const dedupeKey = `command:${commandId}`
-    this.db.exec('BEGIN IMMEDIATE')
-    try {
-      this.db.prepare('DELETE FROM transport_outbox WHERE worker_id=? AND dedupe_key=?').run(workerId, dedupeKey)
-      this.db.prepare('DELETE FROM transport_outbox_dedupe WHERE worker_id=? AND dedupe_key=?').run(workerId, dedupeKey)
-      this.db.exec('COMMIT')
-    } catch (error) {
-      this.db.exec('ROLLBACK')
-      throw error
-    }
+  discardCommand(_workerId: WorkerId, _commandId: string): void {
+    // Kept as the receipt boundary; no outbox mutation until transport ACK.
   }
   private outboundAckThrough(workerId: WorkerId, epoch: string): number { return Number(this.meta(workerId, `outbound_ack:${epoch}`) ?? '0') }
   private inboundAckThrough(workerId: WorkerId, epoch: string): number { return Number(this.meta(workerId, `inbound_ack:${epoch}`) ?? '0') }

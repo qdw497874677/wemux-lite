@@ -22,6 +22,15 @@ async function waitFor(predicate: () => Promise<boolean>, timeout = 20_000) { co
 async function stop(child: ChildProcess | null) { if (!child || child.exitCode !== null) return; child.kill('SIGTERM'); await Promise.race([once(child, 'exit'), sleep(2_000)]); if (child.exitCode === null) child.kill('SIGKILL') }
 async function freePort() { const net = await import('node:net'); const server = net.createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening'); const address = server.address(); const port = typeof address === 'object' && address ? address.port : 0; await new Promise<void>(resolveClose => server.close(() => resolveClose())); return port }
 async function request(base: string, path: string, init?: RequestInit) { const response = await fetch(`${base}${path}`, init); const body = await response.text(); return { response, body: body ? JSON.parse(body) : null } }
+async function registerWorker(home: string, base: string, token: string, name: string): Promise<void> {
+  // Tokens may begin with '-'; pass through the supported environment contract
+  // instead of an ambiguous CLI argument (and keep it out of process argv).
+  const child = spawn(process.execPath, [workerEntry, 'register', '--home', home, '--server', base, '--name', name], { cwd: root, env: { ...process.env, WEMUX_ENROLLMENT_TOKEN: token }, stdio: ['ignore', 'pipe', 'pipe'] })
+  let diagnostic = ''
+  for (const stream of [child.stdout!, child.stderr!]) stream.on('data', chunk => { diagnostic = (diagnostic + chunk).slice(-4000) })
+  const [code] = await once(child, 'exit')
+  assert.equal(code, 0, `Worker registration failed (${name}): ${diagnostic.replaceAll(token, '<redacted>')}`)
+}
 async function login(base: string, loginName: string, password: string) { const result = await request(base, '/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ login: loginName, password }) }); assert.equal(result.response.status, 200); const cookie = result.response.headers.get('set-cookie')!.split(';', 1)[0]!; const me = await request(base, '/api/auth/me', { headers: { cookie } }); return { cookie, csrf: me.body.csrfToken as string } }
 function adminHeaders(auth: { cookie: string; csrf: string }, json = true): Record<string, string> { return { cookie: auth.cookie, 'x-csrf-token': auth.csrf, ...(json ? { 'content-type': 'application/json' } : {}) } }
 async function createAccount(databasePath: string, email: string, password: string) {
@@ -54,7 +63,7 @@ async function runScenario() {
     await createAccount(databasePath, email, password)
     const auth = await login(base, email, password)
     const tokenResult = await request(base, '/api/enrollment-tokens', { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify({ expiresInSeconds: 3600 }) }); assert.equal(tokenResult.response.status, 201)
-    const register = spawn(process.execPath, [workerEntry, 'register', '--home', workerHome, '--server', base, '--token', tokenResult.body.token, '--name', 'resource-e2e-worker'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }); await once(register, 'exit'); assert.equal(register.exitCode, 0)
+    await registerWorker(workerHome, base, tokenResult.body.token, 'resource-e2e-worker')
     worker = spawn(process.execPath, [workerEntry, 'start', '--home', workerHome], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }); worker.stdout!.on('data', chunk => output.push(`[worker] ${chunk}`)); worker.stderr!.on('data', chunk => output.push(`[worker-err] ${chunk}`))
     let workerId = ''
     await waitFor(async () => {
@@ -63,7 +72,7 @@ async function runScenario() {
       return !!workerId
     })
     const secondToken = await request(base, '/api/enrollment-tokens', { method: 'POST', headers: adminHeaders(auth), body: JSON.stringify({ expiresInSeconds: 3600 }) }); assert.equal(secondToken.response.status, 201)
-    const registerSecond = spawn(process.execPath, [workerEntry, 'register', '--home', secondHome, '--server', base, '--token', secondToken.body.token, '--name', 'resource-e2e-worker-2'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }); await once(registerSecond, 'exit'); assert.equal(registerSecond.exitCode, 0)
+    await registerWorker(secondHome, base, secondToken.body.token, 'resource-e2e-worker-2')
     secondWorker = spawn(process.execPath, [workerEntry, 'start', '--home', secondHome], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] }); secondWorker.stdout!.on('data', chunk => output.push(`[worker-2] ${chunk}`)); secondWorker.stderr!.on('data', chunk => output.push(`[worker-2-err] ${chunk}`))
     let secondWorkerId = ''
     await waitFor(async () => { const result = await request(base, '/api/workers', { headers: { cookie: auth.cookie } }); secondWorkerId = result.body.items.find((item: { name: string }) => item.name === 'resource-e2e-worker-2')?.id ?? ''; return !!secondWorkerId })

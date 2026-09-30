@@ -563,7 +563,7 @@ Task review
 传输确认只证明接收端持久接收，**不等于应用层收据**。以下三条是实现必须满足的不变量（历史 P0 缺陷即违反它们：丢收据的 Command 永久停发，或者被无限重发）：
 
 - **允许重投**：只有 transport ACK 而没有应用层收据的 durable 项必须可以重新入队，分配新的 `directionSeq`，保持领域身份（同一 `commandId`）不变，接收方按长期 `messageId` 与领域身份双重去重。
-- **收到收据即停发**：收到该领域身份的应用层收据后，应当立即丢弃「尚未重新发送」的待发行与对应去重记录；Worker 已处理该身份，不会出现序号空洞。
+- **收到收据即停发领域重投**：应用层收到该领域身份的收据后不得再次将 Command 入队；但若该 Command 对应的 durable 传输帧尚无 transport ACK，必须保留原帧和去重记录直至收到 ACK，不能删除中间 sequence 留下永久空洞。断线时传输层可能重放此原帧，Worker 以 `messageId` 去重并重发 transport ACK；它不再次执行领域副作用。已获 transport ACK 的帧此前已被原子清理。
 - **入队只在有界事件发生**：deliverable 项的重新入队只允许由握手/重连、新领域事件（命令入队、状态变化）或收据触发。纯 ACK 驱动的 flush 只能重放 outbox，不得重新入队，否则同一 Command 会在一条连接上形成 ACK→入队→发送的忙循环。
 
 ## 11. Session Journal 恢复
