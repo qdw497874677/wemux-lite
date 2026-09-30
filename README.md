@@ -84,18 +84,19 @@ curl -sS -X POST http://127.0.0.1:3001/enrollment-tokens \
   -H 'Authorization: Bearer <PAT>' \
   -H 'Content-Type: application/json' -d '{}'
 
-# 在待接入 Linux 机器上执行一次完成校验→私有版本安装→注册→用户级服务启动
-# 需要 curl、Node.js >=22.13、npm，以及运行中的 systemd --user manager
+# 在待接入 Linux/macOS Worker 上执行一次完成校验→私有版本安装→注册→用户级服务启动
+# 需要 curl、Node.js >=22.13、npm；Linux 需运行中的 systemd --user；macOS 需已登录用户的 launchd GUI domain
 # Server URL 支持 HTTPS（公网推荐）或 HTTP（可信内网，如 http://192.168.1.10:3001）
 curl --proto '=http,https' --proto-redir '=http,https' -fsSL \
   http://127.0.0.1:3001/downloads/install-worker.sh \
   | WEMUX_SERVER_URL='http://127.0.0.1:3001' \
     WEMUX_ENROLLMENT_TOKEN='TOKEN' \
     WEMUX_WORKER_NAME='Worker 01' sh
-# 检查：systemctl --user status wemux-lite-worker.service
+# Linux 检查：systemctl --user status wemux-lite-worker.service
+# macOS 检查：launchctl print gui/$(id -u)/com.wemux.lite.worker
 ```
 
-安装器默认在 `~/.local/share/wemux-lite-worker/releases/<sha256>/` 安装隔离的 Worker，身份保存在 `~/.wemux-lite/`，使用 `systemd --user` 持续运行；`current` 指针在新服务启动失败时恢复旧版本。需要注销后仍持续在线时由机器管理员执行 `loginctl enable-linger <用户名>`（按系统安全策略决定）。用户会话里没有 systemd manager 时安装明确失败，不会假装已部署；仅用于手工前台调试可显式设 `WEMUX_INSTALL_MODE=global`，该模式仍需自己维护服务生命周期。包下载与同源 manifest 做 SHA-256/长度校验；HTTP 仅适用于可信内网，公网必须用 HTTPS；同源 checksum 不等于发布签名。`systemd is-active` 仅证明服务进程启动，不证明已连通 Server，请同时在节点页确认在线。升级重复运行安装命令时沿用既有 Worker 身份，已注册的 home 不需再次提供 Token；旧注册 Token 不应重用。详见 [Linux Worker 安装和回滚验收](docs/acceptance/r2-linux-worker-installer.md)。
+安装器默认在 `~/.local/share/wemux-lite-worker/releases/<sha256>/` 安装隔离的 Worker，身份保存在 `~/.wemux-lite/`，Linux 使用 `systemd --user`，macOS 使用登录用户的 `~/Library/LaunchAgents/com.wemux.lite.worker.plist`；`current` 指针在新服务启动失败时恢复旧版本。Linux 需要注销后仍持续在线时由机器管理员按安全策略执行 `loginctl enable-linger <用户名>`；macOS LaunchAgent 依赖图形用户登录，不承诺注销后保持在线。没有相应用户服务管理器时安装明确失败，不会假装已部署；仅用于手工前台调试可显式设 `WEMUX_INSTALL_MODE=global`，该模式仍需自己维护服务生命周期。包下载与同源 manifest 做 SHA-256/长度校验；HTTP 仅适用于可信内网，公网必须用 HTTPS；同源 checksum 不等于发布签名。服务管理器的进程活跃检查仅证明 Worker 进程启动，不证明已连通 Server，请同时在节点页确认在线。升级重复运行安装命令时沿用既有 Worker 身份，已注册的 home 不需再次提供 Token；旧注册 Token 不应重用。详见 [Linux Worker 安装和回滚验收](docs/acceptance/r2-linux-worker-installer.md)。
 
 Worker 安装不会安装 Agent。可在 Worker 机器上运行 `wemux-lite-worker agent use pi --path /absolute/path/to/pi` 复用已有安装，或显式运行 `wemux-lite-worker agent install pi --yes` / `agent install claude --yes` 下载固定官方 npm 包到 Worker home（不做全局安装）。通过 `agent list` 查看路径及来源；更改后重启 Worker。安装的网络/上游代码信任边界、认证和其他选项见 [Worker 本地 Agent runtime 管理](apps/worker/README.md#本地-agent-runtime-管理)。
 

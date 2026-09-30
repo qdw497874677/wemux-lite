@@ -275,6 +275,56 @@ test('managed installer stages immutable releases, preserves identity and rolls 
   assert.equal(readlinkSync(join(root, 'current')), release1, 'service health failure restores previous release')
   assert.equal(readFileSync(unitFile, 'utf8'), unit, 'rollback restores the service unit')
   assert.ok(readFileSync(log, 'utf8').includes('systemctl --user restart wemux-lite-worker.service'), 'rollback restarts the previous release')
+
+  // Exercise the Darwin branch on Linux with a launchctl stub. The plist must
+  // encode arguments separately, preserve the release pointer and roll back.
+  stub('uname', ['printf "Darwin\\n"'])
+  stub('launchctl', [
+    `printf 'launchctl %s\\n' "$*" >> '${log}'`,
+    'if [ "$1" = bootstrap ] && [ "${WEMUX_STUB_FAIL_BOOTSTRAP:-0}" = 1 ]; then exit 1; fi',
+    'if [ "$1" = bootout ]; then rm -f "${WEMUX_INSTALL_ROOT}/.stub-launchd-loaded"; fi',
+    'if [ "$1" = bootstrap ]; then touch "${WEMUX_INSTALL_ROOT}/.stub-launchd-loaded"; fi',
+    'if [ "$1" = print ] && [ "$2" != gui/$(id -u) ]; then',
+    '  if [ ! -f "${WEMUX_INSTALL_ROOT}/.stub-launchd-loaded" ]; then exit 113; fi',
+    '  if [ "${WEMUX_STUB_FAIL_ACTIVE:-0}" = 1 ]; then exit 1; fi',
+    `  printf '    pid = %s\\n' '${process.pid}'`,
+    'fi',
+    'exit 0',
+  ])
+  const macConfig = join(dir, 'Library/LaunchAgents')
+  const macUnit = join(macConfig, 'com.wemux.lite.worker.plist')
+  const firstMac = await run({ WEMUX_INSTALL_ROOT: join(dir, 'mac-managed'), WEMUX_WORKER_HOME: join(dir, 'mac-home') })
+  assert.equal(firstMac.status, 0, firstMac.stderr)
+  const macRoot = join(dir, 'mac-managed')
+  const macRelease = readlinkSync(join(macRoot, 'current'))
+  const plist = readFileSync(macUnit, 'utf8')
+  assert.match(plist, /<key>Label<\/key><string>com\.wemux\.lite\.worker<\/string>/)
+  assert.match(plist, /<key>ProgramArguments<\/key><array>/)
+  assert.match(plist, /<key>KeepAlive<\/key><true\/>/)
+  assert.match(plist, /<key>RunAtLoad<\/key><true\/>/)
+  assert.match(plist, /mac-managed\/current\/node_modules\/@wemux\/worker\/dist\/cli\.js/)
+  const oldRegisters = readFileSync(log, 'utf8').split('register\n').length
+  const repeatMac = await run({ WEMUX_INSTALL_ROOT: macRoot, WEMUX_WORKER_HOME: join(dir, 'mac-home'), WEMUX_ENROLLMENT_TOKEN: '' })
+  assert.equal(repeatMac.status, 0, repeatMac.stderr)
+  assert.equal(readFileSync(log, 'utf8').split('register\n').length, oldRegisters)
+  await writeFile(workerPackage, 'package-v3')
+  const macFailure = await run({ WEMUX_INSTALL_ROOT: macRoot, WEMUX_WORKER_HOME: join(dir, 'mac-home'), WEMUX_ENROLLMENT_TOKEN: '', WEMUX_STUB_FAIL_BOOTSTRAP: '1' })
+  assert.notEqual(macFailure.status, 0)
+  assert.equal(readlinkSync(join(macRoot, 'current')), macRelease, 'failed launchd bootstrap restores previous release')
+  assert.equal(readFileSync(macUnit, 'utf8'), plist, 'failed launchd bootstrap restores prior plist')
+  const macCrash = await run({ WEMUX_INSTALL_ROOT: macRoot, WEMUX_WORKER_HOME: join(dir, 'mac-home'), WEMUX_ENROLLMENT_TOKEN: '', WEMUX_STUB_FAIL_ACTIVE: '1' })
+  assert.equal(macCrash.status, 70, 'a loaded job without a live PID cannot pass health check')
+  assert.equal(readlinkSync(join(macRoot, 'current')), macRelease)
+  assert.equal(readFileSync(macUnit, 'utf8'), plist)
+  const foreignPlist = plist.replace('com.wemux.lite.worker</string>', 'com.other.worker</string>')
+  await writeFile(macUnit, foreignPlist)
+  const beforeConflict = readFileSync(log, 'utf8')
+  const conflict = await run({ WEMUX_INSTALL_ROOT: macRoot, WEMUX_WORKER_HOME: join(dir, 'mac-home'), WEMUX_ENROLLMENT_TOKEN: '' })
+  assert.equal(conflict.status, 70)
+  assert.match(conflict.stderr, /belongs to another installation/)
+  assert.equal(readFileSync(macUnit, 'utf8'), foreignPlist)
+  assert.equal(readlinkSync(join(macRoot, 'current')), macRelease)
+  assert.equal(readFileSync(log, 'utf8').slice(beforeConflict.length).includes('launchctl bootout'), false, 'never unload a foreign job')
 })
 
 test('管理员登录会话持久化在服务端，并随空闲过期失效', async () => {

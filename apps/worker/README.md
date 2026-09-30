@@ -22,18 +22,17 @@ The Worker now has an independently authenticated local Web/API and can run loca
 
 ## Install and run
 
-Install the Worker directly from the Wemux Server on each Agent host (no public npm registry required):
+Install the Worker on each Agent host (Linux with a running `systemd --user` manager, or macOS with a logged-in `launchd` GUI domain). The Server distributes the installer and `.tgz`; npm still needs a registry for runtime dependencies. Node >=22.13 and npm are required. The managed installer registers and launches the user service, so do **not** register/start a second instance in the same Worker home:
 
 ```bash
 curl -fsSL 'https://wemux.example.com/downloads/install-worker.sh' | \
-  WEMUX_SERVER_URL='https://wemux.example.com' sh
-
-WEMUX_ENROLLMENT_TOKEN='ONE_TIME_TOKEN' \
-  wemux-lite-worker register --server https://wemux.example.com --name 'Worker 01'
-wemux-lite-worker detect
-wemux-lite-worker status
-wemux-lite-worker start
+  WEMUX_SERVER_URL='https://wemux.example.com' \
+  WEMUX_ENROLLMENT_TOKEN='ONE_TIME_TOKEN' WEMUX_WORKER_NAME='Worker 01' sh
+# Linux: systemctl --user status wemux-lite-worker.service
+# macOS: launchctl print gui/$(id -u)/com.wemux.lite.worker
 ```
+
+Use `WEMUX_INSTALL_MODE=global` only for a manual foreground install with a separately managed supervisor.
 
 For development from this monorepo:
 
@@ -45,12 +44,11 @@ node apps/worker/dist/cli.js --version
 ```
 
 `register` is a one-time operation and must run as the same OS account that will
-run `start`. Upgrades preserve the Worker home: install the new package and restart
-the foreground process or its service supervisor. The Server-delivered installer downloads the Worker `.tgz` from `/downloads/worker.tgz`
+run `start`. Upgrades preserve the Worker home: rerun the managed installer without the one-time token;
+the installed user service restarts with the new release. The Server-delivered installer downloads the Worker `.tgz` from `/downloads/worker.tgz`
 and installs it with the local npm client; it does not resolve `@wemux/worker` itself
 through a registry. The package currently has third-party runtime dependencies, so npm
-still needs access to its configured registry to install those dependencies. Uninstalling
-the npm package does not remove `~/.wemux-lite-mini`; back up or delete that directory separately.
+still needs access to its configured registry to install those dependencies. Uninstalling the global npm package does not remove the managed Worker home (default `~/.wemux-lite`); back up or remove it separately.
 
 Options: `--home DIR`, `--name NAME`, `--server URL`, `--token TOKEN`.
 Environment equivalents: `WEMUX_WORKER_HOME`, `WEMUX_WORKER_NAME`,
