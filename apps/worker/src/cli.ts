@@ -54,8 +54,11 @@ export async function main(args = process.argv.slice(2)) {
   if (options.command === 'version') { console.log('wemux-lite-worker 0.1.0'); return }
   if (options.command === 'help') { console.log('wemux-lite-worker admin init [--username NAME] [--password-file FILE] | register --server URL [--servers URL1,URL2] [--prefer tailnet|direct|any] [--transport direct|nc] [--force] --token TOKEN | start [--host 127.0.0.1] [--port 3002] [--secure-cookies] [--prefer ...] [--transport ...] | status [--prefer ...] | detect | agent list | agent status | agent use <key> --path /absolute/executable | agent install <pi|opencode|claude> --yes | tailscale [--server URL]；所有命令支持 --home DIR；admin init 也可读取 WEMUX_LOCAL_ADMIN_PASSWORD；register --force 用于替换已存在的本机身份（例如服务器数据被重置后凭据失效）；HTTPS 终止于受信反向代理时启用 --secure-cookies 或 WEMUX_WORKER_SECURE_COOKIES=1；Agent 选择变更需要重启 Worker；--prefer 缺省时自动：检测到 tailscale CLI 且候选含 tailnet 地址则优先 tailnet；--transport nc 让注册与 WebSocket 全部经由 tailscale nc 隧道（不改系统路由，仅支持明文 http 端点）'); return }
   if (!['register', 'start', 'status', 'detect', 'tailscale', 'agent', 'admin'].includes(options.command)) throw new Error('Unknown command')
-  await mkdir(options.home, { recursive: true, mode: 0o700 })
-  await chmod(options.home, 0o700)
+  const readOnly = options.command === 'status' || options.command === 'tailscale'
+  if (!readOnly) {
+    await mkdir(options.home, { recursive: true, mode: 0o700 })
+    await chmod(options.home, 0o700)
+  }
   if (options.command === 'agent') {
     if (options.extraPositionals.length) throw new Error('agent 命令不接受额外位置参数')
     if (options.agentAction === 'use') {
@@ -77,8 +80,8 @@ export async function main(args = process.argv.slice(2)) {
   let store: SqliteWorkerStore | undefined
   try {
     const database = join(options.home, 'worker.sqlite')
-    store = new SqliteWorkerStore(database)
-    await chmod(database, 0o600)
+    store = new SqliteWorkerStore(database, { readOnly })
+    if (!readOnly) await chmod(database, 0o600)
     if (options.command === 'start') await activateStagedRuntimes(options.home, store.identity()?.workerId)
     let settings = await readAgentSettings(options.home)
     let agents = defaultAgents(settings)
@@ -87,14 +90,14 @@ export async function main(args = process.argv.slice(2)) {
       settings = await readAgentSettings(options.home)
       agents = defaultAgents(settings)
     }
-    const installation = ensureLocalInstallation(store, options.name)
+    const installation = readOnly ? null : ensureLocalInstallation(store, options.name)
     if (options.command === 'admin') {
       if (options.adminAction !== 'init' || options.extraPositionals.length || options.agentKey) throw new Error('使用 admin init [--username NAME] [--password-file FILE]')
       if (options.agentPath || options.yes) throw new Error('admin init 不接受 --path 或 --yes')
       const password = options.passwordFile ? (await readFile(options.passwordFile, 'utf8')).replace(/[\r\n]+$/, '') : options.localAdminPassword
       if (!password) throw new Error('admin init requires --password-file or WEMUX_LOCAL_ADMIN_PASSWORD')
       const admin = await createLocalAdmin(store, { username: options.username, password })
-      console.log(JSON.stringify({ installationId: installation.installationId, username: admin.username, createdAt: admin.createdAt }))
+      console.log(JSON.stringify({ installationId: installation!.installationId, username: admin.username, createdAt: admin.createdAt }))
     } else if (options.command === 'register') {
       const existing = store.identity()
       // 换身份会丢弃旧 workerId（旧会话/工作区仍绑定它），因此必须显式 --force：
@@ -162,7 +165,7 @@ export async function main(args = process.argv.slice(2)) {
       const requestStop = async () => { stopRequested?.() }
       const lifecycle = new ClusterLifecycle(store, agents, {
         home: options.home,
-        name: installation.name,
+        name: installation!.name,
         enrollmentPath: options.enrollmentPath,
         socketPath: options.socketPath,
         transport: options.transport,

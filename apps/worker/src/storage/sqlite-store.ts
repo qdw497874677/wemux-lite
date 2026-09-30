@@ -19,8 +19,14 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
   private readonly db: DatabaseSync
   private tail: Promise<unknown> = Promise.resolve()
 
-  constructor(path: string) {
-    this.db = new DatabaseSync(path)
+  constructor(path: string, options: { readOnly?: boolean } = {}) {
+    this.db = new DatabaseSync(path, { readOnly: options.readOnly ?? false })
+    // Diagnostic callers must never change journal mode, schema or identities.
+    if (options.readOnly) {
+      const version = this.db.prepare('PRAGMA user_version').get()?.user_version
+      if (![1, 2, 3, 4, 5].includes(Number(version))) { this.db.close(); throw new Error('Unsupported Worker database schema') }
+      return
+    }
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;')
     const version = this.db.prepare('PRAGMA user_version').get()?.user_version
     if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5) { this.db.close(); throw new Error('Unsupported Worker database schema') }
