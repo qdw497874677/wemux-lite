@@ -306,6 +306,7 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     putResourceBlob: (sha256: string, base64Content: string) => request<{ sha256: string; deduplicated: boolean }>(routes.resourceBlob(sha256), { base64Content }, undefined, 'PUT'),
     publishResourceRevision: (resourceId: string, revision: ResourceRevision) => request<ResourceRevision>(routes.resourceRevisions(resourceId), revision),
     resourceBindings: (signal?: AbortSignal) => list<{ binding: ResourceBinding; reconcile: ReconcileReport | null }>(routes.resourceBindings, signal),
+    providerCandidates: (workerId: string, projectId: string, agentKey: string, signal?: AbortSignal) => list<{ modelId: string; resourceId: string; bindingId: string; status: 'not-verified' }>(`/api/workers/${id(workerId)}/projects/${id(projectId)}/provider-candidates?agentKey=${encodeURIComponent(agentKey)}`, signal),
     bindResource: (body: { id: string; workerId: string; resourceRevisionId: string; agentKey: string | null; projectId: string | null }) => request<ResourceBinding>(routes.resourceBindings, body),
     transitionResourceBinding: (bindingId: string, status: ResourceBindingStatus, expectedRevision: number) => request<ResourceBinding>(routes.resourceBinding(bindingId), { status, expectedRevision }, undefined, 'PATCH'),
     workers: async (signal?: AbortSignal) => {

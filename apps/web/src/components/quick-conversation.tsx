@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import type { Api } from '../api/client.ts'
 import { Bot, Boxes, Check, ChevronDown, CircleCheck, Server, TriangleAlert } from 'lucide-react'
 import type { WorkerDTO, WorkspaceDTO } from '../api/dto'
 import { QuickStartController, fillQuickChoices, quickConfigReason } from '../features/sessions/quick-start.ts'
@@ -37,8 +39,8 @@ function ConfigChip({ label, value, selectedId, icon, choices, disabled, onSelec
   </PopoverContent></Popover>
 }
 
-export function QuickConversation({ controller, projectId, workers, workspaces, connected, onSetup, onOpen }: {
-  controller: QuickStartController; projectId: string; workers: WorkerDTO[]; workspaces: WorkspaceDTO[]; connected: boolean
+export function QuickConversation({ api, controller, projectId, workers, workspaces, connected, onSetup, onOpen }: {
+  api: Api; controller: QuickStartController; projectId: string; workers: WorkerDTO[]; workspaces: WorkspaceDTO[]; connected: boolean
   onSetup: () => void; onOpen: (id: string) => void
 }) {
   const state = useSyncExternalStore(controller.subscribe, controller.snapshot)
@@ -62,7 +64,14 @@ export function QuickConversation({ controller, projectId, workers, workspaces, 
     return { id: placement.workerId, label: node?.name ?? placement.workerId, description: `${workspaceStateLabel[placement.status]} · ${node ? workerStateLabel[node.connectionState] : '节点不可访问'}` }
   }) ?? []
   const agentChoices = worker?.capabilities.map(item => ({ id: item.agentKey, label: item.displayName, description: !isExecutable(item) ? item.availability.reason || '不可执行或尚未认证' : !item.models.length ? '未报告可用模型' : undefined, disabled: !isExecutable(item) })) ?? []
-  const modelChoices = [{ id: '', label: '智能体默认模型' }, ...(agent?.models.map(item => ({ id: item.modelId, label: item.displayName })) ?? [])]
+  const candidates = useQuery({
+    queryKey: ['provider-candidates', projectId, config.workerId, config.agentKey],
+    queryFn: ({ signal }) => api.providerCandidates(config.workerId, projectId, config.agentKey, signal),
+    enabled: connected && Boolean(projectId && config.workerId && config.agentKey),
+    staleTime: 2000, refetchInterval: connected ? 5000 : false,
+  })
+  const modelChoices: Choice[] = [{ id: '', label: '智能体默认模型' }, ...(agent?.models.map(item => ({ id: item.modelId, label: item.displayName })) ?? []),
+    ...(candidates.data ?? []).map(item => ({ id: `candidate:${item.bindingId}:${item.modelId}`, label: item.modelId, description: '已绑定，尚未验证模型与凭据；暂不可用于对话', disabled: true }))]
   const runtimeIssues = worker?.capabilities.filter(item => !isExecutable(item) || !item.models.length) ?? []
   const placementIssues = ws?.placements.filter(item => item.status !== 'ready' || item.failureReason) ?? []
   const hasDiagnostics = runtimeIssues.length > 0 || placementIssues.length > 0
