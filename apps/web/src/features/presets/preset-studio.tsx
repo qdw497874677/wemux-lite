@@ -33,6 +33,7 @@ export function PresetStudio({ api, workers }: { api: Api; workers: WorkerDTO[] 
   const [agentKey, setAgentKey] = useState('')
   const [presetId, setPresetId] = useState('')
   const [workerId, setWorkerId] = useState('')
+  const [providerResourceId, setProviderResourceId] = useState('')
   const [providerName, setProviderName] = useState(''), [providerEndpoint, setProviderEndpoint] = useState(''), [providerModel, setProviderModel] = useState(''), [providerRef, setProviderRef] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
@@ -62,13 +63,18 @@ export function PresetStudio({ api, workers }: { api: Api; workers: WorkerDTO[] 
     setError(''); setMessage(''); setBusy(true)
     try {
       const actor = await api.currentAccount()
-      const resourceId = randomId()
+      const resourceId = providerResourceId || randomId()
       const createdAt = new Date().toISOString()
-      const { definition, revision } = prepareProviderRevision({ resourceId, revisionId: randomId(), version: 1, name: providerName, endpoint: providerEndpoint, modelId: providerModel, credentialRef: providerRef, createdBy: actor.user.id, createdAt })
-      await api.createResource({ id: resourceId, kind: 'model-provider', name: providerName.trim(), description: '', definition, createdBy: actor.user.id as Resource['createdBy'], createdAt: createdAt as Resource['createdAt'], updatedAt: createdAt as Resource['updatedAt'] })
-      await api.publishResourceRevision(resourceId, revision)
-      setProviderName(''); setProviderEndpoint(''); setProviderModel(''); setProviderRef('')
-      setMessage('已发布非秘密模型供应商版本。请在目标 Worker 本地配置对应凭据；尚未完成模型认证，不可用于新建会话。')
+      const detail = providerResourceId ? await api.resourceDetail(providerResourceId) : null
+      const version = detail ? Math.max(0, ...detail.revisions.map(item => item.version)) + 1 : 1
+      const { definition, revision } = prepareProviderRevision({ resourceId, revisionId: randomId(), version, name: detail?.resource.name ?? providerName, endpoint: providerEndpoint, modelId: providerModel, credentialRef: providerRef, createdBy: actor.user.id, createdAt })
+      if (detail) await api.publishProviderRevision(resourceId, { expectedVersion: version - 1, revision })
+      else {
+        await api.createResource({ id: resourceId, kind: 'model-provider', name: providerName.trim(), description: '', definition, createdBy: actor.user.id as Resource['createdBy'], createdAt: createdAt as Resource['createdAt'], updatedAt: createdAt as Resource['updatedAt'] })
+        await api.publishResourceRevision(resourceId, revision)
+      }
+      setProviderResourceId(''); setProviderName(''); setProviderEndpoint(''); setProviderModel(''); setProviderRef('')
+      setMessage(`已发布非秘密模型供应商 v${version}。请在目标 Worker 本地配置对应凭据；尚未完成模型认证，不可用于新建会话。`)
       await refresh()
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setBusy(false) }
   }
@@ -123,12 +129,13 @@ export function PresetStudio({ api, workers }: { api: Api; workers: WorkerDTO[] 
     {expanded && <div className="mt-5 grid gap-6 border-t border-border pt-5 lg:grid-cols-2">
       <div className="space-y-3">
         <h3 className="text-sm font-medium">发布模型供应商（非秘密）</h3>
+        <label className="block space-y-1 text-xs">编辑模型供应商<select aria-label="编辑模型供应商" className="w-full rounded-lg border border-border bg-background px-3 py-2" value={providerResourceId} onChange={event => { const item = resources.find(resource => resource.id === event.target.value && resource.kind === 'model-provider'); setProviderResourceId(item?.id ?? ''); setProviderName(item?.name ?? ''); setProviderEndpoint(item?.kind === 'model-provider' ? item.definition.endpoint : ''); setProviderModel(item?.kind === 'model-provider' ? item.definition.modelIds[0] ?? '' : ''); setProviderRef(item?.kind === 'model-provider' && item.definition.credential.kind === 'worker-credential' ? item.definition.credential.credentialRef : '') }}><option value="">新建模型供应商</option>{resources.filter(item => item.kind === 'model-provider').map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
         <p className="text-xs text-muted-foreground">当前仅支持隔离 Pi 的 OpenAI 兼容端点、单模型与本机加密凭据引用。此处不输入密钥；新建资源和不可变 v1 后，才可加入下方预设。发布不代表认证通过。</p>
-        <label className="block space-y-1 text-xs">供应商名称<input aria-label="供应商名称" className="w-full rounded-lg border border-border bg-background px-3 py-2" value={providerName} maxLength={200} onChange={event => setProviderName(event.target.value)} /></label>
+        <label className="block space-y-1 text-xs">供应商名称<input aria-label="供应商名称" className="w-full rounded-lg border border-border bg-background px-3 py-2" value={providerName} maxLength={200} onChange={event => setProviderName(event.target.value)} disabled={Boolean(providerResourceId)} /></label>
         <label className="block space-y-1 text-xs">HTTPS 端点<input aria-label="供应商 HTTPS 端点" className="w-full rounded-lg border border-border bg-background px-3 py-2" value={providerEndpoint} onChange={event => setProviderEndpoint(event.target.value)} placeholder="https://models.example.com/v1" /></label>
         <label className="block space-y-1 text-xs">模型 ID<input aria-label="供应商模型 ID" className="w-full rounded-lg border border-border bg-background px-3 py-2" value={providerModel} onChange={event => setProviderModel(event.target.value)} /></label>
         <label className="block space-y-1 text-xs">Worker 本机凭据引用<input aria-label="供应商本机凭据引用" className="w-full rounded-lg border border-border bg-background px-3 py-2" value={providerRef} onChange={event => setProviderRef(event.target.value)} placeholder="local-ref" /></label>
-        <button type="button" disabled={busy || !providerName.trim() || !providerEndpoint.trim() || !providerModel.trim() || !providerRef.trim()} className="rounded-lg border border-border px-3 py-2 text-xs disabled:opacity-50" onClick={() => void publishProvider()}>发布非秘密版本</button>
+        <button type="button" disabled={busy || !providerName.trim() || !providerEndpoint.trim() || !providerModel.trim() || !providerRef.trim()} className="rounded-lg border border-border px-3 py-2 text-xs disabled:opacity-50" onClick={() => void publishProvider()}>{providerResourceId ? '发布新供应商版本' : '发布非秘密版本'}</button>
         <h3 className="border-t border-border pt-5 text-sm font-medium">发布资源预设</h3>
         <select aria-label="编辑预设" className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs" value={editingId} onChange={event => {
           const previous = latest.find(item => item.id === event.target.value)

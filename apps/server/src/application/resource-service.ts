@@ -124,6 +124,22 @@ export class ResourceService {
   resources(): readonly Resource[] { return this.repository.resources() }
   deleteResource(id: string): void { this.repository.deleteResource(id) }
   createRevision(revision: ResourceRevision): ResourceRevision { return this.repository.createRevision(revision) }
+  /** Publish the new non-secret Provider definition and immutable revision together. */
+  publishProviderRevision(resourceId: string, input: { readonly expectedVersion: number; readonly revision: ResourceRevision }): Promise<ResourceRevision> {
+    return this.repository.transaction(() => {
+      const current = this.repository.resource(resourceId)
+      if (!current || current.kind !== 'model-provider') throw new Error('provider_resource_not_found')
+      const versions = this.repository.revisions(resourceId)
+      const latest = versions.reduce((highest, item) => Math.max(highest, item.version), 0)
+      if (latest !== input.expectedVersion || input.revision.version !== latest + 1) throw new Error('provider_version_conflict')
+      const next = input.revision
+      if (next.resourceId !== resourceId || next.kind !== 'model-provider' || next.payload.mode !== 'inline-config' || next.state !== 'published') throw new Error('invalid_provider_revision')
+      // The repository validates the actual content digest and strict shapes;
+      // a failed revision rolls back the resource update in this transaction.
+      this.repository.updateResource({ ...current, definition: next.payload.config, updatedAt: this.now() })
+      return this.repository.createRevision(next)
+    })
+  }
   revision(id: string): ResourceRevision | null { return this.repository.revision(id) }
   revisions(resourceId: string): readonly ResourceRevision[] { return this.repository.revisions(resourceId) }
   bindings(workerId?: WorkerId): readonly ResourceBinding[] { return this.repository.bindings(workerId) }

@@ -84,6 +84,18 @@ export const nodeResourceRoutes: readonly RouteDescriptor[] = [
     }
     context.json(201, service(context).createRevision(revision))
   } },
+  { method: 'POST', pattern: '/resources/:resourceId/provider-revisions', auth: 'admin', handler: async context => {
+    await context.operator()
+    const body = object(await context.readBody())
+    if (Object.keys(body).sort().join(',') !== 'expectedVersion,revision' || !Number.isSafeInteger(body.expectedVersion) || (body.expectedVersion as number) < 1) throw new AppError(400, 'Invalid Provider publish request', 'invalid_provider_revision')
+    try { context.json(201, await service(context).publishProviderRevision(context.params.resourceId, { expectedVersion: body.expectedVersion as number, revision: body.revision as ResourceRevision })) }
+    catch (error) {
+      if (error instanceof Error && error.message === 'provider_version_conflict') throw new AppError(409, 'Provider version changed; refresh and retry', error.message)
+      if (error instanceof Error && error.message === 'provider_resource_not_found') throw new AppError(404, 'Provider resource not found', error.message)
+      if (error instanceof Error && /^(invalid_provider|provider_config)/.test(error.message)) throw new AppError(400, 'Invalid Provider revision', error.message)
+      throw error
+    }
+  } },
   { method: 'PUT', pattern: '/resource-blobs/:sha256', auth: 'admin', handler: async context => {
     await context.operator()
     if (!SHA256.test(context.params.sha256)) throw new AppError(400, 'Invalid blob hash', 'invalid_request')

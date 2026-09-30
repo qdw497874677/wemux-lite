@@ -80,6 +80,35 @@ test('model provider resource rejects secret fields and its revision is immutabl
   } finally { repository.close() }
 })
 
+test('Provider publishes v2 atomically with version CAS and preserves older bindings', async () => {
+  const repository = new SqliteResourceRepository(':memory:')
+  const config = { providerKey: 'openai-compatible' as const, endpoint: 'https://models.example.test/v1', modelIds: ['test-model'], agentKeys: ['pi' as never], credential: { kind: 'worker-credential' as const, credentialRef: 'local-ref', variableNames: ['OPENAI_API_KEY'] } }
+  const provider: Resource = { ...resource, id: 'provider-versioned', kind: 'model-provider', definition: config }
+  const create = (definition: typeof config, version: number): ResourceRevision => {
+    const digest = createHash('sha256').update(JSON.stringify(definition)).digest('hex')
+    return { ...revision, id: `provider-version-${version}`, resourceId: provider.id, kind: 'model-provider', version, contentSha256: digest, payload: { mode: 'inline-config', contentSha256: digest, config: definition }, manifest: { ...revision.manifest, bytes: Buffer.byteLength(JSON.stringify(definition)), fileCount: 0, sha256: digest, compatibility: { ...revision.manifest.compatibility, agentKeys: ['pi' as never] } }, supplyChain: { mode: 'static-content', manifestSha256: digest } }
+  }
+  try {
+    repository.createResource(provider)
+    const first = create(config, 1)
+    repository.createRevision(first)
+    const service = new ResourceService(repository, { send() {} }, () => at)
+    const nextConfig = { ...config, modelIds: ['next-model'] }
+    const second = create(nextConfig, 2)
+    await assert.rejects(service.publishProviderRevision(provider.id, { expectedVersion: 0, revision: second }), /provider_version_conflict/)
+    assert.deepEqual(repository.resource(provider.id), provider)
+    await assert.rejects(service.publishProviderRevision(provider.id, { expectedVersion: 1, revision: { ...second, manifest: { ...second.manifest, sha256: '0'.repeat(64) } } }), /provider_config_hash_mismatch/)
+    assert.deepEqual(repository.resource(provider.id), provider, 'failed revision leaves current definition unchanged')
+    assert.deepEqual(await service.publishProviderRevision(provider.id, { expectedVersion: 1, revision: second }), second)
+    assert.deepEqual(repository.resource(provider.id)?.definition, nextConfig)
+    assert.deepEqual(repository.revision(first.id), first)
+    const binding = service.createBinding({ id: 'provider-previous-binding', workerId, resourceRevisionId: first.id, agentKey: 'pi' as never, createdBy: userId })
+    assert.equal(binding.resourceRevisionId, first.id)
+    assert.deepEqual(service.desiredSet(workerId).bindings[0]?.provider?.config, config, 'an earlier binding remains pinned to v1 after v2 publication')
+    await assert.rejects(service.publishProviderRevision(provider.id, { expectedVersion: 1, revision: create({ ...config, modelIds: ['stale'] }, 2) }), /provider_version_conflict/)
+  } finally { repository.close() }
+})
+
 test('filesystem blob store verifies hashes and deduplicates by content address', async t => {
   const root = await mkdtemp(join(tmpdir(), 'wemux-resource-blobs-'))
   t.after(() => rm(root, { recursive: true, force: true }))

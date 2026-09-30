@@ -72,6 +72,23 @@ test('resource management routes are administrator-only and expose catalog, bind
   assert.deepEqual(desired.output.body, { workerId: 'worker-1', revision: 1, bindings: [] })
 })
 
+test('Provider version route requires admin and reports CAS conflicts without persisting a revision', async () => {
+  const target = route('POST', '/resources/:resourceId/provider-revisions')
+  let operatorChecked = false
+  let input: unknown
+  const published = context({
+    params: { resourceId: 'provider-1' }, operator: async () => { operatorChecked = true; return 'operator' },
+    readBody: async () => ({ expectedVersion: 1, revision: { id: 'v2', kind: 'model-provider' } }),
+    resources: { publishProviderRevision: async (resourceId: string, body: unknown) => { input = { resourceId, body }; return { id: 'v2' } } },
+  })
+  await target.handler(published.value)
+  assert.equal(operatorChecked, true)
+  assert.deepEqual(input, { resourceId: 'provider-1', body: { expectedVersion: 1, revision: { id: 'v2', kind: 'model-provider' } } })
+  assert.equal(published.output.status, 201)
+  const stale = context({ params: { resourceId: 'provider-1' }, readBody: async () => ({ expectedVersion: 1, revision: {} }), resources: { publishProviderRevision: async () => { throw new Error('provider_version_conflict') } } })
+  await assert.rejects(async () => target.handler(stale.value), (error: { status: number; code: string }) => error.status === 409 && error.code === 'provider_version_conflict')
+})
+
 test('Preset routes require administrator and derive actor; invalid and conflicted writes return structured HTTP errors', async () => {
   const presets = context()
   await route('GET', '/resource-presets').handler(presets.value)
