@@ -46,6 +46,27 @@ test('resource management routes are administrator-only and expose catalog, bind
   await route('GET', '/resource-bindings').handler(bindings.value)
   assert.deepEqual(bindings.output.body, { items: [{ binding: { id: 'binding-1' }, reconcile: null }] })
 
+  const candidatesRoute = nodeResourceRoutes.find(item => item.method === 'GET' && item.pattern === '/workers/:workerId/projects/:projectId/provider-candidates')
+  assert.equal(candidatesRoute?.auth, 'authenticated')
+  let ownerValidated = false
+  let workerValidated = false
+  let received: unknown
+  const candidate = context({
+    params: { workerId: 'worker-1', projectId: 'project-1' }, url: new URL('http://localhost/workers/worker-1/projects/project-1/provider-candidates?agentKey=pi'),
+    actor: async () => 'viewer-1',
+    projects: { require: async () => { ownerValidated = true } },
+    workerAccess: { require: async () => { workerValidated = true } },
+    resources: { providerCandidates: (...args: unknown[]) => { received = args; return [{ modelId: 'openai-compatible::test', status: 'not-verified' }] } },
+  })
+  await candidatesRoute!.handler(candidate.value)
+  assert.equal(ownerValidated && workerValidated, true)
+  assert.deepEqual(received, ['worker-1', 'project-1', 'pi'])
+  assert.deepEqual(candidate.output.body, { items: [{ modelId: 'openai-compatible::test', status: 'not-verified' }] })
+  const forbidden = context({
+    params: { workerId: 'worker-1', projectId: 'project-1' }, url: new URL('http://localhost/workers/worker-1/projects/project-1/provider-candidates?agentKey=pi'), actor: async () => 'viewer-1',
+    projects: { require: async () => { throw new Error('forbidden-project') } }, workerAccess: { require: async () => { throw new Error('must-not-leak-worker') } }, resources: { providerCandidates: () => { throw new Error('must-not-query') } },
+  })
+  await assert.rejects(async () => candidatesRoute!.handler(forbidden.value), /forbidden-project/)
   const desired = context({ params: { workerId: 'worker-1' } })
   await route('GET', '/workers/:workerId/resource-set').handler(desired.value)
   assert.deepEqual(desired.output.body, { workerId: 'worker-1', revision: 1, bindings: [] })

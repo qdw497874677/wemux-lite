@@ -92,6 +92,26 @@ test('model-provider preset only binds mapped Agent and distributes locator with
   } finally { repository.close() }
 })
 
+test('project-scoped Provider candidates expose no secrets and never claim model availability', () => {
+  const { repository, service } = setup()
+  try {
+    const config = { providerKey: 'openai-compatible' as const, endpoint: 'https://models.example.test/v1', modelIds: ['model-a'], agentKeys: ['pi' as AgentKey], credential: { kind: 'worker-credential' as const, credentialRef: 'private-ref', variableNames: ['OPENAI_API_KEY'] } }
+    const digest = createHash('sha256').update(JSON.stringify(config)).digest('hex')
+    const provider: Resource = { id: 'provider-candidate', kind: 'model-provider', name: 'Candidate', description: '', definition: config, createdBy: admin, createdAt: at, updatedAt: at }
+    const published: ResourceRevision = { id: 'candidate-rev', resourceId: provider.id, kind: 'model-provider', version: 1, state: 'published', manifest: { ...revision.manifest, bytes: Buffer.byteLength(JSON.stringify(config)), fileCount: 0, sha256: digest, compatibility: { ...revision.manifest.compatibility, agentKeys: ['pi' as AgentKey] } }, payload: { mode: 'inline-config', contentSha256: digest, config }, contentSha256: digest, supplyChain: { mode: 'static-content', manifestSha256: digest }, createdBy: admin, createdAt: at }
+    repository.createResource(provider); repository.createRevision(published)
+    service.createBinding({ workerId: worker, resourceRevisionId: published.id, agentKey: 'pi' as AgentKey, projectId: 'project-a' as never, createdBy: admin })
+    assert.deepEqual(service.providerCandidates(worker, 'project-b' as never, 'pi' as AgentKey), [])
+    assert.deepEqual(service.providerCandidates('other-worker' as WorkerId, 'project-a' as never, 'pi' as AgentKey), [])
+    assert.deepEqual(service.providerCandidates(worker, 'project-a' as never, 'claude-code' as AgentKey), [])
+    const items = service.providerCandidates(worker, 'project-a' as never, 'pi' as AgentKey)
+    assert.deepEqual(items, [{ modelId: 'openai-compatible::model-a', resourceId: provider.id, bindingId: service.bindings(worker)[0]!.id, status: 'not-verified' }])
+    assert.doesNotMatch(JSON.stringify(items), /private-ref|OPENAI_API_KEY|models\.example\.test|sentinel-secret/)
+    service.transitionBinding(service.bindings(worker)[0]!.id, 'pending-gc', service.bindings(worker)[0]!.revision)
+    assert.deepEqual(service.providerCandidates(worker, 'project-a' as never, 'pi' as AgentKey), [])
+  } finally { repository.close() }
+})
+
 test('a failed multi-entry apply rolls back all bindings and emits no notification', async () => {
   const { repository, service, notifications } = setup()
   try {

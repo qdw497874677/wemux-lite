@@ -1,4 +1,4 @@
-import { assertModelProviderConfig, type Resource, type ResourceBindingStatus, type ResourceRevision, type WorkerId } from '@wemux/domain'
+import { assertModelProviderConfig, type AgentKey, type ProjectId, type Resource, type ResourceBindingStatus, type ResourceRevision, type WorkerId } from '@wemux/domain'
 import { AppError } from '../../application/errors.ts'
 import type { RouteDescriptor } from './types.ts'
 
@@ -108,6 +108,16 @@ export const nodeResourceRoutes: readonly RouteDescriptor[] = [
     await context.operator(); const body = object(await context.readBody())
     if (typeof body.status !== 'string' || typeof body.expectedRevision !== 'number') throw new AppError(400, 'Missing binding transition fields', 'invalid_request')
     context.json(200, service(context).transitionBinding(context.params.bindingId, body.status as ResourceBindingStatus, body.expectedRevision))
+  } },
+  { method: 'GET', pattern: '/workers/:workerId/projects/:projectId/provider-candidates', auth: 'authenticated', handler: async context => {
+    const actor = await context.actor()
+    const projectId = context.params.projectId as ProjectId, workerId = context.params.workerId as WorkerId
+    if (!context.projects || !context.workerAccess) throw new AppError(404, 'Not found')
+    await context.projects.require(actor, projectId)
+    await context.workerAccess.require(actor, workerId)
+    const agentKey = context.url.searchParams.get('agentKey')
+    if (!agentKey || agentKey.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(agentKey)) throw new AppError(400, 'Invalid Agent key', 'invalid_request')
+    context.json(200, { items: service(context).providerCandidates(workerId, projectId, agentKey as AgentKey) })
   } },
   { method: 'GET', pattern: '/workers/:workerId/resource-set', auth: 'admin', handler: async context => {
     await context.operator()

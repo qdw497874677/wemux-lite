@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type {
   ReconcileReport,
+  AgentKey,
+  ProjectId,
   NodeResourcePreset,
   NodeResourcePresetApplication,
   NodeResourcePresetEntry,
@@ -127,6 +129,25 @@ export class ResourceService {
   bindings(workerId?: WorkerId): readonly ResourceBinding[] { return this.repository.bindings(workerId) }
   bindingProjections(workerId?: WorkerId): ReadonlyArray<{ readonly binding: ResourceBinding; readonly reconcile: ReconcileReport | null }> {
     return this.repository.bindings(workerId).map(binding => ({ binding, reconcile: this.repository.latestReport(binding.id) }))
+  }
+
+  /** Non-secret, project-scoped discovery only. Not a readiness or auth claim. */
+  providerCandidates(workerId: WorkerId, projectId: ProjectId, agentKey: AgentKey): ReadonlyArray<{ readonly modelId: string; readonly resourceId: string; readonly bindingId: string; readonly status: 'not-verified' }> {
+    const candidates = new Map<string, { modelId: string; resourceId: string; bindingId: string; status: 'not-verified'; priority: number }[]>()
+    for (const binding of this.desiredSet(workerId).bindings) {
+      if (binding.kind !== 'model-provider' || (binding.projectId !== null && binding.projectId !== projectId) || (binding.agentKey !== null && binding.agentKey !== agentKey) || !binding.provider?.config.agentKeys.includes(agentKey)) continue
+      for (const model of binding.provider.config.modelIds) {
+        const modelId = `${binding.provider.config.providerKey}::${model}`
+        const priority = Number(binding.projectId !== null) * 2 + Number(binding.agentKey !== null)
+        candidates.set(modelId, [...candidates.get(modelId) ?? [], { modelId, resourceId: binding.resourceId, bindingId: binding.bindingId, status: 'not-verified', priority }])
+      }
+    }
+    // Do not offer an ambiguous highest-priority selection: the Worker rejects it.
+    return [...candidates.values()].flatMap(items => {
+      const top = Math.max(...items.map(item => item.priority))
+      const best = items.filter(item => item.priority === top)
+      return best.length === 1 ? [{ modelId: best[0]!.modelId, resourceId: best[0]!.resourceId, bindingId: best[0]!.bindingId, status: best[0]!.status }] : []
+    }).sort((a, b) => a.modelId.localeCompare(b.modelId))
   }
   async putBlob(content: Uint8Array, expectedSha256: string): Promise<StoredResourceBlob> {
     if (!this.blobs) throw new Error('resource_blob_store_unavailable')
