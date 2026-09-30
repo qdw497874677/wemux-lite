@@ -128,6 +128,34 @@ test('disconnect aborts only private Pi provider sessions without touching ordin
   } finally { await runner.close() }
 })
 
+test('private Pi Provider runner never publishes a buffered success after revocation', async () => {
+  const key = 'pi' as AgentKey
+  const definition = { providerKey: 'openai-compatible' as const, endpoint: 'https://example.invalid/v1', modelIds: ['offline-model'], agentKeys: [key], credential: { kind: 'environment' as const, variableNames: ['OPENAI_API_KEY'] } }
+  let release!: () => void
+  const barrier = new Promise<void>(resolve => { release = resolve })
+  let completed!: () => void
+  const done = new Promise<void>(resolve => { completed = resolve })
+  const adapter: RuntimeSessionAdapter = { async openSession() { return {
+    async execute() { return { signals: (async function* () {
+      yield { kind: 'event' as const, event: { kind: 'assistant.text.delta' as const, text: 'answer' } }
+      yield { kind: 'finished' as const, outcome: { status: 'completed' as const } }
+      completed()
+      await barrier
+    })(), async stop() {} } },
+    async close() {}, kill() {},
+  } } }
+  const runner = new WorkerAgentRunner({ agents: [{ ...executionAgent, agentKey: key }], runtimeAdapters: new Map([[key, adapter]]) })
+  const task = collect(runner.runWithPiProvider(request({ agentKey: key, modelId: 'openai-compatible::offline-model' as ModelId }), { definition, environment: { OPENAI_API_KEY: 'local-secret' } }, 'stamp'))
+  try {
+    await done
+    runner.abortProviderSessions()
+    release()
+    const events = await task
+    assert.equal(events.some(event => event.customMetadata?.wemux?.terminal === 'completed'), false)
+    assert.equal(events.at(-1)?.customMetadata?.wemux?.terminal, 'failed')
+  } finally { release(); await runner.close() }
+})
+
 test('private Pi Provider runner redacts secrets from adapter failures and persisted events', async () => {
   const secret = 'private-error-secret-sentinel'
   const key = 'pi' as AgentKey

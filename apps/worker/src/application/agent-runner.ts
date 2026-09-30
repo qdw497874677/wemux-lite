@@ -82,6 +82,14 @@ export class WorkerAgentRunner implements AgentRunner {
       if (active.stopRequested) await handle.stop()
       const signals = privateProvider ? this.checkedPiProviderSignals(handle.signals, privateProvider.provider.environment.OPENAI_API_KEY) : handle.signals
       for await (const signal of signals) {
+        if (privateProvider && (active.stopRequested || !this.privateSessions.has(request.sessionId))) {
+          faulted = true
+          const stopped = this.terminal(request, { status: 'failed', failure: { code: 'agent-error', message: 'Pi Provider 已撤销或连接中断' } })
+          terminalSeen = true
+          await this.persist(sessionKey, stopped)
+          yield stopped
+          break
+        }
         // The isolated Provider process cannot create a resumable native Pi
         // Session: its config and authentication belong to this child only.
         if (privateProvider && signal.kind === 'native-session') continue
