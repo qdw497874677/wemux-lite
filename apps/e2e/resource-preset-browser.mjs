@@ -21,7 +21,7 @@ try {
   assert.ok(healthy, 'real Server serves production Web')
   browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_PATH ?? '/opt/data/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome', args: ['--no-sandbox', '--disable-dev-shm-usage'] })
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: 'dark' })
-  const errors = [], writes = [], presets = [], applications = []
+  const errors = [], writes = [], presets = [], applications = [], publishedProviders = [], publishedRevisions = []
   let administrator = true
   page.on('pageerror', error => errors.push(error.stack ?? error.message))
   page.on('console', message => { if (message.type() === 'error') errors.push(`console: ${message.text()}`) })
@@ -40,9 +40,13 @@ try {
     if (path === '/api/workers') return fulfill(route, { items: [worker] })
     if (path === '/api/workers/worker-1/capabilities') return fulfill(route, { workerId: worker.id, capabilities: [] })
     if (path === '/api/projects' || path === '/api/workspaces' || path === '/api/sessions' || path === '/api/commands' || path === '/api/workers/worker-1/grants' || path === '/api/teams/team/members') return fulfill(route, { items: [] })
-    if (path === '/api/resources') return fulfill(route, { items: [resource, provider] })
+    if (path === '/api/resources' && method === 'POST') { const body = request.postDataJSON(); publishedProviders.push(body); return fulfill(route, body, 201) }
+    if (path === '/api/resources') return fulfill(route, { items: [resource, provider, ...publishedProviders] })
     if (path === '/api/resources/skill-1') return fulfill(route, { resource, revisions: [revision] })
     if (path === '/api/resources/provider-1') return fulfill(route, { resource: provider, revisions: [providerRevision] })
+    if (path.startsWith('/api/resources/') && path.endsWith('/revisions') && method === 'POST') { const body = request.postDataJSON(); publishedRevisions.push(body); return fulfill(route, body, 201) }
+    const published = publishedProviders.find(item => path === `/api/resources/${item.id}`)
+    if (published) return fulfill(route, { resource: published, revisions: publishedRevisions.filter(item => item.resourceId === published.id) })
     if (path === '/api/resource-presets') {
       if (method === 'POST') {
         const body = request.postDataJSON()
@@ -67,6 +71,17 @@ try {
   await page.goto(`${base}/cluster`)
   await page.getByRole('heading', { name: '集群运行状态' }).waitFor()
   await page.getByRole('button', { name: /节点预设/ }).click({ timeout: 10000 }).catch(async error => { console.error('browser diagnostics:', await page.locator('#root').innerText(), errors); throw error })
+  await page.getByLabel('供应商名称').fill('新建供应商')
+  await page.getByLabel('供应商 HTTPS 端点').fill('https://models.example.test/v1')
+  await page.getByLabel('供应商模型 ID').fill('offline-model')
+  await page.getByLabel('供应商本机凭据引用').fill('local-model-ref')
+  await page.getByRole('button', { name: '发布非秘密版本' }).click()
+  await page.getByText(/已发布非秘密模型供应商版本/).waitFor()
+  assert.equal(publishedProviders.length, 1)
+  assert.equal(publishedRevisions.length, 1)
+  assert.equal(publishedProviders[0].definition.credential.credentialRef, 'local-model-ref')
+  assert.equal(publishedRevisions[0].contentSha256, publishedRevisions[0].manifest.sha256)
+  assert.doesNotMatch(JSON.stringify({ publishedProviders, publishedRevisions }), /ciphertext|apiKey|secret|password/)
   await page.getByLabel('预设资源').selectOption(provider.id)
   await page.getByLabel('预设版本').selectOption(providerRevision.id)
   await page.getByLabel('预设 Agent').selectOption('claude-code')
@@ -107,6 +122,6 @@ try {
   await page.getByRole('heading', { name: '集群运行状态' }).waitFor()
   assert.equal(await page.getByRole('button', { name: /节点预设/ }).count(), 0)
   assert.deepEqual(errors, [])
-  await writeFile(join(output, 'browser-result.json'), JSON.stringify({ passed: true, checked: ['生产集群路由与资源表单', 'Provider 版本 Agent 适配检查、仅引用本地密钥的说明', 'CSRF 发布不可变 v1/v2', '展示版本、大小与副作用的确认', '手工应用 CAS', '应用进度', '非管理员不可访问预设入口', '无页面异常'], screenshot: 'preset-studio.png' }, null, 2))
+  await writeFile(join(output, 'browser-result.json'), JSON.stringify({ passed: true, checked: ['生产集群路由与资源表单', '非秘密 Provider 创建与不可变 v1 发布', 'Provider 版本 Agent 适配检查、仅引用本地密钥的说明', 'CSRF 发布不可变 v1/v2', '展示版本、大小与副作用的确认', '手工应用 CAS', '应用进度', '非管理员不可访问预设入口', '无页面异常'], screenshot: 'preset-studio.png' }, null, 2))
   console.log('Preset Studio browser acceptance passed')
 } finally { await browser?.close(); server.kill('SIGTERM'); await rm(temp, { recursive: true, force: true }) }
