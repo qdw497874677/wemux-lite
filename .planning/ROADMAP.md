@@ -6,6 +6,8 @@
 
 GSD 阶段以数字顺序规划执行，阶段内保留原票声明依赖，独立余量可拆切片推进；共享工作树保持单写者（配置 `parallelization: false`）。任何票的 `ready-for-agent` 或已有有界完成都不等于整票关门。本路线只调整规划，不执行修复、付费 Runtime、数据重置或旧版删除。
 
+> **追踪已迁移（2026-10-08）**：阶段工作不再以 GSD 计划文件跟踪，已转为 spec + 票据，位于 `.scratch/<feature>/spec.md` 与 `.scratch/<feature>/issues/*.md`：`web-next-phase1-external-gates`（外部门）、`web-next-phase2-coordination-closure`（收口）、`web-next-phase3-plan-handoff`、`web-next-phase4-collaboration-surfaces`、`web-next-phase5-dual-host`、`web-next-phase6-migration-closure`、`web-next-phase7-cutover`。本文件保留为阶段目标与验收口径来源。
+
 ## Phases
 
 - [ ] **Phase 1: 存量主链路收尾** - 收口阻塞，逐票验收新版入口、身份、项目/Task、会话和 Run/审查（01/02/03/04/07）。本地候选矩阵全绿并获用户确认（2026-10-07）；NEXT-03/04 已关门，NEXT-01/02/07 等待真实 OAuth/SMTP/外部死信/视觉复审/付费运行时外部门，阶段保持 OPEN。

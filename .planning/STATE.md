@@ -18,6 +18,8 @@ progress:
 
 # Project State
 
+> **追踪已迁移（2026-10-08）**：阶段工作不再以 `.planning/phases/**` 计划文件跟踪，已转为 spec + 票据（`.scratch/<feature>/spec.md`、`.scratch/<feature>/issues/*.md`）。本文件的 `current_phase`、进度与 `stopped_at` 为历史快照，权威口径见各 spec 与 `.planning/REQUIREMENTS.md`。
+
 ## Project Reference
 
 See: .planning/PROJECT.md (updated 2026-10-06)

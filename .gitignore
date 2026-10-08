@@ -15,8 +15,14 @@ data/
 
 # Generated packages and local investigation evidence
 /artifacts/
-.scratch/
 *-current.png
+
+# .scratch：spec 与票据入库；原始证据、临时探针与本机产物不入库
+.scratch/**
+!.scratch/*/
+!.scratch/*/spec.md
+!.scratch/*/issues/
+!.scratch/*/issues/*.md
 
 # 保真工装运行时产物（上游源码副本、样式副本、截图与报告）
 apps/web/scripts/tailgrids-fidelity/.out/
@@ -26,6 +32,7 @@ apps/web/scripts/tailgrids-fidelity/playground/src/wemux-styles.css
 # Machine-local agent configuration
 .claude/
 .agents/
+.pi/
 
 # Runtime state (logs, PIDs)
 .runtime/

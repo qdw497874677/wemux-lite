@@ -21,7 +21,7 @@ apps/web       # @wemux/web：React + Vite + TanStack Router/Query + Tailwind v4
 apps/e2e       # 端到端验证脚本
 packages/      # domain / server-domain / web-contract / wire-protocol（先构建这些）
 docs/          # product-direction.md / roadmap.md / specs / design / research
-.scratch/task-board-agent-platform/   # 票据 + 验收证据（tickets 01–08）
+.scratch/<feature>/                   # spec.md + issues/*.md 入库；原始证据/探针不入库（历史 tickets 01–08 见 task-board-agent-platform/）
 ```
 
 ## 常用命令
@@ -115,9 +115,23 @@ node apps/worker/dist/cli.js tailscale --server http://100.101.102.103:8010
 
 ## 其他约定
 
-- Git 远端为 `git@github.com:qdw497874677/wemux-lite.git`，默认分支 `main`。提交前检查 diff，禁止提交 `data/`、`.scratch/`、凭据与本机构建产物。
+- Git 远端为 `git@github.com:qdw497874677/wemux-lite.git`，默认分支 `main`。提交前检查 diff，禁止提交 `data/`、凭据与本机构建产物；`.scratch/` 下仅 `spec.md` 与 `issues/*.md` 入库，原始证据、临时探针与本机产物不入库（见 `.gitignore`）。
 - Node ≥ 22.13（本机 v26）；npm workspaces，无 pnpm/yarn。
 - UI 中文文案；零 em-dash（—）装饰、无装饰性圆点；图标用 lucide；设计 token 沿用 Tailwind v4 + 现有 CSS 变量（深色优先，自动亮色）。
 - 必要依赖与轻量部署是明确目标：保留 node:http/node:sqlite 默认方案，新增中间件需说明真实问题、替代方案与运维成本；不得以“最小化”为由省略安全、恢复、测试和完整生命周期。
 - **Worker 在线状态只由拥有连接的进程重置**：`SqliteServerStore` 默认不重置持久化的 `worker`/`cache` 状态，只有 `createWemuxServer` 传 `presenceReset: true`。本机 CLI、验收脚本、备份等只读入口打开同一个数据库时不得把在线 Worker 刷成离线（历史缺陷：读取状态反而把连接中的 Worker 置为 offline）。
 - **投递入队只允许有界事件触发**：握手/重连、新领域事件、应用层收据；纯传输 ACK 驱动的 flush 只能重放 outbox，不得重新入队，否则同一 Command 会在一条连接上形成 ACK→入队→发送的忙循环。收到收据即丢弃该领域身份的待发行，重投保持领域身份、只换 `directionSeq`（见 `docs/design/worker-reliable-connection.md` §9.2、§10.1）。
+
+## Agent skills
+
+### Issue tracker
+
+票据以本地 markdown 跟踪在 `.scratch/<feature>/` 下。见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+使用默认五个分诊角色字符串（`needs-triage` 等）。见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+单上下文：词汇表为根级 `CONTEXT.md`，决策记录在 `docs/adr/`。见 `docs/agents/domain.md`。
