@@ -72,6 +72,18 @@ Status: ready-for-agent
 - 付费模型与真实外部渠道签收（Phase 1 外部门）。
 - 双宿主、迁移与切根工作。
 
+## Tickets
+
+票号仅在本阶段内有效。原票号以提交 `43966aa` 为准，合并只改变跟踪粒度，原验收项全部保留。
+
+| 当前票 | 合并前票号 |
+| --- | --- |
+| [01 画布与 Fork](issues/01-canvas-fork.md) | 01 |
+| [02 文件、Diff、终端与成果](issues/02-files-terminal-artifacts.md) | 02、03 |
+| [03 连接器、渠道与签收](issues/03-connector-channel-acceptance.md) | 04、05 |
+
+03 的实施只依赖 01，阶段验收另须 02 完成。签收并入 03，证据准备完成后转 `ready-for-human`；用户确认前不关闭本阶段、不勾选 NEXT-09 / NEXT-10 / NEXT-12。
+
 ## Further Notes
 
 - 依据 `docs/design/session-collaboration-canvas.md`、`docs/design/session-canvas-module-contracts.md`、`docs/design/connector-module-contracts.md`、`docs/design/connector-module-borrow-and-hexagon-boundaries.md`。

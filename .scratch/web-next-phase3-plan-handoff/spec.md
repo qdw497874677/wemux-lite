@@ -70,6 +70,17 @@ Status: ready-for-agent
 - 付费模型签收。
 - 画布、连接器、双宿主与切根工作。
 
+## Tickets
+
+票号仅在本阶段内有效。原票号以提交 `43966aa` 为准，合并只改变跟踪粒度，原验收项全部保留。
+
+| 当前票 | 合并前票号 |
+| --- | --- |
+| [01 计划修订批准与交接](issues/01-plan-approval-and-handoff.md) | 01、02 |
+| [02 跨 Runtime 闭环与签收](issues/02-cross-runtime-loop-acceptance.md) | 03、04 |
+
+签收并入 02，但人工门不取消：实施和证据准备完成后转 `ready-for-human`，用户确认前不关闭本阶段、不勾选 NEXT-06 / NEXT-08。
+
 ## Further Notes
 
 - 依据 `docs/design/task-platform-contract-decisions.md`、`docs/design/agent-collaboration-p2-architecture.md`。

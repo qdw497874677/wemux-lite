@@ -69,6 +69,17 @@ Status: ready-for-agent
 - 付费模型签收。
 - 迁移收口与切根（Phase 6、7）。
 
+## Tickets
+
+票号仅在本阶段内有效。原票号以提交 `43966aa` 为准，合并只改变跟踪粒度，原验收项全部保留。
+
+| 当前票 | 合并前票号 |
+| --- | --- |
+| [01 资源管理面](issues/01-resource-management.md) | 01 |
+| [02 独立宿主、身份入群与双端验收](issues/02-local-host-enrollment-acceptance.md) | 02、03、04 |
+
+02 内依次推进本地宿主、入群生命周期、桌面手机验收，不另建子票。证据准备完成后转 `ready-for-human`；用户确认前不关闭本阶段、不勾选 NEXT-11 / NEXT-13 / NEXT-14。
+
 ## Further Notes
 
 - 依据 `docs/design/node-resource-distribution-architecture.md`、`docs/design/m2-dual-host-contract.md`、`docs/design/worker-web-workbench.md`（实现基线）。

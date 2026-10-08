@@ -65,6 +65,18 @@ Status: ready-for-agent
 - 实际删除旧版与切根（Phase 7）。
 - 付费模型与外部渠道签收（Phase 1 外部门）。
 
+## Tickets
+
+票号仅在本阶段内有效。原票号以提交 `43966aa` 为准，合并只改变跟踪粒度，原验收项全部保留。
+
+| 当前票 | 合并前票号 |
+| --- | --- |
+| [01 旁路勘察与迁移登记表](issues/01-bypass-survey-ledger.md) | 01、02 |
+| [02 调用方改造与旁路移除](issues/02-remove-bypass.md) | 03 |
+| [03 授权矩阵、全链路与签收](issues/03-authz-matrix-acceptance.md) | 04、05 |
+
+02 以 01 的旁路勘察完成为前提；03 必须等待 01、02 全部完成。03 证据准备完成后转 `ready-for-human`；用户确认前不关闭本阶段、不勾选 NEXT-15，通过也不构成切根或删除授权。
+
 ## Further Notes
 
 - 依据 `docs/specs/web-next-project-agent-platform.md` §4 迁移登记表与产品方向文档。

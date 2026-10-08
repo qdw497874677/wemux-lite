@@ -81,6 +81,19 @@ Team 级协调 Task 的对话入口当前被"运行时隔离资格门"强制关�
 - 付费模型与真实外部运行时签收（Phase 1 外部门）。
 - Phase 3 之后的交接、画布、连接器、双宿主与切根工作。
 
+## Tickets
+
+票号仅在本阶段内有效。原票号以提交 `43966aa` 为准；合并不减少验收项，不改变 L1 only 决策，也不构成风险接受或开门授权。
+
+| 当前票 | 合并前票号 |
+| --- | --- |
+| [01 会话级作用域与工具网关绑定](issues/01-session-scoping-and-gateway-binding.md) | 01、02 |
+| [02 命令帧授权及恢复路径](issues/02-command-frame-authorization.md) | 03 |
+| [03 门标准与同候选重探测](issues/03-gate-standard-reprobe.md) | 04 |
+| [04 票 05 人工签收与前置门解除](issues/04-ticket05-acceptance.md) | 05 |
+
+最后一票保留独立 `ready-for-human` 状态；前三票不得翻转门常量或勾选 NEXT-05。
+
 ## Further Notes
 
 - 决策来源：用户 2026-10-08 明确选择 L1 only；调研对照 AgentsMesh（工作区/agent home/按需 secret 的作用域模式，无内核沙箱，环境变量过滤不挡宿主凭据）。决策与残余风险必须在门证据与验收记录中引用。
