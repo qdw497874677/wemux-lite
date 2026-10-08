@@ -1,0 +1,20 @@
+import { useState } from 'react'
+import type { RegistrationPolicyDTO } from '@wemux/web-contract/browser-host'
+import type { AccountApi } from './AccountSecurity.tsx'
+import { AccountSection, ActionForm, ConfirmButton, useAccountData } from './AccountForms.tsx'
+import { Button } from './primitives.tsx'
+const statusLabel = { active: '正常', disabled: '已停用', deletion_pending: '待删除', deleted: '已删除' } as const
+export function AccountGovernance({ api, administrator, restart }: { api: AccountApi; administrator: boolean; restart: () => Promise<void> }) {
+  const lifecycle = useAccountData(() => api.accountLifecycle(), [api])
+  return <><AccountSection title="账号生命周期">{lifecycle.feedback}{lifecycle.data && <><p>账号状态：{statusLabel[lifecycle.data.status]}</p>{lifecycle.data.blockers.map(blocker => <p key={blocker}>{blocker}</p>)}<ActionForm label="确认注销账号" confirm="注销后将无法登录。确认继续？" disabled={lifecycle.data.blockers.length > 0} fields={[{ name: 'confirmation', label: '输入“删除我的账号”确认注销' }]} submit={async values => { await api.confirmAccountDeletion(values.confirmation!); await restart() }} /></>}</AccountSection><AccountAudit api={api} />{administrator && <InstanceAccounts api={api} />}</>
+}
+function InstanceAccounts({ api }: { api: AccountApi }) {
+  const accounts = useAccountData(() => api.managedAccounts(), [api]), policy = useAccountData(() => api.registrationPolicy(), [api])
+  const labels = { disable: '停用', restore: '恢复', 'request-deletion': '请求删除', 'confirm-deletion': '确认删除' } as const
+  return <AccountSection title="实例账号管理">{policy.feedback}{policy.data && <ActionForm label="保存注册策略" confirm="确认更改实例注册策略？" submit={async values => { await api.setRegistrationPolicy(values.policy as RegistrationPolicyDTO); policy.reload(); return '注册策略已更新。' }}><label>注册策略<select name="policy" defaultValue={policy.data.policy}><option value="open">开放注册</option><option value="invite_only">仅邀请</option><option value="closed">关闭注册</option></select></label></ActionForm>}{accounts.feedback}{accounts.data?.map(account => <div key={account.id} className="account-row"><p>{account.username} {account.email}（{statusLabel[account.status]}）</p><div className="account-actions">{(Object.keys(labels) as (keyof typeof labels)[]).map(action => <ConfirmButton key={action} confirm={`确认${labels[action]}账号 ${account.username}？服务端将校验自锁与资源所有权。`} act={async () => { await api.manageAccount(account.id, action); accounts.reload(); return '账号操作已完成。' }}>{labels[action]}</ConfirmButton>)}</div></div>)}</AccountSection>
+}
+function AccountAudit({ api }: { api: AccountApi }) {
+  const [filter, setFilter] = useState<{ action?: string; result?: 'succeeded' | 'failed'; from?: string; to?: string }>({}), [cursor, setCursor] = useState<string>()
+  const audit = useAccountData(() => api.audit({ ...filter, cursor, limit: 50 }), [api, filter, cursor])
+  return <AccountSection title="账号审计"><ActionForm label="筛选审计" fields={[{ name: 'action', label: '动作', required: false }, { name: 'from', label: '起始时间', type: 'datetime-local', required: false }, { name: 'to', label: '截止时间', type: 'datetime-local', required: false }]} submit={async values => { setCursor(undefined); setFilter({ action: values.action || undefined, result: values.result as 'succeeded' | 'failed' || undefined, from: values.from ? new Date(values.from).toISOString() : undefined, to: values.to ? new Date(values.to).toISOString() : undefined }) }}><label>结果<select name="result"><option value="">全部</option><option value="succeeded">成功</option><option value="failed">失败</option></select></label></ActionForm>{audit.feedback}<a href={api.auditExportUrl(filter)} download>导出当前筛选审计</a>{audit.data?.items.map(entry => <p key={entry.id}>{new Date(entry.occurredAt).toLocaleString('zh-CN')} {entry.action} {entry.result === 'succeeded' ? '成功' : '失败'}</p>)}{audit.data?.nextCursor && <Button onClick={() => setCursor(audit.data!.nextCursor!)}>下一页审计</Button>}{cursor && <Button variant="outline" onClick={() => setCursor(undefined)}>返回第一页</Button>}</AccountSection>
+}

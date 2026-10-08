@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#030712" />
+    <link rel="icon" type="image/svg+xml" href="/next/favicon.svg" />
+    <title>Wemux Lite | 新版控制台</title>
+  </head>
+  <body>
+    <div id="boot-failure" hidden role="alert">新版页面资源加载失败。请刷新重试，或<a href="/">返回旧版控制台</a>。</div>
+    <div id="root"></div>
+    <noscript>此控制台需要 JavaScript。请启用后刷新页面。</noscript>
+    <script>
+      window.addEventListener('error', function (event) {
+        if (event.target && (event.target.tagName === 'SCRIPT' || event.target.tagName === 'LINK')) document.getElementById('boot-failure').hidden = false;
+      }, true);
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,33 @@
+{
+  "name": "@wemux/web-next",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty false",
+    "test": "npm run test:prepared",
+    "pretest": "npm run build:packages --prefix ../.. && npm run build --workspace @wemux/server --prefix ../.. && npm run build --workspace @wemux/web --prefix ../..",
+    "test:prepared": "node --experimental-strip-types --test tests/*.test.mjs src/components/__tests__/*.test.mjs",
+    "test:attention-browser": "node ../../scripts/test-with-browser.mjs -- node --experimental-strip-types --test apps/web-next/src/components/__tests__/Attention.test.mjs",
+    "acceptance:safety": "node tests/browser-safety.acceptance.mjs"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.102.8",
+    "@tanstack/react-router": "^1.170.36",
+    "@wemux/web-client": "0.1.0",
+    "@wemux/web-contract": "0.1.0",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "tailwindcss": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  }
+}
