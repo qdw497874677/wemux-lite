@@ -1,19 +1,19 @@
 ---
 gsd_state_version: "1.0"
-current_phase: 1
-current_phase_name: 存量主链路收尾，覆盖票01/02/03/04/07
-status: executing
-stopped_at: "Phase 1 executing: 01-01 and 01-02 locally complete; 01-04 historical deletion fail-closed/blocked; external and candidate gates open"
-last_updated: "2026-10-06T10:53:17.240Z"
-last_activity: 2026-10-06
-last_activity_desc: 执行阶段一：01-04 历史 Task 安全删除仅锁定合同与受限拒绝，尚无成功证明
-state_head: 93c9f67cab09ca51bd95d8bdb14d7d0ca99f0255
+current_phase: 2
+current_phase_name: 受限协调与项目 Agent API（票05受控切片）
+status: planning
+stopped_at: "Phase 1 受控切片候选已签收并提交（HEAD 8829555，候选基线 93c9f67）；Phase 2 六计划已建并通过 plan-checker 修订，待执行"
+last_updated: "2026-10-08T04:13:06.248Z"
+last_activity: 2026-10-08
+last_activity_desc: 阶段2规划：02-CONTEXT 六项用户决策（1A/2a/3确认/4纳入）落地，创建 02-01..02-06 计划并完成检查修订
+state_head: 8829555
 progress:
   total_phases: 7
   completed_phases: 0
-  total_plans: 11
-  completed_plans: 2
-  percent: 18
+  total_plans: 17
+  completed_plans: 9
+  percent: 53
 ---
 
 # Project State
@@ -27,16 +27,16 @@ See: .planning/PROJECT.md (updated 2026-10-06)
 
 ## Current Position
 
-Phase: 1 of 7 (存量主链路收尾，覆盖票01/02/03/04/07)
-Plan: 01-01、01-02 已局部完成；01-04 已梳理合同但因缺真实终结证明保持 blocked，记录见 01-04-BLOCKED.md；01-05 个人隐藏独立增补已在本地实现，Server/Next、真实双 Worker 单账号及双账号/撤权两视口浏览器分别验证，但同候选双 Worker+双账号组合仍待补；01-06 票04有界证据和票07八项差额矩阵已记录在 docs/acceptance/web-next-phase1-conversation-run-gap.md；两者不解除 01-04 历史 Task 删除阻塞；01-03 的真实 Google/SMTP 门须等前置链 01-10 与用户授权
-Status: Phase 1 执行中，票01/02/03/04/07 整票均未签收
-Last activity: 2026-10-06 — 安全基线与新版入口受控浏览器验收已完成，本候选实际部署/身份门未过
+Phase: 2 of 7 (受限协调与项目 Agent API，票05受控切片)
+Plan: Phase 1 的 01-01..01-02、01-05..01-11 九个计划已交付并随候选提交（2026-10-07，HEAD 8829555）；01-03 真实 Google/SMTP 门与 01-04 历史删除证明保持 blocked，阶段 OPEN。Phase 2 规划完成：02-01 模型 / 02-02 入口 UI（wave 2）/ 02-03 查询缺口 a（wave 2）/ 02-04 配对 e2e / 02-05 写通道矩阵 / 02-06 收尾，plan-checker 修订已应用
+Status: Phase 2 待执行，票05保持 in-progress
+Last activity: 2026-10-07 — 阶段2规划完成，待用户发合执行指令
 
-Progress: [██░░░░░░░░] 18%（11 项计划中 2 项局部完成；不代表 Phase 1 / 产品票验收）
+Progress: [█████░░░░] 53%（17 项计划中 9 项完成；不含 01-03/01-04 阻塞项与外部门）
 
 ## Performance Metrics
 
-- Total plans completed: 2
+- Total plans completed: 9
 - Average duration: not available
 - Total execution time: 0
 
@@ -51,7 +51,8 @@ Progress: [██░░░░░░░░] 18%（11 项计划中 2 项局部完�
 - #58 09-E2：审查 SSE 原始凭据周期重验的 6 文件超时残留，按 hunk 处置；不整文件回退共享变更。
 - #57：裁定 deleted Task 的 terminal SSE 404 vs 200，先核查夹具注入。
 - #60：收口 server 全量回归剩余失败簇并复跑全量；已修簇参见交接 §3。
-- #52：05-F2 隔离环境 A/B 决策需要用户明确选择，不能代选。
+- #52：05-F2 隔离环境 A/B 决策已于 2026-10-07 由用户裁定：入口关闭呈现禁用态（1A）、完整模型与 UI 同步（2a）、两个查询缺口均纳入、写通道矩阵纳入；详见 .planning/phases/02-agent-api/02-CONTEXT.md D-01..D-06。
+- Phase 2：执行 02-01..02-06；硬约束：不开放真实协调执行、票05保持 in-progress、不付费模型、不选风险接受 B、不做环境变更 E、Ticket06 前置门不解除、复用既有 e2e 骨架、单写者纪律。
 - Phase 1：逐票核验 01/02/03/04/07 的现有证据与余量；真实账号/TTL/获权 Worker/Test Agent、Google/SMTP 外部门及浏览器验收不能伪称通过；不得调用付费 Runtime。
 
 ### Blockers/Concerns
@@ -68,6 +69,6 @@ Progress: [██░░░░░░░░] 18%（11 项计划中 2 项局部完�
 
 ## Session Continuity
 
-Last session: 2026-10-06
-Stopped at: 01-01/01-02 locally complete; 01-04 fail-closed and blocked pending proven historical deletion; 01-05 independently implemented, separate two-account and two-worker browser gates passed, still pending combined candidate signoff; 01-06 evidence matrix documented; 01-07..10 remain open
-Resume file: .planning/phases/01-existing-core-closure/01-04-PLAN.md
+Last session: 2026-10-07
+Stopped at: 阶段2规划完成（六计划过检查门并修订）；下一步执行 02-01 与 02-03（wave1→2 调整后先 02-01）
+Resume file: .planning/phases/02-agent-api/02-01-PLAN.md
