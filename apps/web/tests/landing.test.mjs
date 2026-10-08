@@ -66,7 +66,12 @@ test('self-service registration follows instance policy and mail availability', 
 })
 
 test('credentials live in HttpOnly cookies: no token storage in the browser', async () => {
-  const clientSourceChecked = clientSource
+  const transport = await readFile(new URL('../../../packages/web-client/src/cluster-transport.ts', import.meta.url), 'utf8')
+  const contract = await readFile(new URL('../../../packages/web-contract/src/browser-host.ts', import.meta.url), 'utf8')
+  assert.match(clientSource, /const transport = createClusterTransport\(config, onUnauthorized\)/)
+  assert.match(clientSource, /const \{ request, list, unauthorized, setCsrfToken \} = transport/)
+  assert.match(clientSource, /export type \{ AccountSession \} from '@wemux\/web-contract\/browser-host'/)
+  const clientSourceChecked = `${clientSource}\n${transport}\n${contract}`
   assert.ok(!clientSourceChecked.includes('localStorage.setItem'))
   assert.match(clientSourceChecked, /credentials: 'same-origin'/)
   assert.match(clientSourceChecked, /headers\['X-CSRF-Token'\] = csrfToken/)

@@ -1,15 +1,6 @@
-// Web-owned HTTP contract. Adapt backend differences here and in client.ts only.
-export interface AgentDTO {
-  agentKey: string
-  displayName: string
-  version: string | null
-  mode: 'detect-only' | 'execution'
-  availability: { status: 'available' | 'unavailable' | 'authentication-required'; reason?: string }
-  agentCommands?: string[]
-  compactMode?: 'native' | 'slash-command'
-  modelSwap?: boolean
-  models: { modelId: string; displayName: string; source: 'detected' | 'configured' }[]
-}
+import type { AgentDTO, AccountStatusDTO, RegistrationPolicyDTO, AccountPayloadDTO } from '@wemux/web-contract/browser-host'
+export type { AgentDTO, ProjectDTO, AccountStatusDTO, AccountUserDTO, LoginSessionDTO, RegistrationPolicyDTO, RegistrationCapabilitiesDTO, GoogleCapabilityDTO, AuthOptionsDTO, AccountPayloadDTO, AccountViewDTO } from '@wemux/web-contract/browser-host'
+// Legacy HTTP contracts. First-entry host/account/project projections are shared above.
 export interface WorkerDTO {
   id: string
   teamId: string
@@ -25,7 +16,6 @@ export interface WorkerDTO {
 }
 export interface CreateEnrollmentTokenDTO { ttlSeconds: number }
 export interface EnrollmentTokenDTO { token: string; expiresAt: string }
-export interface ProjectDTO { id: string; teamId: string; ownerId: string; name: string; shareScope: 'owner-only' | 'selected-members' | 'team'; accessRole: 'owner' | 'viewer' | 'contributor' | 'manager' }
 export interface WorkspacePlacementDTO {
   workerId: string
   status: 'ready' | 'stopped' | 'deleted' | 'failed' | 'unhealthy'
@@ -132,43 +122,17 @@ export interface EventsPageDTO { events: JournalEventDTO[]; throughSeq: number; 
 /**
  * 浏览器账号契约（Ticket 04）。登录会话只经 HttpOnly Cookie 承载，任何响应都不返回可当 Bearer 使用的令牌。
  */
-export type AccountStatusDTO = 'active' | 'disabled' | 'deletion_pending' | 'deleted'
-export interface AccountUserDTO { id: string; username: string; email: string | null; createdAt: string; status?: AccountStatusDTO; authVersion?: number; statusChangedAt?: string | null; deletedAt?: string | null }
-export interface LoginSessionDTO {
-  id: string; current: boolean; authenticationMethod: string; client: string | null
-  authenticatedAt: string; createdAt: string; lastSeenAt: string
-  idleExpiresAt: string; absoluteExpiresAt: string; revokedAt: string | null
-}
 export type PersonalAccessTokenScopeDTO = 'read' | 'write' | 'execute' | 'admin'
 export interface PersonalAccessTokenDTO {
   id: string; name: string; scopes: PersonalAccessTokenScopeDTO[]
   createdAt: string; expiresAt: string; lastUsedAt: string | null; revokedAt: string | null
 }
 export interface IssuedPersonalAccessTokenDTO extends PersonalAccessTokenDTO { token: string }
-export type RegistrationPolicyDTO = 'open' | 'invite_only' | 'closed'
-/** 注册与邮件能力：`emailDelivery` 为 false 时前端必须如实告知，不得模拟“邮件已发送”。 */
-export interface RegistrationCapabilitiesDTO {
-  registrationPolicy: RegistrationPolicyDTO
-  emailDelivery: boolean
-  emailDeliveryReason: string | null
-  passwordMinimumLength: number
-  passwordMaximumLength: number
-  verificationTtlMs: number
-  resetTtlMs: number
-}
-export interface GoogleCapabilityDTO { enabled: boolean; reason: string | null }
-/** 公开安全配置：只回答“声明了没有 / 声明邮箱建号了没有”，不泄露邮箱名单。 */
-export interface AuthOptionsDTO { administratorConfigured: boolean; administratorRegistered: boolean; passwordMinimumLength: number; registration: RegistrationCapabilitiesDTO | null; google: GoogleCapabilityDTO }
-/** 注册、重发验证、找回密码：响应形状统一，不泄露邮箱是否已注册。 */
 export interface AcceptedEmailDTO { status: 'accepted'; email: string }
 export interface RegistrationPolicyViewDTO { policy: RegistrationPolicyDTO; explicit: boolean; updatedAt: string | null; updatedBy: string | null }
 export interface PasswordResetDTO { status: 'reset'; revokedSessions: number; revokedTokens: number }
 /** 验证成功的响应既是一次登录（向浏览器写入 Cookie 会话），也是账号视图。 */
 export type VerifiedEmailDTO = AccountPayloadDTO & { status: 'verified' }
-/** 初始化与登录响应：明文 CSRF 令牌只在这里出现一次，客户端需常驻内存并随写请求回传。 */
-export interface AccountPayloadDTO { user: AccountUserDTO; teamId: string | null; session: LoginSessionDTO; expiresAt: string; csrfToken: string; instanceAdministrator: boolean }
-/** `GET /api/auth/me`：仅在令牌轮换时附带新的明文 CSRF 令牌。 */
-export interface AccountViewDTO { user: AccountUserDTO; teamId: string | null; session: LoginSessionDTO; csrfToken?: string; csrfTokenRotated?: boolean; instanceAdministrator: boolean }
 export interface SessionResourceDTO {
   sendCapability?: import('@wemux/web-contract/task-platform').ActionCapability
   access?: { canRead: boolean; canWrite: boolean; canControl: boolean; projectRole: 'owner' | 'manager' | 'contributor' | 'viewer' | null }

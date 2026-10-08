@@ -5,7 +5,10 @@ import { readFile } from 'node:fs/promises'
 const source = path => readFile(new URL(`../src/${path}`, import.meta.url), 'utf8')
 const page = await source('components/account-page.tsx')
 const client = await source('api/client.ts')
-const dto = await source('api/dto.ts')
+const legacyDto = await source('api/dto.ts')
+const sharedDto = await readFile(new URL('../../../packages/web-contract/src/browser-host.ts', import.meta.url), 'utf8')
+const dto = `${legacyDto}\n${sharedDto}`
+assert.match(legacyDto, /export type \{[^}]+AccountStatusDTO[^}]*\} from '@wemux\/web-contract\/browser-host'/)
 
 test('账号生命周期与可筛选审计只走统一 API client', () => {
   assert.match(client, /accountLifecycle: '\/api\/auth\/account\/lifecycle'/)

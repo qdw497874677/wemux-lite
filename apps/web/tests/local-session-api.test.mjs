@@ -80,3 +80,25 @@ test('local adapter writes with Worker CSRF and stable caller message identities
   assert.deepEqual(JSON.parse(requests[4].body), { decision: 'deny', commandId: 'stable-command' })
   assert.ok(requests.every(request => !request.url.startsWith('/api/auth/') && !request.url.startsWith('/api/projects')))
 })
+
+test('legacy local identity can log in again after expiration while old requests stay cancelled', async () => {
+  const { classifyClientError } = await import('@wemux/web-client')
+  let expired = false; let invalidated = 0; let pendingSignal
+  const client = createLocalSessionApi(async (url, init) => {
+    if (url.endsWith('/agents')) {
+      pendingSignal = init.signal
+      return new Promise((resolve, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true }))
+    }
+    if (url.endsWith('/workbench/sessions')) return expired ? new Response(null, { status: 401 }) : Response.json({ items: [] })
+    return Response.json({ csrf: 'local-only', installation: { name: 'Worker', installationId: 'one' } })
+  }, () => invalidated++)
+  await client.login('user', 'password')
+  const pending = assert.rejects(client.agents(), error => classifyClientError(error) === 'cancelled')
+  expired = true
+  await assert.rejects(client.sessions(), error => error.status === 401)
+  await pending
+  assert.equal(pendingSignal.aborted, true); assert.equal(invalidated, 1)
+  expired = false
+  await client.login('user', 'password')
+  assert.deepEqual(await client.sessions(), [])
+})

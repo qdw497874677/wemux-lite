@@ -1,3 +1,4 @@
+import { TaskSessionButton } from './task-session-button.tsx'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { randomId } from '../../lib/random.ts'
 import { useQuery } from '@tanstack/react-query'
@@ -22,13 +23,6 @@ export function TaskRuns({ task, api, refresh, search: query, selectRun, onDirty
   const search = new URLSearchParams(query)
   const draft = useMemo(() => new LaunchIdentity(window.sessionStorage, `wemux.launch:${JSON.stringify([api.launchScope, task.projectId, task.id])}`, taskPrompt(task)), [api, task.projectId, task.id])
   const [independentSession, setIndependentSession] = useState<string | null>(null)
-  async function createIndependentSession() {
-    if (busy.current) return
-    busy.current = true; setPending(true); setError('')
-    try { const { session } = await api.createTaskSession(task.projectId, task.id, task.title); setIndependentSession(session.id); setReuseSessionId(session.id); refresh() }
-    catch (error) { setError(error instanceof Error ? error.message : '创建会话失败') }
-    finally { busy.current = false; setPending(false) }
-  }
   const [reuseSessionId, setReuseSessionId] = useState('')
   const [cancelling, setCancelling] = useState(false)
   async function cancel(run: Run, retryRejected = false) {
@@ -79,7 +73,7 @@ export function TaskRuns({ task, api, refresh, search: query, selectRun, onDirty
   }
   return <section className="space-y-4" aria-label="任务运行">
     <h3 className="font-semibold">Runs · 单次初始消息执行</h3>
-    <Button variant="outline" disabled={pending || !task.assignee} onClick={() => void createIndependentSession()}>创建独立任务会话（不启动 Run）</Button>
+    <TaskSessionButton key={JSON.stringify([api.taskSessionScope, task.projectId, task.id, query])} api={api} task={task} onCreated={id => { setIndependentSession(id); setReuseSessionId(id); refresh() }} />
     {independentSession && <p className="break-all" role="status">已创建独立会话：{independentSession}；<a className="underline" href={`/projects/${encodeURIComponent(task.projectId)}/sessions/${encodeURIComponent(independentSession)}`}>打开独立会话</a>；或明确选择 reuse 启动 Run。</p>}
     <p className="text-sm">当前 Assignment（只影响后续运行）：{JSON.stringify(task.assignee)}</p>
     {runs.error && <p role="alert">{runs.error.message}</p>}

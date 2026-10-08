@@ -7,7 +7,10 @@ const landing = await source('components/landing.tsx')
 const authForm = await source('components/auth-form.tsx')
 const dialog = await source('components/connection-dialog.tsx')
 const client = await source('api/client.ts')
-const dto = await source('api/dto.ts')
+const legacyDto = await source('api/dto.ts')
+const sharedDto = await readFile(new URL('../../../packages/web-contract/src/browser-host.ts', import.meta.url), 'utf8')
+const dto = `${legacyDto}\n${sharedDto}`
+assert.match(legacyDto, /export type \{[^}]+GoogleCapabilityDTO[^}]*\} from '@wemux\/web-contract\/browser-host'/)
 
 // Ticket 07 验收：未配置 Provider 时不出现能点但必然失败的 Google 入口。
 test('google button only renders when the instance reports the provider as configured', () => {

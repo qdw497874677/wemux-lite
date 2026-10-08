@@ -15,11 +15,13 @@
     "dev:server": "npm run dev --workspace @wemux/server",
     "dev:worker": "npm run dev --workspace @wemux/worker",
     "dev:web": "npm run dev --workspace @wemux/web",
-    "build:packages": "npm run build --workspace @wemux/domain && npm run build --workspace @wemux/connector && npm run build --workspace @wemux/web-contract && npm run build --workspace @wemux/agent-interchange && npm run build --workspace @wemux/server-domain && npm run build --workspace @wemux/wire-protocol",
-    "build": "npm run build:packages && npm run build --workspace @wemux/server && npm run build --workspace @wemux/worker && npm run build --workspace @wemux/web && npm run pack:worker",
+    "build:packages": "npm run build --workspace @wemux/domain && npm run build --workspace @wemux/connector && npm run build --workspace @wemux/web-contract && npm run build --workspace @wemux/agent-interchange && npm run build --workspace @wemux/server-domain && npm run build --workspace @wemux/wire-protocol && npm run build --workspace @wemux/web-client",
+    "build": "npm run build:packages && npm run build --workspace @wemux/server && npm run build --workspace @wemux/worker && npm run build --workspace @wemux/web && npm run build --workspace @wemux/web-next && npm run pack:worker",
     "pack:worker": "node scripts/pack-worker.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "node --import tsx --test \"apps/**/*.test.ts\" \"packages/**/*.test.ts\" && npm run build:packages && node --test \"packages/**/*.test.mjs\" && npm run test --workspace @wemux/web"
+    "test": "node --import tsx --test \"apps/**/*.test.ts\" \"packages/**/*.test.ts\" && node --test \"packages/**/*.test.mjs\" && npm run test --workspace @wemux/web && npm run test:prepared --workspace @wemux/web-next",
+    "pretest": "npm run build:test",
+    "build:test": "npm run build:packages && npm run build --workspace @wemux/server && npm run build --workspace @wemux/worker && npm run build --workspace @wemux/web"
   },
   "devDependencies": {
     "@types/node": "latest",

@@ -1,24 +1,21 @@
+import { ApiError, createClusterTransport, clusterAccountOperations, taskSessionOperations } from '@wemux/web-client'
+import type { AccountSession } from '@wemux/web-contract/browser-host'
+export { ApiError, anonymousSession, isSignedIn } from '@wemux/web-client'
+export type { AccountSession } from '@wemux/web-contract/browser-host'
 import type { NodeResourcePreset, NodeResourcePresetApplication, NodeResourcePresetEntry, Resource, ResourceBinding, ResourceBindingStatus, ResourceRevision, ReconcileReport, ResourceSetSnapshot } from '@wemux/domain'
 import type { Run, LaunchRequest, LaunchResponse, TaskSummary, TaskDetail, TaskCreate, TaskPatch, TaskActivity, AssignmentRequest, CreateTaskWorkspaceRequest, UnbindWorkspaceRequest } from '@wemux/web-contract/task-platform'
 import type { CanvasLayoutResponse, CanvasLayoutSaveRequest, CanvasLayoutSaveResponse, CanvasLayoutScope, SessionGraphResponse } from '@wemux/web-contract/session-graph'
 import type { ConnectorDTO, ConnectorListDTO, ConnectorTestDTO, ConnectorWriteDTO } from '@wemux/web-contract/connectors'
-import type { ChannelListDTO, CreateChannelBindingDTO, CreateChannelDTO, CreatedChannelDTO, DeleteChannelDTO, DeletedChannelDTO, RotateChannelTokenDTO } from '@wemux/web-contract/channels'
+import type { ChannelListDTO, CreateChannelBindingDTO, CreateChannelDTO, CreatedChannelDTO, DeleteChannelDTO, DeletedChannelDTO, OutboundDeliveryDTO, RotateChannelTokenDTO } from '@wemux/web-contract/channels'
 import { randomId } from '../lib/random.ts'
 import { readDeviceId } from '../lib/device-scope.ts'
 import type {
   ApprovalDecisionDTO, RuntimeCommandDTO, PatchSessionDTO, CommandResultDTO,
-  AccountPayloadDTO, AccountViewDTO, AcceptedEmailDTO, AccountSecurityViewDTO, AuthOptionsDTO, CommandDTO, CreateEnrollmentTokenDTO, CreateProjectDTO,
+  AccountViewDTO, AcceptedEmailDTO, AccountSecurityViewDTO, CommandDTO, CreateEnrollmentTokenDTO, CreateProjectDTO,
   CreateSessionDTO, CreateWorkspaceDTO, EmailChangeAcceptedDTO, EmailChangeConfirmedDTO, EnrollmentTokenDTO, EventsPageDTO, GoogleLinkStartDTO, IssuedPersonalAccessTokenDTO, LoginMethodUnboundDTO, LoginSessionDTO, PasswordChangeDTO, PasswordResetDTO, PersonalAccessTokenDTO, PersonalAccessTokenScopeDTO, ProjectDTO,
   AccountLifecycleDTO, AuditPageDTO, AuditQueryDTO, ManagedAccountDTO, RegistrationPolicyDTO, RegistrationPolicyViewDTO, SendMessageDTO, SendResultDTO, SessionDTO, SessionResourceDTO, ServerEventsPageDTO, TailnetInfoDTO, VerifiedEmailDTO, WorkerDTO, WorkspaceDTO, FileDiffDTO, FileListDTO, FileReadDTO, FileWriteDTO,
 } from './dto'
 
-/**
- * 浏览器会话作用域：认证凭据（登录令牌）只在 HttpOnly Cookie 里，JS 无法也不应该读到它。
- * 这里只保存当前账号的可展示信息与写保护令牌（CSRF），刷新页面后由 `GET /api/auth/me` 重建。
- */
-export interface AccountSession { teamId: string; csrfToken: string; username: string; email: string | null; instanceAdministrator: boolean }
-export const anonymousSession = (): AccountSession => ({ teamId: '', csrfToken: '', username: '', email: null, instanceAdministrator: false })
-export const isSignedIn = (session: AccountSession): boolean => session.username !== ''
 const id = encodeURIComponent
 export const routes = {
   authOptions: '/api/auth/options',
@@ -90,6 +87,7 @@ export const routes = {
   channelTokenRotation: (projectId: string, channelId: string) => `/api/projects/${id(projectId)}/channels/${id(channelId)}/token/rotate`,
   channelBindings: (projectId: string) => `/api/projects/${id(projectId)}/channel-bindings`,
   channelBindingState: (projectId: string, bindingId: string) => `/api/projects/${id(projectId)}/channel-bindings/${id(bindingId)}/enabled`,
+  channelDelivery: (projectId: string, deliveryId: string) => `/api/projects/${id(projectId)}/channel-deliveries/${id(deliveryId)}`,
   channelReplay: (projectId: string, deliveryId: string) => `/api/projects/${id(projectId)}/channel-deliveries/${id(deliveryId)}/replay`,
   workspaces: '/api/workspaces',
   workspacePlacements: (workspaceId: string) => `/api/workspaces/${id(workspaceId)}/placements`,
@@ -121,82 +119,17 @@ export const routes = {
   stream: (sessionId: string) => `/api/sessions/${id(sessionId)}/stream`,
 }
 
-export class ApiError extends Error {
-  readonly status?: number
-  constructor(message: string, status?: number) { super(message); this.status = status }
-}
-
 export function createApi(config: AccountSession, onUnauthorized: () => void = () => {}) {
-  const scope = new AbortController()
-  // CSRF 明文只驻留内存；服务端在轮换后通过 `GET /api/auth/me` 重新下发。
-  let csrfToken = config.csrfToken
-  const unsafe = (method: string) => method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS'
-  const unauthorized = () => { if (!scope.signal.aborted) { scope.abort(); onUnauthorized() } }
+  const transport = createClusterTransport(config, onUnauthorized)
+  const { request, list, unauthorized, setCsrfToken } = transport
+  const scope = { signal: transport.signal }
+  const accountOperations = clusterAccountOperations(transport)
   const delay = (ms: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
     if (signal.aborted) { reject(signal.reason); return }
     const abort = () => { clearTimeout(timer); reject(signal.reason) }
     const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve() }, ms)
     signal.addEventListener('abort', abort, { once: true })
   })
-  async function send(path: string, body: unknown, signal: AbortSignal | undefined, method: 'GET' | 'POST' | 'PATCH' | 'DELETE' | 'PUT' | undefined, timeoutMs: number, extra?: Record<string, string>): Promise<Response> {
-    const resolved = method ?? (body === undefined ? 'GET' : 'POST')
-    const headers: Record<string, string> = { Accept: 'application/json', ...extra }
-    // 登录凭据只走 Cookie；写请求额外带 CSRF 令牌，服务端据此判定请求来自本页。
-    if (csrfToken && unsafe(resolved)) headers['X-CSRF-Token'] = csrfToken
-    if (body !== undefined) headers['Content-Type'] = 'application/json'
-    const url = new URL(path, window.location.origin)
-    if (config.teamId) url.searchParams.set('teamId', config.teamId)
-    try {
-      return await fetch(url, {
-        method: resolved, headers, credentials: 'same-origin',
-        body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.any([scope.signal, ...(signal ? [signal] : []), AbortSignal.timeout(timeoutMs)]),
-      })
-    } catch (error) {
-      if (signal?.aborted) throw error
-      throw new ApiError('连接失败：无法访问 Server，请检查服务是否启动、端口与网络。')
-    }
-  }
-  /** 同一账号的其他标签页可能轮换过 CSRF 令牌；写失败时取回新令牌重试一次，避免假失败。 */
-  async function refreshCsrf(): Promise<boolean> {
-    try {
-      const response = await send(routes.authMe, undefined, undefined, 'GET', 15000)
-      if (!response.ok) return false
-      const account = await response.json() as { csrfToken?: string }
-      if (!account.csrfToken) return false
-      csrfToken = account.csrfToken
-      return true
-    } catch { return false }
-  }
-  async function request<T>(path: string, body?: unknown, signal?: AbortSignal, method?: 'GET' | 'POST' | 'PATCH' | 'DELETE' | 'PUT', timeoutMs = 15000, extra?: Record<string, string>): Promise<T> {
-    if (scope.signal.aborted) throw new DOMException("Connection disposed", "AbortError")
-    let response = await send(path, body, signal, method, timeoutMs, extra)
-    if (response.status === 403 && csrfToken && await refreshCsrf()) response = await send(path, body, signal, method, timeoutMs, extra)
-    if (scope.signal.aborted) throw new DOMException("Connection disposed", "AbortError")
-    if (response.status === 401) unauthorized()
-    if (!response.ok) {
-      let detail = ''
-      try {
-        const payload = await response.clone().json() as { error?: { message?: string }; message?: string }
-        detail = payload.error?.message ?? payload.message ?? ''
-      } catch { /* Keep the status-based fallback for non-JSON error bodies. */ }
-      const hint = response.status === 401
-        ? '登录会话已失效，请重新登录。'
-        : response.status === 403 ? detail || '登录会话缺少有效的写保护令牌，请刷新页面后重试。'
-          : detail || '请稍后重试；如持续失败，请检查 Server 日志。'
-      throw new ApiError(`请求失败（HTTP ${response.status}）：${hint}`, response.status)
-    }
-    if (response.status === 204 || response.headers.get('content-length') === '0') return undefined as T
-    if (!response.headers.get('content-type')?.includes('application/json')) {
-      throw new ApiError('服务端响应格式异常，请检查当前访问地址是否为 Wemux Lite Server。')
-    }
-    return response.json() as Promise<T>
-  }
-  async function list<T>(path: string, signal?: AbortSignal): Promise<T[]> {
-    const value = await request<{ items: T[] }>(path, undefined, signal)
-    if (!Array.isArray(value.items)) throw new ApiError('API 契约错误：列表响应应包含 items 数组。')
-    return value.items
-  }
   return {
     launchScope: JSON.stringify([window.location.origin, readDeviceId(), config.teamId]),
     attention: (signal?: AbortSignal) => request<import('@wemux/server-domain').AttentionResult>('/api/attention', undefined, signal),
@@ -214,7 +147,8 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     review: (p: string, t: string, runId: string, signal?: AbortSignal) => request<{ review: import('@wemux/web-contract/task-platform').ReviewRequest | null }>(`/api/projects/${id(p)}/tasks/${id(t)}/runs/${id(runId)}/review`, undefined, signal),
     reviewAction: (p: string, t: string, runId: string, body: import('@wemux/web-contract/task-platform').ReviewActionRequest) => request<{ review: import('@wemux/web-contract/task-platform').ReviewRequest; task: TaskDetail }>(`/api/projects/${id(p)}/tasks/${id(t)}/runs/${id(runId)}/review`, body),
     runs: (p: string, t: string, signal?: AbortSignal) => list<Run>(`/api/projects/${id(p)}/tasks/${id(t)}/runs`, signal),
-    createTaskSession: (p: string, t: string, title: string) => request<{ session: { id: string } }>(`/api/projects/${id(p)}/tasks/${id(t)}/sessions`, { title }),
+    ...taskSessionOperations(transport),
+    taskSessionScope: { host: window.location.origin, account: config.username, teamId: config.teamId },
     cancelRun: (p: string, t: string, body: { runId: string; sessionId: string; requestId: string }) => request<{ run: Run }>(`/api/projects/${id(p)}/tasks/${id(t)}/runs/${id(body.runId)}/cancel`, body),
     launch: (p: string, t: string, body: LaunchRequest) => request<LaunchResponse>(`/api/projects/${id(p)}/tasks/${id(t)}/launch`, body),
     assignTask: (p: string, t: string, body: AssignmentRequest) => request<TaskDetail>(`/api/projects/${id(p)}/tasks/${id(t)}/assignment`, body, undefined, 'PUT'),
@@ -230,29 +164,21 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     taskActivity: (projectId: string, taskId: string, signal?: AbortSignal) => list<TaskActivity>(`/api/projects/${id(projectId)}/tasks/${id(taskId)}/activity`, signal),
     addTaskLink: (projectId: string, taskId: string, url: string) => request<TaskDetail>(`/api/projects/${id(projectId)}/tasks/${id(taskId)}/links`, { url }),
     removeTaskLink: (projectId: string, taskId: string, linkId: string) => request<TaskDetail>(`/api/projects/${id(projectId)}/tasks/${id(taskId)}/links/${id(linkId)}`, undefined, undefined, 'DELETE'),
-    dispose: () => scope.abort(),
+    dispose: transport.dispose,
     // 账号与会话（Ticket 04）：凭据只经 HttpOnly Cookie，响应里没有可当 Bearer 用的令牌。
     // 不再有“首次认领”入口：授权根是服务端启动配置的 WEMUX_ADMIN_EMAILS。
-    authOptions: (signal?: AbortSignal) => request<AuthOptionsDTO>(routes.authOptions, undefined, signal),
-    login: async (login: string, password: string) => {
-      const account = await request<AccountPayloadDTO>(routes.authLogin, { login, password })
-      csrfToken = account.csrfToken
-      return account
-    },
+    authOptions: accountOperations.authOptions,
+    login: accountOperations.login,
     // Google 登录（Ticket 07）：拿到授权地址后由调用方整页跳转，会话仍由回调写入 HttpOnly Cookie。
     startGoogleSignIn: (returnTo?: string) => request<{ authorizeUrl: string; expiresAt: string }>(routes.authGoogleStart, returnTo ? { returnTo } : {}),
-    currentAccount: async (signal?: AbortSignal) => {
-      const account = await request<AccountViewDTO>(routes.authMe, undefined, signal)
-      if (account.csrfToken) csrfToken = account.csrfToken
-      return account
-    },
+    currentAccount: accountOperations.currentAccount,
     loginSessions: (signal?: AbortSignal) => list<LoginSessionDTO>(routes.loginSessions, signal),
     revokeLoginSession: (sessionId: string) => request<void>(routes.loginSession(sessionId), undefined, undefined, 'DELETE'),
     personalAccessTokens: (signal?: AbortSignal) => list<PersonalAccessTokenDTO>(routes.personalAccessTokens, signal),
     createPersonalAccessToken: (body: { name: string; scopes: PersonalAccessTokenScopeDTO[]; expiresAt: string }) => request<IssuedPersonalAccessTokenDTO>(routes.personalAccessTokens, body),
     revokePersonalAccessToken: (tokenId: string) => request<void>(routes.personalAccessToken(tokenId), undefined, undefined, 'DELETE'),
     rotatePersonalAccessToken: (tokenId: string, expiresAt: string) => request<IssuedPersonalAccessTokenDTO>(routes.rotatePersonalAccessToken(tokenId), { expiresAt }),
-    logout: async () => { await request<void>(routes.authLogout, {}); csrfToken = '' },
+    logout: accountOperations.logout,
     // 邮箱注册与找回（Ticket 05）：全部是未登录可用的入口，响应形状统一，不泄露邮箱是否存在。
     register: (input: { email: string; displayName: string; password: string; invitationToken?: string }) => request<AcceptedEmailDTO>(routes.authRegister, input),
     teams: (signal?: AbortSignal) => list<{ id: string; name: string; role: 'owner' | 'admin' | 'member'; memberCount: number }>(routes.teams, signal),
@@ -270,7 +196,7 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     verifyEmail: async (token: string) => {
       // 验证成功同时签发了 Cookie 会话，因此这里和登录一样接住 CSRF 令牌。
       const account = await request<VerifiedEmailDTO>(routes.authVerifyEmail, { token })
-      csrfToken = account.csrfToken
+      setCsrfToken(account.csrfToken)
       return account
     },
     forgotPassword: (email: string) => request<AcceptedEmailDTO>(routes.authForgotPassword, { email }),
@@ -292,7 +218,7 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     unbindLoginMethod: (methodId: string, body: { currentPassword?: string }) => request<LoginMethodUnboundDTO>(routes.authIdentity(methodId), body, undefined, 'DELETE'),
     registrationPolicy: (signal?: AbortSignal) => request<RegistrationPolicyViewDTO>(routes.registrationPolicy, undefined, signal),
     setRegistrationPolicy: (policy: RegistrationPolicyDTO) => request<RegistrationPolicyViewDTO>(routes.registrationPolicy, { policy }, undefined, 'PATCH'),
-    logoutAll: async () => { const result = await request<{ revoked: number }>(routes.authLogoutAll, {}); csrfToken = ''; return result },
+    logoutAll: async () => { const result = await request<{ revoked: number }>(routes.authLogoutAll, {}); setCsrfToken(''); return result },
     createEnrollmentToken: (body: CreateEnrollmentTokenDTO) => request<EnrollmentTokenDTO>(routes.enrollmentTokens, body),
     tailnet: (signal?: AbortSignal) => request<TailnetInfoDTO>(routes.tailnet, undefined, signal),
     resources: (signal?: AbortSignal) => list<Resource>(routes.resources, signal),
@@ -317,7 +243,7 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
         return { ...worker, capabilities: capabilityResult.capabilities }
       }))
     },
-    projects: (signal?: AbortSignal) => list<ProjectDTO>(routes.projects, signal),
+    projects: accountOperations.projects,
     connectors: (projectId: string, signal?: AbortSignal) => request<ConnectorListDTO>(routes.connectors(projectId), undefined, signal),
     createConnector: (projectId: string, body: ConnectorWriteDTO) => request<ConnectorDTO>(routes.connectors(projectId), body),
     updateConnector: (projectId: string, connectorId: string, body: ConnectorWriteDTO) => request<ConnectorDTO>(routes.connector(projectId, connectorId), body, undefined, 'PUT'),
@@ -331,6 +257,7 @@ export function createApi(config: AccountSession, onUnauthorized: () => void = (
     deleteChannel: (projectId: string, channelId: string, body: DeleteChannelDTO) => request<DeletedChannelDTO>(routes.channel(projectId, channelId), body, undefined, 'DELETE'),
     createChannelBinding: (projectId: string, body: CreateChannelBindingDTO) => request<unknown>(routes.channelBindings(projectId), body),
     setChannelBindingEnabled: (projectId: string, bindingId: string, body: { requestId: string; expectedRevision: number; enabled: boolean }) => request<unknown>(routes.channelBindingState(projectId, bindingId), body),
+    channelDelivery: (projectId: string, deliveryId: string, signal?: AbortSignal) => request<OutboundDeliveryDTO>(routes.channelDelivery(projectId, deliveryId), undefined, signal),
     replayChannelDelivery: (projectId: string, deliveryId: string, body: { requestId: string; reason: string }) => request<unknown>(routes.channelReplay(projectId, deliveryId), body),
     projectGrants: (projectId: string, signal?: AbortSignal) => list<{ projectId: string; userId: string; role: 'viewer' | 'contributor' | 'manager' }>(routes.projectGrants(projectId), signal),
     updateProjectAccess: (projectId: string, shareScope: ProjectDTO['shareScope']) => request<ProjectDTO>(routes.projectAccess(projectId), { shareScope }, undefined, 'PATCH'),

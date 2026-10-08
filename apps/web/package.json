@@ -43,7 +43,8 @@
     "shiki": "^4.4.3",
     "streamdown": "^2.6.0",
     "tailwind-merge": "latest",
-    "use-stick-to-bottom": "^1.1.6"
+    "use-stick-to-bottom": "^1.1.6",
+    "@wemux/web-client": "0.1.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "latest",

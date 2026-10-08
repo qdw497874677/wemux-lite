@@ -1,3 +1,4 @@
+import { createLocalTransport, localIdentityOperations } from '@wemux/web-client'
 import type { AgentDTO, JournalEventDTO } from '../api/dto.ts'
 import { randomId } from '../lib/random.ts'
 
@@ -8,12 +9,7 @@ export interface LocalSessionRecord {
   runtimeState: string
   activeTurnId: string | null
 }
-export interface LocalStatus {
-  csrf: string
-  capabilities: AgentDTO[]
-  installation: { name: string; installationId: string }
-  cluster: { enrolled: boolean; serverUrl?: string; workerId?: string; connection: { phase: string; failure: string | null } | null }
-}
+export type { LocalStatus } from '@wemux/web-contract/browser-host'
 export interface LocalAgentSettings {
   selections: { key: string; executable: string; source: string; selected: boolean }[]
   capabilities: AgentDTO[]
@@ -30,31 +26,12 @@ export interface LocalClusterDiscovery { serverUrl: string; ok: boolean; status:
 export interface LocalSendReceipt { commandId: string; status: string; messageId: string }
 
 export function createLocalSessionApi(fetcher: typeof fetch = fetch, onUnauthorized: () => void = () => {}) {
-  let csrf = ''
-  const request = async <T>(path: string, method: 'GET' | 'POST' | 'PUT' | 'DELETE' = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> => {
-    const headers: Record<string, string> = { Accept: 'application/json' }
-    if (method !== 'GET') { headers['x-wemux-csrf'] = csrf; headers['content-type'] = 'application/json' }
-    const response = await fetcher(`/api/local/${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal, credentials: 'same-origin', cache: 'no-store' })
-    if (response.status === 401 && path !== 'auth/session' && path !== 'status') onUnauthorized()
-    if (!response.ok) {
-      let message = `本地请求失败：HTTP ${response.status}`
-      try { const error = await response.json() as { error?: string; message?: string }; if (typeof error.message === 'string') message = error.message; else if (typeof error.error === 'string') message = error.error } catch { /* Keep HTTP status. */ }
-      throw new Error(message)
-    }
-    if (response.status === 204) return undefined as T
-    return response.json() as Promise<T>
-  }
+  const transport = createLocalTransport(fetcher, onUnauthorized)
+  const { request } = transport
   const sessionPath = (id: string) => `workbench/sessions/${encodeURIComponent(id)}`
   return {
-    async status() { const status = await request<LocalStatus>('status'); csrf = status.csrf; return status },
-    async login(username: string, password: string) {
-      const result = await request<{ csrf: string }>('auth/session', 'POST', { username, password }); csrf = result.csrf
-      return this.status()
-    },
-    async logout() {
-      await request<void>('auth/session', 'DELETE')
-      csrf = ''
-    },
+    ...localIdentityOperations(transport),
+    dispose: transport.dispose,
     agents: () => request<LocalAgentSettings>('agents'),
     selectAgent: (key: string, executable: string) => request<LocalAgentSettings>(`agents/${encodeURIComponent(key)}`, 'PUT', { executable }),
     resetAgent: (key: string) => request<LocalAgentSettings>(`agents/${encodeURIComponent(key)}`, 'DELETE'),
