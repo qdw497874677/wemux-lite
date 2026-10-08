@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // One explicit deployment configuration; no implicit database creation or registration.
-import { readFile, writeFile, mkdir, open } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, open, stat } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -70,5 +70,23 @@ if (action === 'start' || action === 'restart') {
   if (!online) throw new Error('Worker process started but cluster has not confirmed online; inspect worker.log')
   console.log('Worker: original identity confirmed online by Server')
 }
-for (const name of Object.keys(services)) console.log(`${name}: ${await running(name) ? 'running' : 'stopped'}`)
+for (const name of Object.keys(services)) {
+  const pid = await running(name)
+  console.log(`${name}: ${pid ? `running (pid ${pid}, entry verified)` : 'stopped'}\n${name} entry: ${services[name].entry}`)
+}
 console.log(`URL: ${config.url}\nRelease: ${config.release}\nWorker home: ${config.workerHome}`)
+// Report only non-secret delivery paths. instance.json and verified process entries
+// are authoritative; the legacy release-path marker may lag and is never rewritten here.
+for (const [label, root] of [
+  ['Root web', resolve(config.release, config.serverEnvironment?.WEMUX_WEB_DIST ?? 'apps/web/dist')],
+  ['Next web (/next/)', resolve(config.release, config.serverEnvironment?.WEMUX_WEB_NEXT_DIST ?? 'apps/web-next/dist')],
+]) {
+  let ready = false
+  try { ready = (await stat(join(root, 'index.html'))).isFile() } catch (error) { if (error.code !== 'ENOENT') throw error }
+  console.log(`${label}: ${root} (${ready ? 'ready' : 'not built'})`)
+}
+try {
+  const marker = (await readFile(join(root, 'release-path'), 'utf8')).trim()
+  console.log(`Release marker: ${marker}`)
+  if (resolve(marker) !== resolve(config.release)) console.warn('Warning: release-path differs from instance.json; verify the release and process entries before publishing')
+} catch (error) { if (error.code !== 'ENOENT') throw error }
