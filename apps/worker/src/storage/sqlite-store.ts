@@ -1,4 +1,7 @@
 import { DatabaseSync } from 'node:sqlite'
+import { fileWriteRowidInvariants, fileWriteRowidTables } from './file-write-rowid-invariants.ts'
+import { fileWriteInvariants } from './file-write-invariants.ts'
+import { fileWriteStorage } from './file-write-store.ts'
 import { retentionDestinationInvariants, retentionInvariants } from './retention-invariants.ts'
 import { randomUUID } from 'node:crypto'
 import type { AgentEvent, AgentSession, SessionKey, SessionStore } from '@wemux/agent-interchange'
@@ -24,17 +27,17 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
     // Diagnostic callers must never change journal mode, schema or identities.
     if (options.readOnly) {
       const version = this.db.prepare('PRAGMA user_version').get()?.user_version
-      if (![1, 2, 3, 4, 5].includes(Number(version))) { this.db.close(); throw new Error('Unsupported Worker database schema') }
+      if (![1, 2, 3, 4, 5, 6, 7].includes(Number(version))) { this.db.close(); throw new Error('Unsupported Worker database schema') }
       return
     }
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;')
     const version = this.db.prepare('PRAGMA user_version').get()?.user_version
-    if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5) { this.db.close(); throw new Error('Unsupported Worker database schema') }
+    if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7) { this.db.close(); throw new Error('Unsupported Worker database schema') }
     if (version === 0) this.db.exec(`BEGIN;
       CREATE TABLE documents (bucket TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(bucket,id));
       CREATE TABLE journal (session_id TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(session_id,seq));
       PRAGMA user_version=1; COMMIT;`)
-    if (version !== 3 && version !== 4 && version !== 5) {
+    if (version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7) {
       this.db.exec('BEGIN IMMEDIATE')
       try {
         if (version !== 2) this.db.exec(retentionInvariants)
@@ -43,17 +46,34 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
       }
       catch (error) { this.db.exec('ROLLBACK'); this.db.close(); throw error }
     }
-    if (version !== 4 && version !== 5) {
+    if (version !== 4 && version !== 5 && version !== 6 && version !== 7) {
       this.db.exec(`BEGIN IMMEDIATE;
         CREATE TABLE IF NOT EXISTS connector_credentials (id TEXT PRIMARY KEY, owner_kind TEXT NOT NULL CHECK(owner_kind='connector'), owner_id TEXT NOT NULL, auth_type TEXT NOT NULL, ciphertext TEXT NOT NULL, profile_json TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS connector_executions (request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, state TEXT NOT NULL, session_id TEXT NOT NULL, body TEXT NOT NULL, journal_summary TEXT, created_at TEXT NOT NULL, completed_at TEXT);
         CREATE INDEX IF NOT EXISTS connector_execution_session ON connector_executions(session_id, created_at);
         PRAGMA user_version=4; COMMIT;`)
     }
-    if (version !== 5) {
+    if (version !== 5 && version !== 6 && version !== 7) {
       this.db.exec(`BEGIN IMMEDIATE;
         CREATE TABLE provider_credentials (id TEXT PRIMARY KEY, owner_kind TEXT NOT NULL CHECK(owner_kind='model-provider'), variable_names_json TEXT NOT NULL, ciphertext TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         PRAGMA user_version=5; COMMIT;`)
+    }
+    if (version !== 6 && version !== 7) {
+      this.db.exec('BEGIN IMMEDIATE')
+      try { this.db.exec(fileWriteInvariants); this.db.exec('PRAGMA user_version=6; COMMIT') }
+      catch (error) { this.db.exec('ROLLBACK'); this.db.close(); throw error }
+    }
+    if (version !== 7) {
+      this.db.exec('BEGIN IMMEDIATE')
+      try {
+        for (const table of fileWriteRowidTables) {
+          if (this.db.prepare(`SELECT 1 FROM ${table} WHERE rowid=-1`).get()) {
+            throw new Error(`Worker schema 7 migration refused: ${table} contains reserved rowid -1`)
+          }
+        }
+        this.db.exec(fileWriteRowidInvariants)
+        this.db.exec('PRAGMA user_version=7; COMMIT')
+      } catch (error) { this.db.exec('ROLLBACK'); this.db.close(); throw error }
     }
   }
   close() { this.db.close() }
@@ -211,7 +231,7 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
     listRepositoryCheckouts: async id => { await this.tail; return this.list<RepositoryCheckout>('checkouts').filter(item => item.workspaceId === id) },
   }
   sessions: WorkerStore['sessions'] = {
-    get: async id => { await this.tail; const session = this.getDocument<SessionExecution>('sessions', id); return session ? { ...session, storageMode: session.storageMode ?? 'local' as const } : null },
+    get: async id => { await this.tail; return this.readSession(id) },
     getTurn: async id => { await this.tail; return this.getDocument('turns', id) },
     listQueued: async id => { await this.tail; return this.queued(id) },
   }
@@ -219,19 +239,27 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
     get: async id => { await this.tail; return this.getDocument('commands', id) },
     listRecoverable: async limit => { await this.tail; return this.list<CommandRecord>('commands').filter(c => c.state === 'accepted' || c.state === 'running').slice(0, limit) },
   }
+  fileWrites: WorkerStore['fileWrites'] = {
+    get: async id => { await this.tail; return fileWriteStorage(this.db).reader.get(id) },
+    listPendingResults: async limit => { await this.tail; return fileWriteStorage(this.db).reader.listPendingResults(limit) },
+  }
   journal: WorkerStore['journal'] = {
-    read: async ({ sessionId, fromSeq, limit }) => {
-      await this.tail
-      const rows = this.db.prepare('SELECT body FROM journal WHERE session_id=? AND seq>=? ORDER BY seq LIMIT ?').all(sessionId, fromSeq, limit + 1)
-      const events = rows.slice(0, limit).map(row => JSON.parse(String(row.body)) as JournalEvent)
-      return { events, throughSeq: (events.at(-1)?.seq ?? fromSeq - 1) as EventSeq, hasMore: rows.length > limit }
-    },
+    read: async input => { await this.tail; return this.readJournal(input) },
     listHeads: async () => { await this.tail; return this.list<SessionExecution>('sessions').map(s => ({ sessionId: s.sessionId, lastSeq: this.head(s.sessionId) })) },
     getEvent: async (id, seq) => {
       await this.tail
       const row = this.db.prepare('SELECT body FROM journal WHERE session_id=? AND seq=?').get(id, seq)
       return row ? JSON.parse(String(row.body)) as JournalEvent : null
     },
+  }
+  private readSession(id: SessionId) {
+    const session = this.getDocument<SessionExecution>('sessions', id)
+    return session ? { ...session, storageMode: session.storageMode ?? 'local' as const } : null
+  }
+  private readJournal({ sessionId, fromSeq, limit }: Parameters<WorkerStore['journal']['read']>[0]) {
+    const rows = this.db.prepare('SELECT body FROM journal WHERE session_id=? AND seq>=? ORDER BY seq LIMIT ?').all(sessionId, fromSeq, limit + 1)
+    const events = rows.slice(0, limit).map(row => JSON.parse(String(row.body)) as JournalEvent)
+    return { events, throughSeq: (events.at(-1)?.seq ?? fromSeq - 1) as EventSeq, hasMore: rows.length > limit }
   }
   private head(id: SessionId): EventSeq {
     return Number(this.db.prepare('SELECT COALESCE(MAX(seq),0) AS seq FROM journal WHERE session_id=?').get(id)?.seq) as EventSeq
@@ -267,11 +295,29 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
   transaction<T>(work: (tx: WorkerStoreTx) => Promise<T>): Promise<T> {
     return this.mutate(async () => {
       this.db.exec('BEGIN IMMEDIATE')
-      try { const value = await work(this.tx); this.db.exec('COMMIT'); return value }
-      catch (error) { this.db.exec('ROLLBACK'); throw error }
+      let active = true
+      const assertActive = () => { if (!active) throw new Error('Worker transaction is closed') }
+      const guard = <T extends object>(repository: T): T => new Proxy(repository, {
+        get(target, key) {
+          const method = Reflect.get(target, key)
+          return typeof method === 'function' ? async (...args: unknown[]) => {
+            assertActive()
+            return Reflect.apply(method, target, args)
+          } : method
+        },
+      })
+      const tx: WorkerStoreTx = {
+        workspaces: guard(this.tx.workspaces), sessions: guard(this.tx.sessions), commands: guard(this.tx.commands), journal: guard(this.tx.journal),
+        appendJournal: async (id, events) => { assertActive(); return this.tx.appendJournal(id, events) },
+        fileWrites: fileWriteStorage(this.db).writer(assertActive),
+      }
+      try { const value = await work(tx); active = false; this.db.exec('COMMIT'); return value }
+      catch (error) { active = false; this.db.exec('ROLLBACK'); throw error }
+      finally { active = false }
     })
   }
-  private tx: WorkerStoreTx = {
+  private tx: Omit<WorkerStoreTx, 'fileWrites'> = {
+    journal: { read: async input => this.readJournal(input) },
     workspaces: {
       save: async workspace => this.put('workspaces', workspace.id, workspace),
       saveRepositoryCheckouts: async items => { for (const item of items) this.put('checkouts', `${item.workspaceId}:${item.repositoryId}`, item) },
@@ -289,6 +335,8 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
       },
     },
     sessions: {
+      get: async id => this.readSession(id),
+      getTurn: async id => this.getDocument('turns', id),
       deleteSession: async id => {
         const session = this.getDocument<import('../domain/session-execution.js').SessionExecution>('sessions', id)
         if (session?.activeTurnId || this.queued(id).length) throw new Error('Session is active')
@@ -330,11 +378,11 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
         if (session.activeTurnId) return null
         const item = this.queued(id)[0]
         if (!item) return null
-        const turn: Turn = { id: item.capabilityTurnId ?? randomUUID() as TurnId, sessionId: id, message: item.message, state: 'running', startedAt: now(), finishedAt: null, failure: null, capabilitySnapshot: item.capabilitySnapshot, capabilityToken: item.capabilityToken }
+        const turn: Turn = { id: item.capabilityTurnId ?? randomUUID() as TurnId, sessionId: id, message: item.message, modelId: session.binding.modelId, state: 'running', startedAt: now(), finishedAt: null, failure: null, capabilitySnapshot: item.capabilitySnapshot, capabilityToken: item.capabilityToken }
         this.put('queue', item.submissionCommandId, { ...item, state: 'claimed' })
         this.put('turns', turn.id, turn)
         this.put('sessions', id, { ...session, activeTurnId: turn.id })
-        this.append(id, [{ occurredAt: now(), payload: { kind: 'turn.started', turnId: turn.id, messageId: item.message.messageId } }])
+        this.append(id, [{ occurredAt: now(), payload: { kind: 'turn.started', turnId: turn.id, messageId: item.message.messageId, modelId: session.binding.modelId } }])
         this.state(id, 'running')
         return turn
       },

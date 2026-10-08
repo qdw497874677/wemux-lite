@@ -110,16 +110,117 @@ test('pi runtime session maps new pi RPC protocol without duplicating assistant 
   // Regression: pi ≥0.85 RPC emits streaming `message_update` records plus a final
   // `message_end` carrying the full message, then `turn_end`/`agent_end`/`agent_settled`.
   // Full-text replays must be deduped; only agent_settled completes the prompt.
-  const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"session\",\"sessionId\":\"pi-new\"}' '{\"type\":\"message_start\"}' '{\"type\":\"message_update\",\"usage\":{\"input\":9,\"output\":1}}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"收到\"}]}}' '{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\"}}' '{\"type\":\"agent_end\"}' '{\"type\":\"agent_settled\"}'")
+  const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"session\",\"sessionId\":\"pi-new\"}' '{\"type\":\"message_start\"}' '{\"type\":\"message_update\",\"usage\":{\"input\":9,\"output\":1}}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"收到\"}],\"usage\":{\"input\":9,\"output\":1}}}' '{\"type\":\"turn_end\",\"message\":{\"role\":\"assistant\"}}' '{\"type\":\"agent_end\"}' '{\"type\":\"agent_settled\"}'")
   const adapter = new PiRuntimeSessionAdapter(cli)
   const session = await adapter.openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
   const handle = await session.execute({ operationId: 'turn-new' as TurnId, message: { content: '你好' } })
   const signals = await collect(handle.signals)
   const texts = signals.flatMap(s => s.kind === 'event' && s.event.kind === 'assistant.text.delta' ? [s.event.text] : [])
   assert.deepEqual(texts, ['收到'])
+  const usage = signals.flatMap(s => s.kind === 'event' && s.event.kind === 'usage.updated' ? [s.event.usage] : [])
+  assert.equal(usage.length, 1)
+  assert.equal(usage[0]?.inputTokens, 9)
+  assert.equal(usage[0]?.outputTokens, 1)
   const last = signals.at(-1)
   assert.equal(last?.kind, 'finished')
   if (last?.kind === 'finished') assert.deepEqual(last.outcome, { status: 'completed' })
+})
+
+test('Pi publishes only finalized cumulative operation usage across two assistant messages', async () => {
+  const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"message_start\"}' '{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"one\"},\"usage\":{\"input\":0,\"output\":0}}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"one\"}],\"usage\":{\"input\":10,\"output\":2,\"totalTokens\":12,\"cost\":{\"total\":0.01}}}}' '{\"type\":\"message_start\"}' '{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"two\"},\"usage\":{\"input\":0,\"output\":0}}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"two\"}],\"usage\":{\"input\":6,\"output\":3,\"totalTokens\":9,\"cost\":{\"total\":0.02}}}}' '{\"type\":\"agent_settled\"}'")
+  const session = await new PiRuntimeSessionAdapter(cli).openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  const signals = await collect((await session.execute({ operationId: 'turn-usage' as TurnId, message: { content: 'hi' } })).signals)
+  const usage = signals.flatMap(signal => signal.kind === 'event' && signal.event.kind === 'usage.updated' ? [signal.event.usage] : [])
+  assert.deepEqual(usage.map(value => ({ revision: value.revision, input: value.inputTokens, output: value.outputTokens, cost: value.costUsd, scope: value.scope })), [
+    { revision: 1, input: 10, output: 2, cost: 0.01, scope: 'operation' },
+    { revision: 2, input: 16, output: 5, cost: 0.03, scope: 'operation' },
+  ])
+  assert.deepEqual(signals.flatMap(signal => signal.kind === 'event' && signal.event.kind === 'assistant.text.delta' ? [signal.event.text] : []), ['one', 'two'])
+})
+
+test('Pi usage snapshots keep missing counters unknown, retain known cost, and reject overflowing totals', async () => {
+  const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"first\"}],\"usage\":{\"input\":7,\"cost\":{\"total\":0.01}}}}' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"second\"}],\"usage\":{\"input\":3,\"output\":2}}}' '{\"type\":\"agent_settled\"}'")
+  const session = await new PiRuntimeSessionAdapter(cli).openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  const signals = await collect((await session.execute({ operationId: 'turn-partial' as TurnId, message: { content: 'hi' } })).signals)
+  const usage = signals.flatMap(signal => signal.kind === 'event' && signal.event.kind === 'usage.updated' ? [signal.event.usage] : [])
+  assert.deepEqual(usage.map(value => ({ revision: value.revision, completeness: value.completeness, input: value.inputTokens, output: value.outputTokens, cost: value.costUsd })), [
+    { revision: 1, completeness: 'partial', input: 7, output: undefined, cost: 0.01 },
+    { revision: 2, completeness: 'partial', input: 10, output: 2, cost: 0.01 },
+  ])
+  const overflow = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"one\"}],\"usage\":{\"input\":4503599627370496,\"output\":1}}}' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"two\"}],\"usage\":{\"input\":4503599627370496,\"output\":1}}}' '{\"type\":\"agent_settled\"}'")
+  const overflowSession = await new PiRuntimeSessionAdapter(overflow).openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  const overflowSignals = await collect((await overflowSession.execute({ operationId: 'turn-overflow' as TurnId, message: { content: 'hi' } })).signals)
+  const overflowUsage = overflowSignals.flatMap(signal => signal.kind === 'event' && signal.event.kind === 'usage.updated' ? [signal.event.usage] : [])
+  assert.equal(overflowUsage[1]?.inputTokens, undefined)
+  assert.equal(overflowUsage[1]?.completeness, 'partial')
+  assert.equal(overflowUsage[1]?.outputTokens, 2)
+})
+
+test('Pi missing response usage never produces a complete operation snapshot', async () => {
+  const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"unmetered\"}]}}' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"metered\"}],\"usage\":{\"input\":5,\"output\":2}}}' '{\"type\":\"agent_settled\"}'")
+  const session = await new PiRuntimeSessionAdapter(cli).openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  const signals = await collect((await session.execute({ operationId: 'turn-missing' as TurnId, message: { content: 'hi' } })).signals)
+  const usage = signals.flatMap(signal => signal.kind === 'event' && signal.event.kind === 'usage.updated' ? [signal.event.usage] : [])
+  assert.equal(usage.length, 1)
+  assert.equal(usage[0]?.completeness, 'partial')
+  assert.equal(usage[0]?.inputTokens, 5)
+  assert.equal(usage[0]?.outputTokens, 2)
+})
+
+test('Pi trailing unmetered response revises a complete operation usage snapshot to partial', async () => {
+  const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"first\"}],\"usage\":{\"input\":5,\"output\":2,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":7,\"cost\":{\"total\":0.01}}}}' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"unmetered\"}]}}' '{\"type\":\"agent_settled\"}'")
+  const session = await new PiRuntimeSessionAdapter(cli).openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  const signals = await collect((await session.execute({ operationId: 'turn-trailing-unmetered' as TurnId, message: { content: 'hi' } })).signals)
+  const usage = signals.flatMap(signal => signal.kind === 'event' && signal.event.kind === 'usage.updated' ? [signal.event.usage] : [])
+  assert.deepEqual(usage.map(value => ({ revision: value.revision, completeness: value.completeness, inputTokens: value.inputTokens, totalTokens: value.totalTokens })), [
+    { revision: 1, completeness: 'complete', inputTokens: 5, totalTokens: 7 },
+    { revision: 2, completeness: 'partial', inputTokens: 5, totalTokens: undefined },
+  ])
+})
+
+test('Pi missing reported total clears a previous subtotal instead of fabricating a new one', async () => {
+  const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"first\"}],\"usage\":{\"input\":1,\"output\":0,\"totalTokens\":1}}}' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"second\"}],\"usage\":{\"input\":9007199254740990,\"output\":2}}}' '{\"type\":\"agent_settled\"}'")
+  const session = await new PiRuntimeSessionAdapter(cli).openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  const signals = await collect((await session.execute({ operationId: 'turn-missing-total' as TurnId, message: { content: 'hi' } })).signals)
+  const usage = signals.flatMap(signal => signal.kind === 'event' && signal.event.kind === 'usage.updated' ? [signal.event.usage] : [])
+  assert.equal(usage[1]?.inputTokens, Number.MAX_SAFE_INTEGER)
+  assert.equal(usage[1]?.outputTokens, 2)
+  assert.equal(usage[1]?.totalTokens, undefined)
+  assert.equal(usage[1]?.completeness, 'partial')
+})
+
+test('Pi reported operation total never reappears as a partial subtotal after a missing response total', async () => {
+  const cli = await executable('pi', "read _; printf '%s\\n' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"one\"}],\"usage\":{\"input\":10,\"output\":2,\"totalTokens\":12}}}' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"two\"}],\"usage\":{\"input\":5,\"output\":1}}}' '{\"type\":\"message_start\"}' '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"three\"}],\"usage\":{\"input\":2,\"output\":1,\"totalTokens\":3}}}' '{\"type\":\"agent_settled\"}'")
+  const session = await new PiRuntimeSessionAdapter(cli).openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  const signals = await collect((await session.execute({ operationId: 'turn-suppressed-total' as TurnId, message: { content: 'hi' } })).signals)
+  const usage = signals.flatMap(signal => signal.kind === 'event' && signal.event.kind === 'usage.updated' ? [signal.event.usage] : [])
+  assert.deepEqual(usage.map(value => ({ revision: value.revision, total: value.totalTokens, input: value.inputTokens, output: value.outputTokens })), [
+    { revision: 1, total: 12, input: 10, output: 2 },
+    { revision: 2, total: undefined, input: 15, output: 3 },
+    { revision: 3, total: undefined, input: 17, output: 4 },
+  ])
+  assert.equal(usage[2]?.completeness, 'partial')
+})
+
+test('Pi missing usage permanently suppresses operation total before and between metered responses', async () => {
+  for (const responses of [
+    [null, { input: 2, output: 1, totalTokens: 3 }],
+    [{ input: 10, output: 2, totalTokens: 12 }, null, { input: 2, output: 1, totalTokens: 3 }],
+  ]) {
+    const records = responses.flatMap((usage, index) => [
+      JSON.stringify({ type: 'message_start' }),
+      JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: `part-${index}` }], ...(usage && { usage }) } }),
+    ])
+    const cli = await executable('pi', `read _; printf '%s\\n' ${[...records, '{"type":"agent_settled"}'].map(record => `'${record}'`).join(' ')}`)
+    const session = await new PiRuntimeSessionAdapter(cli).openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+    const signals = await collect((await session.execute({ operationId: 'turn-unmetered-gap' as TurnId, message: { content: 'hi' } })).signals)
+    const usageEvents = signals.flatMap(signal => signal.kind === 'event' && signal.event.kind === 'usage.updated' ? [signal.event.usage] : [])
+    assert.equal(usageEvents.at(-1)?.totalTokens, undefined)
+    assert.equal(usageEvents.at(-1)?.completeness, 'partial')
+    assert.equal(usageEvents.at(-1)?.inputTokens, responses.length === 2 ? 2 : 12)
+    assert.equal(usageEvents.at(-1)?.outputTokens, responses.length === 2 ? 1 : 3)
+    if (responses.length === 3) assert.deepEqual(usageEvents.map(value => value.totalTokens), [12, undefined, undefined])
+  }
 })
 
 test('pi waits for agent_settled after a tool turn and preserves the final model answer', async () => {

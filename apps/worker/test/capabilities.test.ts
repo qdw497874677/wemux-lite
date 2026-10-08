@@ -44,9 +44,34 @@ test('gateway proxies bearer capability calls and CLI parses commands', async t 
   assert.equal(httpOrigin(`ws://127.0.0.1:${address.port}/worker/ws`), `http://127.0.0.1:${address.port}/`)
   assert.equal(httpOrigin(`wss://example.test/worker/ws?x=1`), 'https://example.test/')
   assert.equal(parseInvocation(['agent', 'send', '--to', 'a', '--content', 'b']).operation, 'agent.send')
+  assert.deepEqual(parseInvocation(['project', 'list']), { operation: 'project.list', input: {} })
+  assert.deepEqual(parseInvocation(['project', 'resources', '--project-id', 'p']), { operation: 'project.resources', input: { projectId: 'p' } })
+  assert.deepEqual(parseInvocation(['session', 'get', '--session-id', 's']), { operation: 'session.get', input: { sessionId: 's' } })
+  assert.deepEqual(parseInvocation(['task', 'create', '--project-id', 'p', '--request-id', 'once', '--title', 'Investigate']), { operation: 'task.create', input: { projectId: 'p', requestId: 'once', title: 'Investigate' } })
+  assert.deepEqual(parseInvocation(['task', 'sessions', '--project-id', 'p', '--task-id', 't', '--limit', '2', '--cursor', '1']), { operation: 'task.sessions', input: { projectId: 'p', taskId: 't', limit: 2, cursor: '1' } })
+  assert.deepEqual(parseInvocation(['session', 'events', '--session-id', 's', '--from-seq', '9']), { operation: 'session.events', input: { sessionId: 's', fromSeq: 9 } })
+  assert.throws(() => parseInvocation(['task', 'list', '--project-id', 'p', '--limit', '0']), /positive safe integer/)
+})
+
+test('CLI and MCP surface structured capability denial and idempotency conflicts', async t => {
+  const upstream = await import('node:http').then(({ createServer }) => createServer((request, response) => {
+    response.writeHead(request.url?.endsWith('/task.create') ? 409 : 400, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ error: request.url?.endsWith('/task.create') ? { code: 'request_conflict', message: 'Request id reused with different content' } : { code: 'invalid_request', message: 'Missing requestId' } }))
+  }))
+  await new Promise<void>(resolve => upstream.listen(0, '127.0.0.1', resolve))
+  t.after(async () => new Promise<void>(resolve => upstream.close(() => resolve())))
+  const gateway = new CapabilityGateway(`http://127.0.0.1:${(upstream.address() as { port: number }).port}`)
+  const endpoint = await gateway.listen()
+  t.after(() => gateway.close())
+  const previous = process.env.WEMUX_CAPABILITY_ENDPOINT, previousToken = process.env.WEMUX_CAPABILITY_TOKEN
+  process.env.WEMUX_CAPABILITY_ENDPOINT = endpoint
+  process.env.WEMUX_CAPABILITY_TOKEN = 'synthetic-test-token'
+  t.after(() => { if (previous === undefined) delete process.env.WEMUX_CAPABILITY_ENDPOINT; else process.env.WEMUX_CAPABILITY_ENDPOINT = previous; if (previousToken === undefined) delete process.env.WEMUX_CAPABILITY_TOKEN; else process.env.WEMUX_CAPABILITY_TOKEN = previousToken })
+  await assert.rejects(invokeCapability({ operation: 'task.list', input: {} }), /invalid_request: Missing requestId/)
+  await assert.rejects(handleMcpRequest({ method: 'tools/call', params: { name: 'wemux_task_create', arguments: { projectId: 'p', title: 'new', requestId: 'reused' } } }), /request_conflict: Request id reused with different content/)
 })
 
 test('MCP exposes the minimal tool surface', async () => {
   const listed = await handleMcpRequest({ method: 'tools/list' })
-  assert.deepEqual(listed.tools.map((tool: any) => tool.name), ['wemux_session_info', 'wemux_agent_list', 'wemux_agent_send', 'wemux_inbox_list', 'wemux_inbox_read', 'wemux_delegation_accept', 'wemux_delegation_reject', 'wemux_delegation_complete', 'mcp_list_tools', 'mcp_call', 'http_call'])
+  assert.deepEqual(listed.tools.map((tool: any) => tool.name), ['wemux_session_info', 'wemux_project_list', 'wemux_project_get', 'wemux_project_resources', 'wemux_task_list', 'wemux_task_get', 'wemux_task_create', 'wemux_task_sessions', 'wemux_session_get', 'wemux_session_events', 'wemux_agent_list', 'wemux_agent_send', 'wemux_inbox_list', 'wemux_inbox_read', 'wemux_delegation_accept', 'wemux_delegation_reject', 'wemux_delegation_complete', 'mcp_list_tools', 'mcp_call', 'http_call'])
 })

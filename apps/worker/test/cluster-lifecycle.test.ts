@@ -283,6 +283,125 @@ test('connect proceeds when previous runtime shutdown hangs on a stuck agent tur
   }
 })
 
+test('real capability gateway journals Connector expiry before local Turn cleanup and reopens durably', { timeout: 10000 }, async t => {
+  const f = await fixture()
+  let call: Promise<Response> | undefined, externalCalls = 0
+  const { HttpConnectorExecutor } = await import('../src/connectors/http-executor.ts')
+  t.mock.method(HttpConnectorExecutor.prototype, 'execute', async () => { externalCalls++; throw new Error('External execution forbidden in expiry test') })
+  t.mock.method(TestRuntimeSessionAdapter.prototype, 'openSession', async () => ({
+    execute: async input => ({
+      signals: (async function* () {
+        const context = input.launchContext!
+        assert.ok(context.capabilityEndpoint); assert.ok(context.capabilityToken)
+        call = fetch(`${context.capabilityEndpoint}/http.call`, { method: 'POST', headers: { authorization: `Bearer ${context.capabilityToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ connectorId: 'expiry-http', connectorRevision: 1, operationId: 'write', requestId: 'expiry-request', toolCallId: 'expiry-call', input: { body: {} } }) })
+        // Observe failures immediately; final assertions still await the original call.
+        void call.catch(() => {})
+        await waitFor(() => f.lifecycle.listConnectorApprovals().length === 1)
+        yield { kind: 'finished' as const, outcome: { status: 'completed' as const } }
+      })(), stop: async () => {},
+    }), command: async () => {}, resolveApproval: async () => {}, close: async () => {},
+  }))
+  try {
+    const now = new Date().toISOString() as Timestamp
+    await f.store.saveConnectorDefinition({ id: 'expiry-http' as never, projectId: 'local' as never, kind: 'http', name: 'Expiry fixture', description: null, revision: 1, enabled: true, allowedWorkerIds: [], credentialRef: null, credentialAvailability: 'not_required', riskDefaults: { requireApprovalForRead: false, allowMcpReadOnlyHint: false }, config: { baseUrl: 'https://fixture.example.test', authentication: 'none', publicHeaders: {}, allowedOperations: [{ id: 'write', method: 'POST', pathTemplate: '/items', allowedQueryNames: [], allowedRequestHeaderNames: [], requestContentTypes: ['application/json'] }], allowPrivateNetwork: false }, createdAt: now, updatedAt: now })
+    await f.lifecycle.initializeLocalRuntime()
+    const workbench = createLocalWorkbenchService(f.store, f.lifecycle)
+    const directory = await workbench.addDirectory(f.home)
+    const session = await workbench.createSession({ workspaceId: directory.workspaceId, agentKey: 'test', modelId: 'test' })
+    await workbench.enqueue(session.sessionId, 'release approval on completion')
+    await waitFor(async () => (await workbench.journal(session.sessionId, 1, 200)).events.some(e => e.payload.kind === 'approval.expired'))
+    assert.ok(call)
+    const response = await call
+    assert.equal(response.status, 200)
+    assert.equal((await response.json() as { error: { code: string } }).error.code, 'approval_denied')
+    await waitFor(async () => (await f.store.sessions.get(session.sessionId))?.activeTurnId === null)
+    const before = await workbench.journal(session.sessionId, 1, 200)
+    const approvals = before.events.filter(e => e.payload.kind.startsWith('approval.'))
+    assert.deepEqual(approvals.map(e => e.payload.kind), ['approval.requested', 'approval.expired'])
+    const requested = approvals[0]!.payload, expired = approvals[1]!.payload
+    assert.equal(requested.kind, 'approval.requested'); assert.equal(expired.kind, 'approval.expired')
+    if (requested.kind === 'approval.requested' && expired.kind === 'approval.expired') {
+      assert.equal(expired.reason, 'turn_released'); assert.equal(expired.turnId, requested.turnId); assert.equal(expired.approvalId, requested.approvalId)
+    }
+    assert.equal(externalCalls, 0); assert.deepEqual(f.lifecycle.listConnectorApprovals(), []); assert.deepEqual(await workbench.approvals(session.sessionId), [])
+    await f.lifecycle.close()
+    const reopened = new SqliteWorkerStore(join(f.home, 'worker.sqlite'))
+    try { assert.deepEqual(await reopened.journal.read({ sessionId: session.sessionId, fromSeq: 1 as never, limit: 200 }), before) } finally { reopened.close() }
+  } finally { await f.close() }
+})
+
+test('real local capability gateway persists timeout expiry before Turn release and across reopen', { timeout: 10000 }, async t => {
+  const f = await fixture()
+  const { HttpConnectorExecutor } = await import('../src/connectors/http-executor.ts')
+  let externalCalls = 0
+  t.mock.method(HttpConnectorExecutor.prototype, 'execute', async () => { externalCalls++; throw new Error('External execution forbidden in timeout test') })
+  let call: Promise<Response> | undefined
+  let approvalPending!: () => void
+  t.mock.method(TestRuntimeSessionAdapter.prototype, 'openSession', async () => ({
+    execute: async input => ({
+      signals: (async function* () {
+        const context = input.launchContext!
+        call = fetch(`${context.capabilityEndpoint}/http.call`, {
+          method: 'POST', headers: { authorization: `Bearer ${context.capabilityToken}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ connectorId: 'timeout-http', connectorRevision: 1, operationId: 'write', requestId: 'timeout-request', toolCallId: 'timeout-call', input: { body: {} } }),
+        })
+        void call.catch(() => {})
+        const deadline = Date.now() + 3000
+        while (f.lifecycle.listConnectorApprovals().length === 0 && Date.now() < deadline) await new Promise<void>(resolve => setImmediate(resolve))
+        assert.equal(f.lifecycle.listConnectorApprovals().length, 1)
+        approvalPending()
+        await call
+        yield { kind: 'finished' as const, outcome: { status: 'completed' as const } }
+      })(), stop: async () => {},
+    }), command: async () => {}, resolveApproval: async () => {}, close: async () => {},
+  }))
+  try {
+    const now = new Date().toISOString() as Timestamp
+    await f.store.saveConnectorDefinition({ id: 'timeout-http' as never, projectId: 'local' as never, kind: 'http', name: 'Timeout fixture', description: null, revision: 1, enabled: true, allowedWorkerIds: [], credentialRef: null, credentialAvailability: 'not_required', riskDefaults: { requireApprovalForRead: false, allowMcpReadOnlyHint: false }, config: { baseUrl: 'https://fixture.example.test', authentication: 'none', publicHeaders: {}, allowedOperations: [{ id: 'write', method: 'POST', pathTemplate: '/items', allowedQueryNames: [], allowedRequestHeaderNames: [], requestContentTypes: ['application/json'] }], allowPrivateNetwork: false }, createdAt: now, updatedAt: now })
+    await f.lifecycle.initializeLocalRuntime()
+    const workbench = createLocalWorkbenchService(f.store, f.lifecycle)
+    const directory = await workbench.addDirectory(f.home)
+    const session = await workbench.createSession({ workspaceId: directory.workspaceId, agentKey: 'test', modelId: 'test' })
+    const pending = new Promise<void>(resolve => { approvalPending = resolve })
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    await workbench.enqueue(session.sessionId, 'time out approval')
+    await pending
+    const before = await workbench.journal(session.sessionId, 1, 100)
+    assert.deepEqual(before.events.filter(event => event.payload.kind.startsWith('approval.')).map(event => event.payload.kind), ['approval.requested'])
+    // Drive every idle watchdog tick separately so each pending-approval check
+    // runs; one synchronous five-minute leap would conceal a watchdog failure.
+    for (let interval = 0; interval < 10; interval++) {
+      t.mock.timers.tick(30_000 - (interval === 9 ? 1 : 0))
+      await new Promise<void>(resolve => setImmediate(resolve))
+      assert.equal(f.lifecycle.listConnectorApprovals().length, 1, `approval remains pending through idle tick ${interval + 1}`)
+      assert.notEqual((await f.store.sessions.get(session.sessionId))?.activeTurnId, null)
+    }
+    assert.equal(f.lifecycle.listConnectorApprovals().length, 1, 'approval must not expire before its five-minute deadline')
+    assert.equal((await workbench.journal(session.sessionId, 1, 100)).events.some(event => event.payload.kind === 'approval.expired'), false)
+    assert.notEqual((await f.store.sessions.get(session.sessionId))?.activeTurnId, null, 'idle watchdog must not terminate a Turn awaiting human approval')
+    t.mock.timers.tick(1)
+    assert.ok(call)
+    const response = await call
+    assert.equal((await response.json() as { error: { code: string } }).error.code, 'approval_denied')
+    await waitFor(async () => (await workbench.journal(session.sessionId, 1, 100)).events.some(event => event.payload.kind === 'approval.expired'))
+    const after = await workbench.journal(session.sessionId, 1, 100)
+    const approvals = after.events.filter(event => event.payload.kind.startsWith('approval.'))
+    assert.deepEqual(approvals.map(event => event.payload.kind), ['approval.requested', 'approval.expired'])
+    assert.equal(approvals[1]?.payload.kind, 'approval.expired')
+    if (approvals[1]?.payload.kind === 'approval.expired') assert.equal(approvals[1].payload.reason, 'timeout')
+    assert.equal(externalCalls, 0)
+    assert.deepEqual(f.lifecycle.listConnectorApprovals(), [])
+    t.mock.timers.reset()
+    await waitFor(async () => (await f.store.sessions.get(session.sessionId))?.activeTurnId === null)
+    const settled = await workbench.journal(session.sessionId, 1, 100)
+    assert.equal(settled.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'completed'), true, 'approval timeout does not kill an otherwise healthy Turn')
+    await f.lifecycle.close()
+    const reopened = new SqliteWorkerStore(join(f.home, 'worker.sqlite'))
+    try { assert.deepEqual(await reopened.journal.read({ sessionId: session.sessionId, fromSeq: 1 as never, limit: 100 }), settled) }
+    finally { reopened.close() }
+  } finally { t.mock.timers.reset(); await f.close() }
+})
+
 test('explicit start candidates override persisted identity urls', () => {
   const identity = ['http://10.0.0.1:8010', 'http://10.0.0.2:8010']
   assert.deepEqual(clusterCandidateUrls(identity, ['http://100.64.0.9:8010'], 'cluster'), ['ws://100.64.0.9:8010/cluster'])

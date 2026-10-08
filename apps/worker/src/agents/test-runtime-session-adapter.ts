@@ -39,6 +39,13 @@ class TestRuntimeSession implements AgentRuntimeSession {
     try {
       yield { kind: 'native-session', nativeSession: this.open.resume ?? `test:${this.open.sessionId}` as NativeSessionRef }
       const toolCallId = `${input.operationId}:echo` as ToolCallId
+      // Deterministic non-provider failure for owned Worker/browser acceptance.
+      // A literal prefix is required; ordinary prompts remain unchanged.
+      if (input.message.content.startsWith('[test-agent:fail]')) {
+        await wait()
+        yield { kind: 'finished', outcome: { status: 'failed', failure: { code: 'agent-error', message: 'Test Agent injected failure' } } }
+        return
+      }
       const slow = input.message.content.match(/^\[test-agent:pause-ms=(\d+)\]/)
       if (slow) {
         for (let remaining = Math.min(Number(slow[1]), 120000); remaining > 0; remaining -= 1000) {

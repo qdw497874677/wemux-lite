@@ -49,6 +49,35 @@ test('http_call executes through ToolExecutionGateway and replays an idempotent 
   assert.equal(journal[0]?.toolCall.action.kind, 'http')
 })
 
+test('HTTP 503 is persisted as upstream_error and write replay does not repeat the side effect', async t => {
+  let attempts = 0
+  const h = await harness(t, { approval: 'approve', fetch: (async () => { attempts++; return new Response(JSON.stringify({ error: 'fixture_down' }), { status: 503, headers: { 'content-type': 'application/json' } }) }) as typeof fetch })
+  const result = await h.gateway.executeHttp(h.common)
+  assert.equal(result.ok, false)
+  if (!result.ok) { assert.equal(result.error.code, 'upstream_error'); assert.equal(result.error.retryable, false); assert.doesNotMatch(result.error.message, /fixture_down/) }
+  assert.deepEqual(await h.gateway.executeHttp(h.common), result)
+  assert.equal(attempts, 1)
+  const journal = await h.store.listConnectorJournal(ids.sessionId)
+  assert.equal(journal.length, 1)
+  assert.deepEqual(journal[0]?.result, result)
+})
+
+test('HTTP 429 preserves bounded Retry-After while sent writes remain non-retryable', async t => {
+  for (const [retryAfter, expected] of [['60', 60_000], ['9999999999', 86_400_000], ['not-a-date', null]] as const) {
+    const h = await harness(t, { approval: 'approve', fetch: (async () => new Response('', { status: 429, headers: { 'retry-after': retryAfter } })) as typeof fetch })
+    const write = await h.gateway.executeHttp(h.common)
+    assert.equal(write.ok, false)
+    if (!write.ok) { assert.equal(write.error.code, 'rate_limited'); assert.equal(write.error.retryable, false); assert.equal(write.error.retryAfterMs, expected) }
+  }
+  const read = await harness(t, { fetch: (async () => new Response('', { status: 429, headers: { 'retry-after': '60' } })) as typeof fetch })
+  const config = read.connector.config
+  const readConnector = definition({ config: { ...config, allowedOperations: [{ ...config.allowedOperations[0]!, method: 'GET', requestContentTypes: [] }] } })
+  await read.store.saveConnectorDefinition(readConnector)
+  const result = await read.gateway.executeHttp({ ...read.common, input: {}, snapshot: { ...read.snapshot, connectors: [readConnector] } })
+  assert.equal(result.ok, false)
+  if (!result.ok) { assert.equal(result.error.code, 'rate_limited'); assert.equal(result.error.retryable, true); assert.equal(result.error.retryAfterMs, 60_000) }
+})
+
 test('http_call fails closed without approval support or when approval is denied', async t => {
   const unsupported = await harness(t)
   const closed = await unsupported.gateway.executeHttp({ ...unsupported.common, agentSupportsApproval: false })

@@ -75,13 +75,32 @@ export class WorkerTransportStore {
     try {
       this.setMeta('logical_connection_id', frame.logicalConnectionId)
       this.database.prepare('UPDATE transport_outbox SET last_sent_at = NULL').run()
-      if (serverCursor.deliveryEpoch === this.outboundEpoch) this.setOutboundAckThrough(serverCursor.ackThrough)
+      if (serverCursor.deliveryEpoch === this.outboundEpoch) {
+        this.setOutboundAckThrough(serverCursor.ackThrough)
+        this.database.prepare('DELETE FROM transport_outbox WHERE seq <= ?').run(this.outboundAckThrough())
+      }
       if (this.meta('inbound_epoch') !== inbound.deliveryEpoch) {
         this.setMeta('inbound_epoch', inbound.deliveryEpoch)
         if (storedInbound === null) this.setMeta(`inbound_ack:${inbound.deliveryEpoch}`, String(inbound.ackThrough))
       }
       this.database.exec('COMMIT')
     } catch (error) { this.database.exec('ROLLBACK'); throw error }
+  }
+
+  /** Full application identity, independent of transport sequence/message identity. */
+  async enqueueFileResult(payload: import('@wemux/wire-protocol').FileWriteResultPayload): Promise<MessageId> {
+    const rows = this.database.prepare("SELECT message_id, payload_json FROM transport_outbox WHERE json_extract(payload_json, '$.type') = 'fs.write.result'").all()
+    for (const row of rows) {
+      const previous = JSON.parse(String(row.payload_json)) as typeof payload
+      if (previous.requestId !== payload.requestId) continue
+      if (fileResultIdentity(previous) !== fileResultIdentity(payload) || previous.resultJson !== payload.resultJson || previous.outcome !== payload.outcome) throw new Error('File result projection conflict')
+      return String(row.message_id) as MessageId
+    }
+    return this.enqueue(payload)
+  }
+
+  hasOutstandingFileResults(): boolean {
+    return Boolean(this.database.prepare("SELECT 1 FROM transport_outbox WHERE seq > ? AND json_extract(payload_json, '$.type') = 'fs.write.result' LIMIT 1").get(this.outboundAckThrough()))
   }
 
   async enqueue(payload: WorkerPayload): Promise<MessageId> {
@@ -182,4 +201,9 @@ export class WorkerTransportStore {
     this.database.prepare('INSERT INTO transport_meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value)
     return value
   }
+}
+
+export function fileResultIdentity(value: import('@wemux/wire-protocol').FileWriteResultPayload | import('@wemux/wire-protocol').FileWriteResultAckPayload): string {
+  return JSON.stringify([value.requestId, value.sessionId, value.workerId, value.operation,
+    value.fingerprintVersion, value.fingerprint, value.resultVersion, value.resultDigest])
 }

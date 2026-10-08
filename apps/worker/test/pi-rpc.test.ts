@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { PiAgent } from '../src/agents/pi-agent.js'
 import { PiRpc } from '../src/agents/pi-rpc.js'
+import { createPiCapabilityTools, piCapabilityExtension } from '../src/capabilities/pi-tools.js'
 import type { AgentTurnInput, AgentSignal } from '../src/application/ports/agent-adapter.js'
 
 async function fixture(mode = 'ok', version = '0.85.1') {
@@ -71,10 +72,14 @@ for await (const line of createInterface({input: process.stdin})) {
   send({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'Hi 😀\u2028there'}});
   send({type:'tool_execution_start',toolCallId:'t',toolName:'read',args:{path:'x'}});
   for (const text of ['a', 'ab', 'ab']) send({type:'tool_execution_update',toolCallId:'t',partialResult:{content:[{type:'text',text}]}});
-  if (tools.length) await tools[0].execute('t', {});
+  let toolFailed = false;
+  if (tools.length) {
+    try { await tools[mode.startsWith('connector-') ? tools.findIndex(t => t.name === 'http_call') : 0].execute('t', {}); }
+    catch (error) { toolFailed = true; await writeFile('tool-error.txt', String(error)); }
+  }
   if (mode === 'nonprefix') send({type:'tool_execution_update',toolCallId:'t',partialResult:{content:[{type:'text',text:'x'}]}});
   const result = {content:[{type:'text',text:mode === 'nonprefix' ? 'xy' : 'abc'}]};
-  send({type:'tool_execution_end',toolCallId:'t',result,isError:false});
+  send({type:'tool_execution_end',toolCallId:'t',result,isError:toolFailed});
   send({type:'agent_end',messages:[{role:'assistant',stopReason:'error',errorMessage:'transient'}],willRetry:true});
   const message = {role:'assistant',stopReason:mode === 'error' ? 'error' : 'stop',errorMessage:'model failed'};
   send({type:'message_end',message});
@@ -279,6 +284,62 @@ test('Pi RPC startup timeout and turn timeout clean up subprocesses', async () =
       assert.throws(() => process.kill(pid, 0))
     } finally { await f.close() }
   }
+})
+test('Pi connector approval keeps the fetch alive through the five-minute decision deadline in both tool paths', async t => {
+  const durations: number[] = []
+  const timeout = AbortSignal.timeout
+  t.mock.method(AbortSignal, 'timeout', (duration: number) => { durations.push(duration); return timeout(duration) })
+  const server = createServer((_req, res) => { res.setHeader('content-type', 'application/json'); res.end('{"ok":true}') })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}`
+    for (const name of ['http_call', 'mcp_call', 'wemux_session_info']) {
+      const tool = createPiCapabilityTools({ capabilityEndpoint: endpoint, capabilityToken: 'secret' } as any).find(item => item.name === name)!
+      await tool.execute('t', {})
+    }
+    assert.deepEqual(durations, [6 * 60_000, 6 * 60_000, 30_000])
+    const extension = piCapabilityExtension('/tmp/wemux-pi-ready-test')
+    assert.match(extension, /AbortSignal\.timeout\(connector \? 360000 : 30000\)/)
+    assert.doesNotMatch(extension, /AbortSignal\.timeout\(30000\)/)
+    const delayed = createServer((_req, res) => { setTimeout(() => { res.setHeader('content-type', 'application/json'); res.end('{"ok":true}') }, 120) })
+    await new Promise<void>(resolve => delayed.listen(0, '127.0.0.1', resolve))
+    try {
+      const delayedEndpoint = `http://127.0.0.1:${(delayed.address() as { port: number }).port}`
+      const direct = createPiCapabilityTools({ capabilityEndpoint: delayedEndpoint, capabilityToken: 'secret' } as any).find(item => item.name === 'http_call')!
+      const t0 = Date.now()
+      assert.equal((await direct.execute('t', {})).details.ok, true)
+      assert.ok(Date.now() - t0 >= 100, 'direct transport waits for response headers')
+      const f = await fixture('connector-delayed')
+      try {
+        const signals = await collect(await f.agent.startTurn({ ...f.input, launchContext: { capabilityEndpoint: delayedEndpoint, capabilityToken: 'secret' } as any }))
+        assert(signals.some(signal => signal.kind === 'event' && signal.event.kind === 'tool.finished' && signal.event.exitCode === 0))
+      } finally { await f.close() }
+    } finally { await new Promise<void>((resolve, reject) => delayed.close(error => error ? reject(error) : resolve())) }
+  } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
+})
+
+test('Pi connector approval request uses Node HTTP without native fetch five-minute header deadline', async () => {
+  const source = piCapabilityExtension('/tmp/wemux-pi-ready-test')
+  assert.match(source, /import \{ request \} from 'node:http'/)
+  assert.match(source, /connectorRequest\(url, token, input, deadline\)/)
+  assert.doesNotMatch(source, /headersTimeout: 300000/)
+})
+
+test('Pi connector denial fails for both Worker tool and generated CLI extension', async () => {
+  const server = createServer((_req, res) => { res.setHeader('content-type', 'application/json'); res.end('{"ok":false,"error":{"code":"approval_denied","message":"Tool write rejected"}}') })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}`
+  const context = { capabilityEndpoint: endpoint, capabilityToken: 'secret' }
+  try {
+    const direct = createPiCapabilityTools(context as any).find(tool => tool.name === 'http_call')!
+    await assert.rejects(direct.execute('t', {}), /approval_denied: Tool write rejected/)
+    const f = await fixture('connector-denied')
+    try {
+      const signals = await collect(await f.agent.startTurn({ ...f.input, launchContext: context as any }))
+      assert(signals.some(signal => signal.kind === 'event' && signal.event.kind === 'tool.finished' && signal.event.exitCode === 1))
+      assert.match(await readFile(join(f.cwd, 'tool-error.txt'), 'utf8'), /approval_denied: Tool write rejected/)
+    } finally { await f.close() }
+  } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
 })
 test('Pi loads real generated extension across process boundary, injects launch resources and removes secrets', async () => {
   let invoked = false

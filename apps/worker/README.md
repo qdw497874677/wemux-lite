@@ -56,7 +56,7 @@ Environment equivalents: `WEMUX_WORKER_HOME`, `WEMUX_WORKER_NAME`,
 Default home: `~/.wemux-lite-mini`. `register` refuses to replace an existing identity.
 The `wemux-lite-agent` and `wemux-lite-agent-mcp` executables are internal per-turn capability
 bridges; operators normally use only `wemux-lite-worker`.
-`status` prints durable local state, **not** a claim of live Server connectivity.
+`status` prints durable local state, **not** a claim of live Server connectivity. If the home or database does not exist, it exits successfully with `initialized: false` and an initialization/registration hint, without creating any files. Existing corrupt or inaccessible databases remain errors, not an uninitialized status.
 SIGINT/SIGTERM stops transport and active turns, drains writes, then closes SQLite.
 A PID lock prevents two local runtimes from executing the same queue. An invalid
 lock file requires manual inspection; stale dead-PID locks are removed on startup.

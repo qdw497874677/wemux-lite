@@ -7,13 +7,14 @@ import type { AgentKey, NativeSessionRef, ToolCallId } from '@wemux/domain'
 import type { AgentAdapter, AgentSignal, AgentTurnInput, AgentTurnOutcome, LocalAgentDetection } from '../application/ports/agent-adapter.js'
 import { modelId, splitModelId } from '../domain/model-id.js'
 import { piCapabilityExtension } from '../capabilities/pi-tools.js'
+import { runtimeVersionEnvironment } from '../runtimes/version-environment.js'
 import { findPi, PiRpc } from './pi-rpc.js'
 
 const exec = promisify(execFile)
 const agentCommands = ['/compact', '/model'] as const
 // 0.80.4 introduced settlement; 0.85.1 is our validated lifecycle/extension baseline.
 async function supportedVersion(executable: string, timeout: number) {
-  const version = (await exec(executable, ['--version'], { timeout, killSignal: 'SIGKILL', maxBuffer: 65536 })).stdout.trim().slice(0, 256)
+  const version = (await exec(executable, ['--version'], { timeout, killSignal: 'SIGKILL', maxBuffer: 65536, env: runtimeVersionEnvironment('pi') })).stdout.trim().slice(0, 256)
   const match = /^(?:pi\s+)?v?(\d+)\.(\d+)\.(\d+)(?:\+[\w.-]+)?$/.exec(version)
   const supported = match && (Number(match[1]) > 0 || Number(match[2]) > 85 || (Number(match[2]) === 85 && Number(match[3]) >= 1))
   if (!supported) throw new Error(`Unsupported Pi CLI version ${JSON.stringify(version)}; upgrade to Pi >=0.85.1 (validated baseline; agent_settled requires >=0.80.4)`)

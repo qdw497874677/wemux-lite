@@ -112,3 +112,22 @@ export interface WorkerJournalReader {
   listHeads(): Promise<readonly SessionJournalHead[]>
   getEvent(sessionId: SessionId, seq: import('@wemux/domain').EventSeq): Promise<JournalEvent | null>
 }
+
+/** Committed reads only. Do not call these from a transaction callback. */
+export interface WorkerFileWriteReader {
+  get(requestId: string): Promise<import('../../domain/file-write-admission.js').WorkerFileWriteRecord | null>
+  listPendingResults(limit: number): Promise<readonly import('@wemux/wire-protocol').FileWriteResultPayload[]>
+}
+
+export interface WorkerFileWriteWriter {
+  /** Provisional until the enclosing transaction successfully commits; no I/O inside the callback. */
+  reserve(admission: import('@wemux/wire-protocol').FileWriteAdmitPayload): Promise<import('../../domain/file-write-admission.js').WorkerFileWriteReservation>
+  retainResult(result: import('@wemux/wire-protocol').FileWriteResultPayload): Promise<void>
+  acknowledgeResult(ack: import('@wemux/wire-protocol').FileWriteResultAckPayload): Promise<void>
+  /**
+   * Explicit exclusive-runtime-owner action only, after old execution has stopped.
+   * Not safe for diagnostic opens or concurrent runtimes. No lease/timeout takeover.
+   * Retains unknown + pending result atomically, never grants execution authority.
+   */
+  recoverUnresolved(): Promise<number>
+}

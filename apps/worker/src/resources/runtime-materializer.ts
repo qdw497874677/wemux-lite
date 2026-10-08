@@ -4,6 +4,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { ResourceBindingSnapshot, WorkerId } from '@wemux/domain'
 import type { AgentAdapter } from '../application/ports/agent-adapter.ts'
 import { installCatalog, matchesRuntimeVersion, runRuntimeProcess, stageAgentRuntime, type RuntimeProcess } from '../runtimes/management.ts'
+import { runtimeVersionEnvironment } from '../runtimes/version-environment.js'
 import { readAgentSettings, removeAgentSelection, saveAgentSelection } from '../config/agent-settings.ts'
 import { ResourceStateStore, type InstalledResourceState } from './resource-state-store.ts'
 
@@ -79,7 +80,8 @@ export class RuntimeMaterializer {
     try {
       if (!(await stat(path)).isFile()) return false
       await access(path, constants.X_OK)
-      const version = await this.run({ command: path, args: ['--version'], timeout: 10_000 })
+      const env = runtimeVersionEnvironment(key)
+      const version = await this.run({ command: path, args: ['--version'], timeout: 10_000, ...(env ? { env } : {}) })
       return matchesRuntimeVersion(version, binding.artifact!.packageVersion)
     } catch { return false }
   }

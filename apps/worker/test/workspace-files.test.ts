@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { promisify } from 'node:util'
-import { diffWorkspaceFile, listWorkspaceFiles, MAX_FILE_READ_BYTES, MAX_FILE_WRITE_BYTES, parseGitDiff, readWorkspaceFile, writeWorkspaceFile } from '../src/files/workspace-files.js'
+import { diffWorkspaceFile, FILE_READ_ERROR, fileReadErrorMessage, listWorkspaceFiles, MAX_FILE_READ_BYTES, MAX_FILE_WRITE_BYTES, parseGitDiff, readWorkspaceFile, writeWorkspaceFile } from '../src/files/workspace-files.js'
 
 const git = promisify(execFile)
 
@@ -50,14 +50,17 @@ test('workspace file write is binary-safe, creates parents, and rejects traversa
 test('workspace file read truncates at the requested limit and caps requests at 10MB', async () => {
   const { parent, root } = await fixture()
   try {
-    await writeFile(join(root, 'large.txt'), 'x'.repeat(MAX_FILE_READ_BYTES + 32))
+    assert.equal(MAX_FILE_READ_BYTES, 10 * 1024 * 1024)
+    await writeFile(join(root, 'large.txt'), 'x'.repeat(MAX_FILE_READ_BYTES))
     assert.deepEqual(await readWorkspaceFile(root, 'large.txt', 16), {
       content: 'x'.repeat(16),
-      size: MAX_FILE_READ_BYTES + 32,
+      size: MAX_FILE_READ_BYTES,
       truncated: true,
       binary: false,
     })
     await assert.rejects(readWorkspaceFile(root, 'large.txt', MAX_FILE_READ_BYTES + 1), /maxBytes/)
+    await writeFile(join(root, 'large.txt'), Buffer.alloc(MAX_FILE_READ_BYTES + 1, 0x78))
+    await assert.rejects(readWorkspaceFile(root, 'large.txt', MAX_FILE_READ_BYTES), { message: `${FILE_READ_ERROR.tooLarge}: File exceeds ${MAX_FILE_READ_BYTES} byte limit` })
     await writeFile(join(root, 'binary.dat'), Buffer.from([0xff, 0xfe, 0xfd]))
     assert.deepEqual(await readWorkspaceFile(root, 'binary.dat', 16), { content: null, base64Content: '//79', size: 3, truncated: false, binary: true })
   } finally {
@@ -124,4 +127,27 @@ test('workspace directory listing returns sorted files and directories with meta
   } finally {
     await rm(parent, { recursive: true, force: true })
   }
+})
+
+test('workspace read preserves UTF-8 BOM, empty files and binary NUL bytes', async () => {
+  const { parent, root } = await fixture()
+  try {
+    for (const bytes of [Buffer.from('\ufeff成果\r\n'), Buffer.alloc(0), Buffer.from([0, 1, 255, 0])]) {
+      await writeFile(join(root, 'result'), bytes)
+      const result = await readWorkspaceFile(root, 'result', MAX_FILE_READ_BYTES)
+      assert.equal(result.truncated, false)
+      assert.equal(result.size, bytes.length)
+      assert.deepEqual(result.binary ? Buffer.from(result.base64Content!, 'base64') : Buffer.from(result.content!, 'utf8'), bytes)
+      if (!result.binary) assert.equal(result.base64Content, undefined)
+    }
+  } finally { await rm(parent, { recursive: true, force: true }) }
+})
+
+test('workspace read error classification does not forward paths or file fragments', () => {
+  for (const code of ['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM', 'EIO']) {
+    const message = fileReadErrorMessage(Object.assign(new Error('/secret/path: private bytes'), { code }))
+    assert.match(message, code === 'ENOENT' || code === 'ENOTDIR' ? /^file_not_found:/ : /^file_unreadable:/)
+    assert.doesNotMatch(message, /secret|private/)
+  }
+  assert.equal(fileReadErrorMessage(new Error(`${FILE_READ_ERROR.accessRevoked}: revoked`)), 'file_access_revoked: revoked')
 })

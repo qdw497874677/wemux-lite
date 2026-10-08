@@ -17,3 +17,11 @@ export interface WorkerTransport {
   stop(): void
   send(payload: WorkerPayload): Promise<void>
 }
+
+/** Internal opt-in composition only; never constructed by the production lifecycle. */
+export interface FileWriteIngress {
+  retainedResult(requestId: string): Promise<import('@wemux/wire-protocol').FileWriteResultPayload | undefined>
+  receive(frame: unknown, negotiation: import('@wemux/wire-protocol/file-admission-node').FileWriteAdmissionNegotiation,
+    publish: (result: import('@wemux/wire-protocol').FileWriteResultPayload) => Promise<void>): Promise<void>
+  replay(publish: (result: import('@wemux/wire-protocol').FileWriteResultPayload) => Promise<void>): Promise<void>
+}

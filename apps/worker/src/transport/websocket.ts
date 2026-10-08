@@ -1,13 +1,17 @@
 import WebSocket from 'ws'
 import {
   WEMUX_ADK_PROFILE_V1,
+  FS_WRITE_ADMISSION_V1,
+  supportsFileWriteAdmission,
   parseServerTransportFrame,
   type ServerPayload,
   type ServerToWorkerFrame,
   type WorkerPayload,
   type WorkerToServerFrame,
 } from '@wemux/wire-protocol'
-import type { ConnectionState, StateChange, WorkerTransport } from './types.js'
+import { parseVerifiedServerFileWriteFrame } from '@wemux/wire-protocol/file-admission-node'
+import { fileResultIdentity } from './transport-store.js'
+import type { ConnectionState, StateChange, WorkerTransport, FileWriteIngress } from './types.js'
 import type { WorkerTransportStore } from './transport-store.js'
 
 export interface WebSocketTransportOptions {
@@ -19,8 +23,10 @@ export interface WebSocketTransportOptions {
   readonly platform: string
   readonly architecture: string
   readonly store: WorkerTransportStore
-  readonly onMessage: (payload: ServerPayload) => void
-  readonly onConnected: () => void
+  readonly onMessage: (payload: ServerPayload) => void | Promise<void>
+  readonly onConnected: () => void | Promise<void>
+  /** Internal embedding only; default does not advertise or consume file admission. */
+  readonly fileWriteIngress?: FileWriteIngress
   readonly onDisconnected?: () => void
   /** User-visible diagnostic notice that does not itself change transport state. */
   readonly onNotice?: (message: string) => void
@@ -43,12 +49,16 @@ const connectTimeoutMs = 10_000
 const idleTimeoutMs = 45_000
 
 export class WebSocketTransport implements WorkerTransport {
+  private negotiatedGeneration: number | undefined
+  private fileWriteNegotiated = false
+  private readonly projectedResults = new Set<string>()
   private socket: WebSocket | undefined
   private reconnectTimer: NodeJS.Timeout | undefined
   private connectTimer: NodeJS.Timeout | undefined
   private idleTimer: NodeJS.Timeout | undefined
   private stableTimer: NodeJS.Timeout | undefined
   private flushing = false
+  private flushRequested = false
   private processingMessages: Promise<void> = Promise.resolve()
   private stopped = true
   private attempts = 0
@@ -75,12 +85,16 @@ export class WebSocketTransport implements WorkerTransport {
   }
 
   async send(payload: WorkerPayload): Promise<void> {
+    if (payload.type === 'fs.write.result') throw new Error('File results require committed ingress publication')
     await this.options.store.enqueue(payload)
-    this.flush().catch(() => undefined)
+    this.flush().catch(error => this.processingFailure(error))
   }
 
   private connect(): void {
     if (this.stopped) return
+    this.negotiatedGeneration = undefined
+    this.fileWriteNegotiated = false
+    this.projectedResults.clear()
     const generation = ++this.generation
     const socket = new WebSocket(this.options.url, {
       headers: { authorization: `Bearer ${this.options.authToken}` },
@@ -92,7 +106,7 @@ export class WebSocketTransport implements WorkerTransport {
     this.connectTimer = setTimeout(() => socket.terminate(), connectTimeoutMs)
     socket.on('open', () => this.handleOpen(socket, generation))
     socket.on('message', (data) => {
-      const raw = data.toString()
+      const raw = data.toString() // Immutable snapshot before the asynchronous raw-frame queue.
       this.processingMessages = this.processingMessages
         .then(() => this.handleMessage(socket, generation, raw))
         .catch((error) => {
@@ -117,7 +131,7 @@ export class WebSocketTransport implements WorkerTransport {
       architecture: this.options.architecture,
       adkProfiles: [WEMUX_ADK_PROFILE_V1],
     })
-    socket.send(JSON.stringify(hello))
+    socket.send(JSON.stringify(this.options.fileWriteIngress ? { ...hello, features: [...hello.features, FS_WRITE_ADMISSION_V1] } : hello))
     this.armIdleTimer(socket, generation)
     // The transport hello is authoritative. The first connected callback waits
     // for Server negotiation; raw WS acceptance alone never means online.
@@ -131,23 +145,52 @@ export class WebSocketTransport implements WorkerTransport {
     catch { return socket.close(1002, 'invalid transport v2 frame') }
 
     if (frame.frameType === 'transport.hello') {
+      if (this.negotiatedGeneration === generation) throw new Error('Duplicate transport hello')
       if (frame.selectedTransport.major !== 2 || frame.selectedAdkProfile !== WEMUX_ADK_PROFILE_V1) {
         this.transition('needs-attention', 'incompatible transport or ADK profile')
         this.stopped = true
         return socket.close(1002, 'incompatible transport or ADK profile')
       }
       await this.options.store.acceptServerHello(frame)
+      if (!this.isCurrent(socket, generation)) return
+      this.negotiatedGeneration = generation
+      this.fileWriteNegotiated = supportsFileWriteAdmission(this.options.fileWriteIngress ? [FS_WRITE_ADMISSION_V1] : [], frame.enabledFeatures)
+      if (!this.fileWriteNegotiated && this.options.store.hasOutstandingFileResults()) return this.stopForFileDowngrade(socket)
       this.transition('open', 'handshake accepted')
-      this.options.onConnected()
+      await this.options.onConnected()
+      if (!this.isCurrent(socket, generation)) return
+      if (this.fileWriteNegotiated) await this.options.fileWriteIngress!.replay(result => this.publishFileResult(socket, generation, result))
+      if (!this.isCurrent(socket, generation)) return
       this.stableTimer = setTimeout(() => { this.attempts = 0 }, this.options.retry?.stableConnectionMs ?? defaultStableConnectionMs)
       return this.flush()
     }
+    if (frame.frameType === 'transport.error' && this.negotiatedGeneration !== generation) {
+      // Negotiation may reject instead of accepting hello. This structurally
+      // validated control frame is not a rejection/receipt of any outbox data.
+      this.options.onNotice?.(`Transport handshake rejected (${frame.code}): ${frame.message}`)
+      if (!frame.retryable) {
+        this.stopped = true
+        this.transition('needs-attention', frame.message)
+      }
+      // Retryable handshake errors retain all data and use normal close/backoff.
+      return socket.close(frame.code === 'revoked' ? 1008 : 1002, frame.code)
+    }
+    if (this.negotiatedGeneration !== generation) throw new Error('Transport hello not accepted')
     if (frame.frameType === 'transport.ack') {
       await this.options.store.acknowledgeOutbound(frame)
       return this.flush()
     }
     if (frame.frameType === 'transport.error') {
       if (!frame.retryable) {
+        // A permanent rejection is not a receipt for a file-result envelope.
+        // Preserve sequence continuity and the application obligation for inspection.
+        if (this.options.store.hasOutstandingFileResults()) {
+          const notice = `File result transport rejected (${frame.code}); connection stopped: ${frame.message}`
+          this.options.onNotice?.(notice)
+          this.stopped = true
+          this.transition('needs-attention', notice)
+          return socket.close(1002, 'file result transport rejected')
+        }
         const dropped = await this.options.store.dropOldestUnacked()
         if (dropped) {
           const notice = `丢弃服务器永久拒绝的消息（序号 ${dropped.seq}，${dropped.payload.type}，${frame.code}）：${frame.message}`
@@ -165,19 +208,54 @@ export class WebSocketTransport implements WorkerTransport {
     }
     if (frame.frameType === 'transport.pong') return
     if (frame.frameType === 'data') {
+      if (frame.payload.type === 'fs.write.admit' || frame.payload.type === 'fs.write.result.ack') {
+        const negotiation = { localFeatures: this.options.fileWriteIngress ? [FS_WRITE_ADMISSION_V1] : [], peerFeatures: this.fileWriteNegotiated ? [FS_WRITE_ADMISSION_V1] : [] }
+        const retained = frame.payload.type === 'fs.write.result.ack' ? await this.options.fileWriteIngress?.retainedResult(frame.payload.requestId) : undefined
+        const verified = parseVerifiedServerFileWriteFrame(frame, negotiation, retained)
+        if (!this.isCurrent(socket, generation)) return
+        const accepted = await this.options.store.acceptInbound(verified)
+        // Transport receipt is not application processing; Server intent must redeliver after a crash gap.
+        if (this.isCurrent(socket, generation)) socket.send(JSON.stringify(accepted.ack))
+        if (accepted.isNew) await this.options.fileWriteIngress!.receive(verified, negotiation, result => this.publishFileResult(socket, generation, result))
+        return
+      }
       if (frame.durability === 'volatile') {
-        this.options.onMessage(frame.payload)
+        await this.options.onMessage(frame.payload)
         return
       }
       const accepted = await this.options.store.acceptInbound(frame)
       socket.send(JSON.stringify(accepted.ack))
-      if (accepted.isNew) this.options.onMessage(frame.payload)
+      if (accepted.isNew) await this.options.onMessage(frame.payload)
     }
+  }
+
+  private async publishFileResult(socket: WebSocket, generation: number, result: import('@wemux/wire-protocol').FileWriteResultPayload): Promise<void> {
+    if (!this.isCurrent(socket, generation) || !this.fileWriteNegotiated || this.negotiatedGeneration !== generation) return
+    const key = fileResultIdentity(result)
+    if (this.projectedResults.has(key)) return
+    await this.options.store.enqueueFileResult(result)
+    this.projectedResults.add(key)
+    await this.flush()
+  }
+
+  private stopForFileDowngrade(socket: WebSocket): void {
+    const notice = 'File result transport replay requires fs-write-admission-v1; connection stopped'
+    this.options.onNotice?.(notice)
+    this.stopped = true
+    this.transition('needs-attention', notice)
+    socket.close(1002, 'file admission feature unavailable')
+  }
+
+  private processingFailure(error: unknown): void {
+    this.options.onNotice?.(`传输消息处理失败：${error instanceof Error ? error.message : String(error)}`)
+    this.socket?.close(1002, 'transport processing failed')
   }
 
   private handleClose(socket: WebSocket, generation: number): void {
     if (this.socket !== socket || this.generation !== generation) return
     this.socket = undefined
+    this.negotiatedGeneration = undefined
+    this.fileWriteNegotiated = false
     this.clearTimers()
     this.options.onDisconnected?.()
     if (this.stopped) return this.transition(this.state === 'needs-attention' ? 'needs-attention' : 'stopped', 'closed')
@@ -195,23 +273,33 @@ export class WebSocketTransport implements WorkerTransport {
   }
 
   private async flush(): Promise<void> {
+    this.flushRequested = true
     if (this.flushing) return
     this.flushing = true
     try {
-      while (true) {
+      while (this.flushRequested) {
+        this.flushRequested = false
         const socket = this.socket
+        const generation = this.generation
         if (!socket || socket.readyState !== WebSocket.OPEN || this.state !== 'open') return
+        if (!this.fileWriteNegotiated && this.options.store.hasOutstandingFileResults()) return this.stopForFileDowngrade(socket)
         const pending = await this.options.store.pendingOutbound(64)
-        if (!pending.length) return
+        if (!pending.length) continue
+        this.flushRequested = true
         for (const frame of pending) {
-          if (socket.readyState !== WebSocket.OPEN || socket !== this.socket) return
+          if (socket.readyState !== WebSocket.OPEN || !this.isCurrent(socket, generation) || this.negotiatedGeneration !== generation) return
           await this.options.store.markOutboundSent(frame)
-          socket.send(JSON.stringify(frame))
+          if (!this.isCurrent(socket, generation) || this.negotiatedGeneration !== generation) return
+          await new Promise<void>((resolve, reject) => socket.send(JSON.stringify(frame), error => error ? reject(error) : resolve()))
         }
       }
+    } catch (error) {
+      this.flushRequested = false
+      throw error
     } finally {
       this.flushing = false
-      if (this.socket?.readyState === WebSocket.OPEN && this.state === 'open' && (await this.options.store.pendingOutbound(1)).length) this.flush().catch(() => undefined)
+      // Only an overlapping bounded flush request can schedule another pass.
+      if (this.flushRequested && !this.stopped && this.state === 'open') void this.flush().catch(error => this.processingFailure(error))
     }
   }
 

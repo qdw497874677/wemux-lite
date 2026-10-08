@@ -80,6 +80,18 @@ export async function main(args = process.argv.slice(2)) {
   let store: SqliteWorkerStore | undefined
   try {
     const database = join(options.home, 'worker.sqlite')
+    if (options.command === 'status') {
+      // Only absence is an uninitialized installation. Corruption and access
+      // errors must still fail; diagnostics never create a home or database.
+      const exists = await stat(database).then(() => true, (error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return false
+        throw error
+      })
+      if (!exists) {
+        console.log(JSON.stringify({ initialized: false, identity: null, endpoints: [], prefer: parsePreference(options.prefer), capabilities: [], workspaces: [], sessions: [], message: 'Worker 尚未初始化或注册；请运行 admin init 或 register。' }, null, 2))
+        return
+      }
+    }
     store = new SqliteWorkerStore(database, { readOnly })
     if (!readOnly) await chmod(database, 0o600)
     if (options.command === 'start') await activateStagedRuntimes(options.home, store.identity()?.workerId)

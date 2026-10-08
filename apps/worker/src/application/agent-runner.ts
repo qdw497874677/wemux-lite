@@ -93,7 +93,12 @@ export class WorkerAgentRunner implements AgentRunner {
         // The isolated Provider process cannot create a resumable native Pi
         // Session: its config and authentication belong to this child only.
         if (privateProvider && signal.kind === 'native-session') continue
-        const event = this.toEvent(request, signal)
+        // PiRuntimeSessionAdapter normalizes iterator aborts into finished/failed
+        // signals. Preserve the explicit stop intent at this boundary too; the
+        // catch below only handles adapters that propagate the exception.
+        const stoppedPiAbort = !privateProvider && request.agentKey === 'pi' && active.stopRequested && signal.kind === 'finished'
+          && signal.outcome.status === 'failed' && signal.outcome.failure.message === 'This operation was aborted'
+        const event = this.toEvent(request, stoppedPiAbort ? { kind: 'finished', outcome: { status: 'cancelled' } } : signal)
         if (!event) continue
         terminalSeen ||= event.customMetadata?.wemux?.terminal !== undefined
         await this.persist(sessionKey, event)
@@ -112,7 +117,11 @@ export class WorkerAgentRunner implements AgentRunner {
         // Provider mode no diagnostic from an untrusted subprocess may enter
         // Journal, Web, or Server; the local operator can inspect process logs.
         const message = privateProvider ? 'Pi Provider 启动或执行失败，请检查 Worker 本地配置' : error instanceof Error ? error.message : 'Agent failed'
-        const event = this.terminal(request, { status: 'failed', failure: { code: 'agent-error', message } })
+        // Native Pi can reject its signal iterator during an explicitly
+        // requested stop before emitting a terminal signal. Keep unrelated
+        // adapter errors (and private Provider isolation failures) as failed.
+        const abortedByStop = !privateProvider && request.agentKey === 'pi' && active.stopRequested && error instanceof Error && error.message === 'This operation was aborted'
+        const event = this.terminal(request, abortedByStop ? { status: 'cancelled' } : { status: 'failed', failure: { code: 'agent-error', message } })
         await this.persist(sessionKey, event)
         yield event
       }
@@ -164,7 +173,9 @@ export class WorkerAgentRunner implements AgentRunner {
   async resolveApproval(request: ApprovalDecision): Promise<void> {
     const active = this.active.get(request.sessionId)
     if (!active || (request.invocationId && active.invocationId !== request.invocationId)) throw new Error('Agent invocation is not active')
-    await this.managerForSession(request.sessionId).resolveApproval(request.sessionId, request.approvalId, request.decision)
+    await this.managerForSession(request.sessionId).resolveApproval(request.sessionId, request.approvalId, request.decision, () => {
+      if (this.active.get(request.sessionId) !== active || active.invocationId !== request.invocationId) throw new Error('Approval invocation is no longer active')
+    })
   }
 
   async stop(sessionId: SessionId, invocationId: RuntimeOperationId): Promise<void> {

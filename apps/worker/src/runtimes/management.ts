@@ -5,6 +5,8 @@ import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/p
 import { isAbsolute, join } from 'node:path'
 import { runtimeKey, saveAgentSelection, type RuntimeKey } from '../config/agent-settings.js'
 
+import { runtimeVersionEnvironment } from './version-environment.js'
+
 export interface ProcessRequest { command: string; args: string[]; cwd?: string; env?: NodeJS.ProcessEnv; timeout: number }
 export type RuntimeProcess = (request: ProcessRequest) => Promise<string>
 export const runRuntimeProcess: RuntimeProcess = request => new Promise((resolve, reject) => {
@@ -72,11 +74,12 @@ export function matchesRuntimeVersion(output: string, version: string): boolean 
   return new RegExp(`(^|[^0-9.])${escaped}($|[^0-9.])`).test(output)
 }
 
-async function validateExecutable(executable: string, run: RuntimeProcess): Promise<string> {
+async function validateExecutable(executable: string, run: RuntimeProcess, key: RuntimeKey): Promise<string> {
   if (!isAbsolute(executable)) throw new Error('--path 必须是可执行文件的绝对路径（不是命令或参数）')
   if (!(await stat(executable)).isFile()) throw new Error('Agent 路径不是文件')
   await access(executable, constants.X_OK)
-  const version = await run({ command: executable, args: ['--version'], timeout: 10_000 })
+  const env = runtimeVersionEnvironment(key)
+  const version = await run({ command: executable, args: ['--version'], timeout: 10_000, ...(env ? { env } : {}) })
   if (!version.trim()) throw new Error('Agent --version 未返回版本；保留原有选择')
   return version.slice(0, 256)
 }
@@ -84,7 +87,7 @@ async function validateExecutable(executable: string, run: RuntimeProcess): Prom
 export async function useAgent(home: string, value: string | undefined, executable: string | undefined, run: RuntimeProcess = runRuntimeProcess) {
   const key = runtimeKey(value)
   if (!executable) throw new Error('agent use 需要 --path 绝对路径')
-  const version = await validateExecutable(executable, run)
+  const version = await validateExecutable(executable, run, key)
   await saveAgentSelection(home, key, { executable, source: 'local', selectedAt: new Date().toISOString() })
   return { key, executable, source: 'local', version, message: restartNotice }
 }
@@ -148,7 +151,7 @@ async function materializeAgentPackage(home: string, value: string | undefined, 
     const binName = key === 'pi' ? 'pi' : key === 'opencode' ? 'opencode' : 'claude'
     if (manifest.name !== spec.name || manifest.version !== spec.version || manifest.bin?.[binName] !== spec.bin) throw new Error('安装包名称、版本或入口与固定目录不匹配；保留原有选择')
     const executable = join(root, spec.bin)
-    const version = await validateExecutable(executable, run)
+    const version = await validateExecutable(executable, run, key)
     if (!matchesRuntimeVersion(version, spec.version)) throw new Error('Agent version probe does not match pinned artifact; previous selection preserved')
     return { key, executable, directory, package: packageSpec, version }
   } catch (error) {

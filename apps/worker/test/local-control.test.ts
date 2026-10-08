@@ -308,7 +308,7 @@ test('local control serves session controls and protects every workbench write w
       assert.equal((await fetch(`${base}/${route}`)).status, 401)
       assert.equal((await fetch(`${base}/${route}`, { headers: authenticated })).status, 200)
     }
-    for (const [route, body] of [['commands', { name: 'compact', commandId: 'stable' }], ['approvals/a1/resolve', { decision: 'approve' }]] as const) {
+    for (const [route, body] of [['commands', { name: 'compact', commandId: 'stable' }], ['approvals/a1/resolve', { decision: 'approve', turnId: 'turn-1' }]] as const) {
       assert.equal((await fetch(`${base}/${route}`, { method: 'POST', headers: { cookie: session }, body: JSON.stringify(body) })).status, 403)
       assert.equal((await fetch(`${base}/${route}`, { method: 'POST', headers: authenticated, body: JSON.stringify(body) })).status, 202)
     }
@@ -482,4 +482,24 @@ test('browser: stable login, form capture, selection, bounded history, queue and
     assert.deepEqual(failures, [])
     await page.screenshot({ path: '/tmp/local-m2-browser.png', fullPage: true })
   } finally { await browser.close(); await f.cleanup() }
+})
+
+test('local approval HTTP requires explicit identity and authorization for both route families', async () => {
+  const calls: unknown[][] = []
+  const workbench = { async resolveApproval(...args: unknown[]) { calls.push(args); return { commandId: 'receipt', status: 'accepted' } } } as unknown as LocalWorkbenchService
+  const f = await fixture({ workbench, cluster: {} as never })
+  try {
+    const login = await fetch(`${f.server.url}/api/local/auth/session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'owner', password: 'correct horse battery staple' }) })
+    const session = cookie(login); const { csrf } = await login.json() as { csrf: string }
+    for (const path of ['/api/local/workbench/sessions/session/approvals/approval/resolve', '/api/local/connectors/approvals/approval/resolve']) {
+      const post = (body: unknown, headers: Record<string, string>) => fetch(`${f.server.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) })
+      const body = { sessionId: 'session', turnId: 'original-turn', decision: 'approve', commandId: 'caller-id' }
+      assert.equal((await post(body, {})).status, 401)
+      assert.equal((await post(body, { cookie: session })).status, 403)
+      const headers = { cookie: session, 'x-wemux-csrf': csrf }
+      assert.equal((await post({ ...body, turnId: undefined }, headers)).status, 400)
+      assert.equal((await post(body, headers)).status, 202)
+    }
+    assert.deepEqual(calls, Array.from({ length: 2 }, () => ['session', 'approval', 'approve', 'caller-id', 'original-turn']))
+  } finally { await f.cleanup() }
 })

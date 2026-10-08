@@ -9,7 +9,7 @@ export interface HttpCallInput {
   readonly headers?: Readonly<Record<string, string>>
   readonly body?: unknown
 }
-export interface HttpCallResult { readonly output: unknown; readonly agentSummary: unknown; readonly journalSummary: unknown }
+export interface HttpCallResult { readonly output: unknown; readonly agentSummary: unknown; readonly journalSummary: unknown; readonly retryAfterMs: number | null }
 
 export class HttpConnectorExecutor {
   private readonly credentials: WorkerCredentialStore
@@ -39,7 +39,7 @@ export class HttpConnectorExecutor {
       const response = await this.guarded(url, { method: operation.method, headers, body, signal: controller.signal, redirect: 'follow' })
       const output = await readBounded(response, 256 * 1024)
       const safe = { status: response.status, ok: response.ok, contentType: response.headers.get('content-type'), body: output }
-      return { output: safe, agentSummary: summarizeAgentResult(safe), journalSummary: summarizeJournal({ connectorId: connector.id, connectorRevision: connector.revision, operationId: operation.id, method: operation.method, targetOrigin: url.origin, status: response.status, ok: response.ok }) }
+      return { output: safe, agentSummary: summarizeAgentResult(safe), journalSummary: summarizeJournal({ connectorId: connector.id, connectorRevision: connector.revision, operationId: operation.id, method: operation.method, targetOrigin: url.origin, status: response.status, ok: response.ok }), retryAfterMs: response.status === 429 ? retryDelay(response.headers.get('retry-after')) : null }
     } finally {
       clearTimeout(timer); signal?.removeEventListener('abort', abort); this.privateAllowed = false
     }
@@ -60,6 +60,16 @@ export class HttpConnectorExecutor {
     if (!value) throw new Error('Connector credential is invalid')
     headers.set('authorization', connector.config.authentication === 'api_key' && !/^\S+\s/.test(value) ? `Bearer ${value}` : value)
   }
+}
+
+// Retry-After may be seconds or an HTTP date. Bound both forms to one day;
+// invalid/untrusted upstream values never become a negative or unbounded delay.
+function retryDelay(value: string | null): number | null {
+  if (value === null) return null
+  const trimmed = value.trim()
+  if (/^\d{1,10}$/.test(trimmed)) return Math.min(Number(trimmed) * 1000, 86_400_000)
+  const at = Date.parse(trimmed)
+  return Number.isFinite(at) ? Math.min(Math.max(at - Date.now(), 0), 86_400_000) : null
 }
 
 function combineUrl(base: string, path: string): URL {

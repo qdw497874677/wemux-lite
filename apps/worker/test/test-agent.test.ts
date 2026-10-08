@@ -16,6 +16,15 @@ test('TestAgent ordinary prompts retain tools, exact echo and completed outcome'
   assert.equal(signals.flatMap(s => s.kind === 'event' && s.event.kind === 'assistant.text.delta' ? [s.event.text] : []).join(''), 'Echo: ordinary test')
 })
 
+test('TestAgent explicit failure marker yields one failed terminal without a provider', async () => {
+  const handle = await (await open()).execute(input('[test-agent:fail] failure acceptance'))
+  const signals = []
+  for await (const signal of handle.signals) signals.push(signal)
+  assert.deepEqual(signals.at(-1), { kind: 'finished', outcome: { status: 'failed', failure: { code: 'agent-error', message: 'Test Agent injected failure' } } })
+  assert.equal(signals.filter(s => s.kind === 'finished').length, 1)
+  assert.equal(signals.some(s => s.kind === 'event' && s.event.kind === 'tool.started'), false)
+})
+
 test('TestAgent explicit slow marker pauses before tools and stop interrupts the pause', async () => {
   const handle = await (await open()).execute(input('[test-agent:pause-ms=120000] slow'))
   const iterator = handle.signals[Symbol.asyncIterator]()

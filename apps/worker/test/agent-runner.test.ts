@@ -280,6 +280,37 @@ test('runner emits exactly one failed terminal event when provider throws', asyn
   await runner.close()
 })
 
+test('Pi normalized abort signals need explicit stop; unrelated failures and private Provider remain failed', async () => {
+  const key = 'pi' as AgentKey
+  const aborted = { kind: 'finished' as const, outcome: { status: 'failed' as const, failure: { code: 'agent-error' as const, message: 'This operation was aborted' } } }
+  for (const caseName of ['stopped-abort', 'unstopped-abort', 'stopped-unrelated', 'private-abort'] as const) {
+    let release!: () => void
+    let entered!: () => void
+    let stopped = false
+    const ready = new Promise<void>(resolve => { entered = resolve })
+    const blocked = new Promise<void>(resolve => { release = resolve })
+    const adapter: RuntimeSessionAdapter = { async openSession() { return {
+      async execute() { return { signals: (async function* () {
+        entered(); await blocked
+        yield caseName === 'stopped-unrelated' ? { ...aborted, outcome: { ...aborted.outcome, failure: { ...aborted.outcome.failure, message: 'A different provider error' } } } : aborted
+      })(), async stop() { stopped = true; release() } } },
+      async close() {},
+    } } }
+    const runner = new WorkerAgentRunner({ agents: [{ ...executionAgent, agentKey: key }], runtimeAdapters: new Map([[key, adapter]]) })
+    const input = request({ agentKey: key, modelId: (caseName === 'private-abort' ? 'openai-compatible::offline' : 'model') as ModelId, sessionId: `${sessionId}-${caseName}` as SessionId, invocationId: `${operationId}-${caseName}` as TurnId })
+    const privateProvider = { definition: { providerKey: 'openai-compatible' as const, endpoint: 'https://example.invalid/v1', modelIds: ['offline'], agentKeys: [key], credential: { kind: 'environment' as const, variableNames: ['OPENAI_API_KEY'] } }, environment: { OPENAI_API_KEY: 'private-test-secret' } }
+    try {
+      const run = collect(caseName === 'private-abort' ? runner.runWithPiProvider(input, privateProvider, 'private-abort') : runner.run(input))
+      await ready
+      if (caseName !== 'unstopped-abort') await runner.stop(input.sessionId, input.invocationId)
+      else release()
+      const result = await run
+      assert.equal(stopped, true, 'runner cleanup stops the handle even without an explicit request')
+      assert.equal(result.at(-1)?.customMetadata?.wemux?.terminal, caseName === 'stopped-abort' ? 'cancelled' : 'failed', caseName)
+    } finally { await runner.close() }
+  }
+})
+
 test('same-session concurrency is rejected without disturbing the active invocation', async () => {
   let release: (() => void) | undefined
   const adapter: RuntimeSessionAdapter = { async openSession() { return {
@@ -386,5 +417,28 @@ test('stop requested while a provider session is opening is delivered after exec
   const events = await collecting
   assert.equal(stopped >= 1, true)
   assert.equal(events.at(-1)?.customMetadata?.wemux?.terminal, 'cancelled')
+  await runner.close()
+})
+
+test('approval queued behind manager command rechecks invocation after lock acquisition', { timeout: 3000 }, async () => {
+  const gate = () => { let release!: () => void; const promise = new Promise<void>(resolve => { release = resolve }); return { promise, release } }
+  const started = gate(), finish = gate(), commandEntered = gate(), unlock = gate(), releasedInvocation = gate()
+  let nativeCalls = 0
+  const runner = new WorkerAgentRunner({ agents: [executionAgent], runtimeAdapters: new Map([[agentKey, { async openSession() { return {
+    async execute() { return { signals: (async function* () { started.release(); await finish.promise; yield { kind: 'finished' as const, outcome: { status: 'completed' as const } } })(), async stop() { releasedInvocation.release() } } },
+    async command() { commandEntered.release(); await unlock.promise }, async resolveApproval() { nativeCalls++ }, async close() {},
+  } } }]]) })
+  const run = collect(runner.run(request()))
+  await started.promise
+  // Normal live approval reaches the bound native instance exactly once.
+  await runner.resolveApproval({ sessionId, invocationId: operationId, approvalId: 'approval' as never, decision: 'approve' })
+  assert.equal(nativeCalls, 1)
+  const command = runner.command({ sessionId, invocationId: operationId, name: 'compact', arguments: {} })
+  await commandEntered.promise
+  const decision = runner.resolveApproval({ sessionId, invocationId: operationId, approvalId: 'approval' as never, decision: 'deny' })
+  const denied = assert.rejects(decision, /no longer active/)
+  finish.release(); await releasedInvocation.promise
+  unlock.release(); await command; await denied; await run
+  assert.equal(nativeCalls, 1, 'queued stale decision must not reach native resolve')
   await runner.close()
 })

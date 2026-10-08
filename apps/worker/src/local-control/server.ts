@@ -38,7 +38,7 @@ export interface LocalControlServer {
 export interface LocalControlHandlers {
   readonly shutdown?: () => Promise<void>
   readonly workbench?: LocalWorkbenchService
-  readonly cluster?: Pick<ClusterLifecycle, 'connection' | 'discover' | 'enroll' | 'connect' | 'pause' | 'resume' | 'leave' | 'agentSettings' | 'selectAgent' | 'resetAgent' | 'listConnectors' | 'saveConnector' | 'deleteConnector' | 'putConnectorCredential' | 'connectorCredentialAvailable' | 'agentInstallation' | 'beginAgentInstallation' | 'listConnectorApprovals' | 'resolveConnectorApproval' | 'providerCredentialChanged'>
+  readonly cluster?: Pick<ClusterLifecycle, 'connection' | 'discover' | 'enroll' | 'connect' | 'pause' | 'resume' | 'leave' | 'agentSettings' | 'selectAgent' | 'resetAgent' | 'listConnectors' | 'saveConnector' | 'deleteConnector' | 'putConnectorCredential' | 'connectorCredentialAvailable' | 'agentInstallation' | 'beginAgentInstallation' | 'listConnectorApprovals' | 'providerCredentialChanged'>
 }
 
 function json(response: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
@@ -229,7 +229,9 @@ export async function startLocalControlServer(options: LocalControlServerOptions
         if (request.method === 'POST' && segments.length === 6 && segments[3] === 'approvals' && segments[5] === 'resolve') {
           const body = await readJson(request)
           if (body.decision !== 'approve' && body.decision !== 'deny') return json(response, 400, { error: '批准决定无效' })
-          return json(response, handlers.cluster.resolveConnectorApproval(decodeURIComponent(segments[4]), body.decision) ? 200 : 404, { resolved: true })
+          if (typeof body.sessionId !== 'string' || typeof body.turnId !== 'string' || !body.turnId.trim()) return json(response, 400, { error: 'Explicit sessionId and turnId are required for approval' })
+          if (!handlers.workbench) return json(response, 409, { error: 'Local workbench unavailable' })
+          return json(response, 202, await handlers.workbench.resolveApproval(body.sessionId, decodeURIComponent(segments[4]), body.decision, optionalIdentity(body.commandId), body.turnId))
         }
         return json(response, 404, { error: 'Not found' })
       }
@@ -366,7 +368,8 @@ export async function startLocalControlServer(options: LocalControlServerOptions
           if (request.headers['x-wemux-csrf'] !== authenticated.csrf) return json(response, 403, { error: 'Forbidden' })
           const body = await readJson(request)
           if (body.decision !== 'approve' && body.decision !== 'deny') return json(response, 400, { error: '批准决定无效' })
-          return json(response, 202, await workbench.resolveApproval(sessionId, decodeURIComponent(segments[6]), body.decision, optionalIdentity(body.commandId)))
+          if (typeof body.turnId !== 'string' || !body.turnId.trim()) return json(response, 400, { error: 'Explicit turnId is required for approval' })
+          return json(response, 202, await workbench.resolveApproval(sessionId, decodeURIComponent(segments[6]), body.decision, optionalIdentity(body.commandId), body.turnId))
         }
         if (request.method === 'GET' && segments.length === 6 && segments[3] === 'sessions' && segments[5] === 'journal' && sessionId) {
           const fromSeq = Number(target.searchParams.get('fromSeq') ?? '1')

@@ -24,10 +24,14 @@ try {
   const worker = join(prefix, 'bin', 'wemux-lite-worker')
   const version = execFileSync(worker, ['--version'], { encoding: 'utf8', timeout: 10_000 })
   if (!/^wemux-lite-worker \d+\.\d+\.\d+\s*$/.test(version)) fail(`unexpected version output: ${version}`)
-  execFileSync(worker, ['status', '--home', join(temporaryDirectory, 'home')], {
-    stdio: 'ignore',
-    timeout: 10_000,
+  const status = spawnSync(worker, ['status', '--home', join(temporaryDirectory, 'home')], {
+    encoding: 'utf8', timeout: 10_000,
   })
+  if (status.status !== 0) {
+    // Keep actionable known diagnostics without echoing arbitrary CLI output or environment.
+    const diagnostic = ['unable to open database file', 'file is not a database', 'Unsupported Worker database schema'].find(message => status.stderr?.includes(message)) ?? 'unrecognized diagnostic (output withheld)'
+    fail(`Worker status failed: exit=${status.status}, signal=${status.signal}, error=${status.error?.code ?? 'none'}; ${diagnostic}`)
+  }
 
   const agent = spawnSync(join(prefix, 'bin', 'wemux-lite-agent'), [], { encoding: 'utf8', timeout: 10_000 })
   if (agent.status !== 1 || !agent.stderr.includes('Usage: wemux-lite-agent')) fail('wemux-lite-agent did not start and report its expected usage error')
@@ -47,6 +51,8 @@ try {
   const webAsset = webEntry.match(/\/assets\/([^"']+\.js)/)?.[1]
   if (!webAsset) fail('bundled Web entry point has no hashed JavaScript asset')
   accessSync(join(packageRoot, 'web', 'assets', webAsset))
+  if (!/rel="icon"[^>]+href="\/favicon.svg"/.test(webEntry)) fail('bundled Worker Web entry must include its root favicon')
+  if (!readFileSync(join(packageRoot, 'web', 'favicon.svg'), 'utf8').includes('<svg')) fail('bundled Worker Web favicon is missing')
   accessSync(join(packageRoot, 'node_modules', 'ws', 'package.json'))
   accessSync(join(packageRoot, 'node_modules', '@modelcontextprotocol', 'sdk', 'package.json'))
   const missingAgents = JSON.parse(execFileSync(process.execPath, [join(packageRoot, 'dist', 'cli.js'), 'detect', '--home', join(temporaryDirectory, 'no-agents')], {

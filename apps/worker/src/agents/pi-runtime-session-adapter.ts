@@ -298,6 +298,12 @@ class PiRuntimeSession implements AgentRuntimeSession {
     if (!child.stdout) throw new Error('Pi runtime output unavailable')
     let emittedText = ''
     let sawToolActivity = false
+    let usageRevision = 0
+    let countedMessage = false
+    let usageIncomplete = false
+    const usageTotal: { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number; totalTokens?: number; costUsd?: number } = {}
+    const usageCoverage = new Set<string>()
+    const unusableUsageFields = new Set<string>()
     let pendingOutcome: Extract<AgentSignal, { kind: 'finished' }> | null = null
     const dedupeText = (signal: AgentSignal): AgentSignal | null => {
       if (signal.kind !== 'event' || signal.event.kind !== 'assistant.text.delta') return signal
@@ -317,10 +323,29 @@ class PiRuntimeSession implements AgentRuntimeSession {
         // message against the first message's text and drop it entirely.
         if (record.type === 'message_start') {
           emittedText = ''
+          countedMessage = false
           pendingOutcome = null
         }
         if (record.type === 'auto_retry_start') pendingOutcome = null
+        const assistantEnd = record.type === 'message_end' && (record.message as { role?: string } | undefined)?.role === 'assistant'
         const mapped = mapRuntimeRecord('pi', operationId, record)
+        if (assistantEnd && !countedMessage && !mapped.some(signal => signal.kind === 'event' && signal.event.kind === 'usage.updated')) {
+          countedMessage = true
+          usageIncomplete = true
+          // An unmetered response makes the operation-wide reported total unknown;
+          // a later response cannot restore its missing contribution.
+          unusableUsageFields.add('totalTokens')
+          usageCoverage.delete('totalTokens')
+          delete usageTotal.totalTokens
+          if (usageRevision > 0) {
+            usageRevision++
+            yield { kind: 'event', event: { kind: 'usage.updated', usage: {
+              scope: 'operation', subjectId: operationId, source: 'runtime', revision: usageRevision,
+              completeness: 'partial', ...usageTotal,
+              ...(usageTotal.costUsd !== undefined ? { currency: 'USD' as const } : {}),
+            } } }
+          }
+        }
         for (const signal of mapped) {
           // turn_end closes one assistant response (including a tool call), not
           // the prompt. agent_end can still be followed by recovery or follow-up.
@@ -331,6 +356,38 @@ class PiRuntimeSession implements AgentRuntimeSession {
           }
           const completed = record.type === 'agent_settled' && signal.kind === 'finished' ? pendingOutcome ?? signal : signal
           if (signal.kind === 'event' && signal.event.kind.startsWith('tool.')) sawToolActivity = true
+          if (record.type === 'message_end' && completed.kind === 'event' && completed.event.kind === 'usage.updated') {
+            if (countedMessage) continue
+            countedMessage = true
+            const response = completed.event.usage
+            for (const key of ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'totalTokens', 'costUsd'] as const) {
+              const current = response[key]
+              if (current === undefined || unusableUsageFields.has(key)) {
+                usageIncomplete = true
+                if (key === 'totalTokens') { unusableUsageFields.add(key); usageCoverage.delete(key); delete usageTotal[key] }
+                continue
+              }
+              const sum = (usageTotal[key] ?? 0) + current
+              if (key === 'costUsd' ? !Number.isFinite(sum) || sum < 0 : !Number.isSafeInteger(sum) || sum < 0) {
+                usageIncomplete = true
+                unusableUsageFields.add(key)
+                usageCoverage.delete(key)
+                delete usageTotal[key]
+                continue
+              }
+              if (!usageCoverage.has(key) && usageRevision > 0) usageIncomplete = true
+              usageTotal[key] = sum
+              usageCoverage.add(key)
+            }
+            usageRevision++
+            yield { kind: 'event', event: { kind: 'usage.updated', usage: {
+              scope: 'operation', subjectId: operationId, source: 'runtime', revision: usageRevision,
+              completeness: usageIncomplete || usageTotal.inputTokens === undefined || usageTotal.outputTokens === undefined || usageTotal.totalTokens === undefined ? 'partial' : 'complete',
+              ...usageTotal,
+              ...(usageTotal.costUsd !== undefined ? { currency: 'USD' as const } : {}),
+            } } }
+            continue
+          }
           const deduped = dedupeText(completed)
           if (!deduped) continue
           // Pi 在模型拒绝、额度用尽或凭据失效时会结束回合但不产生任何正文；把它当成完成会让界面

@@ -112,10 +112,12 @@ export class ClusterLifecycle {
   }) }
   connectorCredentialAvailable() { return this.connectors.credentials.available }
   listConnectorApprovals() { return this.connectors.listApprovals() }
-  resolveConnectorApproval(id: string, decision: 'approve' | 'deny') { return this.connectors.resolveApproval(id, decision) }
 
   private async publishConnectorApproval(event: import('../connectors/runtime.js').ConnectorApprovalEvent) {
-    if (event.kind !== 'requested') return
+    if (event.kind === 'expired') {
+      await this.store.transaction(tx => tx.appendJournal(event.sessionId as never, [{ occurredAt: event.occurredAt as Timestamp, payload: { kind: 'approval.expired', turnId: event.turnId as never, approvalId: event.approvalId as never, reason: event.reason } }]))
+      return
+    }
     const approval = event.approval
     await this.store.transaction(tx => tx.appendJournal(approval.sessionId as never, [{ occurredAt: approval.createdAt as Timestamp, payload: { kind: 'approval.requested', turnId: approval.turnId as never, approvalId: approval.approvalId as never, action: { kind: 'connector', requestId: approval.requestId, toolCallId: approval.toolCallId, connectorRevision: approval.connectorRevision, operationType: approval.operationType }, reason: '连接器写操作需要批准' } }]))
   }

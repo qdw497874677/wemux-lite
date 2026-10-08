@@ -4,6 +4,8 @@ import type { RuntimeOperationInput } from '../application/ports/runtime-session
 
 const text = (value: unknown) => typeof value === 'string' ? value : null
 const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : undefined
+const tokenCount = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined
+const nonnegativeCost = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 const object = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const count = (value: unknown) => {
   const parsed = number(value)
@@ -47,11 +49,39 @@ const terminalOutcome = (provider: 'pi' | 'claude', record: Record<string, unkno
   return null
 }
 
+function usageSignals(operationId: RuntimeOperationInput['operationId'], record: Record<string, unknown>): AgentSignal[] {
+  const nested = object(object(record.message).usage)
+  const raw = Object.keys(nested).length > 0 ? nested : Object.keys(object(record.usage)).length > 0 ? object(record.usage) : record
+  const fields = { inputTokens: raw.inputTokens ?? raw.input_tokens ?? raw.input, outputTokens: raw.outputTokens ?? raw.output_tokens ?? raw.output, cacheReadTokens: raw.cacheReadTokens ?? raw.cache_read_input_tokens ?? raw.cacheRead, cacheWriteTokens: raw.cacheWriteTokens ?? raw.cache_creation_input_tokens ?? raw.cacheWrite, totalTokens: raw.totalTokens ?? raw.total_tokens, costUsd: record.costUsd ?? record.cost_usd ?? object(raw.cost).total }
+  // A malformed metric must not turn an authoritative final response into a
+  // valid-looking partial record or break the client Journal decoder.
+  if (Object.entries(fields).some(([key, value]) => value !== undefined && (key === 'costUsd' ? nonnegativeCost(value) : tokenCount(value)) === undefined)) return []
+  const usage = { inputTokens: tokenCount(fields.inputTokens), outputTokens: tokenCount(fields.outputTokens), cacheReadTokens: tokenCount(fields.cacheReadTokens), cacheWriteTokens: tokenCount(fields.cacheWriteTokens), totalTokens: tokenCount(fields.totalTokens), costUsd: nonnegativeCost(fields.costUsd) }
+  if (record.type !== 'message_end' && usage.totalTokens === undefined && usage.inputTokens !== undefined && usage.outputTokens !== undefined) {
+    const estimated = usage.inputTokens + usage.outputTokens
+    if (Number.isSafeInteger(estimated)) usage.totalTokens = estimated
+  }
+  if (Object.values(usage).every(value => value === undefined)) return []
+  return [{ kind: 'event', event: { kind: 'usage.updated', usage: {
+    scope: record.type === 'message_end' ? 'message' : 'operation', subjectId: record.type === 'message_end' ? `${operationId}:message` : operationId, source: 'runtime', revision: 1,
+    completeness: usage.inputTokens !== undefined && usage.outputTokens !== undefined && usage.totalTokens !== undefined ? 'complete' : 'partial',
+    ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
+    ...(usage.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
+    ...(usage.cacheReadTokens !== undefined ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+    ...(usage.cacheWriteTokens !== undefined ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
+    ...(usage.totalTokens !== undefined ? { totalTokens: usage.totalTokens } : {}),
+    ...(usage.costUsd !== undefined ? { costUsd: usage.costUsd, currency: 'USD' as const } : {}),
+  } } } as AgentSignal]
+}
+
 export function mapRuntimeRecord(provider: 'pi' | 'claude', operationId: RuntimeOperationInput['operationId'], record: Record<string, unknown>): AgentSignal[] {
   const type = text(record.type)
   if (type === 'assistant' || type === 'assistant_message' || type === 'text_delta' || type === 'message_update' || (type === 'message_end' && object(record.message).role === 'assistant')) {
     const value = assistantText(record)
-    return value ? [{ kind: 'event', event: { kind: 'assistant.text.delta', text: value, streamKind: 'assistant_text' } }] : []
+    return [
+      ...(value ? [{ kind: 'event' as const, event: { kind: 'assistant.text.delta' as const, text: value, streamKind: 'assistant_text' as const } }] : []),
+      ...(type === 'message_end' && provider === 'pi' && Object.keys(object(object(record.message).usage)).length > 0 ? usageSignals(operationId, record) : []),
+    ]
   }
   if (type === 'tool_execution_start' || type === 'tool_use') {
     const toolCallId = (text(record.toolCallId) ?? text(record.id) ?? `${provider}-${operationId}-tool`) as ToolCallId
@@ -63,30 +93,23 @@ export function mapRuntimeRecord(provider: 'pi' | 'claude', operationId: Runtime
   }
   if (type === 'tool_execution_end' || type === 'tool_result') {
     const toolCallId = (text(record.toolCallId) ?? text(record.id) ?? `${provider}-${operationId}-tool`) as ToolCallId
-    return [{ kind: 'event', event: { kind: 'tool.finished', toolCallId, exitCode: number(record.exitCode) ?? (record.is_error === true ? 1 : 0) } }]
+    // Native Pi includes the final tool result only in tool_execution_end; a
+    // failure may have no update frames at all. Preserve its bounded text so
+    // operators can distinguish an approval denial from a transport failure.
+    const result = object(record.result)
+    const content = Array.isArray(result.content) ? result.content : []
+    const output = content.map(item => text(object(item).text) ?? '').join('\n')
+    return [
+      ...(provider === 'pi' && output ? [{ kind: 'event' as const, event: { kind: 'tool.output.delta' as const, toolCallId, text: output.slice(0, 200_000), streamKind: 'command_output' as const } }] : []),
+      { kind: 'event', event: { kind: 'tool.finished', toolCallId, exitCode: number(record.exitCode) ?? (record.is_error === true || record.isError === true ? 1 : 0) } },
+    ]
   }
   if (type === 'approval_required') {
     const event = { kind: 'approval.requested', approvalId: (text(record.approvalId) ?? text(record.id) ?? `${provider}-${operationId}-approval`) as ApprovalId, action: record.action ?? record.input ?? null, reason: text(record.reason) ?? undefined } as AgentTurnEvent
     return [{ kind: 'event', event }]
   }
-  if (type === 'usage' || type === 'usage_update' || type === 'message_update' || (type === 'result' && record.usage !== undefined)) {
-    const raw = Object.keys(object(record.usage)).length > 0 ? object(record.usage) : record
-    const usage = { inputTokens: number(raw.inputTokens ?? raw.input_tokens ?? raw.input), outputTokens: number(raw.outputTokens ?? raw.output_tokens ?? raw.output), cacheReadTokens: number(raw.cacheReadTokens ?? raw.cache_read_input_tokens ?? raw.cacheRead), cacheWriteTokens: number(raw.cacheWriteTokens ?? raw.cache_creation_input_tokens ?? raw.cacheWrite), totalTokens: number(raw.totalTokens ?? raw.total_tokens), costUsd: number(record.costUsd ?? record.cost_usd) }
-    if (usage.totalTokens === undefined && usage.inputTokens !== undefined && usage.outputTokens !== undefined) usage.totalTokens = usage.inputTokens + usage.outputTokens
-    const normalized = {
-      scope: 'operation' as const,
-      subjectId: operationId,
-      source: 'runtime' as const,
-      revision: 1,
-      completeness: usage.inputTokens !== undefined && usage.outputTokens !== undefined ? 'complete' as const : 'partial' as const,
-      ...(usage.inputTokens !== undefined ? { inputTokens: usage.inputTokens } : {}),
-      ...(usage.outputTokens !== undefined ? { outputTokens: usage.outputTokens } : {}),
-      ...(usage.cacheReadTokens !== undefined ? { cacheReadTokens: usage.cacheReadTokens } : {}),
-      ...(usage.cacheWriteTokens !== undefined ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
-      ...(usage.totalTokens !== undefined ? { totalTokens: usage.totalTokens } : {}),
-      ...(usage.costUsd !== undefined ? { costUsd: usage.costUsd, currency: 'USD' as const } : {}),
-    }
-    const signals: AgentSignal[] = [{ kind: 'event', event: { kind: 'usage.updated', usage: normalized } as AgentTurnEvent }]
+  if (type === 'usage' || type === 'usage_update' || (type === 'result' && record.usage !== undefined)) {
+    const signals = usageSignals(operationId, record)
     if (type === 'result') signals.push({ kind: 'finished', outcome: record.is_error === true || record.status === 'failed' ? { status: 'failed', failure: { code: 'agent-error', message: text(record.error) ?? text(record.message) ?? `${provider} runtime failed` } } : { status: 'completed' } })
     return signals
   }

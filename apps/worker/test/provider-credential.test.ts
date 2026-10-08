@@ -34,7 +34,7 @@ test('Worker model provider credential is encrypted with separate owner, persist
       assert.equal(row.owner_kind, 'model-provider')
       assert.match(String(row.ciphertext), /^enc:v2:/)
       assert.equal(probe.prepare('SELECT count(*) AS count FROM connector_credentials').get()!.count, 0)
-      assert.equal(probe.prepare('PRAGMA user_version').get()!.user_version, 5)
+      assert.equal(probe.prepare('PRAGMA user_version').get()!.user_version, 7)
     } finally { probe.close() }
     owner = new WorkerProviderCredentialStore(f.reopen(), { key })
     assert.deepEqual(await owner.resolve(input.id, input.variableNames), input.secret)

@@ -7,6 +7,8 @@ import type {
   WorkerCommandReader,
   WorkerCommandWriter,
   WorkerJournalReader,
+  WorkerFileWriteReader,
+  WorkerFileWriteWriter,
 } from './worker-store-types.js'
 
 /**
@@ -19,13 +21,17 @@ export interface WorkerStore {
   readonly sessions: SessionExecutionReader
   readonly commands: WorkerCommandReader
   readonly journal: WorkerJournalReader
+  readonly fileWrites: WorkerFileWriteReader
 
+  /** Effects/publication must use only the successful outer return value, never provisional tx decisions. */
   transaction<T>(work: (tx: WorkerStoreTx) => Promise<T>): Promise<T>
 }
 
 export interface WorkerStoreTx {
+  readonly fileWrites: WorkerFileWriteWriter
   readonly workspaces: LocalWorkspaceWriter
-  readonly sessions: SessionExecutionWriter
+  readonly sessions: SessionExecutionWriter & Pick<SessionExecutionReader, 'get' | 'getTurn'>
+  readonly journal: Pick<WorkerJournalReader, 'read'>
   readonly commands: WorkerCommandWriter
 
   appendJournal(

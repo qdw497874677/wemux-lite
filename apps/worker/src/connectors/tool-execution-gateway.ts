@@ -121,9 +121,17 @@ export class ToolExecutionGateway {
         if (decision !== 'approve') return await this.persist(call, failure('approval_denied', input.requestId, connector.revision, 'Connector call was denied'))
       }
       if (input.signal?.aborted) return await this.persist(call, failure('cancelled', input.requestId, connector.revision, 'Connector call was cancelled'))
-      const output = kind === 'mcp'
-        ? await this.mcp.callTool(input.currentTurn.sessionId, connector as McpConnectorDefinition, await this.resolveSecret(connector), input.toolName, input.input, input.signal)
-        : (await this.http.execute(connector as HttpConnectorDefinition, input.input as HttpCallInput, input.signal)).agentSummary
+      const http = kind === 'http' ? await this.http.execute(connector as HttpConnectorDefinition, input.input as HttpCallInput, input.signal) : null
+      const output = http ? http.agentSummary : await this.mcp.callTool(input.currentTurn.sessionId, connector as McpConnectorDefinition, await this.resolveSecret(connector), input.toolName, input.input, input.signal)
+      if (http) {
+        const response = output as { status?: number; ok?: boolean }
+        if (response.ok === false && typeof response.status === 'number') {
+          // An upstream HTTP error is a failed Connector execution, not a
+          // successful write. Do not infer that a sent write is safe to retry.
+          const throttled = response.status === 429
+          return await this.persist(call, failure(throttled ? 'rate_limited' : 'upstream_error', input.requestId, connector.revision, throttled ? 'Connector upstream rate limited the call' : 'Connector upstream returned an error', throttled && operationType === 'read', throttled ? http.retryAfterMs : null))
+        }
+      }
       const agentResult = summarizeAgentResult(output)
       if (JSON.stringify(agentResult) === '"[truncated]"' || Buffer.byteLength(JSON.stringify(agentResult)) > 256 * 1024) return await this.persist(call, failure('response_too_large', input.requestId, connector.revision, 'MCP result exceeds the Agent output limit'))
       return await this.persist(call, success(agentResult, input.requestId, connector.revision))
@@ -183,7 +191,7 @@ function httpOperation(connector: HttpConnectorDefinition, operationId: string):
 }
 function requiresApproval(operationType: OperationType, connector: ConnectorDefinition) { return operationType !== 'read' || connector.riskDefaults.requireApprovalForRead }
 function success(output: unknown, requestId: string, connectorRevision: number): ExecutionResult { return { ok: true, output, requestId, connectorRevision, completedAt: new Date().toISOString() as never } }
-function failure(code: ConnectorExecutionErrorCode, requestId: string, connectorRevision: number | null, message: string, retryable = false): ExecutionResult { return { ok: false, error: { code, message, retryable, retryAfterMs: null }, requestId, connectorRevision, completedAt: new Date().toISOString() as never } }
+function failure(code: ConnectorExecutionErrorCode, requestId: string, connectorRevision: number | null, message: string, retryable = false, retryAfterMs: number | null = null): ExecutionResult { return { ok: false, error: { code, message, retryable, retryAfterMs }, requestId, connectorRevision, completedAt: new Date().toISOString() as never } }
 function mappedFailure(error: unknown, requestId: string, revision: number | null): ExecutionResult {
   if (error instanceof GatewayError) return failure(error.code, requestId, revision, error.message, error.retryable)
   if (error instanceof ConnectorCredentialError) return failure(error.code, requestId, revision, error.message)

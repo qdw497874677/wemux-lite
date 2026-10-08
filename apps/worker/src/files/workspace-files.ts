@@ -8,6 +8,28 @@ import type { WorkspaceDiffLine } from '@wemux/wire-protocol'
 
 export const MAX_FILE_READ_BYTES = 10 * 1024 * 1024
 export const MAX_FILE_WRITE_BYTES = 10 * 1024 * 1024
+// Gateway maxPayload is 4 MiB. Reserve 64 KiB for the transport envelope;
+// measure the serialized response, including base64 expansion and JSON escaping.
+export const MAX_FS_RESPONSE_PAYLOAD_BYTES = 4 * 1024 * 1024 - 64 * 1024
+
+// Stable fs.response.error prefixes until the wire contract carries a structured errorCode.
+export const FILE_READ_ERROR = {
+  tooLarge: 'file_too_large',
+  transportTooLarge: 'file_transport_too_large',
+  notFound: 'file_not_found',
+  unreadable: 'file_unreadable',
+  accessRevoked: 'file_access_revoked',
+} as const
+
+export function fileReadErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'File read failed'
+  if (Object.values(FILE_READ_ERROR).some(code => message.startsWith(`${code}:`))) return message
+  const code = error && typeof error === 'object' && 'code' in error ? error.code : undefined
+  if (code === 'ENOENT' || code === 'ENOTDIR') return `${FILE_READ_ERROR.notFound}: File does not exist`
+  if (code === 'EACCES' || code === 'EPERM') return `${FILE_READ_ERROR.unreadable}: File is not readable`
+  // Do not forward OS errors containing absolute paths or content fragments.
+  return `${FILE_READ_ERROR.unreadable}: File read failed`
+}
 
 export interface WorkspaceFileEntry {
   readonly name: string
@@ -17,7 +39,9 @@ export interface WorkspaceFileEntry {
 }
 
 export interface WorkspaceFileRead {
+  /** binary=false: lossless UTF-8 text, including a leading BOM and empty text. */
   readonly content: string | null
+  /** binary=true: canonical base64 of the original bytes; content is null. */
   readonly base64Content?: string
   readonly size: number
   readonly truncated: boolean
@@ -188,7 +212,8 @@ export async function readWorkspaceFile(workspaceRoot: string, subpath: string, 
   if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_FILE_READ_BYTES) throw new Error(`maxBytes must be between 1 and ${MAX_FILE_READ_BYTES}`)
   const target = await resolveWorkspacePath(workspaceRoot, subpath)
   const stat = await lstat(target)
-  if (!stat.isFile()) throw new Error('Path is not a file')
+  if (!stat.isFile()) throw new Error(`${FILE_READ_ERROR.unreadable}: Path is not a file`)
+  if (stat.size > MAX_FILE_READ_BYTES) throw new Error(`${FILE_READ_ERROR.tooLarge}: File exceeds ${MAX_FILE_READ_BYTES} byte limit`)
   const length = Math.min(stat.size, maxBytes)
   const buffer = Buffer.alloc(length)
   const handle = await open(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
@@ -196,7 +221,7 @@ export async function readWorkspaceFile(workspaceRoot: string, subpath: string, 
     const { bytesRead } = await handle.read(buffer, 0, length, 0)
     const bytes = buffer.subarray(0, bytesRead)
     let content: string | null = null
-    try { content = new TextDecoder('utf-8', { fatal: true }).decode(bytes) } catch { /* Invalid UTF-8 is binary for preview purposes. */ }
+    try { content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes) } catch { /* Invalid UTF-8 is binary for preview purposes. */ }
     const binary = content === null || bytes.includes(0)
     return {
       content: binary ? null : content,

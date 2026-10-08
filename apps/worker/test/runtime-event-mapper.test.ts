@@ -5,12 +5,35 @@ import { mapRuntimeRecord } from '../src/agents/runtime-event-mapper.js'
 
 const operationId = 'op-test' as OperationId
 
+test('Pi tool_execution_end maps camelCase isError from RPC as failed exit', () => {
+  const [output, failed] = mapRuntimeRecord('pi', operationId, { type: 'tool_execution_end', toolCallId: 'denied', isError: true, result: { content: [{ type: 'text', text: 'approval_denied' }] } })
+  assert.deepEqual(output, { kind: 'event', event: { kind: 'tool.output.delta', toolCallId: 'denied', text: 'approval_denied', streamKind: 'command_output' } })
+  assert.deepEqual(failed, { kind: 'event', event: { kind: 'tool.finished', toolCallId: 'denied', exitCode: 1 } })
+  const [ok] = mapRuntimeRecord('pi', operationId, { type: 'tool_execution_end', toolCallId: 'ok', isError: false })
+  assert.deepEqual(ok, { kind: 'event', event: { kind: 'tool.finished', toolCallId: 'ok', exitCode: 0 } })
+})
+
 test('maps tool lifecycle and approval requests without provider-specific UI fields', () => {
   const started = mapRuntimeRecord('pi', operationId, { type: 'tool_execution_start', toolCallId: 'call-1', toolName: 'bash', args: { command: 'pwd' } })
   assert.equal(started[0]?.kind, 'event')
   assert.deepEqual(started[0]?.kind === 'event' ? started[0].event : null, { kind: 'tool.started', toolCallId: 'call-1', toolName: 'bash', input: { command: 'pwd' }, streamKind: 'command_output' })
   const approval = mapRuntimeRecord('pi', operationId, { type: 'approval_required', approvalId: 'approval-1', action: { command: 'rm -rf /tmp/x' }, reason: 'destructive' })
   assert.equal(approval[0]?.kind === 'event' ? approval[0].event.kind : null, 'approval.requested')
+})
+
+test('Pi message_end publishes finalized nested usage and text without inventing interim usage', () => {
+  const signals = mapRuntimeRecord('pi', operationId, { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: '你好' }], usage: { input: 9, output: 2, cacheRead: 1, totalTokens: 12 } } })
+  assert.deepEqual(signals.map(signal => signal.kind === 'event' ? signal.event.kind : signal.kind), ['assistant.text.delta', 'usage.updated'])
+  assert.deepEqual(signals[1]?.kind === 'event' ? signals[1].event : null, { kind: 'usage.updated', usage: { scope: 'message', subjectId: `${operationId}:message`, source: 'runtime', revision: 1, completeness: 'complete', inputTokens: 9, outputTokens: 2, cacheReadTokens: 1, totalTokens: 12 } })
+  assert.deepEqual(mapRuntimeRecord('pi', operationId, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: '继续' }, message: { role: 'assistant', usage: { input: 0, output: 0 } } }).map(signal => signal.kind === 'event' ? signal.event.kind : signal.kind), ['assistant.text.delta'])
+  const withoutReportedTotal = mapRuntimeRecord('pi', operationId, { type: 'message_end', message: { role: 'assistant', content: [], usage: { input: 7, output: 1 } } })
+  assert.deepEqual(withoutReportedTotal.map(signal => signal.kind === 'event' ? signal.event.kind : signal.kind), ['usage.updated'])
+  assert.equal(withoutReportedTotal[0]?.kind === 'event' && withoutReportedTotal[0].event.kind === 'usage.updated' ? withoutReportedTotal[0].event.usage.totalTokens : null, undefined)
+  assert.deepEqual(mapRuntimeRecord('pi', operationId, { type: 'message_end', message: { role: 'assistant', content: [], usage: { unknown: 1 } } }), [])
+  for (const input of [-1, 0.5, Number.MAX_SAFE_INTEGER + 1]) {
+    assert.deepEqual(mapRuntimeRecord('pi', operationId, { type: 'message_end', message: { role: 'assistant', content: [], usage: { input, output: 2 } } }), [])
+  }
+  assert.deepEqual(mapRuntimeRecord('pi', operationId, { type: 'message_end', message: { role: 'assistant', content: [], usage: { input: 2, output: 1, cost: { total: -0.01 } } } }), [])
 })
 
 test('maps usage, compaction, and terminal outcomes', () => {

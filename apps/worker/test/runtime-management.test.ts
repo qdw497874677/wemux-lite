@@ -48,6 +48,36 @@ function installer(calls: ProcessRequest[], fail?: 'npm' | 'version' | 'manifest
   }
 }
 
+test('Pi managed version probe ignores parent package metadata but rejects a real mismatched binary', async t => {
+  const home = await fixture(t)
+  const previous = process.env.PI_PACKAGE_DIR
+  const parent = join(home, 'parent-pi')
+  await mkdir(parent)
+  await writeFile(join(parent, 'package.json'), JSON.stringify({ version: '0.87.1' }))
+  process.env.PI_PACKAGE_DIR = parent
+  try {
+    const runInstall = (version: string): RuntimeProcess => {
+      const setup = installer([])
+      return async request => {
+        if (request.command === 'npm') return setup(request)
+        await writeFile(request.command, `#!/usr/bin/env node\nimport fs from 'node:fs'; console.log(process.env.PI_PACKAGE_DIR ? JSON.parse(fs.readFileSync(process.env.PI_PACKAGE_DIR+'/package.json','utf8')).version : ${JSON.stringify(version)});\n`)
+        assert.equal((request.env ?? process.env).HOME, process.env.HOME)
+        assert.equal((request.env ?? process.env).PATH, process.env.PATH)
+        return runRuntimeProcess(request)
+      }
+    }
+    const installed = await installFixture(home, 'pi', runInstall('0.85.1'))
+    assert.equal(installed.version, '0.85.1')
+    const before = await readFile(join(home, 'agents.json'), 'utf8')
+    await assert.rejects(installFixture(home, 'pi', runInstall('0.85.10')), /does not match pinned artifact/)
+    assert.equal(await readFile(join(home, 'agents.json'), 'utf8'), before)
+    assert.equal(process.env.PI_PACKAGE_DIR, parent)
+  } finally {
+    if (previous === undefined) delete process.env.PI_PACKAGE_DIR
+    else process.env.PI_PACKAGE_DIR = previous
+  }
+})
+
 test('pinned runtime probe rejects a different patch version', () => {
   assert.equal(matchesRuntimeVersion('pi 0.85.1', '0.85.1'), true)
   assert.equal(matchesRuntimeVersion('pi 0.85.10', '0.85.1'), false)
@@ -101,7 +131,8 @@ for (const key of ['pi', 'opencode', 'claude'] as const) test(`managed ${key} in
   const artifact = join(prefix, `${installCatalog[result.key].name.replace(/^@/, '').replace('/', '-')}-${installCatalog[result.key].version}.tgz`)
   assert.deepEqual(calls[1], { command: 'npm', args: ['install', '--global=false', '--prefix', prefix, '--no-save', '--package-lock=false', '--no-audit', '--no-fund', '--registry=https://registry.npmjs.org', '--', artifact], cwd: prefix, env: calls[1].env, timeout: 300_000 })
   assert.ok(prefix.startsWith(join(home, 'agents', result.key)))
-  assert.deepEqual(calls[2], { command: result.executable, args: ['--version'], timeout: 10_000 })
+  assert.deepEqual(calls[2], { command: result.executable, args: ['--version'], timeout: 10_000, ...(result.key === 'pi' ? { env: calls[2].env } : {}) })
+  if (result.key === 'pi') assert.equal(calls[2].env?.PI_PACKAGE_DIR, undefined)
   assert.equal((await readAgentSettings(home))[result.key]?.package, spec)
   assert.equal((await readAgentSettings(home))[result.key]?.source, 'managed')
   assert.match(result.message, /重启/)

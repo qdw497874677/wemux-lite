@@ -14,6 +14,7 @@ import { SqliteWorkerStore } from '../src/storage/sqlite-store.js'
 import { WorkerRuntime } from '../src/application/runtime.js'
 import { TestAgent } from '../src/agents/test-agent.js'
 import type { AgentAdapter } from '../src/application/ports/agent-adapter.js'
+import type { RuntimeSessionAdapter } from '../src/application/ports/runtime-session.js'
 import { LocalProvisioner } from '../src/workspaces/local-provisioner.js'
 import { WebSocketTransport } from '../src/transport/websocket.js'
 import { WorkerTransportStore } from '../src/transport/transport-store.js'
@@ -118,6 +119,39 @@ test('FIFO, durable ACK, idempotency conflict, cancellation, stop and stream/too
   } finally { await f.cleanup() }
 })
 
+test('cancel versus claim ordering, duplicate commands and late stop keep the next Turn single-execution', async () => {
+  const f = await fixture()
+  try {
+    // Hold execution of the first Turn so the two orderings are observable.
+    await f.send('hold', { kind: 'session.enqueue', sessionId, message: { messageId: 'hold' as never, content: '[test-agent:pause-ms=60000] hold' } })
+    await until(async () => Boolean((await f.store.sessions.get(sessionId))?.activeTurnId))
+    const holdId = (await f.store.sessions.get(sessionId))!.activeTurnId!
+    await f.send('before', enqueue('before'))
+    await f.send('after', enqueue('after'))
+    // Cancel wins the claim: the cancelled message never starts. Replaying the
+    // same command cannot append a second cancellation or alter the queue.
+    const cancelBefore = { kind: 'session.cancel-queued', sessionId, submissionCommandId: 'before' as CommandId } as const
+    await f.send('cancel-before', cancelBefore)
+    await f.send('cancel-before', cancelBefore)
+    await f.send('stop-hold', { kind: 'turn.stop', sessionId, turnId: holdId })
+    await until(async () => (await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events.some(e => e.payload.kind === 'turn.started' && e.payload.messageId === 'after'))
+    const afterTurn = (await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events.find(e => e.payload.kind === 'turn.started' && e.payload.messageId === 'after')!
+    // Claim wins the cancel: the target has already started and cannot be
+    // retroactively removed. A late stop for the old Turn must not stop it.
+    await f.send('cancel-after', { kind: 'session.cancel-queued', sessionId, submissionCommandId: 'after' as CommandId })
+    await f.send('cancel-after', { kind: 'session.cancel-queued', sessionId, submissionCommandId: 'after' as CommandId })
+    await f.send('stop-hold', { kind: 'turn.stop', sessionId, turnId: holdId })
+    await f.send('late-stop-hold', { kind: 'turn.stop', sessionId, turnId: holdId })
+    await until(async () => (await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events.some(e => e.payload.kind === 'turn.finished' && e.payload.turnId === afterTurn.payload.turnId))
+    const page = await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })
+    assert.deepEqual(page.events.filter(e => e.payload.kind === 'turn.started').map(e => e.payload.messageId), ['hold', 'after'])
+    assert.equal(page.events.filter(e => e.payload.kind === 'message.cancelled' && e.payload.messageId === 'before').length, 1)
+    assert.equal(page.events.filter(e => e.payload.kind === 'message.cancelled' && e.payload.messageId === 'after').length, 0)
+    assert.equal(page.events.filter(e => e.payload.kind === 'turn.finished' && e.payload.turnId === afterTurn.payload.turnId && e.payload.outcome === 'completed').length, 1)
+    assert.equal((await f.store.sessions.get(sessionId))?.activeTurnId, null)
+  } finally { await f.cleanup() }
+})
+
 test('a silent agent turn fails durably instead of leaving the session running forever', async () => {
   const home = await mkdtemp(join(tmpdir(), 'wemux-silent-agent-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
@@ -146,7 +180,86 @@ test('a silent agent turn fails durably instead of leaving the session running f
     const finished = journal.events.find(event => event.payload.kind === 'turn.finished')
     assert.ok(finished?.payload.kind === 'turn.finished')
     assert.equal(finished.payload.failure?.code, 'agent-error')
-    assert.match(finished.payload.failure?.message ?? '', /长时间没有产生任何事件/)
+    assert.match(finished.payload.failure?.message ?? '', /长时间没有产生任何事件|执行时间超过上限/)
+  } finally { await runtime.shutdown(); store.close(); await rm(home, { recursive: true, force: true }) }
+})
+
+test('max runtime deadline after a published event does not request a second iterator result', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'wemux-max-deadline-'))
+  const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
+  let sawFirst = false, secondNext = 0
+  const agent: AgentAdapter = {
+    agentKey: 'test' as any, mode: 'execution',
+    async detect() { return { agentKey: 'test' as any, displayName: 'Deadline probe', version: '1', mode: 'execution', executablePath: null, diagnostics: [], availability: { status: 'available' }, models: [{ modelId: 'test' as any, displayName: 'test', source: 'configured' }] } },
+  }
+  const adapter: RuntimeSessionAdapter = { async openSession() { return {
+    async execute() { return { signals: { async *[Symbol.asyncIterator]() {
+      sawFirst = true
+      yield { kind: 'event' as const, event: { kind: 'assistant.text.delta' as const, text: 'first', streamKind: 'assistant_text' as const } }
+      secondNext++
+      throw new Error('second iterator read must not occur after max deadline')
+    } }, async stop() {} } }, async command() {}, async resolveApproval() {}, async close() {},
+  } } }
+  const transaction = store.transaction.bind(store)
+  t.mock.method(store, 'transaction', async (...args: Parameters<typeof store.transaction>) => {
+    if (sawFirst) await delay(80)
+    return transaction(...args)
+  })
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send() {} }, workerId, 'deadline', undefined, { idleMs: 1000, maxMs: 40 }, new Map([[agent.agentKey, adapter]]))
+  const send = (id: string, command: WorkerCommand) => runtime.receive({ type: 'command', commandId: id as CommandId, command })
+  try {
+    await runtime.initialize()
+    await send('provision', { kind: 'workspace.provision', workspace })
+    await until(async () => (await store.workspaces.get(workspace.workspace.id))?.status === 'ready')
+    await send('create', create)
+    await send('deadline', enqueue('deadline'))
+    await until(async () => (await store.sessions.get(sessionId))?.runtimeState === 'failed')
+    const page = await store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })
+    assert.equal(sawFirst, true, 'fixture must deliver the first signal')
+    const firstDelta = page.events.find(event => event.payload.kind === 'assistant.text.delta' && event.payload.text === 'first')
+    assert.ok(firstDelta, 'first assistant event must persist before the maximum-deadline failure')
+    const terminal = page.events.find(event => event.payload.kind === 'turn.finished')
+    assert.ok(terminal && firstDelta.seq < terminal.seq, 'maximum deadline is reached after the first event is published')
+    assert.equal(terminal?.payload.kind, 'turn.finished')
+    if (terminal?.payload.kind === 'turn.finished') {
+      assert.equal(terminal.payload.failure?.abortReason, 'timeout')
+      assert.match(terminal.payload.failure?.message ?? '', /执行时间超过上限/)
+    }
+    assert.equal(secondNext, 0)
+  } finally { await runtime.shutdown(); store.close(); await rm(home, { recursive: true, force: true }) }
+})
+
+test('explicit stop does not convert a non-Pi adapter abort into cancelled', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'wemux-abort-stop-'))
+  const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
+  let fail!: (error: Error) => void
+  let started!: () => void
+  const executing = new Promise<void>(resolve => { started = resolve })
+  const gate = new Promise<never>((_resolve, reject) => { fail = reject })
+  const agent: AgentAdapter = {
+    agentKey: 'test' as any,
+    mode: 'execution',
+    async detect() { return { agentKey: 'test' as any, displayName: 'Native abort probe', version: '1', mode: 'execution', executablePath: null, diagnostics: [], availability: { status: 'available' }, models: [{ modelId: 'test' as any, displayName: 'test', source: 'configured' }] } },
+  }
+  const adapter: RuntimeSessionAdapter = { async openSession() { return {
+    async execute() { return { signals: { async *[Symbol.asyncIterator]() { started(); await gate } }, async stop() { fail(new Error('This operation was aborted')) } } },
+    async command() {}, async resolveApproval() {}, async close() {},
+  } } }
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send() {} }, workerId, 'abort-stop', undefined, undefined, new Map([[agent.agentKey, adapter]]))
+  const send = (id: string, command: WorkerCommand) => runtime.receive({ type: 'command', commandId: id as CommandId, command })
+  try {
+    await runtime.initialize()
+    await send('provision', { kind: 'workspace.provision', workspace })
+    await until(async () => (await store.workspaces.get(workspace.workspace.id))?.status === 'ready')
+    await send('create', create)
+    await send('abort-me', enqueue('abort-me'))
+    await executing
+    const turnId = (await store.sessions.get(sessionId))!.activeTurnId!
+    await send('stop', { kind: 'turn.stop', sessionId, turnId })
+    await until(async () => Boolean((await store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events.find(event => event.payload.kind === 'turn.finished')))
+    const page = await store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })
+    assert.equal(page.events.find(event => event.payload.kind === 'turn.finished')?.payload.outcome, 'failed')
+    assert.equal(page.events.some(event => event.payload.kind === 'turn.finished' && event.payload.failure?.abortReason === 'provider_error'), true)
   } finally { await runtime.shutdown(); store.close(); await rm(home, { recursive: true, force: true }) }
 })
 

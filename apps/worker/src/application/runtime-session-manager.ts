@@ -88,10 +88,11 @@ export class RuntimeSessionManager {
     })
   }
 
-  async resolveApproval(sessionId: SessionId, approvalId: ApprovalId, decision: 'approve' | 'deny'): Promise<void> {
+  async resolveApproval(sessionId: SessionId, approvalId: ApprovalId, decision: 'approve' | 'deny', requireActiveInvocation: () => void): Promise<void> {
     await this.serial(sessionId, async () => {
       const entry = this.entries.get(sessionId)
       if (!entry) throw new Error('Runtime session is not active')
+      requireActiveInvocation()
       await entry.session.resolveApproval(approvalId, decision)
     })
   }

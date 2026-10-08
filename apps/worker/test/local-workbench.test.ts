@@ -46,7 +46,7 @@ test('local workbench authorizes a canonical directory and runs a durable sessio
     assert.deepEqual(await workbench.enqueue(session.sessionId, '你好 local', identity), receipt)
     await assert.rejects(workbench.enqueue(session.sessionId, 'changed', identity), /different payload/)
     assert.deepEqual(await workbench.supportedCommands(session.sessionId), ['compact'])
-    await assert.rejects(workbench.resolveApproval(session.sessionId, 'missing', 'approve'), /待批准请求不存在/)
+    await assert.rejects(workbench.resolveApproval(session.sessionId, 'missing', 'approve', undefined, ''), /Explicit turnId/)
     assert.equal(receipt.status, 'accepted')
     await waitFor(async () => (await workbench.journal(session.sessionId, 1, 200) as { events: readonly { payload: { kind: string } }[] }).events.some(event => event.payload.kind === 'turn.finished'))
     const page = await workbench.journal(session.sessionId, 1, 200) as { events: readonly { payload: { kind: string; text?: string; outcome?: string } }[] }
@@ -97,7 +97,7 @@ test('dual-host runtime rejects cross-scope commands and never publishes local s
     await assert.rejects(workbench.journal(clusterSessionId, 1, 20), /本地会话不存在/)
     await assert.rejects(workbench.queue(clusterSessionId), /本地会话不存在/)
     await assert.rejects(workbench.approvals(clusterSessionId), /本地会话不存在/)
-    await assert.rejects(workbench.resolveApproval(clusterSessionId, 'a', 'approve'), /本地会话不存在/)
+    await assert.rejects(workbench.resolveApproval(clusterSessionId, 'a', 'approve', undefined, 'turn'), /本地会话不存在/)
     await assert.rejects(workbench.command(clusterSessionId, 'compact'), /本地会话不存在/)
     const localAgainstCluster = await runtime.executeLocal('local-cross-scope' as CommandId, { kind: 'session.enqueue', sessionId: clusterSessionId, message: { messageId: 'local-cross-message' as import('@wemux/domain').MessageId, content: 'blocked' } })
     assert.equal(localAgainstCluster.status, 'rejected')
@@ -137,6 +137,7 @@ test('local queue, approval and compact commands use authoritative state and sta
       await tx.commands.record({ commandId, command, payloadFingerprint: fingerprint }, { commandId, status: 'accepted' })
       await tx.commands.setExecutionState({ commandId, state: 'completed', result: null, updatedAt: timestamp })
       if (command.kind === 'session.cancel-queued') await tx.sessions.cancelQueued(command.sessionId, command.submissionCommandId)
+      if (command.kind === 'runtime.approval.resolve') await tx.appendJournal(command.sessionId, [{ occurredAt: timestamp, payload: { kind: 'approval.resolved', turnId: command.turnId, approvalId: command.approvalId, decision: command.decision } }])
     })
     return { commandId, status: 'accepted' as const }
   } }
@@ -154,8 +155,9 @@ test('local queue, approval and compact commands use authoritative state and sta
     await service.cancelQueued(sessionId, 'second')
     assert.deepEqual(await service.queue(sessionId), [])
     assert.equal((await service.approvals(sessionId)).length, 1)
-    await service.resolveApproval(sessionId, 'approval', 'approve', 'first-attempt')
-    await service.resolveApproval(sessionId, 'approval', 'approve', 'retry')
+    const turnId = (await store.sessions.get(sessionId))!.activeTurnId!
+    await service.resolveApproval(sessionId, 'approval', 'approve', 'first-attempt', turnId)
+    await service.resolveApproval(sessionId, 'approval', 'approve', 'first-attempt', turnId)
     assert.equal(commands.filter(command => command.kind === 'runtime.approval.resolve').length, 1)
     assert.deepEqual(await service.approvals(sessionId), [])
     assert.deepEqual(await service.supportedCommands(sessionId), ['compact'])

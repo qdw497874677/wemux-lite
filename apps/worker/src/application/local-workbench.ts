@@ -34,7 +34,7 @@ export interface LocalWorkbenchService {
   approvals(sessionId: string): Promise<readonly Extract<import('@wemux/domain').JournalEvent['payload'], { kind: 'approval.requested' }>[]>
   supportedCommands(sessionId: string): Promise<readonly string[]>
   command(sessionId: string, name: string, commandId?: string): Promise<CommandReceipt>
-  resolveApproval(sessionId: string, approvalId: string, decision: 'approve' | 'deny', commandId?: string): Promise<CommandReceipt>
+  resolveApproval(sessionId: string, approvalId: string, decision: 'approve' | 'deny', commandId: string | undefined, turnId: string): Promise<CommandReceipt>
   cancelQueued(sessionId: string, submissionCommandId: string): Promise<CommandReceipt>
   stop(sessionId: string, turnId: string): Promise<CommandReceipt>
   journal(sessionId: string, fromSeq: number, limit: number): ReturnType<WorkerStore['journal']['read']>
@@ -119,16 +119,19 @@ export function createLocalWorkbenchService(store: WorkerStore & LocalState, run
       const session = await requireLocalSession(sessionId)
       if (!session.activeTurnId) return []
       const pending = new Map<string, Extract<import('@wemux/domain').JournalEvent['payload'], { kind: 'approval.requested' }>>()
+      const seen = new Set<string>()
+      let finished = false
       let fromSeq = 1
       do {
         const page = await store.journal.read({ sessionId: sessionId as SessionId, fromSeq: fromSeq as import('@wemux/domain').EventSeq, limit: 500 })
         for (const event of page.events) {
           const p = event.payload
-          if (p.kind === 'approval.requested' && p.turnId === session.activeTurnId) {
-            const previous = await store.commands.get(identity(`approval:${sessionId}:${p.approvalId}`, 'resolve') as CommandId)
-            if (!previous || previous.state === 'rejected') pending.set(p.approvalId, p)
+          if (p.kind === 'turn.finished' && p.turnId === session.activeTurnId) { finished = true; pending.clear() }
+          if (p.kind === 'approval.requested' && p.turnId === session.activeTurnId && !seen.has(p.approvalId)) {
+            seen.add(p.approvalId)
+            if (!finished) pending.set(p.approvalId, p)
           }
-          if (p.kind === 'approval.resolved' && p.turnId === session.activeTurnId) pending.delete(p.approvalId)
+          if ((p.kind === 'approval.resolved' || p.kind === 'approval.expired') && p.turnId === session.activeTurnId) pending.delete(p.approvalId)
         }
         if (!page.hasMore || !page.events.length) break
         fromSeq = Number(page.events.at(-1)!.seq) + 1
@@ -145,26 +148,18 @@ export function createLocalWorkbenchService(store: WorkerStore & LocalState, run
       const commandId = identity(`command:${sessionId}`, requestId)
       return accepted(await execute({ kind: 'runtime.command', sessionId: sessionId as SessionId, operationId: commandId as import('@wemux/domain').RuntimeOperationId, name: 'compact', arguments: {} }, commandId))
     },
-    async resolveApproval(sessionId, approvalId, decision, requestId) {
+    async resolveApproval(sessionId, approvalId, decision, requestId, turnId) {
       await requireLocalSession(sessionId)
       if (decision !== 'approve' && decision !== 'deny') throw new LocalWorkbenchError('批准决定无效')
       if (!approvalId || approvalId.length > 256) throw new LocalWorkbenchError('批准标识无效')
-      // Verify the approval belongs to this session. Stable identity also protects a lost response retry.
-      if (requestId !== undefined) identity('validate', requestId)
-      const commandId = identity(`approval:${sessionId}:${approvalId}`, 'resolve')
-      if (!(await store.commands.get(commandId as CommandId))) {
-        const session = await requireLocalSession(sessionId)
-        let fromSeq = 1
-        let found = false
-        do {
-          const page = await store.journal.read({ sessionId: sessionId as SessionId, fromSeq: fromSeq as import('@wemux/domain').EventSeq, limit: 500 })
-          found = page.events.some(event => event.payload.kind === 'approval.requested' && event.payload.approvalId === approvalId && event.payload.turnId === session.activeTurnId)
-          if (found || !page.hasMore || !page.events.length) break
-          fromSeq = Number(page.events.at(-1)!.seq) + 1
-        } while (true)
-        if (!found) throw new LocalWorkbenchError('待批准请求不存在')
+      if (typeof turnId !== 'string' || !turnId.trim() || turnId.length > 200) throw new LocalWorkbenchError('Explicit turnId is required for approval')
+      const legacy = await store.commands.get(identity(`approval:${sessionId}:${approvalId}`, 'resolve') as CommandId)
+      if (legacy?.command.kind === 'runtime.approval.resolve' && legacy.command.sessionId === sessionId && legacy.command.approvalId === approvalId && !('turnId' in legacy.command)) {
+        throw new LocalWorkbenchError('legacy-unbound approval command requires explicit migration; decision was not redispatched')
       }
-      return accepted(await execute({ kind: 'runtime.approval.resolve', sessionId: sessionId as SessionId, approvalId: approvalId as import('@wemux/domain').ApprovalId, decision }, commandId))
+      // Explicit caller IDs share one operation namespace so changed targets conflict.
+      const commandId = requestId === undefined ? identity(`approval:${JSON.stringify([sessionId, turnId, approvalId])}`, 'resolve') : identity('approval-request', requestId)
+      return accepted(await execute({ kind: 'runtime.approval.resolve', sessionId: sessionId as SessionId, turnId: turnId as import('@wemux/domain').TurnId, approvalId: approvalId as import('@wemux/domain').ApprovalId, decision }, commandId))
     },
     async cancelQueued(sessionId, submissionCommandId) {
       await requireLocalSession(sessionId)
