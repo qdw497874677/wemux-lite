@@ -1,6 +1,6 @@
 # Wemux Lite
 
-Wemux Lite 是以 Project 为组织中心、自托管的 AI Agent 集群管理与协作平台，统一管理分布在不同 Worker 上的执行能力、工作环境与持续 Session。直接对话与任务协作均是一等使用路径。
+Wemux Lite 是以 Project 为组织中心、自托管的 AI Agent 集群管理与协作平台，统一管理分布在不同 Worker 上的执行能力、工作环境与持续 Session。对话以 Task 为归属，平台协调讨论与普通任务实施是两种使用路径。
 
 本文只定义领域语言。产品方向见 [docs/product-direction.md](docs/product-direction.md)，建设安排见 [docs/roadmap.md](docs/roadmap.md)。
 
@@ -17,6 +17,10 @@ _Avoid_: GPU 训练集群、模型 API 网关、共享文件系统
 **Agent Network**:
 由 Wemux Server 统一管理和编排的 Agent 执行能力网络：不同 Worker 通过 Adapter Bridge 把异构 Agent 统一到 Wemux ADK Profile，并以主动长连接加入网络；团队成员通过受控的 Project、Workspace、Session 和协作画布访问这些能力，Agent 也可在用户授权范围内经 Server 发起结构化委托。Agent 与 Worker 不直接横向互连。
 _Avoid_: P2P Agent 网络、Agent 自主扩大权限或组队、公共 Agent 市场、Worker 互联网络、要求 Agent 原生实现 Server transport
+
+**Platform Coordination Chat（平台协调聊天）**:
+用户在平台层讨论、制定计划并按授权交接普通实施任务的对话，执行者是选定 Worker 上的 Agent；入口属于平台，不等于执行者位于 Server 本机，也不赋予超出用户权限的资源访问权。
+_Avoid_: Server 内置 Agent、全局管理员聊天、无 Task 会话、Worker 本地聊天自动拥有集群派发权限
 
 **Agent Delegation**:
 父 Invocation 经 Server 鉴权、路由和审计后向目标 Agent 发起的结构化子调用；子调用拥有独立 Session 或 Invocation，并以 Tool Result 返回父调用。执行链记录 `parentInvocationId`、发起 Agent、目标 Agent 与实际用户身份；首版可以先提供人工编排，再演进自动委托。
@@ -123,8 +127,8 @@ _Avoid_: Worker 入网即上传全部会话、后台自动纳管、仅凭本地�
 _Avoid_: 自动发布的集群 Workspace、任意目录即授权、文件系统沙箱
 
 **Session**:
-可持续对话的产品上下文，固定绑定执行环境、执行节点、Agent 与 Model。集群会话固定归属 Project 和 Workspace Placement，可被 Task 或 Agent Run 关联但不以 Task 为强制父级；获权成员共同使用同一上下文和 Journal，需要独立探索时显式 Fork。本地会话归属 Worker 本地工作环境，不要求加入集群。Worker 离线时 Session 变为 unavailable，Server 不将其隐式迁移到其他 Worker；等待、Fork 或迁移都必须显式发生。
-_Avoid_: Native Session、Task 的子资源、Turn、按成员隐式复制的对话、私有聊天即文件隔离、跨 Worker 透明故障转移
+固定归属一个 Task 的持续对话上下文，绑定执行环境、Worker 与 Agent，允许在同一 Session 切换该 Agent 的 Model，当前 Turn 的实际模型不被追溯改变。普通任务会话处于 Project 范围，平台协调会话通过 Team 级专用 Task 归属，本地会话通过 Worker 本地 Task 归属；获权成员共享上下文和 Journal，离线不导致隐式迁移或换绑。
+_Avoid_: Native Session、Turn、无 Task 会话、跨 Task 换绑、按成员隐式复制的对话、私有聊天即文件隔离、跨 Worker 透明故障转移
 
 **Session Fork**:
 从现有 Session 的固定 `sourceEventCursor` 显式创建的独立 Session，用于在不改变原对话的情况下继续探索；Fork 拥有自己的后续上下文和 Journal，来源 Session 在 cursor 之后的消息不会自动进入目标，是否沿用原 Workspace Placement、Worker、Agent 与 Model 由创建时明确选择。Fork 与目标 Session 创建是后端幂等、可审计的领域操作。
@@ -181,12 +185,20 @@ _Avoid_: 离线排队伪装成已运行、queued 或 accepted 等同 running、�
 ## 任务与审查
 
 **Task**:
-Project 内承载目标、验收标准、管理状态和执行意图的工作单元，是可选的协作追踪锚点；它可以关联 Workspace、Session 和 Agent Run，但不拥有其生命周期。
-_Avoid_: Session、Turn、Session 的强制父级、所有对话的前置条件
+承载工作目标或专用对话意图、作为 Session 固定归属的工作单元；普通实施任务属于 Project，平台协调专用任务直接属于 Team，Worker 独立任务由本地宿主管理。
+_Avoid_: Session、Turn、必须由用户手工创建、任务归属等于工作区文件所有权
 
 **Task Workflow**:
-Task 的管理状态机：`backlog | todo | in_progress | in_review | blocked | done | cancelled`；任务完成由人决策，看板只是其视图。
-_Avoid_: Run 执行状态、Run 成功自动 done、可配置工作流引擎
+普通实施 Task 的管理状态机：`backlog | todo | in_progress | in_review | blocked | done | cancelled`；显式提交完成按任务审查策略推进，看板只是其视图，专用对话使用独立的处理/等待语义。
+_Avoid_: Run 执行状态、Run 成功自动 done、对话等待等同人工审查
+
+**Coordination Task（协调对话任务）**:
+承载平台协调聊天的 Team 级专用 Task，用于讨论、研究、计划和经授权的任务交接；长期保留，等待下一条消息不表示普通实施任务待审查。
+_Avoid_: 无归属会话、普通实施任务、全实例资源访问许可
+
+**Project Agent Capabilities（项目级 Agent 能力）**:
+平台向获授权 Agent 提供的项目资源发现、任务管理、关联会话查询与工作交接能力，与 Runtime 自身内部计划条目区分。
+_Avoid_: 管理员万能凭据、可见任务即能读取全部会话、自动同步 Runtime todo
 
 **Task Link**:
 Task 与外部跟踪对象（如 Git issue、Pull Request）的关联。
@@ -205,7 +217,7 @@ _Avoid_: Task、整个 Session、Agent 本体、独立追加消息自动属于�
 _Avoid_: 必然专属文件副本、随任务销毁的临时目录
 
 **Review**:
-人对任务执行结果及验收证据的判断，可以批准完成或要求修改，与 Agent 自报成功分开。
+由任务审查策略指定的人或 Agent 对执行结果及验收证据作出的判断，可以批准或要求修改，与执行者自报成功分开。
 _Avoid_: Turn 终态、模型自评等同于人工验收
 
 ## 共享与治理

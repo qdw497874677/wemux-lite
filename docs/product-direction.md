@@ -18,7 +18,9 @@ Wemux Lite 是面向个人与团队、自托管的 AI Agent 集群管理、协�
 
 核心价值是“统一管理且执行可信”，不是把若干 Agent CLI 包装成多个聊天窗口。
 
-## 3. 两条一等使用路径
+## 3. Task 承载的讨论与实施路径
+
+最新确认的方向与实施门槛见 [新版前端与项目级 Agent 能力规格](specs/web-next-project-agent-platform.md) 和 [ADR 0007](adr/0007-task-bound-conversation-direction.md)。以下为目标规则，不代表现有代码已完成迁移。
 
 ```text
 集群资源：Worker → Agent → 模型与运行能力
@@ -28,21 +30,20 @@ Project
   ├── Workspace（逻辑工作环境）
   │     ├── Placement @ Worker A
   │     └── Placement @ Worker B
-  ├── Session → 指定 Workspace + Worker + Agent + Model
-  └── Task → Assignment → Run → Session
+  └── 普通 Task → Assignment → Run → Session（固定 Task，模型可切换）
+
+Team → 协调对话 Task → Session → 经授权交接 Project 内普通 Task
 ```
 
-### 直接对话
+### 协调讨论与测试对话
 
-Project → Workspace → 选择执行位置、Agent 和模型 → Session。
-
-不要求先创建 Task；空项目必须提供直接开始对话的入口。Worker 是执行目标，不是强加在 Project 与 Workspace 之间的导航层级。
+所有 Session 必须绑定 Task。平台协调入口自动提供 Team 级专用 Task，用于讨论、研究、计划和受权交接；项目内测试也自动提供专用 Task，不要求用户先填任务表单。协调执行者可以位于任意获授权 Worker，不要求 Server 本机执行。讨论模式由运行时强制限制，无法保证限制的 Runtime 不开放此模式。
 
 ### 任务协作
 
-Project → Task（目标与验收标准）→ Assignment → Run → Session → 人工审查。
+Project → Task（目标与验收标准）→ Assignment → Run → Session → 显式提交完成及配置的审查流程。
 
-Task 看板是可选的管理视图，不是产品唯一主入口。Run 执行成功不等于任务验收完成；独立对话消息也不自动变成任务运行。
+Task 看板是管理视图，不是必须先打开的页面。Run 成功不等于 Task 完成；新项目默认不强制审查，管理者可配置 Agent、人工或多阶段审查，执行者不得自行取消要求。
 
 两条集群路径共享同一套执行、历史、权限与故障恢复机制，不建设两套会话系统。
 
@@ -71,7 +72,7 @@ Worker 可独立安装，不注册 Server 也可通过自身鉴权的 Web/API �
 | 项目与环境 | Repository、逻辑 Workspace、各 Worker Placement 的完整生命周期与清理边界 |
 | 持续会话 | 创建、流式与工具事件、排队、停止、恢复、历史、检索、用量与同步新鲜度 |
 | 协作画布与血缘 | 可交互 Session 节点、Fork cursor、关系图、画布/专注连续切换、布局和授权过滤 |
-| 任务与交付 | 指派、尝试追踪、审查、结果证据及外部关联，保留人工决策 |
+| 任务与交付 | 指派、尝试追踪、可配置审查、结果证据及外部关联；平台 API 支持 Agent 创建任务、查询关联会话与受权交接 |
 | 权限与安全 | 邮箱注册、验证与找回、Google OAuth/OIDC 登录及账号绑定、团队、资源共享、撤权、客户端凭证、执行权限与审计 |
 | 运维 | 安装、升级、迁移、备份、恢复、诊断、容量边界与可复查发布验收 |
 | 客户端 | 集群 Web 与 Worker 独立 Web 复用会话交互；公共 API 与事件契约支持 CLI 和其他客户端 |
@@ -84,7 +85,7 @@ Worker 可独立安装，不注册 Server 也可通过自身鉴权的 Web/API �
 1. Server 是集群授权和控制面；Worker 是本机文件、进程、Agent 调用和 Session Journal 的执行权威，也负责独立 Web/API 的本地身份授权。集群注册凭据不作为 Web 登录凭据；直接访问不能绕过集群会话权限。浏览器关闭不应中断已持久接受的执行。
 2. 加入集群时由 Worker 主动连接 Server；独立使用不要求注册，Agent 不是注册主体。Agent 与模型凭据、Git 凭据保留在 Worker，不为统一管理而集中复制到 Server。
 3. Workspace 是 Project 内逻辑环境，Placement 是它在某个 Worker 上的物理落点。跨 Worker 管理不代表自动同步文件、共享绝对路径、故障转移或迁移原生会话。
-4. Session 固定执行绑定；需要更换执行位置、Agent 或模型时新建 Session。未来迁移能力须单独设计，不得静默改写历史绑定。
+4. Session 固定 Task、执行位置和 Agent，不换绑 Task。同一 Session 可切换当前 Agent 的模型，对下一 Turn 生效，保留每次执行的实际模型；不支持时明确拒绝，不隐式替换。
 5. 同一 Placement 的 Session 共享文件；私有聊天不等于文件隔离。隔离工作必须使用独立环境，Worker 也不是容器安全沙箱。
 6. Worker Journal 是会话历史权威；Server 投影必须展示新鲜度。Worker 永久丢失后的缓存保持只读且标明无法验证，不升级为权威。
 7. 命令接收、实际执行、执行终结、日志同步、任务验收是不同事实。超时或离线不等于失败或成功；恢复和重试不得隐式重复执行。

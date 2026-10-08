@@ -8,6 +8,10 @@ Wemux Lite 是面向个人与团队、自托管的 AI Agent 集群管理与协�
 
 已确认目标：Worker 可独立安装、无需注册集群即可使用自身鉴权的 Web/API，并支持显式公网 HTTPS；Web 提供主动加入集群、重试与退出。集群注册身份和 Web 用户凭据分离，不自动共享本地会话。运行时及会话 UI 按双宿主复用，设计见 `docs/design/worker-web-workbench.md`。此为待实施方向，勿把现有 CLI 当作已支持独立 Web；旧“全部远程会话必须经 Server”仅适用于集群控制路径。
 
+## 已确认的新产品方向（实施基线）
+
+当前优先事项见 `docs/specs/web-next-project-agent-platform.md`、ADR 0006/0007。前述旧的“无 Task 直接对话”描述已被取代：所有 Session 绑定 Task；Team 级协调 Task 用于讨论和交接，Project 内普通 Task 用于实施，Worker 独立宿主也需本地 Task。平台提供项目视角的内置 Agent API（创建任务、查询关联会话等），由 Runtime Adapter 通过适宜工具入口使用，不绑定 Pi 或 MCP。新前端在独立目录以 Paperclip 为基础，同实例 `/next/` 开发；迁移期旧版不要求持续回归，旧版历史异常不阻断新版票据；全部有效功能及双宿主、移动端验收后才删除旧版。上述是已确认目标，不代表代码已经实现。
+
 ## 仓库布局
 
 ```
@@ -88,10 +92,10 @@ node apps/worker/dist/cli.js tailscale --server http://100.101.102.103:8010
 
 ## 领域模型速记
 
-- 组织：Team → Project；Project 下有 Repository、Workspace、Session 和可选 Task，不是 Task → Workspace → Run 的单一所有权树。
+- 组织：Team → Project；普通 Task 属于 Project，协调专用 Task 可直接属于 Team。Session 固定归属 Task，Workspace 生命周期独立，不随 Task 删除而清理文件。
 - Workspace 是逻辑环境，Workspace Placement 是 `(workspaceId, workerId)` 的物理落点；不同节点的路径和状态独立，不隐式同步文件或迁移会话。
-- 直接对话：Project → Workspace → Session；任务追踪：Task → Run → Session。Session 固定 Worker/Workspace/Agent/Model 绑定。
-- Task 状态机：`backlog | todo | in_progress | in_review | blocked | done | cancelled`；**Run 成功不得自动 done**，需人工审查（approve→done / changes_requested→blocked）。
+- 对话均绑定 Task，测试场景自动提供专用 Task；Session 固定 Task/Worker/Workspace/Agent，同 Session 模型切换对下一 Turn 生效，不修改当前执行快照。
+- 普通 Task 状态机：`backlog | todo | in_progress | in_review | blocked | done | cancelled`；**Run 成功不得自动 done**，显式提交完成按配置审查策略处理；项目默认不强制审查，执行 Agent 不得自行取消要求。协调对话 active/waiting 不等于普通任务的完成/审查。
 - 写操作带 `requestId` 幂等 + CAS 乐观并发；Run 取消有排队/启动/完成三态竞态处理；Session 可跨 Run 复用（reuse mode）。
 - 术语严格按 `CONTEXT.md`（Worker/Agent/Project/Task/Task Workflow/Task Link 等，含 Avoid 列表）。写代码注释、测试、文档时遵守。
 

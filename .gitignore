@@ -14,7 +14,7 @@ data/
 *.db-*
 
 # Generated packages and local investigation evidence
-artifacts/
+/artifacts/
 .scratch/
 *-current.png
 
