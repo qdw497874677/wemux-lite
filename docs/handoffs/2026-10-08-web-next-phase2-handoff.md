@@ -1,5 +1,7 @@
 # 交接文档：Wemux Lite Web-next（阶段 2 收尾与后续）
 
+> 历史交接快照：当前已改用 [spec 与 ticket](../specs/web-next-index.md)，不再按本文阶段编号、待决项或 GSD 工作流推进。旧规划入口的存放位置见 [GSD 历史说明](../../.planning/README.md)。下文保留当时的事实与授权边界，不作为当前状态声明。
+
 **生成**：2026-10-08 ｜ **仓库**：`/opt/data/profiles/hacker/workspace/project/wemux-mini` ｜ **远端**：`git@github.com:qdw497874677/wemux-lite.git` ｜ **分支**：`main` ｜ **会话结束时 HEAD**：`272293e`（附带本交接提交）；本会话本地一度领先 `origin/main` 42 个提交、0 落后，本次已推送。
 
 **接手第一步**：先读仓库根 `AGENTS.md`（沙箱陷阱、运行命令、Web 端硬约束、领域速记），再读 `.planning/ROADMAP.md` 与 `.planning/REQUIREMENTS.md` 确认阶段状态。本文件只记录"当前状态 + 未决项 + 操作口径"，不复制规划、规格与证据正文（按路径引用）。

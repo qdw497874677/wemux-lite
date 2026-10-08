@@ -1,6 +1,6 @@
 # Issue tracker：本地 Markdown
 
-本仓库的 issues 与 specs 以 markdown 文件形式存放在 `.scratch/` 下。
+本仓库的 issues 与 specs 以 markdown 文件形式存放在 `.scratch/` 下。当前工作入口见 [spec 与 ticket 索引](../specs/web-next-index.md)；旧 GSD 记录仅供历史追溯，不再维护阶段状态或阶段编号。
 
 ## 约定
 
@@ -9,6 +9,8 @@
 - 实施票据：每票一个文件，位于 `.scratch/<feature-slug>/issues/<NN>-<slug>.md`，从 `01` 起编号，不合并成单个 tickets 文件
 - 分诊状态记录在每个票据文件顶部附近的 `Status:` 行（角色字符串见 `triage-labels.md`）
 - 评论与对话历史追加到文件底部 `## Comments` 标题下
+- 依赖写在 `Blocked by:`，跨 spec 必须链接具体 ticket；按真实功能前提推进，不按 spec 的排列顺序串行
+- `ready-for-agent` 是分诊角色，不表示阻塞解除；人工验收、开门和破坏性操作授权以票据明示的门槛为准
 
 结合本仓库既有惯例（AGENTS.md「票据与证据」）：原始证据留在 `.scratch/`，脱敏验收摘要与可重复测试纳入仓库。
 

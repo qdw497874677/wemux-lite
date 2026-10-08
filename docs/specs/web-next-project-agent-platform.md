@@ -1,6 +1,6 @@
 # 新版前端与项目级 Agent 能力
 
-状态：产品方向已确认；本文保留源码盘点与实施参考，正式中文 PRD 见 [Paperclip 风格前端重写与项目级 Agent 协作平台](web-next-project-agent-prd.md)，已登记为活动 Ticket 25（ready-for-agent）。决策见 ADR 0006、0007。存在入口不等于已验证有效；本文不是完成证明。
+状态：产品方向已确认；本文保留源码盘点与实施参考，正式中文 PRD 见 [Paperclip 风格前端重写与项目级 Agent 协作平台](web-next-project-agent-prd.md)，当前实施按 [spec 与 ticket 索引](web-next-index.md)跟踪，旧 Ticket 25 仅作来源记录。决策见 ADR 0006、0007。存在入口不等于已验证有效；本文不是完成证明。
 
 ## 1. 目标与范围
 
@@ -63,7 +63,9 @@ Agent 调用上下文由宿主可信构建：实际操作者、当前 Task/Sessi
 | 本地 Worker | hosts/local-workbench、local-settings、local-cluster | 本地登录/Task/会话、凭据、Agent配置、入退集群及失败恢复 | 待核验迁移及本地Task新增 |
 | 交互公共能力 | command-palette、components/ui、component-library | 导航搜索、键盘、弹窗焦点、未保存提示、移动端、HTTP安全降级 | 待核验迁移 |
 
-## 5. 分阶段交付与硬门槛
+## 5. 交付能力与硬门槛
+
+以下为交付范围，不是阶段或串行排期。当前工作的具体功能依赖与人工门以 [spec/ticket](web-next-index.md)为准。
 
 1. **合同和盘点**：固定 Paperclip 来源、逐项核验上述登记表；建立 Task/Session/协调权限/API 行为测试，更新相冲突文档。不能以文档完成代表代码完成。
 2. **Server 主闭环**：新目录与 /next 静态入口、登录、项目、Task绑定会话；协调计划→受权创建普通任务→实施→结果/审查；验证项目API与task.sessions。

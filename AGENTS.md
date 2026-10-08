@@ -1,6 +1,6 @@
 # AGENTS.md — Wemux Lite 代理工作指南
 
-面向在本仓库工作的 AI 编码代理（以及新成员）。产品定位见 `docs/product-direction.md`，领域术语见 `CONTEXT.md`，里程碑见 `docs/roadmap.md`；快速上手见 `README.md`。
+面向在本仓库工作的 AI 编码代理（以及新成员）。产品定位见 `docs/product-direction.md`，领域术语见 `CONTEXT.md`，当前工作见 `docs/specs/web-next-index.md` 的 spec/ticket 索引；快速上手见 `README.md`。
 
 ## 项目是什么
 
@@ -104,7 +104,7 @@ node apps/worker/dist/cli.js tailscale --server http://100.101.102.103:8010
 
 ## 票据与证据
 
-后续开发按 `docs/roadmap.md` 的里程碑推进，开工前拆成可独立验收的纵向切片。`.scratch/task-board-agent-platform/issues/01..08` 及证据是历史任务切片记录，不作为当前版本全量完成证明。改动要附可复查的日志、截图或断言输出；原始证据留在 `.scratch`，脱敏验收摘要与可重复测试纳入仓库。只在真实验证后勾选；明确区分已实现、已验证、部分完成和未开始。
+开工与汇报按 `docs/specs/web-next-index.md` 链接的功能 spec 和 ticket 组织；具体依赖读 ticket 的 `Blocked by:`，状态读 `Status:` 与验收记录。当前不再使用阶段编号或整阶段串行门，`.planning/` 和 `docs/roadmap.md` 仅供历史追溯。人工开门、真实验收与破坏性操作确认仍须逐票满足。`.scratch/task-board-agent-platform/issues/01..08` 及证据是历史任务切片记录，不作为当前版本全量完成证明。改动要附可复查的日志、截图或断言输出；原始证据留在 `.scratch`，脱敏验收摘要与可重复测试纳入仓库。只在真实验证后勾选；明确区分已实现、已验证、部分完成和未开始。
 
 ## Worker 与 Agent 安装边界
 

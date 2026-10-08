@@ -7,7 +7,7 @@ Wemux Lite 是面向个人与团队、自托管的 AI Agent 集群管理与协�
 ## 产品与建设方向
 
 - [产品定位与边界](docs/product-direction.md)
-- [里程碑、依赖与验收安排](docs/roadmap.md)
+- [当前 spec、ticket 与需求追溯](docs/specs/web-next-index.md)
 - [领域术语](CONTEXT.md)
 
 Workspace 是项目级逻辑环境，可以在多个 Worker 上拥有独立 Placement；Session 固定绑定执行位置。跨节点管理不等于自动同步文件或迁移会话。文档描述的目标能力与当前代码、已验收能力严格分开。

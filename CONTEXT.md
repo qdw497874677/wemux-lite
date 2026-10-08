@@ -2,7 +2,7 @@
 
 Wemux Lite 是以 Project 为组织中心、自托管的 AI Agent 集群管理与协作平台，统一管理分布在不同 Worker 上的执行能力、工作环境与持续 Session。对话以 Task 为归属，平台协调讨论与普通任务实施是两种使用路径。
 
-本文只定义领域语言。产品方向见 [docs/product-direction.md](docs/product-direction.md)，建设安排见 [docs/roadmap.md](docs/roadmap.md)。
+本文只定义领域语言。产品方向见 [docs/product-direction.md](docs/product-direction.md)，当前工作见 [spec 与 ticket 索引](docs/specs/web-next-index.md)。
 
 ## 集群与能力
 
