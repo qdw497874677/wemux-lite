@@ -54,7 +54,7 @@
 | NEXT-02 | Phase 1 | 本地候选全绿并获用户确认（2026-10-07）；真实 Google OAuth/SMTP 外部门开放 |
 | NEXT-03 | Phase 1 | Complete（2026-10-07 候选签收，证据：web-next-phase1-candidate.md） |
 | NEXT-04 | Phase 1 | Complete（八项有界+候选门；独立宿主留 Phase 5） |
-| NEXT-05 | Phase 2 | In Progress, 局部验证，#52 决策门 |
+| NEXT-05 | Phase 2 | In Progress, 受控切片已交付（`web-next-phase2-controlled-slice.md`：模型/入口禁用态/查询缺口 a+b/写通道矩阵），#52 决策门与隔离资格门未过 |
 | NEXT-06 | Phase 3 | Pending |
 | NEXT-07 | Phase 1 | 本地候选全绿并获用户确认（2026-10-07）；外部死信/视觉复审/付费运行时门开放 |
 | NEXT-08 | Phase 3 | Pending |
