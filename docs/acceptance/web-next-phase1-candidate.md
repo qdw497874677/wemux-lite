@@ -7,6 +7,7 @@
 - Git HEAD：`93c9f67cab09ca51bd95d8bdb14d7d0ca99f0255`；共享工作树含约 1033 个未提交变更（含本阶段全部实现与测试，另混有并行会话产物），未做选择性提交。
 - 源指纹（sha256 of sorted sha256s，截取 16 位）：`apps/server/src 1258eab9100faf39`、`apps/worker/src 96836fb3a860dda2`、`apps/web-next/src 8145bf37a6c0ffbe`、`apps/web-next/tests ea10a95860ee3e23`、`apps/e2e 74f77d23852754f5`、`packages 8f252902edee7c87`。
 - 运行时：Node v26.5.1；Next 静态构建 `/tmp/wemux-next-dist-0110`；Worker CLI 拷贝 `/tmp/wemux-test-worker-0110/dist/cli.js`（node_modules 符号链接仓库根）；Chromium `chromium-1228/chrome-linux64/chrome` + playwright-core 1.61.0。
+- 签收后提交：上述内容已于 2026-10-07 分九个提交入库（新 HEAD `3639766`，候选 HEAD `93c9f67` 为其祖先）；仅文件模式位归一为 0644，未改任何源内容，源指纹仍可从仓库复现。
 
 ## 同候选本地矩阵（全部通过）
 
