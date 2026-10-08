@@ -107,6 +107,13 @@ test('Server and Worker execute and resume a real Pi session', { timeout: 240_00
     ? pi.models.find((model: any) => model.modelId === requestedModel)
     : pi.models[0]
   assert.ok(selectedModel, `Pi model ${requestedModel ?? '(first available)'} was not detected`)
+  // Opt-in second model uses the same two paid Turns already present in this test.
+  // Never infer a second model from a list alone when validating successful switching.
+  const nextModelId = process.env.WEMUX_REAL_PI_NEXT_MODEL
+  if (nextModelId) {
+    assert.notEqual(nextModelId, selectedModel.modelId, 'model switch requires two distinct models')
+    assert.ok(pi.modelSwap && pi.models.some((model: any) => model.modelId === nextModelId), `Pi cannot switch to ${nextModelId}`)
+  }
 
   const created = await api('/sessions', 'POST', {
     workspaceId: provision.workspace.id,
@@ -136,6 +143,15 @@ test('Server and Worker execute and resume a real Pi session', { timeout: 240_00
   worker = startWorker()
   await eventually(() => api('/workers'), value => value.items.some((item: any) => item.id === workerId && item.connectionState === 'online'), 60_000)
 
+  if (nextModelId) {
+    const selection = await api(`/sessions/${created.session.id}/runtime/commands`, 'POST', {
+      commandId: 'real-pi-switch-model', name: 'set_model', arguments: { modelId: nextModelId },
+    })
+    await eventually(() => api(`/commands/${selection.commandId}`), value => value.status === 'accepted')
+    await eventually(() => api(`/sessions/${created.session.id}/events?fromSeq=1&limit=1000`),
+      value => value.events.some((event: any) => event.payload.kind === 'model.changed' && event.payload.modelId === nextModelId))
+  }
+
   const second = await api(`/sessions/${created.session.id}/messages`, 'POST', {
     content: 'Reply with exactly WEMUX_REAL_PI_2. Do not use tools.',
   })
@@ -149,5 +165,11 @@ test('Server and Worker execute and resume a real Pi session', { timeout: 240_00
   const secondText = secondPage.events.filter((event: any) => event.payload.kind === 'assistant.text.delta').map((event: any) => event.payload.text).join('')
   assert.match(secondText, /WEMUX_REAL_PI_2/)
   assert.equal(secondPage.freshness.status, 'synced')
+  if (nextModelId) {
+    const timeline = (await api(`/sessions/${created.session.id}/events?fromSeq=1&limit=1000`)).events
+    assert.deepEqual(timeline.filter((event: any) => event.payload.kind === 'turn.started').map((event: any) => event.payload.modelId), [selectedModel.modelId, nextModelId], 'first Turn snapshot stays immutable; subsequent Turn uses selected model')
+    assert.equal(timeline.filter((event: any) => event.payload.kind === 'model.changed' && event.payload.modelId === nextModelId).length, 1)
+    assert.equal((await api(`/sessions/${created.session.id}`)).binding.modelId, nextModelId)
+  }
   assert.doesNotMatch(workerStderr, /(?:^|\n)(?:Error:|\[error\]|\[fatal\]|\[runtime-error\])/i, 'Worker reported an error')
 })

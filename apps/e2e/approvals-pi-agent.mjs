@@ -9,8 +9,8 @@ import { join, resolve } from 'node:path'
 import { chromium } from '/tmp/wemux-tailnet-pw/node_modules/playwright-core/index.mjs'
 
 const root = process.cwd()
-const evidenceDir = resolve(root, '.scratch/g44b-real')
-const blockedDir = resolve(root, '.scratch/feature-suite-b1/pi-agent-e2e')
+const evidenceDir = resolve(root, process.env.WEMUX_G44B_EVIDENCE_DIR ?? '.scratch/g44b-real')
+const blockedDir = resolve(root, process.env.WEMUX_G44B_BLOCKED_DIR ?? '.scratch/feature-suite-b1/pi-agent-e2e')
 const chromiumPath = '/opt/data/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome'
 const piPath = '/opt/data/.npm-global/bin/pi'
 const requestedModel = process.env.WEMUX_REAL_PI_MODEL ?? 'my-codex/gpt-5.6-sol'
@@ -132,12 +132,18 @@ async function realChain(piModels) {
     for await (const chunk of request) body += chunk
     requests.push({ method: request.method, url: request.url, body: body ? JSON.parse(body) : null })
     await writeFile(join(temp, 'fixture-requests.json'), JSON.stringify(requests))
-    response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ accepted: true, fixture: 'g44b' }))
+    if (process.env.WEMUX_G44B_FAIL_IN_NEXT === '1') {
+      response.writeHead(503, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'fixture_down' }))
+    } else response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ accepted: true, fixture: 'g44b' }))
   })
-  await new Promise((resolveListen, reject) => fixture.once('error', reject).listen(fixturePort, fixtureHost === '127.0.0.1' ? fixtureHost : '0.0.0.0', resolveListen))
+  await new Promise((resolveListen, reject) => {
+    const onError = error => { fixture.off('listening', onListen); reject(error) }
+    const onListen = () => { fixture.off('error', onError); resolveListen() }
+    fixture.once('error', onError).once('listening', onListen).listen(fixturePort, fixtureHost === '127.0.0.1' ? fixtureHost : '0.0.0.0')
+  })
   let serverProcess, workerProcess, browser
   try {
-    serverProcess = child(resolve(root, 'apps/server/dist/main.js'), [], { PORT: String(serverPort), HOST: '127.0.0.1', WEMUX_ADMIN_EMAILS: adminEmail, WEMUX_DATABASE_PATH: join(temp, 'server.sqlite'), WEMUX_PUBLIC_URL: origin, WEMUX_SMTP_FROM: 'Wemux <no-reply@example.com>', WEMUX_MAIL_OUTBOX: outbox, WEMUX_CAPABILITY_SECRET: randomBytes(32).toString('hex'), WEMUX_CONNECTOR_ENCRYPTION_KEY: randomBytes(32).toString('hex'), WEMUX_WEB_DIST: resolve(root, 'apps/web/dist') }, logs, 'server')
+    serverProcess = child(resolve(root, 'apps/server/dist/main.js'), [], { PORT: String(serverPort), HOST: '127.0.0.1', WEMUX_ADMIN_EMAILS: adminEmail, WEMUX_DATABASE_PATH: join(temp, 'server.sqlite'), WEMUX_PUBLIC_URL: origin, WEMUX_SMTP_FROM: 'Wemux <no-reply@example.com>', WEMUX_MAIL_OUTBOX: outbox, WEMUX_CAPABILITY_SECRET: randomBytes(32).toString('hex'), WEMUX_CONNECTOR_ENCRYPTION_KEY: randomBytes(32).toString('hex'), WEMUX_WEB_DIST: resolve(root, 'apps/web/dist'), ...(process.env.WEMUX_G44B_NEXT_DIST ? { WEMUX_WEB_NEXT_DIST: process.env.WEMUX_G44B_NEXT_DIST } : {}) }, logs, 'server')
     await eventually(() => fetch(`${origin}/api/auth/options`), response => response.ok, 'Server 启动', 30_000)
     let response = await fetch(`${origin}/api/auth/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: adminEmail, displayName: 'G44b Admin', password }) })
     assert.equal(response.status, 202, await response.text())
@@ -174,40 +180,225 @@ async function realChain(piModels) {
     assert.equal(connectorResult.commandIds.length, 1, 'Connector 创建必须分发到目标 Worker')
     await eventually(() => api(`/commands/${connectorResult.commandIds[0]}`), value => value.status === 'accepted' || value.status === 'completed', 'Connector 分发接收')
     await eventually(() => api(`/projects/${project.id}/connectors`), value => value.items.some(item => item.id === connector.id && item.revision === connector.revision), 'Connector 可见')
-    const created = await api('/sessions', 'POST', { requestId: randomUUID(), workspaceId: workspaceResult.workspace.id, workerId, title: 'G44b Real Pi', agentKey: 'pi', modelId: selectedModel.modelId, shareScope: 'owner-only' })
+    const task = await api(`/projects/${project.id}/tasks`, 'POST', { title: 'G44b 原生 Agent 会话', requestId: randomUUID() })
+    const fullUiJourney = process.env.WEMUX_G44B_FULL_UI_JOURNEY === '1'
+    let created, page
+    const pageErrors = []
+    if (fullUiJourney) {
+      assert.ok(process.env.WEMUX_G44B_NEXT_DIST && process.env.WEMUX_G44B_APPROVE_IN_NEXT === '1' && process.env.WEMUX_G44B_NEXT_MODEL, 'full UI journey requires Next approval and second model')
+      browser = await chromium.launch({ headless: true, executablePath: chromiumPath, args: ['--no-sandbox', '--disable-dev-shm-usage'] })
+      const viewport = process.env.WEMUX_G44B_VIEWPORT === 'mobile' ? { width: 390, height: 844 } : { width: 1440, height: 960 }
+      const context = await browser.newContext({ viewport, colorScheme: 'dark' })
+      await context.addCookies([{ name: 'wemux_login_session', value: cookie.split('=')[1], domain: '127.0.0.1', path: '/', httpOnly: true, sameSite: 'Lax' }])
+      page = await context.newPage()
+      page.on('pageerror', error => pageErrors.push(String(error)))
+      await page.goto(`${origin}/next/projects/${project.id}?task=${task.id}`)
+      const taskSessions = page.getByRole('region', { name: '任务会话', exact: true })
+      const environment = taskSessions.getByLabel('会话执行环境', { exact: true })
+      const selection = JSON.stringify([workspaceResult.workspace.id, workerId, 'pi', selectedModel.modelId])
+      await eventually(() => environment.locator('option').evaluateAll(options => options.map(option => option.value)), values => values.includes(selection), 'Next Task Pi execution environment', 60_000)
+      await environment.selectOption(selection)
+      await taskSessions.getByLabel('会话标题', { exact: true }).fill('G44b Real Pi')
+      const createResponse = page.waitForResponse(result => result.request().method() === 'POST' && new URL(result.url()).pathname === `/api/projects/${project.id}/tasks/${task.id}/sessions`)
+      await taskSessions.getByRole('button', { name: '创建任务会话', exact: true }).click()
+      const received = await createResponse
+      assert.equal(received.status(), 201, 'Next Task UI must create real Pi Session')
+      created = await received.json()
+    } else created = await api(`/projects/${project.id}/tasks/${task.id}/sessions`, 'POST', { requestId: randomUUID(), workspaceId: workspaceResult.workspace.id, workerId, title: 'G44b Real Pi', agentKey: 'pi', modelId: selectedModel.modelId })
+    assert.equal(created.session.taskId, task.id, 'native Pi Session must bind the explicitly chosen Task')
     await eventually(() => api(`/commands/${created.commandId}`), value => value.status === 'accepted' || value.status === 'completed', 'Session 创建')
+    assert.ok((await api(`/projects/${project.id}/tasks/${task.id}/sessions`)).items.some(item => item.id === created.session.id), 'non-Run Task Session appears in task-associated discovery')
     const requestId = randomUUID(), toolCallId = randomUUID()
     const prompt = `只调用一次 http_call，不要调用其他工具。参数必须是 connectorId=${connector.id}, connectorRevision=${connector.revision}, operationId=createItem, requestId=${requestId}, toolCallId=${toolCallId}, input={"body":{"source":"real-pi","title":"approval fixture"}}。审批后等待工具结果，然后用一句中文确认完成。`
-    const message = await api(`/sessions/${created.session.id}/messages`, 'POST', { content: prompt })
+    let message
+    if (fullUiJourney) {
+      const taskSessions = page.getByRole('region', { name: '任务会话', exact: true })
+      await eventually(() => taskSessions.locator(`li[data-session-id="${created.session.id}"]`).count(), count => count === 1, 'Task UI Session discovery', 30_000)
+      await taskSessions.getByRole('button', { name: '查看会话：G44b Real Pi', exact: true }).click()
+      const composer = page.getByRole('region', { name: '消息提交' })
+      await composer.getByLabel('新消息草稿', { exact: true }).fill(prompt)
+      const sendResponse = page.waitForResponse(result => result.request().method() === 'POST' && new URL(result.url()).pathname === `/api/sessions/${created.session.id}/messages`)
+      await composer.getByRole('button', { name: '发送新消息', exact: true }).click()
+      const received = await sendResponse
+      assert.equal(received.status(), 202, 'Next Task UI must send first real Pi prompt')
+      message = await received.json()
+    } else message = await api(`/sessions/${created.session.id}/messages`, 'POST', { content: prompt })
     await eventually(() => api(`/commands/${message.commandId}`), value => value.status === 'accepted' || value.status === 'completed', '消息接收')
     const pendingPage = await eventually(() => api(`/approvals?projectId=${project.id}&status=pending`), value => value.items?.some(item => item.source?.kind === 'session_tool' && item.source.sessionId === created.session.id), 'HTTP Connector pending approval', 180_000)
     const pending = pendingPage.items.find(item => item.source?.kind === 'session_tool' && item.source.sessionId === created.session.id)
 
-    browser = await chromium.launch({ headless: true, executablePath: chromiumPath, args: ['--no-sandbox', '--disable-dev-shm-usage'] })
-    const context = await browser.newContext({ viewport: { width: 1440, height: 960 }, colorScheme: 'dark' })
-    await context.addCookies([{ name: 'wemux_login_session', value: cookie.split('=')[1], domain: '127.0.0.1', path: '/', httpOnly: true, sameSite: 'Lax' }])
-    const page = await context.newPage()
-    await page.goto(`${origin}/approvals`)
-    await page.getByText(pending.title, { exact: true }).waitFor()
-    await page.screenshot({ path: join(evidenceDir, '01-real-pi-http-call-pending.png'), fullPage: true })
+    if (!browser) {
+      browser = await chromium.launch({ headless: true, executablePath: chromiumPath, args: ['--no-sandbox', '--disable-dev-shm-usage'] })
+      const context = await browser.newContext({ viewport: process.env.WEMUX_G44B_VIEWPORT === 'mobile' ? { width: 390, height: 844 } : { width: 1440, height: 960 }, colorScheme: 'dark' })
+      await context.addCookies([{ name: 'wemux_login_session', value: cookie.split('=')[1], domain: '127.0.0.1', path: '/', httpOnly: true, sameSite: 'Lax' }])
+      page = await context.newPage()
+      page.on('pageerror', error => pageErrors.push(String(error)))
+    }
+    const viewport = page.viewportSize()
+    const nextApproval = !!process.env.WEMUX_G44B_NEXT_DIST && process.env.WEMUX_G44B_APPROVE_IN_NEXT === '1'
+    const deny = process.env.WEMUX_G44B_DENY_IN_NEXT === '1'
+    const cancel = process.env.WEMUX_G44B_STOP_IN_NEXT === '1'
+    const timeout = process.env.WEMUX_G44B_TIMEOUT_IN_NEXT === '1'
+    const fail = process.env.WEMUX_G44B_FAIL_IN_NEXT === '1'
+    assert.ok([deny, cancel, timeout, fail].filter(Boolean).length < 2, 'negative paths are separate cases')
+    assert.ok(!deny && !cancel && !timeout && !fail || nextApproval, 'negative paths must use Next')
+    assert.ok(!deny && !cancel && !timeout && !fail || !process.env.WEMUX_G44B_NEXT_MODEL, 'negative paths and model selection are separate cases')
+    if (nextApproval) {
+      await page.goto(`${origin}/next/projects/${project.id}?task=${created.session.taskId}&session=${created.session.id}`)
+      const controls = page.getByRole('region', { name: '队列与 Turn 控制' })
+      const action = cancel ? controls.getByRole('button', { name: /^停止当前 Turn / }) : controls.getByRole('button', { name: deny ? '拒绝操作' : '批准操作', exact: true })
+      await action.waitFor({ state: 'visible' })
+      await page.screenshot({ path: join(evidenceDir, '01-real-pi-http-call-pending.png'), fullPage: true })
+      if (!timeout) await action.click()
+    } else {
+      await page.goto(`${origin}/approvals`)
+      await page.getByText(pending.title, { exact: true }).waitFor()
+      await page.screenshot({ path: join(evidenceDir, '01-real-pi-http-call-pending.png'), fullPage: true })
+      await page.getByText(pending.title, { exact: true }).click()
+      await page.getByRole('button', { name: '批准', exact: true }).click()
+    }
+    const events = await eventually(() => api(`/sessions/${created.session.id}/events?fromSeq=1&limit=1000`), value => value.events?.some(event => event.payload.kind === 'turn.finished' && (cancel || event.payload.outcome === 'completed')) && (deny || cancel || timeout ? requests.length === 0 : requests.length === 1), 'Pi 恢复、fixture 请求与 turn 完成', timeout ? 390_000 : 90_000)
+    const terminalTurn = events.events.find(event => event.payload.kind === 'turn.finished')
+    if (!cancel) assert.equal(terminalTurn?.payload.outcome, 'completed', 'approval/denial/timeout must finish the native Pi Turn')
+    const usageEvents = events.events.filter(event => event.payload.kind === 'usage.updated' && event.payload.usage?.source === 'runtime')
+    assert.ok(usageEvents.some(event => event.payload.usage.scope === 'operation' && event.payload.usage.inputTokens > 0 && event.payload.usage.outputTokens > 0 && event.payload.usage.totalTokens >= event.payload.usage.inputTokens + event.payload.usage.outputTokens), 'native Pi must persist nonzero finalized Runtime usage in Journal')
+    await writeFile(join(evidenceDir, 'usage-events.json'), JSON.stringify({ count: usageEvents.length, samples: usageEvents.map(event => ({ seq: event.seq, turnId: event.payload.turnId, scope: event.payload.usage.scope, inputTokens: event.payload.usage.inputTokens, outputTokens: event.payload.usage.outputTokens, totalTokens: event.payload.usage.totalTokens })) }, null, 2))
+    if (timeout) {
+      const expired = events.events.find(event => event.payload.kind === 'approval.expired' && event.payload.approvalId === toolCallId)
+      const finished = events.events.find(event => event.payload.kind === 'turn.finished')
+      assert.equal(expired?.payload.reason, 'timeout', 'real pending approval must expire by its own timer')
+      assert.equal(finished?.payload.outcome, 'completed', 'Pi must receive timed-out tool result and complete Turn')
+      const requested = events.events.find(event => event.payload.kind === 'approval.requested' && event.payload.approvalId === toolCallId)
+      assert.ok(Date.parse(expired.occurredAt) - Date.parse(requested?.occurredAt) >= 295_000, 'native approval must remain pending for five minutes')
+      const invocation = events.events.find(event => event.payload.kind === 'tool.started' && event.payload.toolName === 'http_call' && event.payload.input?.toolCallId === toolCallId)
+      assert.ok(invocation, 'timed-out approval maps to native Pi http_call invocation')
+      const output = events.events.filter(event => event.payload.kind === 'tool.output.delta' && event.payload.toolCallId === invocation.payload.toolCallId)
+      const terminal = events.events.find(event => event.payload.kind === 'tool.finished' && event.payload.toolCallId === invocation.payload.toolCallId)
+      const text = output.map(event => event.payload.text).join('')
+      const elapsedMs = Date.parse(expired.occurredAt) - Date.parse(requested.occurredAt)
+      await writeFile(join(evidenceDir, 'timeout-events.json'), JSON.stringify({ reason: expired.payload.reason, elapsedMs, nativeToolCallId: invocation.payload.toolCallId, startedSeq: invocation.seq, expiredSeq: expired.seq, toolOutputSeqs: output.map(event => event.seq), toolOutputMatched: /approval_denied: Connector call was denied/.test(text), toolOutputFailureCodes: [...new Set(text.match(/\b(?:approval_denied|AbortError|TimeoutError|UND_ERR_HEADERS_TIMEOUT|ECONNRESET)\b/g) ?? [])], toolFinishedSeq: terminal?.seq ?? null, exitCode: terminal?.payload.exitCode ?? null, turnFinishedSeq: finished.seq, turnOutcome: finished.payload.outcome, nativeSequence: events.events.filter(event => ['tool.started', 'tool.output.delta', 'tool.finished', 'turn.finished', 'approval.expired'].includes(event.payload.kind)).map(event => ({ seq: event.seq, kind: event.payload.kind, toolCallId: event.payload.toolCallId ?? null, exitCode: event.payload.kind === 'tool.finished' ? event.payload.exitCode : undefined })) }, null, 2))
+      assert.match(text, /approval_denied: Connector call was denied/, 'Pi must receive the terminal Connector denial, not a transport error')
+      assert.equal(terminal?.payload.exitCode, 1, 'timed-out connector ends with failed native tool')
+      assert.ok(expired.seq < terminal.seq && terminal.seq < finished.seq, 'timeout precedes native tool result, which precedes Turn completion')
+      assert.ok([invocation, ...output, terminal, finished].every(event => event.payload.turnId === requested.payload.turnId), 'all terminal events belong to the same Turn')
 
-    await page.getByText(pending.title, { exact: true }).click()
-    await page.getByRole('button', { name: '批准', exact: true }).click()
-    const events = await eventually(() => api(`/sessions/${created.session.id}/events?fromSeq=1&limit=1000`), value => value.events?.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'completed') && requests.length === 1, 'Pi 恢复、fixture 请求与 turn 完成', 180_000)
-    assert.equal(requests[0].method, 'POST')
-    assert.equal(requests[0].url, '/items')
-    assert.deepEqual(requests[0].body, { source: 'real-pi', title: 'approval fixture' })
+    }
+    if (cancel) {
+      const finished = events.events.find(event => event.payload.kind === 'turn.finished')
+      assert.equal(finished.payload.outcome, 'cancelled', 'explicit stop must not turn native abort into provider failure')
+      assert.ok(events.events.some(event => event.payload.kind === 'session.runtime.changed' && event.payload.state === 'stopping'))
+    }
+    if (!deny && !cancel && !timeout) {
+      assert.equal(requests[0].method, 'POST')
+      assert.equal(requests[0].url, '/items')
+      assert.deepEqual(requests[0].body, { source: 'real-pi', title: 'approval fixture' })
+    } else assert.equal(requests.length, 0, 'denied, cancelled or timed out connector cannot write fixture')
     assert.ok(events.events.some(event => event.payload.kind === 'approval.requested' && event.payload.approvalId === toolCallId))
-    assert.ok(events.events.some(event => event.payload.kind === 'approval.resolved' && event.payload.approvalId === toolCallId && event.payload.decision === 'approve'))
-    await page.reload()
-    await page.getByText('已批准', { exact: true }).first().waitFor()
+    if (cancel || timeout) {
+      assert.ok(events.events.some(event => event.payload.kind === 'approval.expired' && event.payload.approvalId === toolCallId && event.payload.reason === (timeout ? 'timeout' : 'turn_released')), 'negative path expires approval without a human decision')
+      assert.equal(events.events.some(event => event.payload.kind === 'approval.resolved' && event.payload.approvalId === toolCallId), false)
+    } else assert.ok(events.events.some(event => event.payload.kind === 'approval.resolved' && event.payload.approvalId === toolCallId && event.payload.decision === (deny ? 'deny' : 'approve')))
+    if (fail) {
+      const invocation = events.events.find(event => event.payload.kind === 'tool.started' && event.payload.toolName === 'http_call' && event.payload.input?.toolCallId === toolCallId)
+      assert.ok(invocation, 'fixture 503 must originate from the expected native Pi tool')
+      const terminal = events.events.find(event => event.payload.kind === 'tool.finished' && event.payload.toolCallId === invocation.payload.toolCallId)
+      const output = events.events.filter(event => event.payload.kind === 'tool.output.delta' && event.payload.toolCallId === invocation.payload.toolCallId)
+      const combined = output.map(event => event.payload.text).join('')
+      // Pi turns thrown Connector failures into tool-error text, not a JSON
+      // result. Require the full structured code/message pair in the matched
+      // native invocation, not a coincidental `503` in request metadata.
+      const upstreamError = /^upstream_error: Connector upstream returned an error$/.test(combined.trim())
+      await writeFile(join(evidenceDir, 'failure-events.json'), JSON.stringify({ upstreamFixtureStatus: requests.length === 1 ? 503 : null, connectorErrorCodeMatched: upstreamError, nativeToolCallId: invocation.payload.toolCallId, outputSeqs: output.map(event => event.seq), toolExitCode: terminal?.payload.exitCode ?? null, turnOutcome: terminalTurn.payload.outcome }, null, 2))
+      assert.equal(upstreamError, true, 'native Pi must receive the exact Connector upstream_error without request metadata')
+      assert.equal(terminal?.payload.exitCode, 1, 'failed Connector execution must fail the native Pi tool')
+      assert.ok(terminal.seq < terminalTurn.seq, 'tool failure precedes completed Turn')
+      assert.ok([invocation, ...output, terminal].every(event => event.payload.turnId === terminalTurn.payload.turnId))
+    }
+    if (deny) {
+      const invocation = events.events.find(event => event.payload.kind === 'tool.started' && event.payload.toolName === 'http_call' && event.payload.input?.toolCallId === toolCallId)
+      assert.ok(invocation, 'connector approval ID must map to the native Pi http_call invocation')
+      const terminal = events.events.filter(event => event.payload.kind === 'tool.finished').map(event => ({ seq: event.seq, kind: event.payload.kind, toolCallId: event.payload.toolCallId, exitCode: event.payload.exitCode }))
+      await writeFile(join(evidenceDir, 'denial-events.json'), JSON.stringify({ decision: 'deny', nativeToolCallId: invocation.payload.toolCallId, finished: terminal, turnOutcomes: events.events.filter(event => event.payload.kind === 'turn.finished').map(event => event.payload.outcome) }, null, 2))
+      assert.ok(terminal.some(event => event.toolCallId === invocation.payload.toolCallId && event.exitCode === 1), 'denied http_call must finish with exitCode 1')
+    }
+    await eventually(() => api(`/approvals?projectId=${project.id}&status=${cancel || timeout ? 'expired' : deny ? 'denied' : 'approved'}`), value => value.items?.some(item => item.projectionKey === pending.projectionKey && item.status === (cancel || timeout ? 'expired' : deny ? 'denied' : 'approved')), '审批投影终态')
+    if (!nextApproval) {
+      await page.reload()
+      // The legacy list defaults to pending-only; select approved after refresh.
+      await page.getByRole('combobox', { name: '筛选状态' }).click()
+      await page.getByRole('option', { name: '已批准' }).click()
+      await page.getByText(pending.title, { exact: true }).waitFor()
+      await page.getByText('已批准', { exact: true }).first().waitFor()
+    } else {
+      await page.reload()
+      await page.getByRole('region', { name: '会话对话' }).getByText(cancel || timeout ? '审批已失效' : deny ? '已拒绝' : '已批准', { exact: false }).first().waitFor()
+    }
     await page.screenshot({ path: join(evidenceDir, '02-real-pi-http-call-approved.png'), fullPage: true })
     await page.goto(`${origin}/timeline`)
     await page.getByRole('heading', { name: '时间线' }).waitFor()
     await page.screenshot({ path: join(evidenceDir, '03-real-pi-timeline.png'), fullPage: true })
-    await writeFile(join(evidenceDir, 'summary.md'), `# G44b 真实 Pi HTTP Connector 审批验收\n\n- 结果：通过\n- Pi 模型：\`${requestedModel}\`\n- Worker：\`${workerId}\`\n- Session：\`${created.session.id}\`\n- Connector：\`${connector.id}\` revision ${connector.revision}\n- Approval：\`${pending.projectionKey}\`\n- fixture：收到 1 次 \`POST /items\`，请求体为 \`${JSON.stringify(requests[0].body)}\`\n- Journal：同时包含 \`approval.requested\`、\`approval.resolved(approve)\`、\`turn.finished(completed)\`\n- 截图：\`.scratch/g44b-real/01-real-pi-http-call-pending.png\`、\`.scratch/g44b-real/02-real-pi-http-call-approved.png\`、\`.scratch/g44b-real/03-real-pi-timeline.png\`\n`)
+    if (process.env.WEMUX_G44B_NEXT_DIST) {
+      await page.goto(`${origin}/next/projects/${project.id}?task=${created.session.taskId}&session=${created.session.id}`)
+      await page.getByRole('region', { name: '会话对话' }).waitFor()
+      await page.getByText('已验证 Journal 历史', { exact: true }).waitFor()
+      await page.getByText(cancel || timeout ? '审批已失效' : deny ? '已拒绝' : '已批准', { exact: false }).first().waitFor()
+      const usage = page.getByRole('region', { name: '会话历史' }).locator(usageEvents.map(event => `li[data-journal-seq="${event.seq}"]`).join(', '))
+      await usage.first().getByRole('heading', { name: '用量记录' }).waitFor()
+      assert.match((await usage.allTextContents()).join(''), /输入 Token.*\d+/)
+      await page.screenshot({ path: join(evidenceDir, '04-next-real-pi-approved.png'), fullPage: true })
+      if (process.env.WEMUX_G44B_NEXT_MODEL) {
+        assert.ok(nextApproval, 'Next model selection requires Next approval mode')
+        const nextModel = process.env.WEMUX_G44B_NEXT_MODEL.replace('/', '::')
+        assert.notEqual(nextModel, selectedModel.modelId)
+        assert.ok(pi.modelSwap && pi.models.some(model => model.modelId === nextModel), 'second model must be advertised as switchable')
+        const controls = page.getByRole('region', { name: '队列与 Turn 控制' })
+        const model = controls.getByRole('region', { name: '模型选择' })
+        const retry = controls.getByRole('button', { name: '重试原控制请求' })
+        if (await retry.count()) {
+          // Reload does not trust a previously admitted decision; explicitly
+          // revalidate the same command/Turn before issuing a different control.
+          await retry.click()
+          await controls.getByText('控制请求已接收。', { exact: false }).waitFor()
+        }
+        await model.getByRole('combobox', { name: '选择后续模型' }).selectOption(nextModel)
+        await model.getByRole('button', { name: '应用到后续 Turn' }).click()
+        await eventually(() => api(`/sessions/${created.session.id}/events?fromSeq=1&limit=1000`),
+          value => value.events.some(event => event.payload.kind === 'model.changed' && event.payload.modelId === nextModel), '真实 Worker 模型切换')
+        await page.reload()
+        await model.getByText(`已确认选择：${nextModel}。`, { exact: false }).waitFor()
+        const composer = page.getByRole('region', { name: '消息提交' })
+        await composer.getByLabel('新消息草稿', { exact: true }).fill('只回复 WEMUX_G44B_MODEL_SWITCH_OK，不要调用工具。')
+        await composer.getByRole('button', { name: '发送新消息', exact: true }).click()
+        const afterSwitch = await eventually(() => api(`/sessions/${created.session.id}/events?fromSeq=1&limit=1000`),
+          value => value.events.filter(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'completed').length >= 2, '切模型后的 Pi 第二轮', 180_000)
+        assert.deepEqual(afterSwitch.events.filter(event => event.payload.kind === 'turn.started').map(event => event.payload.modelId), [selectedModel.modelId, nextModel])
+        const turns = afterSwitch.events.filter(event => event.payload.kind === 'turn.started')
+        const assistantEvents = afterSwitch.events.filter(event => event.payload.kind === 'assistant.text.delta' && event.payload.turnId === turns[1].payload.turnId)
+        assert.ok(assistantEvents.length, 'second Turn has assistant Journal deltas')
+        assert.match(assistantEvents.map(event => event.payload.text).join(''), /WEMUX_G44B_MODEL_SWITCH_OK/)
+        assert.equal(afterSwitch.events.filter(event => event.payload.kind === 'model.changed' && event.payload.modelId === nextModel).length, 1)
+        assert.equal((await api(`/sessions/${created.session.id}`)).binding.modelId, nextModel)
+        assert.equal(requests.length, 1, 'second Turn must not repeat approved connector write')
+        await page.reload()
+        const history = page.getByRole('region', { name: '会话历史' })
+        const assistant = history.locator(assistantEvents.map(event => `li[data-journal-seq="${event.seq}"]`).join(', '))
+        await assistant.first().getByRole('heading', { name: '助手', exact: true }).waitFor()
+        await eventually(() => assistant.allTextContents(), contents => contents.join('').includes('WEMUX_G44B_MODEL_SWITCH_OK'), 'assistant deltas restored after reload')
+        // Negative control: user prompt remains visible while the exact assistant
+        // Journal entries are removed. The selector must not match that prompt.
+        await assistant.evaluateAll(elements => elements.forEach(element => element.remove()))
+        assert.equal(await assistant.count(), 0, 'assistant-specific selector must not match the user prompt')
+        await history.getByRole('heading', { name: '用户消息' }).last().waitFor()
+        await page.reload()
+        await assistant.first().getByRole('heading', { name: '助手', exact: true }).waitFor()
+        await eventually(() => assistant.allTextContents(), contents => contents.join('').includes('WEMUX_G44B_MODEL_SWITCH_OK'), 'assistant deltas recovered after negative control')
+        await page.screenshot({ path: join(evidenceDir, '05-next-real-pi-model-switched.png'), fullPage: true })
+      }
+    }
+    assert.deepEqual(pageErrors, [], 'browser pageerror must stay empty throughout the full journey')
+    await writeFile(join(evidenceDir, 'summary.md'), `# G44b 真实 Pi HTTP Connector 审批验收\n\n- 结果：通过；视口：${viewport.width}×${viewport.height}\n- Pi 模型：\`${requestedModel}\`\n- 后续模型：${process.env.WEMUX_G44B_NEXT_MODEL ?? '未测试'}\n- 浏览器决定入口：${nextApproval ? 'Next' : 'Legacy'}；Task UI 创建并首发：${fullUiJourney ? '是' : '否'}；未捕获页面错误：${pageErrors.length}\n- Worker：\`${workerId}\`\n- Task：\`${task.id}\`；Session：\`${created.session.id}\`（显式 Task 创建，不经 Run）\n- Connector：\`${connector.id}\` revision ${connector.revision}\n- Approval：\`${pending.projectionKey}\`\n- fixture：收到 ${requests.length} 次 \`POST /items\`，预期 HTTP 状态 ${fail ? 503 : 200}（拒绝/超时/停止则无调用），请求体为 \`${JSON.stringify(requests[0]?.body ?? null)}\`\n- Journal：包含 \`approval.requested\`、\`${cancel || timeout ? `approval.expired(${timeout ? 'timeout' : 'turn_released'})` : `approval.resolved(${deny ? 'deny' : 'approve'})`}\`、\`turn.finished(${cancel ? 'cancelled' : 'completed'})\`\n- 截图：当前证据目录的 01～04，启用后续模型时还包含 05。\n`)
     await rm(join(blockedDir, 'BLOCKED.md'), { force: true })
-    log('REAL PASS: Pi → http_call → pending → approve → fixture → turn completed')
+    log(fail ? 'REAL PASS: Pi → http_call → approve → fixture 503 → upstream_error → failed native tool → turn completed' : timeout ? 'REAL PASS: Pi → http_call → pending five minutes → timeout → no fixture write → turn completed' : cancel ? 'REAL PASS: Pi → http_call → pending → stop Turn → approval expired → no fixture write → turn cancelled' : deny ? 'REAL PASS: Pi → http_call → pending → deny → no fixture write → failed tool → turn finished' : 'REAL PASS: Pi → http_call → pending → approve → fixture → turn completed')
   } catch (error) {
     await writeFile(join(evidenceDir, 'failed-server.log'), logs.server)
     await writeFile(join(evidenceDir, 'failed-worker.log'), logs.worker)
