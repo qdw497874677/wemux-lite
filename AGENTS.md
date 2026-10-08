@@ -65,6 +65,9 @@ node apps/worker/dist/cli.js tailscale --server http://100.101.102.103:8010
 # Server 也有自检：GET /api/cluster/tailnet（管理员鉴权）→ 注册弹窗据此推荐 tailnet 地址
 # 沙箱内无真实 tailscale；测试桩在 /tmp/fake-bin/tailscale，PATH=/tmp/fake-bin:$PATH 启动 server 即可验证
 # 浏览器 E2E：playwright-core@1.61.0 恰好匹配沙箱已缓存的 chromium-1228，环境在 /tmp/wemux-tailnet-pw
+# Chromium 可执行文件在 /opt/data/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome（/root/.cache 下没有）：
+# PLAYWRIGHT_CORE_PATH=/tmp/wemux-tailnet-pw/node_modules/playwright-core/index.mjs PLAYWRIGHT_CHROMIUM_PATH=/opt/data/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome
+# web-next 浏览器用例与 apps/e2e 脚本都要求 WEMUX_NEXT_TEST_DIST 指向 /tmp/ 下的一次性 dist 拷贝（脚本断言 startsWith('/tmp/')）
 ```
 
 沙箱陷阱（真实踩过）：
