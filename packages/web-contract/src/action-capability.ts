@@ -1,7 +1,7 @@
 import { taskStatuses, workflowTargets, type TaskStatus } from '@wemux/domain'
 import { runStatuses } from './task-platform.js'
 
-export type CapabilityReasonCode = 'allowed' | 'invalid_metadata' | 'invalid_transition' | 'active_run' | 'assignment_changed' | 'workspace_not_ready' | 'runtime_unavailable' | 'reuse_ineligible' | 'not_found'
+export type CapabilityReasonCode = 'task_deleted' | 'allowed' | 'invalid_metadata' | 'invalid_transition' | 'active_run' | 'assignment_changed' | 'workspace_not_ready' | 'runtime_unavailable' | 'reuse_ineligible' | 'not_found'
 export interface ActionCapability { readonly allowed: boolean; readonly reasonCode: CapabilityReasonCode; readonly reason: string }
 export type CapabilityAction = 'transition' | 'launch_new' | 'launch_reuse' | 'cancel' | 'review_request' | 'review_approve' | 'review_changes_requested' | 'send'
 /** Facts, not precomputed eligibility. Unknown inputs intentionally fail closed. Authorization and CAS remain application boundaries. */
@@ -19,6 +19,12 @@ export interface RunCapabilities { cancel: ActionCapability; reviewRequest: Acti
 const record = (value: unknown): Record<string, unknown> | undefined => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined
 const text = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0
 const status = (value: unknown): value is TaskStatus => taskStatuses.includes(value as TaskStatus)
+/** Only restore a previously completed Task along its recorded block/cancel chain. */
+const restoresDone = (task: Record<string, unknown>): boolean => {
+  if (task.status === 'blocked') return task.blockedFrom === 'done' || task.blockedFrom === 'cancelled' && task.cancelledFrom === 'done'
+  if (task.status === 'cancelled') return task.cancelledFrom === 'done' || task.cancelledFrom === 'blocked' && task.blockedFrom === 'done'
+  return false
+}
 const assignment = (value: unknown) => { const a = record(value); return a && ['workspaceId', 'workerId', 'agentKey', 'modelId'].every(k => text(a[k])) ? a : undefined }
 const same = (a: Record<string, unknown>, b: Record<string, unknown>) => ['workspaceId', 'workerId', 'agentKey', 'modelId'].every(k => a[k] === b[k])
 const deny = (reasonCode: CapabilityReasonCode, reason: string): ActionCapability => ({ allowed: false, reasonCode, reason })
@@ -39,15 +45,20 @@ const allowed: ActionCapability = { allowed: true, reasonCode: 'allowed', reason
 export const unavailableCapability: ActionCapability = deny('invalid_metadata', 'Authoritative capability data unavailable')
 /** The single semantic decision source for authoritative readers, mutations and Web consumers. */
 export function evaluateCapability(action: CapabilityAction, f: CapabilityFacts): ActionCapability {
+  return evaluate(action, f, false)
+}
+function evaluate(action: CapabilityAction, f: CapabilityFacts, authorizedReviewDecision: boolean): ActionCapability {
   const task = record(f.task), run = record(f.run), review = record(f.review)
   const workspace = record(f.workspace), worker = record(f.worker), session = record(f.session)
   const runs = Array.isArray(f.runs) ? f.runs.map(record) : undefined
+  if (task?.deletedAt) return deny('task_deleted', 'Task is permanently deleted')
   if (action !== 'send') {
     if (!task || !text(task.id) || !text(task.projectId) || !status(task.status) || !Number.isSafeInteger(task.version) || Number(task.version) < 1 || !runs || runs.some(r => !r || r.taskId !== task.id || r.projectId !== task.projectId || !text(r.id) || !runStatuses.includes(r.status as typeof runStatuses[number]) || !assignment(r.snapshot) || !text(r.sessionId) || !Number.isSafeInteger(r.attempt) || Number(r.attempt) < 1)) return deny('invalid_metadata', 'Task or Run relationship metadata is incomplete')
     const metadata = record(task.metadataJson)
     if (!metadata || metadata.schemaVersion !== 1 || !record(metadata.values) || !('assignee' in task) || (task.assignee !== null && !assignment(task.assignee)) || !('blockedFrom' in task) || !('cancelledFrom' in task) || (task.blockedFrom !== null && !status(task.blockedFrom)) || (task.cancelledFrom !== null && !status(task.cancelledFrom))) return deny('invalid_metadata', 'Task workflow metadata is incomplete')
     if ((task.status === 'blocked' && (!status(task.blockedFrom) || task.blockedFrom === 'blocked')) || (task.status === 'cancelled' && (!status(task.cancelledFrom) || task.cancelledFrom === 'cancelled'))) return deny('invalid_metadata', 'Task restoration metadata is incomplete')
   }
+  if (task?.deletedAt) return deny('task_deleted', 'Task is permanently deleted')
   if (action !== 'send') {
     if (new Set(runs!.map(r => r!.id)).size !== runs!.length || new Set(runs!.map(r => r!.attempt)).size !== runs!.length) return deny('invalid_metadata', 'Duplicate Run history identity')
     if ((f.run != null && !run) || (f.review != null && !review)) return deny('invalid_metadata', 'Selected relationship metadata is malformed')
@@ -57,28 +68,42 @@ export function evaluateCapability(action: CapabilityAction, f: CapabilityFacts)
     if (action === 'transition' && task!.currentReviewId != null && (!review || review.id !== task!.currentReviewId || review.status !== 'requested' || review.closedAt !== null)) return deny('invalid_metadata', 'Current review metadata is incomplete')
   }
   const active = runs?.some(r => r && ['pending', 'running', 'cancelling'].includes(String(r.status))) ?? false
+  const policy = record(task?.metadataJson)?.values && record(record(task?.metadataJson)?.values)?.reviewPolicy
+  const configuredReview = policy !== undefined && policy !== 'none'
   if (action === 'transition') {
     if (!status(f.target)) return deny('invalid_transition', 'Transition not permitted')
     if (task!.status === f.target) return allowed
+    if (configuredReview && (task!.status === 'in_review' || f.target === 'in_review')) return deny('invalid_transition', 'Configured review requires an authorized review workflow')
+    if (f.target === 'in_review') {
+      const latest = runs!.reduce<Record<string, unknown> | undefined>((last, next) => !last || Number(next!.attempt) > Number(last.attempt) ? next : last, undefined)
+      if (active) return deny('active_run', 'Review requires a terminal Run and no active Task Run')
+      if (latest?.status !== 'succeeded') return deny('invalid_transition', 'Review requires the latest succeeded Run')
+    }
     if (!workflowTargets(task as { status: TaskStatus; blockedFrom: unknown; cancelledFrom: unknown }).includes(f.target)) return deny('invalid_transition', 'Transition not permitted')
-    return active && ['done', 'cancelled'].includes(f.target) ? deny('active_run', 'Task has an active Run') : allowed
+    if (active && ['done', 'cancelled'].includes(f.target)) return deny('active_run', 'Task has an active Run')
+    if (f.target === 'done' && !authorizedReviewDecision && !restoresDone(task!)) return deny('invalid_transition', 'Use explicit completion or an authorized review decision')
+    return allowed
   }
   if (action === 'cancel' || action.startsWith('review_')) {
     if (!run || !runs?.some(r => r?.id === run.id) || run.taskId !== task!.id || run.projectId !== task!.projectId || !assignment(run.snapshot) || !text(run.sessionId) || !runStatuses.includes(run.status as typeof runStatuses[number])) return deny('not_found', 'Run not found in this Task')
     if (action === 'cancel') return allowed // Terminal cancellation is a legal no-op.
+    if (configuredReview) return deny('invalid_transition', 'Configured review policy has no authorized decision workflow yet')
     if (review && (review.taskRunId !== run.id || review.taskId !== task!.id || review.projectId !== task!.projectId || !text(review.id) || !['requested', 'approved', 'changes_requested'].includes(String(review.status)))) return deny('invalid_metadata', 'Review relationship metadata is incomplete')
     const decision = action === 'review_request' ? 'requested' : action === 'review_approve' ? 'approved' : 'changes_requested'
     if (decision === 'requested') {
+      if (run.status !== 'succeeded') return deny(['pending', 'running', 'cancelling'].includes(String(run.status)) ? 'active_run' : 'invalid_transition', 'Review requires a succeeded Run')
       if (review && task!.currentReviewId === review.id && review.status === 'requested' && review.closedAt === null) return allowed
       if (task!.currentReviewId != null) return deny('invalid_transition', 'Task already has a current review')
       if (runs!.some(r => Number(r!.attempt) > Number(run.attempt))) return deny('invalid_transition', 'Review must use latest Run')
     } else {
+      if (decision === 'approved' && run.status !== 'succeeded') return deny('invalid_transition', 'Approval requires a succeeded Run')
       if (!review) return deny('not_found', 'Review not requested')
       if (review.status !== 'requested' || review.closedAt !== null || task!.currentReviewId !== review.id) return deny('invalid_transition', 'Review is not the current pending cycle')
+      if (runs!.some(r => Number(r!.attempt) > Number(run.attempt))) return deny('invalid_transition', 'Review Run is no longer latest')
     }
     if (active) return deny('active_run', 'Review requires a terminal Run and no active Task Run')
     if (decision !== 'requested' && task!.status !== 'in_review') return deny('invalid_transition', 'Task must still be in review')
-    return evaluateCapability('transition', { ...f, target: decision === 'requested' ? 'in_review' : decision === 'approved' ? 'done' : 'blocked' })
+    return evaluate('transition', { ...f, target: decision === 'requested' ? 'in_review' : decision === 'approved' ? 'done' : 'blocked' }, decision === 'approved')
   }
   if (!['launch_new', 'launch_reuse', 'send'].includes(action)) return deny('invalid_metadata', 'Unknown capability action')
   let a = assignment(f.assignment ?? task?.assignee)
@@ -87,9 +112,14 @@ export function evaluateCapability(action: CapabilityAction, f: CapabilityFacts)
     a = assignment({ workspaceId: binding?.workspaceId, workerId: agent?.workerId, agentKey: agent?.agentKey, modelId: binding?.modelId })
     if (!session || session.deletedAt !== null || !a || session.workspaceId !== a.workspaceId || !text(session.projectId) || !text(session.ownerId) || !text(session.id)) return deny('invalid_metadata', 'Session binding metadata is incomplete')
   } else {
+    // An accepted completion covers the latest execution. Reopening is explicit:
+    // a new Run while done (or on its block/cancel restoration chain) would let
+    // a later PATCH restore an obsolete approval without reviewing that Run.
+    if (task!.status === 'done' || restoresDone(task!)) return deny('invalid_transition', 'Reopen the completed Task before starting another Run')
     const current = assignment(task!.assignee)
     if (!a || !current || !same(a, current)) return deny('assignment_changed', 'Assignment changed; retain draft and explicitly confirm current assignment')
     if (active) return deny('active_run', 'Task already has an active Run')
+    if (configuredReview && task!.currentReviewId != null) return deny('invalid_transition', 'A pending review must be resolved before starting another Run')
     const binding = record(f.binding)
     if (!binding || binding.taskId !== task!.id || binding.projectId !== task!.projectId || binding.workspaceId !== a.workspaceId) return deny('assignment_changed', 'Assignment workspace is not bound to Task')
   }
@@ -104,7 +134,7 @@ export function evaluateCapability(action: CapabilityAction, f: CapabilityFacts)
   if (action === 'launch_reuse') {
     const binding = record(session?.binding), agent = record(binding?.agent)
     const actual = assignment({ workspaceId: binding?.workspaceId, workerId: agent?.workerId, agentKey: agent?.agentKey, modelId: binding?.modelId })
-    if (!session || session.deletedAt !== null || session.ownerId !== f.actor || session.projectId !== task!.projectId || !(session.taskId === task!.id || runs?.some(r => r?.sessionId === session.id)) || !actual || !same(actual, a!)) return deny('reuse_ineligible', 'Session ownership or binding mismatch; explicitly confirm a new Session')
+    if (!session || session.deletedAt !== null || session.ownerId !== f.actor || session.projectId !== task!.projectId || session.taskId !== task!.id || !runs?.some(r => r?.taskId === task!.id && r?.sessionId === session.id) || !actual || !same(actual, a!)) return deny('reuse_ineligible', 'Session ownership or binding mismatch; explicitly confirm a new Session')
     if (f.idleReason !== null) return deny('reuse_ineligible', `${f.idleReason ?? 'Session idleness is unknown'}; explicitly confirm a new Session`)
   }
   return allowed

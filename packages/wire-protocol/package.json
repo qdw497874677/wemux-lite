@@ -6,6 +6,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./file-admission-node": {
+      "types": "./dist/file-admission-node.d.ts",
+      "import": "./dist/file-admission-node.js"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"

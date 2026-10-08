@@ -32,6 +32,10 @@ export interface Worker {
 }
 
 export interface Project {
+  /** Absent on historical projects means no mandatory review. */
+  readonly reviewPolicy?: 'none' | 'agent' | 'human' | 'multi-stage'
+  /** Dedicated CAS for the project review default; historical records read as version 1. */
+  readonly reviewPolicyVersion?: number
   readonly id: ProjectId
   readonly teamId: TeamId
   readonly ownerId: UserId
@@ -52,6 +56,8 @@ export interface WorkspaceProvisioningAttempt {
   readonly commandId: string
   readonly startedAt: string
   readonly reportedAt?: string
+  /** Validated current command terminal report only; never inferred from ACK/receipt/legacy reportedAt. */
+  readonly terminalReport?: { readonly commandId: string; readonly workerId: WorkerId; readonly status: 'ready' | 'failed'; readonly occurredAt: string }
   /** True only after issuing a replacement command, never for request coalescing. */
   readonly replacedAttempt?: boolean
   readonly requests: Readonly<Record<string, string>>

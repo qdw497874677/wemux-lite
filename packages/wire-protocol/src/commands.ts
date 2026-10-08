@@ -59,6 +59,7 @@ export type WorkerCommand =
   | {
       readonly kind: 'runtime.approval.resolve'
       readonly sessionId: SessionId
+      readonly turnId: TurnId
       readonly approvalId: ApprovalId
       readonly decision: 'approve' | 'deny'
       /** Cluster account that made the approval decision; absent for Worker-local operation. */

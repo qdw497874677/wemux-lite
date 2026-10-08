@@ -1,8 +1,17 @@
-import type { ProjectId, SessionId, TurnId, WorkerId, WorkspaceId } from './ids.js'
+import type { ProjectId, SessionId, TurnId, UserId, WorkerId, WorkspaceId } from './ids.js'
 import type { AgentKey } from './values.js'
 
 export const capabilityToolNames = [
   'session.info',
+  'project.list',
+  'project.get',
+  'project.resources',
+  'task.list',
+  'task.get',
+  'task.create',
+  'task.sessions',
+  'session.get',
+  'session.events',
   'agent.list',
   'agent.send',
   'agent.inbox.list',
@@ -80,6 +89,10 @@ export interface CapabilityGrantClaims {
   readonly sessionId: SessionId
   readonly turnId: TurnId
   readonly actorAgentId: SessionId
+  /** Issued from the authenticated enqueue boundary, never from a tool argument. */
+  readonly actorUserId?: UserId
+  /** Account authorization generation captured at issuance; account restore never revives old grants. */
+  readonly actorAuthVersion?: number
   readonly projectId: ProjectId
   readonly workspaceId: WorkspaceId
   readonly allowedTools: readonly CapabilityToolName[]

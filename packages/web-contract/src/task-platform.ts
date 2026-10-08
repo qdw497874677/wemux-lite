@@ -28,8 +28,22 @@ export interface ReviewRequest {
   readonly decidedAt: string | null
   /** Cycle closure is not a decision: ordinary exits preserve historical status. */
   readonly closedAt: string | null
+  /** Staged policies only: 1-based position within the frozen stage chain.
+   * Absent on single-stage human reviews. */
+  readonly stageIndex?: number
+  readonly stageCount?: number
 }
 export interface ReviewActionRequest { version: number; status: ReviewStatus }
+/** A pending human review is identified separately from its Run. Decisions
+ * require an explicit request identity and a new Task-version snapshot. */
+export interface HumanReviewDecisionRequest {
+  readonly version: number
+  readonly requestId: string
+  readonly reviewId: string
+  readonly status: 'approved' | 'changes_requested'
+  readonly reason?: string
+}
+export interface HumanReviewDecisionResponse { readonly task: TaskDetail; readonly review: ReviewRequest }
 export interface ProjectActivityItem { cursor: number; activity: TaskActivity }
 
 export interface Assignment {
@@ -40,16 +54,27 @@ export interface Assignment {
   readonly modelId: string | null
 }
 export interface TaskSummary {
+  /** Permanent logical deletion; absent on legacy active records. History is retained. */
+  readonly deletedAt?: string | null
+  readonly deletedBy?: string | null
   readonly capabilities?: import('./action-capability.js').TaskCapabilities
   readonly id: string
   readonly projectId: string
   readonly title: string
   readonly priority: TaskPriority
   readonly status: TaskStatus
-  /** Starts at 1; only actual status/assignee changes increment this CAS version. */
+  /** Starts at 1; effective content, status or assignee changes increment this CAS version. */
   readonly version: number
   readonly assignee: Assignment | null
   readonly origin: 'manual'
+  /** Host-created Project test/quick-chat reuse identity; not Team coordination mode. */
+  readonly dedicatedConversation?: {
+    readonly ownerId: string
+    readonly workspaceId: string
+    readonly workerId: string
+    readonly agentKey: string
+    readonly scenario: 'quick-chat' | 'agent-test'
+  }
   readonly activeRun: RunSummary | null
   /** Non-negative external-link count; board/list markers need no detail requests. */
   readonly linkCount: number
@@ -63,7 +88,7 @@ export interface TaskActivity {
   readonly taskId: string
   readonly projectId: string
   readonly seq: number
-  readonly type: 'task.created' | 'task.updated' | 'task.transitioned' | 'link.changed' | 'binding.changed' | 'assignment.changed' | 'workspace.created' | 'workspace.retried' | 'workspace.provisioning' | 'run.created' | 'run.started' | 'run.finished'
+  readonly type: 'task.deleted' | 'task.created' | 'task.updated' | 'task.transitioned' | 'link.changed' | 'binding.changed' | 'assignment.changed' | 'workspace.created' | 'workspace.retried' | 'workspace.provisioning' | 'run.created' | 'run.started' | 'run.finished'
   readonly actor: string
   readonly requestId: string
   readonly occurredAt: string
@@ -106,10 +131,14 @@ export interface TaskContentPatch {
   readonly acceptanceCriteria?: string | null
   readonly priority?: TaskPriority
 }
+export interface TaskDeleteRequest { readonly version: number; readonly requestId: string }
+export interface TaskDeleteReceipt { readonly taskId: string; readonly version: number; readonly deletedAt: string }
 export interface TaskCAS { readonly version: number }
-/** A mixed PATCH requires version and commits atomically; content-only does not. */
+/** Status requires version. Content accepts optional version during expand phase;
+ * every effective content write (including unversioned legacy writes) advances version once.
+ * A supplied version is checked even for a no-op; valid no-ops do not advance version. */
 export type TaskPatch = TaskContentPatch & (
-  | { readonly status?: never; readonly assignee?: never; readonly version?: never }
+  | { readonly status?: never; readonly assignee?: never; readonly version?: number }
   | (TaskCAS & { readonly status: TaskStatus; readonly assignee?: Assignment | null })
   | (TaskCAS & { readonly assignee: Assignment | null; readonly status?: TaskStatus })
 )
@@ -118,6 +147,8 @@ export interface AssignmentRequest extends TaskCAS { readonly assignee: Assignme
 /** Required when unbinding the current assignment; server validates this condition. */
 export interface UnbindWorkspaceRequest { readonly version?: number }
 export interface CreateTaskWorkspaceRequest {
+  /** Optional explicit create identity; tracing headers remain independent. */
+  readonly requestId?: string
   readonly name: string
   readonly workerId: string
   readonly source: 'empty' | 'git'
@@ -181,8 +212,15 @@ export interface LaunchResponse { readonly run: Run }
  * Cancel after terminal returns that terminal Run unchanged; unrelated messages are untouched.
  */
 export interface CancelRunResponse { readonly run: Run }
+/** Human explicit completion, never inferred from a successful Run. */
+export interface CompletionRequest { readonly requestId: string; readonly version: number; readonly runId: string; readonly summary: string; readonly evidence: readonly string[] }
+export interface CompletionResponse { readonly task: TaskDetail; readonly runId: string }
+/** Submission opens a human review but grants no decision rights to its submitter. */
+export interface HumanReviewSubmissionRequest extends CompletionRequest {}
+export interface HumanReviewSubmissionResponse { readonly task: TaskDetail; readonly runId: string; readonly review: ReviewRequest }
 
 export const taskErrorStatus = {
+  task_deleted: 410, task_has_sessions: 409, task_has_review: 409,
   invalid_request: 400, unauthorized: 401, forbidden: 403, not_found: 404,
   request_id_conflict: 409, version_conflict: 409, active_run: 409,
   assignment_changed: 409, workspace_not_ready: 409, runtime_unavailable: 409,
@@ -211,3 +249,35 @@ export type ProjectEvent = ProjectEventBase & (
   | { readonly type: 'run.changed'; readonly taskId: string; readonly runId: string }
   | { readonly type: 'workspace.provisioning'; readonly workspaceId: string; readonly taskId?: string }
 )
+
+/** Task creation returns a persisted Session, not the richer discovery projection. */
+export interface TaskSession {
+  readonly id: string
+  readonly projectId: string
+  readonly taskId: string
+  readonly runId: string | null
+  readonly ownerId: string
+  readonly workspaceId: string
+  readonly title: string
+  readonly shareScope: 'owner-only' | 'selected-members' | 'project'
+  readonly binding: { readonly workspaceId: string; readonly agent: { readonly workerId: string; readonly agentKey: string }; readonly modelId: string | null }
+  readonly runtimeState: import('@wemux/domain').SessionRuntimeState
+  readonly archivedAt?: string | null
+  readonly deletedAt: string | null
+  readonly storageMode?: 'local' | 'replicated' | 'central'
+  readonly creation?: { readonly requestId: string; readonly fingerprint: string; readonly commandId: string }
+}
+export type CreateTaskSessionRequest = { readonly requestId: string; readonly title: string } & (
+  | { readonly workspaceId: string; readonly workerId: string; readonly agentKey: string; readonly modelId?: string | null }
+  | { readonly workspaceId?: never; readonly workerId?: never; readonly agentKey?: never; readonly modelId?: never }
+)
+export interface CreateTaskSessionResponse { readonly session: TaskSession; readonly commandId: string; readonly created: boolean }
+export interface TaskSessionView extends TaskSession {
+  readonly access: { readonly canRead: boolean; readonly canWrite: boolean; readonly canControl: boolean; readonly projectRole: 'owner' | 'manager' | 'contributor' | 'viewer' | null }
+  readonly activeTurnId: string | null
+  readonly activeTurnOwnerId: string | null
+  readonly queuedMessages: readonly { readonly commandId: string; readonly messageId: string; readonly content: string; readonly position: number | null; readonly sentByAccountId?: string }[]
+  readonly freshness: { readonly sessionId: string; readonly contiguousSeq: number; readonly workerLastSeq: number | null; readonly status: 'unknown' | 'syncing' | 'synced' | 'gap' | 'offline' | 'orphaned' }
+  readonly sendCapability: import('./action-capability.js').ActionCapability
+}
+export interface TaskSessionFilters { projectId?: string; workspaceId?: string; taskId?: string; archived?: boolean }

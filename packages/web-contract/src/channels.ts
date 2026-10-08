@@ -21,7 +21,7 @@ export interface GenericWebhookChannelDTO extends ChannelBaseDTO {
 export interface FeishuChannelDTO extends ChannelBaseDTO {
   readonly kind: 'feishu'
   readonly appIdHint: string
-  readonly verificationMode: 'verification_token' | 'encrypted'
+  readonly verificationMode: 'verification_token' | 'signature' | 'encrypted'
   readonly acceptEventSchema: '2.0'
   readonly tenantKey: string | null
 }

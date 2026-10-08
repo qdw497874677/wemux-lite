@@ -33,3 +33,16 @@ test('rejects unknown fields and the wrong payload direction', () => {
     payload: { type: 'command', commandId: randomUUID(), requestId: randomUUID(), commandType: 'cancel_run', issuedAt: new Date().toISOString(), body: { runId: randomUUID() } },
   }))
 })
+
+test('approval transport replay preserves explicit Turn and the original command body', () => {
+  const command = { kind: 'runtime.approval.resolve', sessionId: 'session', turnId: 'original-turn', approvalId: 'approval', decision: 'approve' }
+  const payload = { type: 'command', commandId: 'immutable-command', command }
+  const frame = { frameType: 'data', durability: 'durable', deliveryEpoch: 'epoch', directionSeq: 1, messageId: 'message', lane: 'command', payloadVersion: '1', expiresAt: null, payload }
+  const first = parseServerTransportFrame(JSON.parse(JSON.stringify(frame)))
+  const replay = parseServerTransportFrame(JSON.parse(JSON.stringify({ ...frame, directionSeq: 2 })))
+  assert.equal(first.frameType, 'data'); assert.equal(replay.frameType, 'data')
+  if (first.frameType === 'data' && replay.frameType === 'data') {
+    assert.deepEqual(first.payload, payload)
+    assert.deepEqual(replay.payload, first.payload)
+  }
+})

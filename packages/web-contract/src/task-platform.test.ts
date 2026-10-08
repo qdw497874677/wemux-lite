@@ -30,6 +30,7 @@ test('M1 state, active cancellation and error vocabulary is frozen', () => {
   assert.deepEqual(runStatuses, ['pending', 'running', 'cancelling', 'succeeded', 'failed', 'cancelled'])
   assert.deepEqual(activeRunStatuses, ['pending', 'running', 'cancelling'])
   assert.deepEqual(taskErrorStatus, {
+    task_deleted: 410, task_has_sessions: 409, task_has_review: 409,
     invalid_request: 400, unauthorized: 401, forbidden: 403, not_found: 404,
     request_id_conflict: 409, version_conflict: 409, active_run: 409,
     assignment_changed: 409, workspace_not_ready: 409, runtime_unavailable: 409,

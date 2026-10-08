@@ -1,3 +1,4 @@
+import { isFileWriteAdmissionType, isServerFileWriteAdmissionStructure, isWorkerFileWriteAdmissionStructure } from './file-admission.js'
 import { WEMUX_ADK_PROFILE_V1 } from '@wemux/domain'
 import type { MessageId, Timestamp, WorkerId } from '@wemux/domain'
 import type { ServerPayload, WorkerPayload } from './messages.js'
@@ -152,12 +153,12 @@ function parseServerHello(value: Record<string, unknown>): ServerTransportHello 
 
 function workerPayload(value: unknown): value is WorkerPayload {
   const payload = record(value)
-  return Boolean(payload && (['heartbeat', 'hello', 'capability', 'ack', 'event', 'fs.response', 'terminal.response', 'terminal.output', 'terminal.exit', 'sync'].includes(String(payload.type)) || isWorkerResourcePayload(payload)))
+  return Boolean(payload && (['heartbeat', 'hello', 'capability', 'ack', 'event', 'fs.response', 'terminal.response', 'terminal.output', 'terminal.exit', 'sync'].includes(String(payload.type)) || isWorkerResourcePayload(payload) || isWorkerFileWriteAdmissionStructure(payload)))
 }
 
 function serverPayload(value: unknown): value is ServerPayload {
   const payload = record(value)
-  return Boolean(payload && (['heartbeat', 'command', 'fs.request', 'terminal.request', 'sync'].includes(String(payload.type)) || isServerResourcePayload(payload)))
+  return Boolean(payload && (['heartbeat', 'command', 'fs.request', 'terminal.request', 'sync'].includes(String(payload.type)) || isServerResourcePayload(payload) || isServerFileWriteAdmissionStructure(payload)))
 }
 
 function parseData(value: Record<string, unknown>): DurableDataFrame | VolatileDataFrame | null {
@@ -168,6 +169,7 @@ function parseData(value: Record<string, unknown>): DurableDataFrame | VolatileD
     return value as unknown as DurableDataFrame
   }
   if (value.durability === 'volatile') {
+    if (isFileWriteAdmissionType(value.payload)) return null
     if (!exactKeys(value, ['frameType', 'durability', 'lane', 'payloadVersion', 'payload'])) return null
     if (!['realtime', 'presence'].includes(String(value.lane)) || !text(value.payloadVersion)) return null
     return value as unknown as VolatileDataFrame
@@ -188,6 +190,7 @@ function parseError(value: Record<string, unknown>): TransportErrorFrame | null 
   return exactKeys(value, ['frameType', 'code', 'message', 'retryable']) && value.frameType === 'transport.error' && codes.includes(value.code as TransportErrorCode) && text(value.message) && typeof value.retryable === 'boolean' ? value as unknown as TransportErrorFrame : null
 }
 
+/** Structural transport validation only; durable file admission integrity requires the Node subpath. */
 export function parseWorkerTransportFrame(value: unknown): WorkerTransportFrame {
   const frame = record(value)
   const parsed = frame && (parseWorkerHello(frame) ?? parseData(frame) ?? parseAck(frame) ?? parsePing(frame) ?? parseError(frame))
@@ -195,6 +198,7 @@ export function parseWorkerTransportFrame(value: unknown): WorkerTransportFrame 
   return parsed as WorkerTransportFrame
 }
 
+/** Structural transport validation only; durable file admission integrity requires the Node subpath. */
 export function parseServerTransportFrame(value: unknown): ServerTransportFrame {
   const frame = record(value)
   const parsed = frame && (parseServerHello(frame) ?? parseData(frame) ?? parseAck(frame) ?? parsePing(frame) ?? parseError(frame))

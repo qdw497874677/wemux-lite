@@ -24,6 +24,8 @@ export type SessionEventPayload =
       readonly kind: 'turn.started'
       readonly turnId: TurnId
       readonly messageId: MessageId
+      /** Claim-time selection; null means the Agent default, omission is legacy/unknown. */
+      readonly modelId?: ModelId | null
     }
   | {
       readonly kind: 'assistant.text.delta'
@@ -66,6 +68,13 @@ export type SessionEventPayload =
       readonly decision: 'approve' | 'deny'
       /** Actual cluster account that resolved the approval; absent for local/legacy history. */
       readonly decidedByAccountId?: UserId
+    }
+  | {
+      /** Automatic invalidation, never a human denial or approval. */
+      readonly kind: 'approval.expired'
+      readonly turnId: TurnId
+      readonly approvalId: ApprovalId
+      readonly reason: 'timeout' | 'cancelled' | 'turn_released' | 'shutdown'
     }
   | {
       readonly kind: 'usage.updated'
@@ -127,6 +136,7 @@ export const SESSION_EVENT_KINDS = [
   'tool.finished',
   'approval.requested',
   'approval.resolved',
+  'approval.expired',
   'usage.updated',
   'compaction.started',
   'compaction.finished',

@@ -1,3 +1,4 @@
+import type { FileWriteAdmitPayload, FileWriteResultPayload, FileWriteResultAckPayload } from './file-admission.js'
 import type {
   AgentCapability,
   EventSeq,
@@ -109,6 +110,8 @@ export type ServerPayload =
   | HeartbeatPayload
   | CommandPayload
   | FileRequestPayload
+  | FileWriteAdmitPayload
+  | FileWriteResultAckPayload
   | TerminalRequestPayload
   | Extract<SyncPayload, { readonly kind: 'request' }>
   | ServerResourcePayload
@@ -118,6 +121,7 @@ export type WorkerPayload =
   | CapabilityPayload
   | CommandReceiptPayload
   | FileResponsePayload
+  | FileWriteResultPayload
   | TerminalResponsePayload
   | TerminalEventPayload
   | EventPayload

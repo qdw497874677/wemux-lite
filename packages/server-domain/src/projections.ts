@@ -129,6 +129,19 @@ export interface AttentionResult {
 }
 export type AttentionPage = CursorPage<AttentionView>
 
+/** Approval pages contain actionable human Task reviews only, not Session Journal approvals. Human task_assignment is unsupported. */
+export type AttentionPagesKind = 'approval' | 'run_problem' | 'channel_dead_letter'
+export interface AttentionPagesQuery {
+  readonly kind: AttentionPagesKind
+  readonly projectId?: ProjectId
+  readonly cursor?: string
+  readonly limit?: number
+}
+export interface AttentionPagesResult extends CursorPage<AttentionView> {
+  readonly generatedAt: Timestamp
+}
+
+
 export type TimelineSourceKind = 'audit' | 'task_activity' | 'run' | 'channel_delivery' | 'session' | 'artifact'
 export interface TimelineEvent {
   readonly cursor: string

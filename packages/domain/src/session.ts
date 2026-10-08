@@ -67,6 +67,8 @@ export interface TurnFailure {
 }
 
 export interface Turn {
+  /** Fixed atomically when the message is claimed. Absent only on legacy records. */
+  readonly modelId?: ModelId | null
   readonly id: TurnId
   readonly sessionId: SessionId
   readonly message: UserMessageInput

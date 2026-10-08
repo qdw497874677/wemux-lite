@@ -28,7 +28,7 @@ export function workflowTargets(task: { readonly status: TaskStatus; readonly bl
   switch (task.status) {
     case 'backlog': return ['todo', 'blocked', 'cancelled']
     case 'todo': return ['in_progress', 'blocked', 'cancelled']
-    case 'in_progress': return ['in_review', 'blocked', 'cancelled']
+    case 'in_progress': return ['in_review', 'done', 'blocked', 'cancelled']
     case 'in_review': return ['done', 'in_progress', 'blocked', 'cancelled']
     case 'done': return ['in_progress', 'blocked', 'cancelled']
     case 'blocked': return [...(isStatus(task.blockedFrom) && task.blockedFrom !== 'blocked' ? [task.blockedFrom] : []), 'cancelled']

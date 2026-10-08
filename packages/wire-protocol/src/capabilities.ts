@@ -6,6 +6,7 @@ import type {
   ProjectId,
   SessionId,
   TurnId,
+  UserId,
   WorkspaceId,
 } from '@wemux/domain'
 
@@ -14,6 +15,8 @@ export interface CapabilityGrantPayload {
   readonly sessionId: SessionId
   readonly turnId: TurnId
   readonly actorAgentId: SessionId
+  readonly actorUserId?: UserId
+  readonly actorAuthVersion?: number
   readonly projectId: ProjectId
   readonly workspaceId: WorkspaceId
   readonly allowedTools: readonly CapabilityToolName[]
