@@ -55,7 +55,7 @@
 5. **Ticket06 前置门未解除**：协调 Runtime 隔离资格门判定 FAIL（`apps`/OS 级隔离与网络出口收敛均不可用）。
 6. `project.list` 仍只允许来源 Project，不宣称跨项目发现（不在本切片范围）。
 
-缺口 2、3 均为**资格门阻塞项**，回链 `.scratch/web-next-project-agent-platform/evidence/ticket-05-runtime-isolation-gate.md`（§五环境变更选项、§六 A/B 岔路）与 `02-CONTEXT.md` D-01/D-02。
+缺口 2、3 均为**资格门阻塞项**，回链 `.scratch/web-next-project-agent-platform/evidence/ticket-05-runtime-isolation-gate.md`（§五环境变更选项、§六 A/B 岔路）与 `02-CONTEXT.md` D-01/D-02。环境方案与岔路的选择简报：`docs/design/coordination-isolation-options.md`（待用户决策，不构成本文件的预选）。
 
 ## 资格门重跑清单（环境变更后执行，不替用户预选方案）
 
