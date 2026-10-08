@@ -282,7 +282,7 @@ export class CapabilityService {
     const context = this.queryContext(claims)
     if (input?.projectId !== claims.projectId) throw new CapabilityError('not-found', 'Project not found')
     const limit = queryLimit(input.limit), offset = queryCursor(input.cursor)
-    const tasks = await this.taskQueries!.list(claims.projectId, context)
+    const tasks = await this.taskQueries!.queryList(claims.projectId, context)
     const items = [...tasks].sort((a, b) => a.id.localeCompare(b.id)).slice(offset, offset + limit)
     return { items, nextCursor: offset + limit < tasks.length ? String(offset + limit) : null }
   }
@@ -290,7 +290,7 @@ export class CapabilityService {
   async getTask(claims: CapabilityGrantClaims, input: { projectId?: string; taskId?: string }) {
     const context = this.queryContext(claims)
     if (input?.projectId !== claims.projectId || !input?.taskId) throw new CapabilityError('not-found', 'Task not found')
-    const task = await this.taskQueries!.get(claims.projectId, input.taskId as never, context)
+    const task = await this.taskQueries!.query(claims.projectId, input.taskId as never, context)
     if (task.projectId !== claims.projectId) throw new CapabilityError('not-found', 'Task not found')
     return { task }
   }

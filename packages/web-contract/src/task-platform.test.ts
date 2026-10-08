@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { activeRunStatuses, boardStatuses, launchFingerprintInput, runStatuses, taskErrorStatus, taskStatuses } from './task-platform.js'
+import { activeRunStatuses, boardStatuses, launchFingerprintInput, parsePlanSteps, runStatuses, taskErrorStatus, taskStatuses } from './task-platform.js'
 import type { Assignment, LaunchRequest, LaunchResponse, ProjectEvent, TaskPatch, TaskErrorResponse, TaskSummary, TaskDetail, BoardColumn } from './task-platform.js'
 // Public package entry and domain-safe subpath must expose the same DTOs.
 import type { LaunchRequest as PublicLaunch } from '@wemux/web-contract'
@@ -103,4 +103,11 @@ void contractTypeChecks
   // @ts-expect-error both projection fields are mandatory on public Run
   const invalid: LaunchResponse['run'] = incomplete
   void invalid; void failure; void lastProjectedSeq
+})
+
+test('Plan step parsing is one shared rule for the Web card and the Server projection', () => {
+  assert.deepEqual(parsePlanSteps('1. Inspect the ticket\n2) Draft the change'), ['Inspect the ticket', 'Draft the change'])
+  assert.deepEqual(parsePlanSteps('- [ ] Write the test\n* [x] Ship the fix'), ['Write the test', 'Ship the fix'])
+  assert.equal(parsePlanSteps('Prose without any step markers'), undefined)
+  assert.equal(parsePlanSteps(''), undefined)
 })

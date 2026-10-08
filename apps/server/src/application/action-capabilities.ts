@@ -4,6 +4,7 @@ import { evaluateCapability, taskStatuses, type TaskDetail, type Run, type Capab
 import type { SessionId, WorkerId, WorkspaceId, ProjectId } from '@wemux/domain'
 import type { ServerStoreTx } from './ports/server-store.ts'
 import { sessionIdleReason } from './session-idle.ts'
+import { resolveReviewRequirement } from './review-requirement.ts'
 
 export async function taskFacts(tx: ServerStoreTx, task: TaskDetail, actor: string): Promise<CapabilityFacts> {
   const a = task.assignee
@@ -14,7 +15,7 @@ export async function taskFacts(tx: ServerStoreTx, task: TaskDetail, actor: stri
   // An executed record predating review snapshots cannot prove which Project
   // default applied at its first Run. Never interpret an absent snapshot as
   // today's (possibly lowered) default when advertising permissions.
-  const inheritedPolicy = runs.length > 0 ? 'human' : project?.reviewPolicy ?? 'none'
+  const inheritedPolicy = resolveReviewRequirement(task, runs, project?.reviewPolicy).policy
   const values = task.metadataJson?.values
   const effectiveTask = values && typeof values === 'object' && !Array.isArray(values) && values.reviewPolicy === undefined
     ? { ...task, metadataJson: { ...task.metadataJson, values: { ...values, reviewPolicy: inheritedPolicy } } } : task

@@ -8,8 +8,10 @@ import type { SessionId } from '@wemux/domain'
 import { createHash, randomUUID } from 'node:crypto'
 import { launchFingerprintInput, type LaunchRequest, type Run } from '@wemux/web-contract/task-platform'
 import { ensureRunCancel, saveRunProjection, isActiveRun } from './run-projection.ts'
+import { resolveReviewRequirement } from './review-requirement.ts'
 import { transitionTask, type ProjectId, type UserId } from '@wemux/domain'
-import { taskStatuses, taskErrorStatus, isTeamCoordinationAnchor, type TaskDetail, type TaskErrorCode, type TaskActivity, type ProjectEvent, type TaskStatus, type Assignment } from '@wemux/web-contract/task-platform'
+import { taskStatuses, taskErrorStatus, isTeamCoordinationAnchor, latestCompletedPlan, planWindowEvents, type TaskSummary, type TaskDetail, type TaskErrorCode, type TaskActivity, type ProjectEvent, type TaskStatus, type Assignment, type TaskDetailProjection, type TaskSummaryProjection, type TaskPlanWindow, type TaskPlanProjection, type TaskQueryProjection, type TaskReviewRequirementProjection, type ReviewPolicy, type PlanJournalEvent } from '@wemux/web-contract/task-platform'
+import type { Session } from '@wemux/server-domain'
 import type { WorkspaceId, WorkerId } from '@wemux/domain'
 import type { ServerService } from './server-service.ts'
 import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
@@ -21,6 +23,14 @@ export class TaskError extends Error {
   constructor(code: TaskErrorCode, message: string, details?: Record<string, unknown>) { super(message); this.code = code; this.status = taskErrorStatus[code]; this.details = details }
 }
 const invalid = (message: string): never => { throw new TaskError('invalid_request', message) }
+/** One bounded plan window per Task. The Task's most active Session wins, ranked by the cached contiguous
+ * sequence (ties by id), so the projection is deterministic and costs one row read per Session plus one
+ * window read per Task. A Session the caller cannot read is omitted later, never silently replaced. */
+async function candidateSessionId(tx: ServerStoreTx, sessions: readonly Session[]): Promise<SessionId | null> {
+  const ranked = await Promise.all(sessions.map(async session => ({ session, seq: Number((await tx.cache.getFreshness(session.id))?.contiguousSeq ?? 0) })))
+  ranked.sort((left, right) => right.seq - left.seq || left.session.id.localeCompare(right.session.id))
+  return ranked[0] ? ranked[0].session.id : null
+}
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid('Expected an object')
   return value as Record<string, unknown>
@@ -47,6 +57,8 @@ function content(input: Record<string, unknown>): Partial<TaskDetail> {
   return patch
 }
 export interface TaskContext { actor: UserId; teamId?: string; requestId: string }
+/** Persisted facts a query projection needs before its Journal window is read. */
+interface TaskProjectionSeed { readonly sessionId: SessionId | null; readonly review: TaskReviewRequirementProjection }
 /** One transaction is the authorization and write boundary. No Assignment or Run creation here. */
 export class TaskService {
   private readonly store: ServerStore
@@ -90,7 +102,7 @@ export class TaskService {
   private enforce(capability: ActionCapability, details?: Record<string, unknown>) {
     if (!capability.allowed) throw new TaskError(capability.reasonCode === 'invalid_metadata' ? 'invalid_transition' : capability.reasonCode === 'allowed' ? 'invalid_transition' : capability.reasonCode, capability.reason, details)
   }
-  list(projectId: string, context: TaskContext) { return this.store.transaction(async tx => {
+  list(projectId: string, context: TaskContext): Promise<TaskSummary[]> { return this.store.transaction(async tx => {
     await this.project(tx, projectId, context)
     return Promise.all((await tx.tasks.list(projectId)).map(async summary => {
       const task = (await tx.tasks.get(summary.id))!
@@ -101,6 +113,59 @@ export class TaskService {
     const task = await this.task(tx, projectId, id, context)
     return { ...task, capabilities: await taskCapabilities(tx, task, context.actor) }
   }) }
+  /** Query projection for the Agent API: the same Task facts plus the derived plan window and review
+   * requirement. Kept beside `get`/`list` so no caller can obtain a second, divergent derivation. */
+  query(projectId: string, id: string, context: TaskContext): Promise<TaskDetailProjection> { return this.queryTasks(projectId, id, context) }
+  queryList(projectId: string, context: TaskContext): Promise<TaskSummaryProjection[]> { return this.queryTaskList(projectId, context) }
+  private async queryTaskList(projectId: string, context: TaskContext): Promise<TaskSummaryProjection[]> {
+    const views = await this.store.transaction(async tx => {
+      await this.project(tx, projectId, context)
+      const project = await tx.resources.getProject(projectId as ProjectId)
+      const sessions = (await tx.resources.listSessions()).filter(session => session.projectId === projectId && !session.deletedAt)
+      return Promise.all((await tx.tasks.list(projectId)).map(async summary => {
+        const task = (await tx.tasks.get(summary.id))!
+        const runs = await tx.tasks.runs(task.id)
+        return { summary, capabilities: await taskCapabilities(tx, task, context.actor),
+          seed: { sessionId: await candidateSessionId(tx, sessions.filter(session => session.taskId === task.id)), review: resolveReviewRequirement(task, runs, project?.reviewPolicy) } }
+      }))
+    })
+    return Promise.all(views.map(async view => ({ ...view.summary, capabilities: view.capabilities, projection: await this.projection(view.seed, context) })))
+  }
+  private async queryTasks(projectId: string, id: string, context: TaskContext): Promise<TaskDetailProjection> {
+    const view = await this.store.transaction(async tx => {
+      const task = await this.task(tx, projectId, id, context)
+      const runs = await tx.tasks.runs(id)
+      const project = await tx.resources.getProject(projectId as ProjectId)
+      const sessions = (await tx.resources.listSessions()).filter(session => session.taskId === id && session.projectId === projectId && !session.deletedAt)
+      return { task, capabilities: await taskCapabilities(tx, task, context.actor),
+        seed: { sessionId: await candidateSessionId(tx, sessions), review: resolveReviewRequirement(task, runs, project?.reviewPolicy) } }
+    })
+    return { ...view.task, capabilities: view.capabilities, projection: await this.projection(view.seed, context) }
+  }
+  /** Plan and review facts for one Task. The review requirement is re-resolved from persisted state; the
+   * plan is re-derived from a bounded Journal window, so a query never returns a cached plan revision. */
+  private async projection(seed: TaskProjectionSeed, context: TaskContext): Promise<TaskQueryProjection> {
+    const { plan, window } = await this.planProjection(seed.sessionId, context)
+    return { plan, review: seed.review, window }
+  }
+  /** One bounded window of the candidate Session, read through the authorized history port. A Session the
+   * caller cannot read yields an omitted projection (`null`), never a leak and never a failed Task read. */
+  private async planProjection(sessionId: SessionId | null, context: TaskContext): Promise<{ plan: TaskPlanProjection | null; window: TaskPlanWindow | null }> {
+    const server = this.server
+    if (!server || !sessionId) return { plan: null, window: null }
+    let through = 0
+    try {
+      const head = (await server.events(sessionId, 1, 1, context.actor)).freshness
+      through = head ? head.contiguousSeq ?? 0 : 0
+    } catch { return { plan: null, window: null } }
+    const fromSeq = Math.max(1, through - planWindowEvents + 1)
+    let events: readonly PlanJournalEvent[]
+    try { events = (await server.events(sessionId, fromSeq, planWindowEvents, context.actor)).events }
+    catch { return { plan: null, window: null } }
+    const plan = latestCompletedPlan(events)
+    return { plan: plan ? { ...plan, sessionId, status: 'pending' } : null,
+      window: { sessionId, fromSeq, throughSeq: events.length ? events[events.length - 1].seq : fromSeq - 1, events: events.length } }
+  }
   activity(projectId: string, id: string, after: number, context: TaskContext) {
     if (!Number.isSafeInteger(after) || after < 0) invalid('Invalid after cursor')
     return this.store.transaction(async tx => { await this.task(tx, projectId, id, context); return tx.tasks.activity(id, after) })
@@ -465,12 +530,11 @@ export class TaskService {
       if (pinPolicy) {
         const project = await tx.resources.getProject(projectId as ProjectId)
         if (!project) throw new TaskError('not_found', 'Project not found')
-        const reviewPolicy = task.metadataJson.values.reviewPolicy ?? ((await tx.tasks.runs(id)).length > 1
-          ? 'human' // A legacy executed Task without a snapshot must fail closed.
-          : project.reviewPolicy ?? 'none')
-        // Pin the inherited requirement in the same transaction as the first Run.
-        // This server-managed snapshot is not a user edit and must not invalidate
-        // clients' Task CAS tokens or emit a separate activity for a single launch.
+        // Pin the inherited requirement in the same transaction as the first Run, through the same
+        // resolution the query projection reports. This server-managed snapshot is not a user edit and
+        // must not invalidate clients' Task CAS tokens or emit a separate activity for a single launch.
+        const runs = await tx.tasks.runs(id)
+        const reviewPolicy = resolveReviewRequirement(task, runs.filter(item => item.id !== runId), project.reviewPolicy).policy
         const projected = await tx.tasks.get(id)
         if (!projected) throw new TaskError('not_found', 'Task not found')
         await tx.tasks.save({ ...projected, metadataJson: { schemaVersion: 1, values: { ...projected.metadataJson.values, reviewPolicy, reviewPolicyFrozen: true } } })

@@ -1,4 +1,6 @@
 import type { UIMessage } from 'ai'
+// One shared parser: the Server Task projection derives steps with the same function as this card.
+import { parsePlanSteps } from '@wemux/web-contract/task-platform'
 import type { AbortReasonDTO, AgentFailureReasonDTO, JournalEventDTO, RuntimeState, RuntimeUsageDTO } from './dto'
 
 export interface ChatMessage {
@@ -67,15 +69,8 @@ export interface ApprovalHistoryEntry extends PendingApproval { decision: 'appro
 
 export type ChatTimelineItem = TimelineMessage | TimelineTool | TimelineNotice | TimelineUsage | TimelineReasoning | ProposedPlan
 
-const planStepPattern = /^\s*(?:\d+[.)]|[-*+]\s+\[[ xX]\])\s+(.+?)\s*$/
-
-export function parseProposedPlanSteps(text: string): string[] | undefined {
-  const steps = text.split(/\r?\n/).flatMap(line => {
-    const match = line.match(planStepPattern)
-    return match?.[1] ? [match[1]] : []
-  })
-  return steps.length ? steps : undefined
-}
+/** Re-exported under the historical card name; the implementation is shared with the Server projection. */
+export const parseProposedPlanSteps = parsePlanSteps
 
 const abortReasonLabels: Record<AbortReasonDTO, string> = {
   user_stop: '用户已停止本轮',

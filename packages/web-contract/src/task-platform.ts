@@ -7,6 +7,9 @@ export type { ActionCapability, CapabilityFacts, CapabilityAction, TaskCapabilit
 export { taskStatuses, workflowTargets } from '@wemux/domain'
 export type { TaskStatus, BlockedFrom, CancelledFrom, TaskWorkflowState } from '@wemux/domain'
 import type { TaskStatus } from '@wemux/domain'
+/** Project review vocabulary is shared with the Task projection; one definition serves both. */
+import type { ReviewPolicy } from './browser-host.js'
+export type { ReviewPolicy }
 export const boardStatuses = ['backlog', 'todo', 'in_progress', 'in_review', 'done', 'blocked'] as const
 export type BoardStatus = typeof boardStatuses[number]
 export type TaskPriority = 'none' | 'low' | 'medium' | 'high'
@@ -295,3 +298,87 @@ export interface TaskSessionView extends TaskSession {
   readonly sendCapability: import('./action-capability.js').ActionCapability
 }
 export interface TaskSessionFilters { projectId?: string; workspaceId?: string; taskId?: string; archived?: boolean }
+
+/** Bounded journal window the Server projection and the Web session fold read the same way;
+ * `apps/web/src/api/client.ts` pages events with `limit=500`, so the projection never reads a wider view. */
+export const planWindowEvents = 500
+/** Structural view of one Session journal event, satisfied by both the domain `JournalEvent` and the Web `JournalEventDTO`. */
+export interface PlanJournalEvent {
+  readonly seq: number
+  readonly occurredAt?: string
+  readonly payload: {
+    readonly kind: string
+    readonly turnId?: string
+    readonly text?: string
+    readonly streamKind?: string
+    readonly outcome?: string
+  }
+}
+/** One numbered or checkbox line of a proposed plan; mirrors the Web plan card exactly. */
+export function parsePlanSteps(text: string): string[] | undefined {
+  const steps = text.split(/\r?\n/).flatMap(line => {
+    const match = line.match(planStepPattern)
+    return match?.[1] ? [match[1]] : []
+  })
+  return steps.length ? steps : undefined
+}
+const planStepPattern = /^\s*(?:\d+[.)]|[-*+]\s+\[[ xX]\])\s+(.+?)\s*$/
+export interface PlannedTurn {
+  readonly turnId: string
+  readonly text: string
+  /** Empty when the plan text carries no numbered/checkbox step lines. */
+  readonly steps: readonly string[]
+  /** Sequence of the completing `turn.finished` event inside the read window. */
+  readonly journalSeq: number
+  readonly occurredAt: string | null
+}
+/** Latest completed proposed plan inside one journal window; identical semantics to the Web plan card:
+ * plan text accumulates from `assistant.text.delta` with `streamKind: 'plan_text'` per Turn and only a
+ * `turn.finished` with `outcome: 'completed'` publishes it. A Turn whose `turn.started` is outside the
+ * window is withheld, so a window cut through a Turn can never pass a half plan off as the real one. */
+export function latestCompletedPlan(events: readonly PlanJournalEvent[]): PlannedTurn | null {
+  const started = new Set<string>()
+  const pending = new Map<string, string>()
+  let latest: PlannedTurn | null = null
+  for (const event of events) {
+    const payload = event.payload
+    const turnId = payload.turnId
+    if (payload.kind === 'turn.started' && turnId) started.add(turnId)
+    else if (payload.kind === 'assistant.text.delta' && payload.streamKind === 'plan_text' && turnId) pending.set(turnId, (pending.get(turnId) ?? '') + (payload.text ?? ''))
+    else if (payload.kind === 'turn.finished' && turnId && payload.outcome === 'completed') {
+      const text = pending.get(turnId)?.trim()
+      pending.delete(turnId)
+      if (!text || !started.has(turnId)) continue
+      latest = { turnId, text, steps: parsePlanSteps(text) ?? [], journalSeq: event.seq, occurredAt: event.occurredAt ?? null }
+    }
+  }
+  return latest
+}
+/** Journal location the projection was derived from; evidence that the plan is neither cached nor invented. */
+export interface TaskPlanWindow {
+  readonly sessionId: string
+  readonly fromSeq: number
+  readonly throughSeq: number
+  readonly events: number
+}
+export interface TaskPlanProjection extends PlannedTurn {
+  readonly sessionId: string
+  /** Proposals stay pending. Binding-version approval belongs to the binding approval ticket and is never synthesized here. */
+  readonly status: 'pending'
+}
+/** Current review requirement after Project policy inheritance; the same resolution the launch path pins. */
+export interface TaskReviewRequirementProjection {
+  readonly policy: ReviewPolicy
+  /** `task` = explicit or previously pinned Task value, `project` = inherited default, `legacy` = fail-closed fallback. */
+  readonly source: 'task' | 'project' | 'legacy'
+  /** True once the requirement is frozen to the Task because execution started; later edits cannot lower it. */
+  readonly frozen: boolean
+}
+/** Query-time projection returned with task.get/task.list; absent from Task reads that are not projections. */
+export interface TaskQueryProjection {
+  readonly plan: TaskPlanProjection | null
+  readonly review: TaskReviewRequirementProjection
+  readonly window: TaskPlanWindow | null
+}
+export interface TaskSummaryProjection extends TaskSummary { readonly projection: TaskQueryProjection }
+export interface TaskDetailProjection extends TaskDetail { readonly projection: TaskQueryProjection }
