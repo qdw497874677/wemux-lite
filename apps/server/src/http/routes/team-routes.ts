@@ -1,4 +1,5 @@
 import type { TeamId, UserId } from '@wemux/domain'
+import { assertCoordinationGateOpen, coordinationAvailability } from '../../application/coordination-gate.ts'
 import { AppError } from '../../application/errors.ts'
 import { sendTeamInvitationMail } from '../../application/team-invitation-mail.ts'
 import type { RouteDescriptor } from './types.ts'
@@ -31,4 +32,19 @@ export const teamRoutes: readonly RouteDescriptor[] = [
     },
   },
   { method: 'DELETE', pattern: '/teams/:teamId/invitations/:invitationId', auth: 'authenticated', handler: async context => context.json(200, await requireTeams(context.teams).revoke(await context.actor(), context.params.teamId as TeamId, context.params.invitationId)) },
+  { method: 'GET', pattern: '/teams/:teamId/coordination/availability', auth: 'authenticated', handler: async context => {
+    const teams = requireTeams(context.teams), teamId = context.params.teamId as TeamId
+    // 成员资格门与非成员 403 同语义，不泄漏其它 Team 的存在性或成员信息。
+    await teams.members(await context.actor(), teamId)
+    context.json(200, coordinationAvailability())
+  } },
+  { method: 'POST', pattern: '/teams/:teamId/coordination/sessions', auth: 'authenticated', handler: async context => {
+    const teams = requireTeams(context.teams), teamId = context.params.teamId as TeamId
+    // 成员资格先于资格门：非成员无法探测任何 Team 的协调状态。
+    await teams.members(await context.actor(), teamId)
+    await context.readBody()
+    assertCoordinationGateOpen()
+    // 资格门重开后的真实协调会话创建属于 Ticket 06 范围，不在此预留可用路径。
+    throw new AppError(501, '协调会话创建尚未实现（Ticket 06 范围）', 'not_implemented')
+  } },
 ]

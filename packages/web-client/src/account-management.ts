@@ -1,4 +1,4 @@
-import type { AccountViewDTO, AccountPayloadDTO, AcceptedEmailDTO, VerifiedEmailDTO, LoginSessionDTO, PersonalAccessTokenDTO, PersonalAccessTokenScopeDTO, IssuedPersonalAccessTokenDTO, PasswordResetDTO, AccountSecurityViewDTO, AccountLifecycleDTO, AuditQueryDTO, AuditPageDTO, ManagedAccountDTO, PasswordChangeDTO, EmailChangeAcceptedDTO, EmailChangeConfirmedDTO, GoogleLinkStartDTO, LoginMethodUnboundDTO, RegistrationPolicyViewDTO, RegistrationPolicyDTO } from '@wemux/web-contract/browser-host'
+import type { AccountViewDTO, AccountPayloadDTO, AcceptedEmailDTO, VerifiedEmailDTO, LoginSessionDTO, PersonalAccessTokenDTO, PersonalAccessTokenScopeDTO, IssuedPersonalAccessTokenDTO, PasswordResetDTO, AccountSecurityViewDTO, AccountLifecycleDTO, AuditQueryDTO, AuditPageDTO, ManagedAccountDTO, PasswordChangeDTO, EmailChangeAcceptedDTO, EmailChangeConfirmedDTO, GoogleLinkStartDTO, LoginMethodUnboundDTO, RegistrationPolicyViewDTO, RegistrationPolicyDTO, TeamCoordinationAvailabilityDTO } from '@wemux/web-contract/browser-host'
 import type { createClusterTransport } from './cluster-transport.ts'
 
 const id = encodeURIComponent
@@ -40,6 +40,8 @@ export const routes = {
   teamInvitation: (teamId: string, invitationId: string) => `/api/teams/${id(teamId)}/invitations/${id(invitationId)}`,
   invitation: (token: string) => `/api/team-invitations/${id(token)}`,
   acceptInvitation: (token: string) => `/api/team-invitations/${id(token)}/accept`,
+  teamCoordinationAvailability: (teamId: string) => `/api/teams/${id(teamId)}/coordination/availability`,
+  teamCoordinationSessions: (teamId: string) => `/api/teams/${id(teamId)}/coordination/sessions`,
 }
 
 /** Existing account/team contracts over the shared Cookie/CSRF identity transport. */
@@ -67,6 +69,9 @@ export function accountManagementOperations(transport: ReturnType<typeof createC
     revokeTeamInvitation: (teamId: string, invitationId: string) => request<{ id: string; status: string }>(routes.teamInvitation(teamId, invitationId), undefined, undefined, 'DELETE'),
     invitation: (token: string, signal?: AbortSignal) => request<{ team: { id: string; name: string }; email: string; role: 'admin' | 'member'; status: 'pending' | 'accepted' | 'expired' | 'revoked' }>(routes.invitation(token), undefined, signal),
     acceptInvitation: (token: string) => request<{ teamId: string; role: 'owner' | 'admin' | 'member' }>(routes.acceptInvitation(token), {}),
+    // Team 协调入口（票 05）：可用性投影与 enqueue 都是 Server 资格门唯一裁决，UI 不硬编码结论。
+    teamCoordinationAvailability: (teamId: string, signal?: AbortSignal) => request<TeamCoordinationAvailabilityDTO>(routes.teamCoordinationAvailability(teamId), undefined, signal),
+    enqueueTeamCoordinationSession: (teamId: string, body: Record<string, unknown>) => request<never>(routes.teamCoordinationSessions(teamId), body),
     resendVerification: (email: string) => request<AcceptedEmailDTO>(routes.authRegisterResend, { email }),
     verifyEmail: async (token: string) => {
       // 验证成功同时签发了 Cookie 会话，因此这里和登录一样接住 CSRF 令牌。

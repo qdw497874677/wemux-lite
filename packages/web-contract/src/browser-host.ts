@@ -34,6 +34,8 @@ export interface LoginSessionDTO {
 }
 
 export type RegistrationPolicyDTO = 'open' | 'invite_only' | 'closed'
+/** Team 协调入口可用性投影（票 05）：状态与禁用原因唯一来自服务端资格门。 */
+export type TeamCoordinationAvailabilityDTO = { status: 'disabled' | 'enabled'; gate: { verdict: 'FAIL' | 'PASS'; reasons: readonly string[]; evidencePath: string; remediationSection: string; reopenConditions: readonly string[] } }
 
 export interface RegistrationCapabilitiesDTO {
   registrationPolicy: RegistrationPolicyDTO
