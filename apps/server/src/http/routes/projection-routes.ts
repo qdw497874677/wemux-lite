@@ -1,6 +1,7 @@
 import type { ApprovalDecisionInput, ApprovalProjectionStatus, ApprovalSource, TimelineSourceKind } from '@wemux/server-domain'
 import type { ProjectId, Timestamp } from '@wemux/domain'
 import { AppError } from '../../application/errors.ts'
+import { TaskError } from '../../application/task-service.ts'
 import { createHash } from 'node:crypto'
 import type { RouteDescriptor } from './types.ts'
 
@@ -49,7 +50,12 @@ export const projectionRoutes: readonly RouteDescriptor[] = [
     if (!body.requestId || !body.decision || !body.sourceRevision) throw new AppError(400, 'Missing approval decision fields', 'invalid_request')
     const canonical = JSON.stringify({ decision: body.decision, note: body.note ?? null, requestId: body.requestId, sourceRevision: body.sourceRevision })
     const input: ApprovalDecisionInput = { decision: body.decision, note: body.note, requestId: body.requestId, sourceRevision: body.sourceRevision, fingerprint: body.fingerprint ?? createHash('sha256').update(canonical).digest('hex') }
-    context.json(200, await context.approvalDecisions.decide(await context.actor('write'), context.params.projectionKey, input))
+    try {
+      context.json(200, await context.approvalDecisions.decide(await context.actor('write'), context.params.projectionKey, input))
+    } catch (error) {
+      if (error instanceof TaskError) throw new AppError(error.status, error.message, error.code)
+      throw error
+    }
   } },
   { method: 'GET', pattern: '/timeline', auth: 'task', handler: async context => {
     if (!context.projections) throw new AppError(404, 'Route not found')

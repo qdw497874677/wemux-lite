@@ -6,45 +6,65 @@ export class SessionStreams {
   private readonly clients = new Set<ServerResponse>()
   private readonly service: ServerService
   constructor(service: ServerService) { this.service = service;}
-  open(response: ServerResponse, sessionId: SessionId, fromSeq: number, actor?: UserId, authorize?: () => Promise<unknown>): void {
-    let cursor = fromSeq, pumping = false, dirty = true, closed = false
+  open(response: ServerResponse, sessionId: SessionId, fromSeq: number, actor?: UserId, credentialAuthorize?: () => Promise<unknown>, resourceAuthorize?: () => Promise<unknown>, credentialActor = actor): void {
+    let cursor = fromSeq, pumping = false, dirty = true, replay = true, heartbeat = false, closed = false, generation = 0
     this.clients.add(response)
+    const cleanup = () => {
+      if (closed) return
+      closed = true
+      clearInterval(timer); unsubscribe(); unsubscribeAuthorization(); this.clients.delete(response)
+    }
+    const fail = () => { cleanup(); response.destroy() }
     const write = (data: string): boolean => {
       if (closed) return false
-      if (!response.write(data)) { response.destroy(); return false }
+      if (!response.write(data)) { fail(); return false }
       return true
     }
     const pump = async () => {
-      dirty = true
       if (pumping || closed) return
       pumping = true
       try {
         while (dirty && !closed) {
           dirty = false
-          let page
-          do {
-            page = await this.service.events(sessionId, cursor, 500, actor)
+          const started = generation, readEvents = replay, sendHeartbeat = heartbeat
+          replay = false; heartbeat = false
+          await credentialAuthorize?.()
+          if (closed) return
+          if (started !== generation) { replay ||= readEvents; heartbeat ||= sendHeartbeat; dirty = true; continue }
+          if (readEvents) {
+            const page = await this.service.events(sessionId, cursor, 500, actor)
+            if (closed) return
+            if (started !== generation) { replay = true; heartbeat ||= sendHeartbeat; dirty = true; continue }
             for (const event of page.events) {
               if (!write(`id: ${event.seq}\nevent: session.event\ndata: ${JSON.stringify(event)}\n\n`)) return
               cursor = event.seq + 1
             }
-          } while (page.nextSeq && !closed)
-          write(`event: freshness\ndata: ${JSON.stringify(page.freshness)}\n\n`)
+            if (page.nextSeq) { replay = true; dirty = true }
+            else if (!write(`event: freshness\ndata: ${JSON.stringify(page.freshness)}\n\n`)) return
+          } else {
+            // Idle authorization must not query Journal or manufacture freshness.
+            await resourceAuthorize?.()
+            if (closed) return
+            if (started !== generation) { heartbeat ||= sendHeartbeat; dirty = true; continue }
+          }
+          if (sendHeartbeat) write(': heartbeat\n\n')
         }
-      } catch { response.destroy() }
+      } catch { fail() }
       finally { pumping = false }
     }
+    const schedule = (readEvents: boolean, tick = false) => {
+      if (closed) return
+      generation++; dirty = true; replay ||= readEvents; heartbeat ||= tick
+      void pump()
+    }
     // Subscribe before reading history so no live event is lost during replay.
-    const unsubscribe = this.service.notifications.onSession(sessionId, () => { void pump() })
-    const unsubscribeAuthorization = actor === undefined ? () => undefined : this.service.notifications.onAuthorization(actor, () => { void pump() })
+    const unsubscribe = this.service.notifications.onSession(sessionId, () => schedule(true))
+    const unsubscribeAuthorization = credentialActor === undefined ? () => undefined : this.service.notifications.onAuthorization(credentialActor, () => schedule(true))
+    const timer = setInterval(() => schedule(false, true), 15000)
+    timer.unref()
+    response.on('close', cleanup)
     response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' })
     response.flushHeaders()
-    const timer = setInterval(() => {
-      if (!authorize) { write(': heartbeat\n\n'); return }
-      void authorize().then(() => write(': heartbeat\n\n'), () => response.destroy())
-    }, 15000)
-    timer.unref()
-    response.on('close', () => { closed = true; clearInterval(timer); unsubscribe(); unsubscribeAuthorization(); this.clients.delete(response) })
     void pump()
   }
   close(): void { for (const client of this.clients) client.destroy() }

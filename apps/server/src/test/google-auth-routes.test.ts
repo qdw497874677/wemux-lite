@@ -5,7 +5,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { UserId } from '@wemux/domain'
@@ -20,12 +20,12 @@ import { browser, fakeGoogle, googleClientId as clientId, googleClientSecret as 
 const sessionCookie = 'wemux_login_session'
 const stateCookie = 'wemux_oauth_state'
 
-async function fixture(t: { after: (fn: () => Promise<void> | void) => void }, options: { google?: boolean; webStaticPath?: string; administratorEmails?: readonly string[] } = {}) {
+async function fixture(t: { after: (fn: () => Promise<void> | void) => void }, options: { google?: boolean; webStaticPath?: string; webNextStaticPath?: string; administratorEmails?: readonly string[] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'wemux-google-'))
   const databasePath = join(directory, 'server.sqlite')
   const provider = options.google === false ? null : await fakeGoogle()
   const app = createWemuxServer({
-    databasePath, administratorEmails: options.administratorEmails ?? [administratorEmail], ...(options.webStaticPath ? { webStaticPath: options.webStaticPath } : {}),
+    databasePath, administratorEmails: options.administratorEmails ?? [administratorEmail], ...(options.webStaticPath ? { webStaticPath: options.webStaticPath } : {}), webNextStaticPath: options.webNextStaticPath,
     ...(provider ? googleProviderSettings(provider, 'http://localhost:4100') : {}),
   })
   const base = await app.listen(0, '127.0.0.1')
@@ -278,4 +278,83 @@ test('回调是 API 路由：单源部署下不会被 SPA 回退截走', async t
   const deepLink = await f.browser.get('/projects/ada', { accept: 'text/html', cookie: null })
   assert.equal(deepLink.status, 200)
   assert.ok(deepLink.text.includes('spa'))
+})
+
+test('双入口 OAuth 回调保留 /next/ returnTo，公开 callback 不被任何 SPA 截获', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'wemux-next-oauth-'))
+  const next = join(root, 'next')
+  await mkdir(next)
+  await writeFile(join(root, 'index.html'), '<title>legacy-oauth</title>')
+  await writeFile(join(next, 'index.html'), '<title>next-oauth</title>')
+  const f = await fixture(t, { webStaticPath: root, webNextStaticPath: next })
+  t.after(() => rm(root, { recursive: true, force: true }))
+  await signInAdmin(f)
+  const returnTo = '/next/projects/ada?tab=tasks'
+  const { callback } = await signIn(f, f.browser, returnTo)
+  assert.equal(callback.status, 302)
+  assert.equal(callback.location, returnTo)
+  assert.equal(callback.headers.get('cache-control'), 'no-store')
+  const page = await f.browser.get(returnTo, { accept: 'text/html' })
+  assert.equal(page.status, 200)
+  assert.match(page.text, /next-oauth/)
+  assert.doesNotMatch(page.text, /legacy-oauth/)
+  assert.equal((await f.browser.get('/api/auth/me')).status, 200)
+  for (const path of ['/api/auth/oauth/google/callback', '/auth/oauth/google/callback']) {
+    const rejected = await browser(f.base).get(path, { accept: 'text/html' })
+    assert.equal(rejected.status, 302)
+    assert.equal(rejected.location, '/?oauth_error=invalid_state')
+    assert.doesNotMatch(rejected.text, /legacy-oauth|next-oauth/)
+  }
+})
+
+test('Next callback failures use only validated transaction recovery entry; legacy and invalid state stay safe', async t => {
+  const f = await fixture(t)
+  const { admin } = await signInAdmin(f)
+  for (const [client, start, target, expected] of [
+    [f.browser, '/api/auth/oauth/google/start', '/next/teams', '/next/login?oauth_error=invalid_request'],
+    [admin, '/api/auth/identities/google/start', '/next/settings', '/next/settings?link_error=invalid_request'],
+    [f.browser, '/api/auth/oauth/google/start', '/projects', '/?oauth_error=invalid_request'],
+    [admin, '/api/auth/identities/google/start', '/settings', '/settings?link_error=invalid_request'],
+  ] as const) {
+    const started = await client.post(start, { returnTo: target })
+    assert.equal(started.status, start.includes('identities') ? 200 : 202)
+    const state = new URL((started.data as { authorizeUrl: string }).authorizeUrl).searchParams.get('state')!
+    const failed = await client.get(`/api/auth/oauth/google/callback?state=${state}&error=access_denied&returnTo=https://evil.example/next/`)
+    assert.equal(failed.status, 302)
+    assert.equal(failed.headers.get('location'), expected)
+    assert.ok(!failed.headers.get('location')!.includes(state))
+  }
+  const started = await f.browser.post('/api/auth/oauth/google/start', { returnTo: '/next/teams' })
+  const state = new URL((started.data as { authorizeUrl: string }).authorizeUrl).searchParams.get('state')!
+  const stranger = browser(f.base)
+  const mismatch = await stranger.get(`/api/auth/oauth/google/callback?state=${state}&returnTo=/next/settings`)
+  assert.equal(mismatch.headers.get('location'), '/?oauth_error=state_mismatch')
+  const missing = await f.browser.get('/api/auth/oauth/google/callback?returnTo=/next/settings')
+  assert.equal(missing.headers.get('location'), '/?oauth_error=invalid_state')
+})
+
+test('Next verifier and exchange failures recover in Next; expired/replayed state cannot authorize entry routing', async t => {
+  const f = await fixture(t)
+  const { admin } = await signInAdmin(f)
+  for (const [client, start, expected] of [
+    [f.browser, '/api/auth/oauth/google/start', '/next/login?oauth_error='],
+    [admin, '/api/auth/identities/google/start', '/next/settings?link_error='],
+  ] as const) {
+    for (const [behavior, error] of [['bad-audience', 'google_verification_failed'], ['http-500', 'google_unavailable']] as const) {
+      const started = await client.post(start, { returnTo: '/next/settings' })
+      const authorization = handoff(f.provider!, (started.data as { authorizeUrl: string }).authorizeUrl)
+      f.provider!.setBehavior(behavior)
+      const failed = await client.get(`/api/auth/oauth/google/callback?code=authorization-code&state=${authorization.state}`)
+      assert.equal(failed.location, expected + error)
+      assert.equal((await f.store.identity.findOAuthTransactionByStateHash(hashSecret(authorization.state)))!.consumedAt, null)
+    }
+  }
+  f.provider!.setBehavior('ok')
+  const { authorization } = await signIn(f, f.browser, '/next/projects')
+  const replayed = await f.browser.call(`/api/auth/oauth/google/callback?code=authorization-code&state=${authorization.state}`, { cookie: `${stateCookie}=${authorization.state}` })
+  assert.equal(replayed.location, '/?oauth_error=state_replayed')
+  const stored = (await f.store.identity.findOAuthTransactionByStateHash(hashSecret(authorization.state)))!
+  await f.app.store.transaction(tx => tx.identity.saveOAuthTransaction({ ...stored, id: 'expired-next-fixture', stateHash: hashSecret('expired-next-state'), consumedAt: null, createdAt: '2020-01-01T00:00:00.000Z' as typeof stored.createdAt, expiresAt: '2020-01-01T00:10:00.000Z' as typeof stored.expiresAt }))
+  const expired = await f.browser.call('/api/auth/oauth/google/callback?state=expired-next-state&returnTo=/next/settings', { cookie: `${stateCookie}=expired-next-state` })
+  assert.equal(expired.location, '/?oauth_error=state_expired')
 })

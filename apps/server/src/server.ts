@@ -75,6 +75,8 @@ export interface WemuxServerOptions {
   capabilitySecret?: string
   workerPackagePath?: string
   webStaticPath?: string
+  /** Independently built UI mounted at /next/; the root UI remains unchanged. */
+  webNextStaticPath?: string
   adminSessionTtlMs?: number
   /** 邮件投递配置；不传则读环境变量。未配置或配错时注册入口保持关闭并在 /auth/options 报告原因。 */
   mail?: MailEnv
@@ -131,10 +133,10 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const notifications = new Notifications()
   const teams = new TeamService(store, notifications)
   const projects = new ProjectAccessService(store, notifications)
-  const canvasCollaboration = new CanvasCollaborationService(projects)
-  const canvasCollaborationStreams = new CanvasCollaborationStreams(canvasCollaboration, notifications)
   const workerAccess = new WorkerAccessService(store, notifications)
   const sessionAccess = new SessionAccessService(store, projects, notifications)
+  const canvasCollaboration = new CanvasCollaborationService(projects, sessionAccess, notifications)
+  const canvasCollaborationStreams = new CanvasCollaborationStreams(canvasCollaboration, notifications)
   const personalAccessTokens = new PersonalAccessTokenService(store)
   const lifecycle = new AccountLifecycleService(store, administrators, identity, notifications)
   const registration = new EmailRegistrationService({ store, identity, settings, mail: mail.settings, mailReason: mail.reason, teams })
@@ -173,7 +175,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const approvalDecisionRepository = new SqliteApprovalDecisionRepository(database)
   const projections = new ProjectionService(store, projects, sessionAccess, approvalDecisionRepository)
   const attentionSource = new SqliteAttentionSource(database)
-  const attention = new AttentionService(projections, attentionSource)
+  const attention = new AttentionService(projections, attentionSource, store)
   const streams = new SessionStreams(service)
   const terminalStreams = new TerminalStreams(notifications)
   // 血缘服务与画布渲染无关：它只读写领域事实，查询端点不在 handler 里拼装边。
@@ -206,6 +208,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const sessionFiles = new SessionFileService(service, workers, workerGateway)
   const sessionTerminals = new SessionTerminalService(service, workers, workerGateway)
   const tasks = new TaskService(store, event => notifications.project(event), service)
+  capabilities.attachProjectQueries(projects, workerAccess, sessionAccess, tasks, service)
   const artifactRepository = new SqliteArtifactRepository(database)
   const artifacts = new ArtifactService(artifactRepository, store, projects)
   const approvalDecisions = new ApprovalDecisionRouter(projections, tasks, service, approvalDecisionRepository)
@@ -217,6 +220,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
     downloads: options.workerPackagePath ? { tarballPath: options.workerPackagePath } : undefined,
     control: { disconnectWorker: id => gateway?.disconnect(id) },
     staticSite: options.webStaticPath ? { root: options.webStaticPath } : undefined,
+    nextStaticSite: options.webNextStaticPath ? { root: options.webNextStaticPath } : undefined,
     tasks,
     projectStreams,
     identity,

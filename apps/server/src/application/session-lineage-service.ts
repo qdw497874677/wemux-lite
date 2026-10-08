@@ -1,3 +1,4 @@
+import { assertSessionTaskMutable } from './task-lifecycle.ts'
 import { createHash } from 'node:crypto'
 import type {
   AgentKey,
@@ -26,13 +27,15 @@ import {
   assertForkTargetsAnotherSession,
   isSessionForkContextPolicy,
 } from '@wemux/domain'
-import { narrowForkAccess, type Project, type Session, type SessionForkRecord, type SessionLineageNodeDecision } from '@wemux/server-domain'
+import { type Session, type SessionForkRecord, type SessionLineageNodeDecision } from '@wemux/server-domain'
 import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
 import type { AdministratorDirectory } from './administrator-directory.ts'
 import { AppError, requireValue } from './errors.ts'
 import { Notifications } from './notifications.ts'
 import { canonicalCommand, newId, now, type ForkTargetSessionInput } from './server-service.ts'
 import { integer, object, text } from './validation.ts'
+import { ProjectAccessService } from './project-access-service.ts'
+import { SessionAccessService } from './session-access-service.ts'
 
 /**
  * Ticket 17 (C1): Session Fork 与血缘权威。Fork 是后端持久事实：目标 Session 创建、
@@ -49,34 +52,27 @@ export interface SessionLineageView {
   readonly graphRevision: string
 }
 
-/**
- * 授权 seam：调用方提交操作者与目标，由实现决定可见性，调用方不复制 Grant 交集算法。
- * 当前实现是 A0 单管理员策略（见 `grantLineageAccess`），票据 09–13 落地团队授权后替换实现。
- */
+/** 授权 seam 委托现有内容 gate，不复制 Grant 或管理员策略。 */
 export interface SessionLineageAccess {
   decideNode(input: { tx: ServerStoreTx; viewer: UserId; teamId: TeamId; session: Session }): Promise<SessionLineageNodeDecision>
 }
 
-/** 目标 Session 的唯一创建 seam，绑定校验仍留在 ServerService，不在此处复制。 */
+/** 目标 Session 的唯一创建 seam，绑定校验仍留在 ServerService。 */
 export interface ForkTargetSessionCreator {
   createForkTargetInTx(tx: ServerStoreTx, input: ForkTargetSessionInput): Promise<Session>
 }
 
-/**
- * 当前的可见性策略：实例管理员与 Session 所有者可见；`shareScope` 为 project 且有 Project
- * Grant、或 selected-members 且有 Session Grant 时可见；其余返回无泄漏占位。
- * 占位者只说明“该 Session 存在”，不带标题、摘要、成员或分支数量。
- */
-export function grantLineageAccess(administrators: AdministratorDirectory): SessionLineageAccess {
+/** 不可读与已删除的 Session 完全省略，不提供存在性信号。 */
+export function grantLineageAccess(sessions: SessionAccessService): SessionLineageAccess {
   return {
-    async decideNode({ tx, viewer, teamId, session }) {
-      if (session.deletedAt !== null) return 'omitted'
-      if (session.ownerId === viewer) return 'visible'
-      if (await administrators.isAdministrator(tx.identity, viewer)) return 'visible'
-      const records = await tx.identity.getIdentityRecords({ userId: viewer, teamId, projectId: session.projectId, workerId: session.binding.agent.workerId, sessionId: session.id })
-      if (session.shareScope === 'project' && records.projectGrant) return 'visible'
-      if (session.shareScope === 'selected-members' && records.sessionGrant) return 'visible'
-      return 'placeholder'
+    async decideNode({ tx, viewer, session }) {
+      try {
+        await sessions.requireInTx(tx, viewer, session.id)
+        return 'visible'
+      } catch (error) {
+        if (error instanceof AppError && error.status === 404) return 'omitted'
+        throw error
+      }
     },
   }
 }
@@ -89,7 +85,7 @@ const forkPoint = (fork: SessionForkRecord): SessionForkPoint => ({
 })
 
 /**
- * 图 revision：Project 内节点与血缘集合的稳定指纹。只在真实变化时改变，客户端据此判断快照
+ * 图 revision：viewer 当前可读的 Project 节点与血缘集合的稳定指纹。只在真实变化时改变，客户端据此判断快照
  * 是否过期；它是服务端事实，不由客户端合并。哈希避免通过 revision 值反推分支数量。
  */
 function graphRevision(projectId: ProjectId, sessionIds: readonly SessionId[], edgeKeys: readonly string[]): string {
@@ -108,16 +104,22 @@ const maxNodeLimit = 1000
 export class SessionLineageService {
   private readonly store: ServerStore
   private readonly targets: ForkTargetSessionCreator
-  private readonly administrators: AdministratorDirectory
+  private readonly projects: ProjectAccessService
   private readonly access: SessionLineageAccess
   private readonly notifications?: Notifications
   constructor(
     store: ServerStore,
     targets: ForkTargetSessionCreator,
-    administrators: AdministratorDirectory,
-    access: SessionLineageAccess = grantLineageAccess(administrators),
+    _administrators: AdministratorDirectory,
+    access?: SessionLineageAccess,
     notifications?: Notifications,
-  ) { this.store = store; this.targets = targets; this.administrators = administrators; this.access = access; this.notifications = notifications;}
+  ) {
+    this.store = store
+    this.targets = targets
+    this.projects = new ProjectAccessService(store)
+    this.access = access ?? grantLineageAccess(new SessionAccessService(store, this.projects))
+    this.notifications = notifications
+  }
 
   /**
    * 创建 Fork：校验来源可读与 cursor 已持久化，原子创建目标 Session 与血缘记录。
@@ -135,20 +137,33 @@ export class SessionLineageService {
       targetModelId: command.targetModelId,
     })).digest('hex')
     const outcome = await this.store.transaction(async (tx): Promise<{ fork: SessionForkPoint; targetSessionId: SessionId; graphRevision: string; workerId: WorkerId | null; replayed: boolean }> => {
-      const teamId = await this.effectiveTeamId(tx, input.operator)
-      const project = await this.requireTeamProject(tx, input.projectId, teamId)
-      const previous = await tx.resources.getSessionForkByRequest(input.projectId, command.requestId)
+      const project = await this.projects.requireInTx(tx, input.operator, input.projectId)
+      const teamId = project.teamId
+      const checkedSource = await tx.resources.getSession(command.sourceSessionId)
+      if (!checkedSource || checkedSource.projectId !== input.projectId) throw new AppError(404, 'Source Session not found in this Project')
+      const visible = await this.access.decideNode({ tx, viewer: input.operator, teamId, session: checkedSource })
+      if (visible !== 'visible') throw new AppError(404, 'Source Session not found in this Project')
+      await assertSessionTaskMutable(tx, checkedSource)
+      // actor-scoped key; legacy unscoped rows remain replayable only by their creator.
+      const requestKey = forkRequestKey(input.operator, command.requestId)
+      const previous = await tx.resources.getSessionForkByRequest(input.projectId, requestKey)
+        ?? (await tx.resources.listSessionForks(input.projectId)).find(fork =>
+          fork.creation.requestId === command.requestId || fork.creation.requestId === forkRequestKey(fork.createdBy, command.requestId))
       if (previous) {
+        const replayActorId = previous.createdBy
+        if (replayActorId !== input.operator) throw new AppError(404, 'Fork not found')
+        await this.requireReadable(tx, { operator: input.operator, teamId, sessionId: previous.sourceSessionId })
+        const target = await this.requireReadable(tx, { operator: input.operator, teamId, sessionId: previous.targetSessionId })
+        if (target.projectId !== input.projectId) throw new AppError(404, 'Fork not found')
         // 幂等重放：只有载荷完全一致才回到同一目标，否则冲突而不是静默复用。
         if (previous.creation.fingerprint !== fingerprint) throw new AppError(409, 'requestId already belongs to a different Session Fork', 'request_id_conflict')
-        return { fork: forkPoint(previous), targetSessionId: previous.targetSessionId, graphRevision: await this.revision(tx, input.projectId), workerId: null, replayed: true }
+        return { fork: forkPoint(previous), targetSessionId: previous.targetSessionId, graphRevision: await this.revision(tx, input.operator, input.projectId), workerId: null, replayed: true }
       }
       const source = await tx.resources.getSession(command.sourceSessionId)
       if (!source || source.projectId !== input.projectId) throw new AppError(404, 'Source Session not found in this Project')
       const decision = await this.access.decideNode({ tx, viewer: input.operator, teamId, session: source })
       // 无内容读取权时既不能读取来源，也不能把它当作上下文种子。
-      if (decision === 'omitted') throw new AppError(404, 'Source Session not found in this Project')
-      if (decision !== 'visible') throw new AppError(403, 'Source Session content is not readable', 'source_not_readable')
+      if (decision !== 'visible') throw new AppError(404, 'Source Session not found in this Project')
       const durable = await this.durableSeq(tx, source.id)
       const cursor = command.sourceEventCursor ?? durable
       // 客户端可见的校验：cursor 超前于已持久序列是冲突，不是服务器内部错误。
@@ -156,6 +171,7 @@ export class SessionLineageService {
       if (cursor > durable) throw new AppError(409, `Session Fork cursor ${cursor} is ahead of durable sequence ${durable}`, 'cursor_not_durable')
       assertForkCursorIsDurable(cursor, durable)
       const target = await this.targets.createForkTargetInTx(tx, {
+        taskId: source.taskId,
         projectId: input.projectId,
         workspaceId: command.targetWorkspaceId,
         workerId: command.targetWorkerId,
@@ -164,7 +180,7 @@ export class SessionLineageService {
         title: forkTitle(source.title),
         ownerId: input.operator,
         storageMode: source.storageMode ?? 'local',
-        requestId: command.requestId,
+        requestId: requestKey,
       })
       const record: SessionForkRecord = {
         id: newId<'SessionForkId'>(),
@@ -175,7 +191,7 @@ export class SessionLineageService {
         createdBy: input.operator,
         createdAt: now(),
         contextPolicy: command.contextPolicy ?? 'through_cursor',
-        creation: { requestId: command.requestId, fingerprint },
+        creation: { requestId: requestKey, fingerprint },
       }
       assertForkTargetsAnotherSession(record)
       await tx.resources.saveSessionFork(record)
@@ -184,7 +200,7 @@ export class SessionLineageService {
         result: 'succeeded', occurredAt: record.createdAt,
         metadata: { forkId: record.id, sourceSessionId: source.id, sourceEventCursor: cursor, contextPolicy: record.contextPolicy },
       })
-      return { fork: forkPoint(record), targetSessionId: target.id, graphRevision: await this.revision(tx, input.projectId), workerId: target.binding.agent.workerId, replayed: false }
+      return { fork: forkPoint(record), targetSessionId: target.id, graphRevision: await this.revision(tx, input.operator, input.projectId), workerId: target.binding.agent.workerId, replayed: false }
     })
     if (!outcome.replayed) {
       this.notifications?.session(outcome.targetSessionId)
@@ -197,11 +213,9 @@ export class SessionLineageService {
   /** 祖先、直接子分支与 Fork point：只返回两端都未被隐藏的边，标题与摘要不侧漏。 */
   async lineage(input: { operator: UserId; sessionId: SessionId }): Promise<SessionLineageView> {
     return await this.store.transaction(async tx => {
-      const teamId = await this.effectiveTeamId(tx, input.operator)
-      const session = await this.requireReadable(tx, { operator: input.operator, teamId, sessionId: input.sessionId })
-      const forks = await tx.resources.listSessionForks(session.projectId)
-      const sessionIds = new Set((await tx.resources.listSessions()).filter(candidate => candidate.projectId === session.projectId).map(candidate => candidate.id))
-      const exposed = await this.exposedForks(tx, teamId, input.operator, forks, sessionIds)
+      const session = await this.requireReadable(tx, { operator: input.operator, sessionId: input.sessionId })
+      const projection = await this.visibleProjection(tx, input.operator, session.projectId)
+      const exposed = projection.forks
       const byTarget = new Map<SessionId, SessionForkRecord[]>()
       for (const fork of exposed) byTarget.set(fork.targetSessionId, [...(byTarget.get(fork.targetSessionId) ?? []), fork])
       const ancestors: SessionForkPoint[] = []
@@ -219,48 +233,29 @@ export class SessionLineageService {
         sessionId: session.id,
         ancestors,
         children,
-        graphRevision: graphRevision(session.projectId, [...sessionIds], exposed.map(fork => edgeKey(fork.id))),
+        graphRevision: projection.revision,
       }
     })
   }
 
-  /** 单条血缘边。两端都不可见时返回 404，避免用 forkId 猜测他人分支。 */
+  /** 单条血缘边只在两端当前都可读且属于同一个 Project 时返回。 */
   async getForkPoint(input: { operator: UserId; forkId: SessionForkId }): Promise<{ fork: SessionForkPoint; graphRevision: string }> {
     return await this.store.transaction(async tx => {
-      const teamId = await this.effectiveTeamId(tx, input.operator)
       const fork = requireValue(await tx.resources.getSessionFork(input.forkId))
-      const project = await tx.resources.getProject(fork.projectId)
-      // Team 不一致按“不存在”处理：不能靠 forkId 探测别人 Team 的分支。
-      if (!project || project.deletedAt !== null || project.teamId !== teamId) throw new AppError(404, 'Fork not found')
-      const source = await tx.resources.getSession(fork.sourceSessionId), target = await tx.resources.getSession(fork.targetSessionId)
-      if (!source || !target) throw new AppError(404, 'Fork not found')
-      const [sourceDecision, targetDecision] = await Promise.all([
-        this.access.decideNode({ tx, viewer: input.operator, teamId, session: source }),
-        this.access.decideNode({ tx, viewer: input.operator, teamId, session: target }),
-      ])
-      const visible = narrowForkAccess(sourceDecision, targetDecision)
-      if (visible === 'omitted' || (sourceDecision !== 'visible' && targetDecision !== 'visible')) throw new AppError(404, 'Fork not found')
-      return { fork: forkPoint(fork), graphRevision: await this.revision(tx, fork.projectId) }
+      const projection = await this.visibleProjection(tx, input.operator, fork.projectId)
+      if (!projection.forks.some(candidate => candidate.id === fork.id)) throw new AppError(404, 'Fork not found')
+      return { fork: forkPoint(fork), graphRevision: projection.revision }
     })
   }
 
-  /** 图读模型：默认返回 Project 内操作者可见的局部邻域，可指定根 Session 与深度。 */
+  /** 图只遍历可读节点；局部查询与完整可见图使用同一个 revision。 */
   async getGraph(input: { operator: UserId; query: SessionGraphQuery }): Promise<SessionGraphSnapshot> {
     const query = parseGraphQuery(input.query)
     return await this.store.transaction(async tx => {
-      const teamId = await this.effectiveTeamId(tx, input.operator)
-      const project = await this.requireTeamProject(tx, query.projectId, teamId)
-      const sessions = (await tx.resources.listSessions()).filter(candidate => candidate.projectId === query.projectId)
-      const live = sessions.filter(candidate => candidate.deletedAt === null)
-      const decisions = new Map<SessionId, SessionLineageNodeDecision>()
-      for (const session of sessions) {
-        decisions.set(session.id, session.deletedAt !== null ? 'omitted' : await this.access.decideNode({ tx, viewer: input.operator, teamId, session }))
-      }
-      // 一个可见根都没有时，先确认操作者能不能读这个 Project；不能读就当作不存在，
-      // 而不是返回空图或占位图（那本身就是关系存在性的信号）。
-      if (!live.some(session => decisions.get(session.id) === 'visible') && !await this.canReadProject(tx, input.operator, teamId, project)) throw new AppError(404, 'Project not found')
-      const forks = await tx.resources.listSessionForks(query.projectId), liveIds = new Set(live.map(session => session.id))
-      const exposed = forks.filter(fork => liveIds.has(fork.sourceSessionId) && liveIds.has(fork.targetSessionId) && narrowForkAccess(decisions.get(fork.sourceSessionId)!, decisions.get(fork.targetSessionId)!) !== 'omitted')
+      const projection = await this.visibleProjection(tx, input.operator, query.projectId)
+      const live = projection.sessions
+      const decisions = new Map<SessionId, SessionLineageNodeDecision>(live.map(session => [session.id, 'visible']))
+      const exposed = projection.forks
       const adjacency = new Map<SessionId, SessionId[]>()
       for (const fork of exposed) {
         adjacency.set(fork.sourceSessionId, [...(adjacency.get(fork.sourceSessionId) ?? []), fork.targetSessionId])
@@ -273,25 +268,10 @@ export class SessionLineageService {
         .map(fork => ({ key: edgeKey(fork.id), relation: { type: 'fork', forkId: fork.id }, sourceSessionId: fork.sourceSessionId, targetSessionId: fork.targetSessionId }))
       const nodes: SessionGraphNode[] = []
       for (const session of selected) {
-        const decision = decisions.get(session.id)!
-        nodes.push(decision === 'visible'
-          ? { sessionId: session.id, visibility: 'visible', summary: await this.summary(tx, session, exposed, selectedSet) }
-          : { sessionId: session.id, visibility: 'placeholder', summary: null })
+        nodes.push({ sessionId: session.id, visibility: 'visible', summary: await this.summary(tx, session, exposed, selectedSet) })
       }
-      // 结构敏感：隐藏了多少条关系不对外计数，否则计数本身就是侧信道。
-      return { revision: graphRevision(query.projectId, selectedIds, edges.map(edge => edge.key)), nodes, edges, hiddenRelationCount: null }
+      return { revision: projection.revision, nodes, edges, hiddenRelationCount: null }
     })
-  }
-
-  /**
-   * Project 级可读性：所有者、实例管理员或持有显式 Project Grant。
-   * 与 Session 级策略共用同一个入口，票据 10 替换本实现而不改调用方。
-   */
-  private async canReadProject(tx: ServerStoreTx, viewer: UserId, teamId: TeamId, project: { id: ProjectId; ownerId: UserId }): Promise<boolean> {
-    if (project.ownerId === viewer) return true
-    if (await this.administrators.isAdministrator(tx.identity, viewer)) return true
-    const records = await tx.identity.getIdentityRecords({ userId: viewer, teamId, projectId: project.id })
-    return records.projectGrant !== null
   }
 
   private async summary(tx: ServerStoreTx, session: Session, forks: readonly SessionForkRecord[], snapshot: ReadonlySet<SessionId>): Promise<SessionGraphNodeSummary> {
@@ -320,55 +300,29 @@ export class SessionLineageService {
     return (await tx.cache.getFreshness(sessionId))?.contiguousSeq ?? 0
   }
 
-  private async requireReadable(tx: ServerStoreTx, input: { operator: UserId; teamId: TeamId; sessionId: SessionId }): Promise<Session> {
+  private async requireReadable(tx: ServerStoreTx, input: { operator: UserId; teamId?: TeamId; sessionId: SessionId }): Promise<Session> {
     const session = await tx.resources.getSession(input.sessionId)
-    if (!session) throw new AppError(404, 'Session not found')
-    await this.requireTeamProject(tx, session.projectId, input.teamId)
-    if (await this.access.decideNode({ tx, viewer: input.operator, teamId: input.teamId, session }) !== 'visible') throw new AppError(404, 'Session not found')
+    if (!session || session.deletedAt !== null) throw new AppError(404, 'Session not found')
+    const project = await this.projects.requireInTx(tx, input.operator, session.projectId)
+    if (input.teamId !== undefined && project.teamId !== input.teamId) throw new AppError(404, 'Session not found')
+    if (await this.access.decideNode({ tx, viewer: input.operator, teamId: project.teamId, session }) !== 'visible') throw new AppError(404, 'Session not found')
     return session
   }
 
-  /**
-   * 操作者的生效 Team：只取真实成员身份，A0 单 Team 部署回落到默认 Team。
-   * 调用方不传 teamId，避免 HTTP 层自造授权范围；票据 09–13 替换此实现即可支持多 Team。
-   */
-  /**
-   * Fork 与血缘不跨 Team：Project 的 Team 必须就是操作者的生效 Team，
-   * 否则同一个管理员在两个 Team 里会看到一条本来不存在的通路。
-   */
-  private async requireTeamProject(tx: ServerStoreTx, projectId: ProjectId, teamId: TeamId): Promise<Project> {
-    const project = await tx.resources.getProject(projectId)
-    if (!project || project.deletedAt !== null || project.teamId !== teamId) throw new AppError(404, 'Project not found')
-    return project
-  }
-
-  private async effectiveTeamId(tx: ServerStoreTx, operator: UserId): Promise<TeamId> {
-    const memberships = await tx.identity.listMemberships(operator)
-    return memberships[0]?.teamId ?? ('default-team' as TeamId)
-  }
-
-  /** 两端都未被隐藏、且收窄后仍可见的边；占位端点保留结构但不带内容。 */
-  private async exposedForks(tx: ServerStoreTx, teamId: TeamId, viewer: UserId, forks: readonly SessionForkRecord[], liveIds: ReadonlySet<SessionId>): Promise<readonly SessionForkRecord[]> {
-    const cache = new Map<SessionId, SessionLineageNodeDecision>()
-    const decide = async (sessionId: SessionId): Promise<SessionLineageNodeDecision> => {
-      const cached = cache.get(sessionId)
-      if (cached) return cached
-      if (!liveIds.has(sessionId)) { cache.set(sessionId, 'omitted'); return 'omitted' }
-      const session = requireValue(await tx.resources.getSession(sessionId))
-      const decision = await this.access.decideNode({ tx, viewer, teamId, session })
-      cache.set(sessionId, decision)
-      return decision
+  /** 每次现查内容权限，不缓存授权结论；同一投影用于图、血缘、边、revision 和布局。 */
+  private async visibleProjection(tx: ServerStoreTx, operator: UserId, projectId: ProjectId) {
+    const project = await this.projects.requireInTx(tx, operator, projectId)
+    const sessions: Session[] = []
+    for (const session of await tx.resources.listSessions()) {
+      if (session.projectId !== projectId || session.deletedAt !== null) continue
+      if (await this.access.decideNode({ tx, viewer: operator, teamId: project.teamId, session }) === 'visible') sessions.push(session)
     }
-    const exposed: SessionForkRecord[] = []
-    for (const fork of forks) {
-      const [source, target] = [await decide(fork.sourceSessionId), await decide(fork.targetSessionId)]
-      if (narrowForkAccess(source, target) === 'omitted') continue
-      exposed.push(fork)
-    }
-    return exposed
+    const ids = new Set(sessions.map(session => session.id))
+    const forks = (await tx.resources.listSessionForks(projectId)).filter(fork => ids.has(fork.sourceSessionId) && ids.has(fork.targetSessionId))
+    return { sessions, forks, revision: graphRevision(projectId, [...ids], forks.map(fork => edgeKey(fork.id))) }
   }
 
-  /** 以可见节点为种子沿血缘双向遍历到 depth；越界或不可见的邻居以占位节点进入快照。 */
+  /** 只沿可见边遍历到 depth，不补不可读节点或占位。 */
   private selectNodes(query: SessionGraphQuery, live: readonly Session[], decisions: ReadonlyMap<SessionId, SessionLineageNodeDecision>, adjacency: ReadonlyMap<SessionId, readonly SessionId[]>): readonly Session[] {
     const byId = new Map(live.map(session => [session.id, session]))
     const roots: SessionId[] = []
@@ -388,29 +342,33 @@ export class SessionLineageService {
       seen.add(id)
       if (seen.size >= limit) break
       if (distance >= depth) continue
-      for (const neighbour of [...(adjacency.get(id) ?? [])].sort()) if (!seen.has(neighbour) && decisions.get(neighbour) !== 'omitted') queue.push({ id: neighbour, distance: distance + 1 })
+      for (const neighbour of [...(adjacency.get(id) ?? [])].sort()) if (!seen.has(neighbour) && decisions.get(neighbour) === 'visible') queue.push({ id: neighbour, distance: distance + 1 })
     }
     return [...seen].sort().map(id => requireValue(byId.get(id)))
   }
 
-  /** 操作者视角下的 Project revision：先校验 Project 可读性，再复用权威图指纹。 */
-  async graphRevisionFor(operator: UserId, projectId: ProjectId): Promise<string> {
-    return await this.store.transaction(async tx => {
-      const teamId = await this.effectiveTeamId(tx, operator)
-      const project = await this.requireTeamProject(tx, projectId, teamId)
-      if (!await this.canReadProject(tx, operator, teamId, project)) throw new AppError(404, 'Project not found')
-      return this.revision(tx, projectId)
+  /** 不受图分页上限影响的布局授权投影，与 revision 在同一事务读取。 */
+  async layoutProjectionFor(operator: UserId, projectId: ProjectId) {
+    return this.store.transaction(async tx => {
+      const projection = await this.visibleProjection(tx, operator, projectId)
+      return {
+        revision: projection.revision,
+        sessionIds: new Set(projection.sessions.map(session => session.id as string)),
+        workspaceGroups: new Set(projection.sessions.map(session => `workspace:${session.workspaceId}`)),
+      }
     })
   }
 
-  /** Project revision 的事务内实现：与图快照用同一指纹规则，客户端可比较新旧。 */
-  private async revision(tx: ServerStoreTx, projectId: ProjectId): Promise<string> {
-    const sessions = (await tx.resources.listSessions()).filter(session => session.projectId === projectId)
-    const live = new Set(sessions.filter(session => session.deletedAt === null).map(session => session.id))
-    const forks = (await tx.resources.listSessionForks(projectId)).filter(fork => live.has(fork.sourceSessionId) && live.has(fork.targetSessionId))
-    return graphRevision(projectId, [...live], forks.map(fork => edgeKey(fork.id)))
+  async graphRevisionFor(operator: UserId, projectId: ProjectId): Promise<string> {
+    return this.store.transaction(tx => this.revision(tx, operator, projectId))
+  }
+
+  private async revision(tx: ServerStoreTx, operator: UserId, projectId: ProjectId): Promise<string> {
+    return (await this.visibleProjection(tx, operator, projectId)).revision
   }
 }
+
+const forkRequestKey = (actor: UserId, requestId: string): string => `fork-actor:${createHash('sha256').update(JSON.stringify([actor, requestId])).digest('hex')}`
 
 const edgeKey = (forkId: SessionForkId): string => `fork:${forkId}`
 

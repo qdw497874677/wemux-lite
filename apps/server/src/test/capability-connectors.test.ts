@@ -86,7 +86,7 @@ test('capability connector resolution fails closed for missing actor, A3-invisib
   const failed = new CapabilityService(f.store, () => timestamp, tokens, { list: async () => { throw new Error('repository unavailable') } })
   assert.deepEqual((await failed.prepareTurn({ sessionId: f.session.id, turnId: 'turn-failed' as never, actorId: f.user.id })).runtime.snapshot.allowedConnectorIds, [])
   const viewer = 'viewer-user' as UserId
-  await f.store.transaction(tx => tx.identity.saveUser({ id: viewer, email: 'viewer@example.com', username: 'viewer', createdAt: timestamp }))
+  await f.store.transaction(tx => tx.identity.saveUser({ id: viewer, email: 'viewer@example.com', username: 'viewer', createdAt: timestamp, status: 'active', authVersion: 0, statusChangedAt: timestamp, deletedAt: null }))
   const viewerCapabilities = new CapabilityService(f.store, () => timestamp, tokens, { list: async () => [visible] })
   assert.deepEqual((await viewerCapabilities.prepareTurn({ sessionId: f.session.id, turnId: 'turn-viewer' as never, actorId: viewer })).runtime.snapshot.allowedConnectorIds, [])
 })

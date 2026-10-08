@@ -41,13 +41,14 @@ export function validateEvent(value: unknown): JournalEvent {
   switch (p.kind) {
     case 'message.queued': text(p.commandId, 'commandId'); text(p.messageId, 'messageId'); streamText(p.content, 'content', 200000); integer(p.position, 'position'); if (p.sentByAccountId !== undefined) text(p.sentByAccountId, 'sentByAccountId'); break
     case 'message.cancelled': text(p.commandId, 'commandId'); text(p.messageId, 'messageId'); break
-    case 'turn.started': text(p.turnId, 'turnId'); text(p.messageId, 'messageId'); break
+    case 'turn.started': text(p.turnId, 'turnId'); text(p.messageId, 'messageId'); if (p.modelId !== undefined) nullableText(p.modelId); break
     case 'assistant.text.delta': text(p.turnId, 'turnId'); streamText(p.text, 'text', 200000); if (p.streamKind !== undefined) oneOf(p.streamKind, ['assistant_text', 'reasoning_text', 'plan_text']); break
     case 'tool.started': text(p.turnId, 'turnId'); text(p.toolCallId, 'toolCallId'); text(p.toolName, 'toolName'); if (p.streamKind !== undefined) oneOf(p.streamKind, ['command_output', 'file_change_output']); break
     case 'tool.output.delta': text(p.turnId, 'turnId'); text(p.toolCallId, 'toolCallId'); streamText(p.text, 'text', 200000); if (p.streamKind !== undefined) oneOf(p.streamKind, ['command_output', 'file_change_output']); break
     case 'tool.finished': text(p.turnId, 'turnId'); text(p.toolCallId, 'toolCallId'); if (p.exitCode !== null) integer(p.exitCode, 'exitCode', -2147483648, 2147483647); break
     case 'approval.requested': text(p.turnId, 'turnId'); text(p.approvalId, 'approvalId'); object(p.action); if (p.reason !== undefined) text(p.reason, 'reason'); break
     case 'approval.resolved': text(p.turnId, 'turnId'); text(p.approvalId, 'approvalId'); oneOf(p.decision, ['approve', 'deny']); if (p.decidedByAccountId !== undefined) text(p.decidedByAccountId, 'decidedByAccountId'); break
+    case 'approval.expired': text(p.turnId, 'turnId'); text(p.approvalId, 'approvalId'); oneOf(p.reason, ['timeout', 'cancelled', 'turn_released', 'shutdown']); break
     case 'usage.updated': text(p.turnId, 'turnId'); usage(p.usage); break
     case 'compaction.started': text(p.turnId, 'turnId'); if (p.reason !== undefined) text(p.reason, 'reason'); break
     case 'compaction.finished': text(p.turnId, 'turnId'); if (p.summary !== undefined) streamText(p.summary, 'summary', 200000); break

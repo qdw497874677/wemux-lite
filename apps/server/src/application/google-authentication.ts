@@ -184,6 +184,22 @@ export class GoogleAuthenticationService {
     return { id: transaction.id, stateHash: transaction.stateHash, nonce: transaction.nonce, codeVerifier: transaction.codeVerifier, returnTo: transaction.returnTo, issuer: transaction.issuer, intent: transaction.intent, userId: transaction.userId, sessionId: transaction.sessionId }
   }
 
+  /** Fixed recovery entry only; never accept a destination from callback query parameters.
+   * Read before callback consumption so a valid transaction that fails later still knows its entry.
+   * Invalid, expired, replayed or cross-browser states provide no routing authority.
+   */
+  async callbackRecovery(state: unknown, cookieState: unknown): Promise<{ path: '/next/login' | '/next/settings'; intent: 'login' | 'link' } | null> {
+    try {
+      const transaction = await this.loadTransaction(state, cookieState, null)
+      const target = safeReturnTo(transaction.returnTo)
+      if (!target?.startsWith('/next/')) return null
+      return { path: transaction.intent === 'link' ? '/next/settings' : '/next/login', intent: transaction.intent }
+    } catch (error) {
+      if (error instanceof AppError) return null
+      throw error
+    }
+  }
+
   /**
    * 回调总入口：同一地址既处理登录也处理绑定，先看事务意图再分发。
    * 让路由层自己猜意图的话，以后新增一种意图就要在两处同步改判断，早晚会漏一处。

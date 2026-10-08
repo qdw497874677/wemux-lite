@@ -10,6 +10,8 @@ export interface ApprovalDecisionReceipt {
 }
 
 export interface ApprovalDecisionRepository {
+  /** Serialize receipt lookup and decision writes in the shared domain database transaction. */
+  transaction<T>(work: () => Promise<T>): Promise<T>
   getReceipt(actorId: UserId, requestId: string, now: Timestamp): Promise<ApprovalDecisionReceipt | null>
   save(receipt: ApprovalDecisionReceipt, overlay: ApprovalView, expiresAt: Timestamp): Promise<void>
   listOverlays(now: Timestamp): Promise<readonly ApprovalView[]>

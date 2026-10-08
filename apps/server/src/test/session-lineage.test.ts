@@ -88,6 +88,18 @@ test('fork creates the target Session, binding snapshot, durable cursor and audi
   assert.deepEqual(page.events, [])
 })
 
+test('fork keeps the source Task when selecting another Workspace', async t => {
+  const f = await fixture(); t.after(() => f.close())
+  const { workspace } = await f.service.createWorkspace({ projectId: f.project.id, workerId: f.worker.id, name: 'branch' })
+  await f.ready(workspace.id)
+  const result = await f.fork({ targetWorkspaceId: workspace.id })
+  const target = (await f.sessions()).find(session => session.id === result.targetSessionId)!
+  assert.ok(f.source.taskId)
+  assert.equal(target.taskId, f.source.taskId)
+  assert.equal(target.runId, null)
+  assert.equal(target.workspaceId, workspace.id)
+})
+
 test('replayed forks are idempotent and a changed payload under the same requestId is rejected', async t => {
   const f = await fixture(); t.after(() => f.close())
   await f.store.putRecord('session', f.source.id, (({ storageMode: _mode, ...legacy }) => legacy)(f.source))
@@ -129,12 +141,11 @@ test('failed forks leave no orphan Session or dangling edge', async t => {
   const f = await fixture(); t.after(() => f.close())
   const before = (await f.sessions()).length
   const otherProject = await f.service.createProject({ name: 'other' })
-  const { session: foreign } = await f.service.createSession({ requestId: 'foreign', workspaceId: f.workspace.id, title: 'foreign', agentKey: 'pi', modelId: 'pi-model' })
-  await f.store.transaction(tx => tx.resources.saveSession({ ...foreign, projectId: otherProject.id }))
-  const crossProject = await f.fork({ requestId: 'fork-cross', sourceSessionId: foreign.id }).catch(error => error)
-  assert.equal(crossProject.status, 404)
   const { workspace: otherWorkspace } = await f.service.createWorkspace({ projectId: otherProject.id, workerId: f.worker.id, name: 'other' })
   await f.ready(otherWorkspace.id)
+  const { session: foreign } = await f.service.createSession({ requestId: 'foreign', workspaceId: otherWorkspace.id, title: 'foreign', agentKey: 'pi', modelId: 'pi-model' })
+  const crossProject = await f.fork({ requestId: 'fork-cross', sourceSessionId: foreign.id }).catch(error => error)
+  assert.equal(crossProject.status, 404)
   const scope = await f.fork({ requestId: 'fork-scope', targetWorkspaceId: otherWorkspace.id }).catch(error => error)
   assert.equal(scope.status, 409)
   assert.equal(scope.code, 'fork_target_scope')
@@ -186,45 +197,108 @@ test('lineage returns nearest-first ancestors, direct children and a revision th
   assert.equal((await f.lineage.getGraph({ operator: f.user.id, query: { projectId: f.project.id, nodeLimit: 0 } }).catch(error => error)).status, 400)
 })
 
-test('hidden nodes are placeholders without content, unreadable Projects stay invisible, and deleting a source does not erase descendants', async t => {
+test('hidden Sessions leave no nodes, edges, counts or ancestry and visible revisions agree', async t => {
   const f = await fixture(); t.after(() => f.close())
   const first = await f.fork({ sourceEventCursor: 2 })
   const stranger = await f.other('stranger')
-  // 对 Project 一无所知的操作者拿到的是“不存在”，而不是空图或占位图（后者本身就是结构信号）。
   assert.equal((await f.lineage.getGraph({ operator: stranger, query: { projectId: f.project.id } }).catch(error => error)).status, 404)
-  assert.equal((await f.lineage.lineage({ operator: stranger, sessionId: f.source.id }).catch(error => error)).status, 404)
-  // 只拥有下游分支的操作者：自己的节点可见，上游退回无内容占位，但仍能看见边的存在。
   const target = (await f.sessions()).find(session => session.id === first.targetSessionId)!
   await f.handOver(target, stranger)
+  await f.store.transaction(tx => tx.identity.saveProjectGrant({ projectId: f.project.id, userId: stranger, role: 'viewer' }))
   const graph = await f.lineage.getGraph({ operator: stranger, query: { projectId: f.project.id } })
-  assert.deepEqual(graph.nodes.map(node => node.sessionId).sort(), [f.source.id, target.id].sort())
-  const hidden = graph.nodes.find(node => node.sessionId === f.source.id)!
-  assert.equal(hidden.visibility, 'placeholder')
-  assert.equal(hidden.summary, null, '占位节点不得携带部分摘要')
-  assert.deepEqual(hidden, { sessionId: f.source.id, visibility: 'placeholder', summary: null }, '占位节点必须只有身份与可见性，任何额外字段都是泄漏面')
-  const owned = graph.nodes.find(node => node.sessionId === target.id)!
-  assert.equal(owned.visibility, 'visible')
-  assert.equal(owned.summary!.title, 'source（分支）')
-  assert.deepEqual(graph.edges.map(edge => edge.key), [`fork:${first.fork.forkId}`])
-  assert.equal(graph.hiddenRelationCount, null, '隐藏计数会泄漏结构，必须为空')
-  // 上游不可读时，下游自己的祖先列表退化为占位而不是 404。
+  assert.deepEqual(graph.nodes.map(node => node.sessionId), [target.id])
+  assert.deepEqual(graph.edges, [])
+  assert.equal(graph.hiddenRelationCount, null)
+  assert.equal(graph.nodes[0]!.summary!.branchCount, 0)
   const partial = await f.lineage.lineage({ operator: stranger, sessionId: target.id })
-  assert.deepEqual(partial.ancestors.map(point => point.sourceSessionId), [f.source.id])
-  // 显式 Project 授权后同一节点转为可见。
+  assert.deepEqual(partial.ancestors, [])
+  assert.deepEqual(partial.children, [])
+  assert.equal(partial.graphRevision, graph.revision)
+  assert.equal(await f.lineage.graphRevisionFor(stranger, f.project.id), graph.revision)
+  assert.equal((await f.lineage.getForkPoint({ operator: stranger, forkId: first.fork.forkId }).catch(error => error)).status, 404)
+  assert.equal(JSON.stringify({ graph, partial }).includes(f.source.id), false)
+  // 删除不可读来源不能改变 viewer 的 revision，也不能删除后代。
+  await f.store.transaction(tx => tx.resources.saveSession({ ...f.source, deletedAt: now() }))
+  assert.equal((await f.lineage.getGraph({ operator: stranger, query: { projectId: f.project.id } })).revision, graph.revision)
+  assert.equal(await f.lineage.graphRevisionFor(stranger, f.project.id), graph.revision)
+  assert.equal((await f.sessions()).find(session => session.id === target.id)!.deletedAt, null)
+})
+
+test('hidden creation, deletion and grants do not move visible revisions; revocation drops cached projections', async t => {
+  const f = await fixture(); t.after(() => f.close())
+  const viewer = await f.other('viewer'), other = await f.other('other')
   await f.store.transaction(async tx => {
-    await tx.resources.saveSession({ ...(await tx.resources.getSession(f.source.id))!, shareScope: 'project' })
-    await tx.identity.saveProjectGrant({ projectId: f.project.id, userId: stranger, role: 'viewer' })
+    await tx.identity.saveProjectGrant({ projectId: f.project.id, userId: viewer, role: 'viewer' })
+    await tx.resources.saveSession({ ...f.source, shareScope: 'project' })
   })
-  const granted = await f.lineage.getGraph({ operator: stranger, query: { projectId: f.project.id } })
-  assert.equal(granted.nodes.find(node => node.sessionId === f.source.id)!.visibility, 'visible')
-  // 删除来源不级联删除后代：目标 Session 仍然存在，只是它的父边不再可见。
-  await f.store.transaction(async tx => { const session = (await tx.resources.getSession(f.source.id))!; await tx.resources.saveSession({ ...session, deletedAt: now() }) })
-  const descendants = (await f.sessions()).filter(session => session.id === first.targetSessionId)
-  assert.equal(descendants.length, 1)
-  assert.equal(descendants[0]!.deletedAt, null)
-  const orphaned = await f.lineage.lineage({ operator: stranger, sessionId: target.id })
-  assert.deepEqual(orphaned.ancestors, [])
-  assert.equal((await f.lineage.getGraph({ operator: stranger, query: { projectId: f.project.id } })).edges.length, 0)
+  const graph = () => f.lineage.getGraph({ operator: viewer, query: { projectId: f.project.id } })
+  const before = await graph()
+  const hidden = await f.fork({ requestId: 'hidden-branch' })
+  const hiddenSession = (await f.sessions()).find(session => session.id === hidden.targetSessionId)!
+  const hiddenTask = await f.create('hidden-task-session')
+  // A separate Workspace creates a dedicated Task not referenced by any visible Session.
+  const { workspace: hiddenWorkspace } = await f.service.createWorkspace({ projectId: f.project.id, workerId: f.worker.id, name: 'hidden-task' })
+  await f.ready(hiddenWorkspace.id)
+  const { session: taskSession } = await f.service.createSession({ requestId: 'hidden-task-session', workspaceId: hiddenWorkspace.id, title: 'hidden-task', agentKey: 'pi', modelId: 'pi-model' })
+  assert.notEqual(taskSession.taskId, f.source.taskId)
+  for (const id of [hiddenTask.session.id, taskSession.id, taskSession.taskId!, hiddenWorkspace.id]) assert.equal(JSON.stringify(await graph()).includes(id), false)
+  assert.deepEqual(await graph(), before)
+  assert.equal((await f.lineage.lineage({ operator: viewer, sessionId: f.source.id })).graphRevision, before.revision)
+  assert.equal(await f.lineage.graphRevisionFor(viewer, f.project.id), before.revision)
+  await f.store.transaction(async tx => {
+    await tx.resources.saveSession({ ...hiddenSession, shareScope: 'selected-members' })
+    await tx.identity.saveSessionGrant({ sessionId: hiddenSession.id, userId: other })
+    await tx.identity.removeSessionGrant(hiddenSession.id, other)
+  })
+  assert.deepEqual(await graph(), before)
+  await f.store.transaction(tx => tx.identity.saveSessionGrant({ sessionId: hiddenSession.id, userId: viewer }))
+  const visible = await graph()
+  assert.equal(visible.nodes.length, 2)
+  assert.equal(visible.nodes.find(node => node.sessionId === f.source.id)!.summary!.branchCount, 1)
+  assert.equal((await f.lineage.getForkPoint({ operator: viewer, forkId: hidden.fork.forkId })).graphRevision, visible.revision)
+  assert.equal((await f.lineage.getGraph({ operator: viewer, query: { projectId: f.project.id, nodeLimit: 1, depth: 0 } })).revision, visible.revision)
+  await f.store.transaction(tx => tx.identity.removeSessionGrant(hiddenSession.id, viewer))
+  assert.deepEqual(await graph(), before)
+  assert.equal((await f.lineage.getForkPoint({ operator: viewer, forkId: hidden.fork.forkId }).catch(error => error)).status, 404)
+  await f.store.transaction(tx => tx.resources.saveSession({ ...hiddenSession, deletedAt: now() }))
+  assert.deepEqual(await graph(), before)
+})
+
+test('instance administrator has no implicit Session content access', async t => {
+  const f = await fixture(); t.after(() => f.close())
+  const owner = await f.other('private-owner')
+  await f.store.transaction(tx => tx.resources.saveSession({ ...f.source, ownerId: owner, shareScope: 'selected-members' }))
+  const graph = await f.lineage.getGraph({ operator: f.user.id, query: { projectId: f.project.id } })
+  assert.deepEqual(graph.nodes, [])
+  assert.equal((await f.lineage.lineage({ operator: f.user.id, sessionId: f.source.id }).catch(error => error)).status, 404)
+  assert.equal((await f.fork({ requestId: 'admin-private' }).catch(error => error)).status, 404)
+})
+
+test('Session Fork replay is actor scoped and rechecks both current endpoints', async t => {
+  const f = await fixture(); t.after(() => f.close())
+  const first = await f.fork({})
+  const actor = await f.other('replay-actor')
+  await f.store.transaction(async tx => {
+    await tx.identity.saveProjectGrant({ projectId: f.project.id, userId: actor, role: 'contributor' })
+    await tx.resources.saveSession({ ...f.source, shareScope: 'project' })
+  })
+  const command = { sourceSessionId: f.source.id, targetWorkspaceId: f.workspace.id, targetWorkerId: f.worker.id, targetAgentKey: 'pi', targetModelId: 'pi-model', requestId: 'fork-1' }
+  const denied = await f.lineage.fork({ operator: actor, projectId: f.project.id, command }).catch(error => error)
+  assert.ok([404, 409].includes(denied.status))
+  assert.equal(JSON.stringify(denied).includes(first.targetSessionId), false)
+  assert.equal((await f.sessions()).length, 2)
+  const record = (await f.store.resources.listSessionForks(f.project.id))[0]!
+  assert.match(record.creation.requestId, /^fork-actor:[a-f0-9]{64}$/)
+  assert.deepEqual((await f.fork({})).fork, first.fork)
+  // Existing unscoped rows remain replayable only by their original actor.
+  await f.store.transaction(tx => tx.resources.saveSessionFork({ ...record, creation: { ...record.creation, requestId: 'fork-1' } }))
+  assert.deepEqual((await f.fork({})).fork, first.fork)
+  const target = (await f.sessions()).find(session => session.id === first.targetSessionId)!
+  await f.handOver(target, actor)
+  assert.equal((await f.fork({}).catch(error => error)).status, 404)
+  await f.handOver(target, f.user.id)
+  await f.store.transaction(tx => tx.resources.saveSession({ ...f.source, ownerId: actor, shareScope: 'owner-only' }))
+  assert.equal((await f.fork({}).catch(error => error)).status, 404)
 })
 
 test('concurrent forks with one requestId converge and distinct requestIds never lose an edge', async t => {
@@ -243,18 +317,21 @@ test('concurrent forks with one requestId converge and distinct requestIds never
   assert.deepEqual(forks.map(fork => fork.sourceEventCursor).sort(), [1, 2, 3])
 })
 
-test('fork and lineage never cross a Team boundary, even for the same operator', async t => {
+test('multi-Team users can read each authorized Project but Fork edges never cross Projects', async t => {
   const f = await fixture(); t.after(() => f.close())
-  const foreignSession = { ...(await f.create('foreign') as { session: Session }).session }
+  // Insert an explicitly legacy fixture, rather than moving a Task-bound Session.
+  const { taskId: _task, runId: _run, creation: _creation, ...legacy } = f.source
+  const foreignSession = { ...legacy, id: 'foreign-team-session' as SessionId }
   await f.store.transaction(async tx => {
     await tx.identity.saveTeam({ id: 'team-b' as never, name: 'Team B', createdAt: now() })
+    await tx.identity.saveMembership({ teamId: 'team-b' as never, userId: f.user.id, role: 'owner', joinedAt: now() })
     await tx.resources.saveProject({ id: 'project-b' as never, teamId: 'team-b' as never, ownerId: f.user.id, name: 'Team B project', shareScope: 'owner-only', deletedAt: null })
     await tx.resources.saveSession({ ...foreignSession, projectId: 'project-b' as never })
   })
-  // 同一个管理员在两个 Team 里各自持有 Project：仍然不能把血缘跨过去。
-  assert.equal((await f.lineage.lineage({ operator: f.user.id, sessionId: foreignSession.id }).catch(error => error)).status, 404)
+  // 多 Team 用户按目标 Project 授权查询，不取 memberships[0]；关系仍不跨 Project。
+  assert.deepEqual((await f.lineage.lineage({ operator: f.user.id, sessionId: foreignSession.id })).ancestors, [])
   assert.equal((await f.fork({ requestId: 'cross-team', sourceSessionId: foreignSession.id }).catch(error => error)).status, 404)
-  assert.equal((await f.lineage.getGraph({ operator: f.user.id, query: { projectId: 'project-b' as never } }).catch(error => error)).status, 404)
+  assert.deepEqual((await f.lineage.getGraph({ operator: f.user.id, query: { projectId: 'project-b' as never } })).nodes.map(node => node.sessionId), [foreignSession.id])
   await f.store.transaction(tx => tx.resources.saveSessionFork({ id: 'fork-b' as never, projectId: 'project-b' as never, sourceSessionId: f.source.id, sourceEventCursor: 0, targetSessionId: foreignSession.id, createdBy: f.user.id, createdAt: now(), contextPolicy: 'through_cursor', creation: { requestId: 'cross-team', fingerprint: 'x' } }))
   assert.equal((await f.lineage.getForkPoint({ operator: f.user.id, forkId: 'fork-b' as never }).catch(error => error)).status, 404)
   // 被拒的请求不得留下任何副作用：跨 Team 的边不在默认 Project 里，也不影响本 Team 的图。
@@ -293,4 +370,23 @@ test('HTTP routes expose fork, lineage, graph and fork point with the same autho
   // 没有凭据的调用者在路由层就被拒，不会落到服务层的授权判定。
   const anonymous = await fetch(`${f.baseUrl}/api/projects/${f.project.id}/session-graph`)
   assert.equal(anonymous.status, 401)
+})
+
+test('HTTP cross-Task Fork parameters are rejected without target identities or Session/Fork/command residue', async t => {
+  const f = await fixture(); t.after(() => f.close())
+  const { workspace } = await f.service.createWorkspace({ projectId: f.project.id, workerId: f.worker.id, name: 'other-task-workspace' })
+  await f.ready(workspace.id)
+  const { session: other } = await f.service.createSession({ requestId: 'other-task', workspaceId: workspace.id, title: 'other-task', agentKey: 'pi', modelId: 'pi-model' })
+  assert.notEqual(other.taskId, f.source.taskId)
+  const before = { sessions: await f.sessions(), forks: await f.store.resources.listSessionForks(f.project.id), commands: await f.store.commands.list({ limit: 1000 }) }
+  for (const field of ['taskId', 'targetTaskId']) {
+    const response = await f.request(`/projects/${f.project.id}/session-forks`, 'POST', {
+      sourceSessionId: f.source.id, targetWorkspaceId: f.workspace.id, targetWorkerId: f.worker.id,
+      targetAgentKey: 'pi', targetModelId: 'pi-model', requestId: `cross-task-${field}`, [field]: other.taskId,
+    })
+    assert.equal(response.status, 400)
+    const body = await response.text()
+    for (const identity of [other.id, other.taskId!, f.source.id]) assert.equal(body.includes(identity), false)
+    assert.deepEqual({ sessions: await f.sessions(), forks: await f.store.resources.listSessionForks(f.project.id), commands: await f.store.commands.list({ limit: 1000 }) }, before)
+  }
 })

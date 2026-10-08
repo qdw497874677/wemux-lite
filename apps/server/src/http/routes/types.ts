@@ -54,6 +54,7 @@ export interface HttpHandlerOptions {
   readonly downloads?: WorkerDownloads
   readonly control?: WorkerControl
   readonly staticSite?: StaticSite
+  readonly nextStaticSite?: StaticSite
   readonly tasks?: TaskService
   readonly projectStreams?: ProjectStreams
   readonly identity?: IdentityService | null

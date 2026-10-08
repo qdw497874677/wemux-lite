@@ -11,7 +11,7 @@ const call = async (base: string, path: string, body: unknown) => {
   return { status: response.status, data: await response.json() as any }
 }
 
-test('session terminal routes proxy lifecycle requests through the owning worker', async t => {
+test('session terminal lifecycle routes stay policy-closed without contacting the owning Worker', async t => {
   const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail] })
   await seedOperator(app.store, app.service)
   const base = await app.listen(0)
@@ -28,17 +28,15 @@ test('session terminal routes proxy lifecycle requests through the owning worker
   await peer.connect({ name: 'terminal-worker' })
   t.after(() => peer.close())
 
-  const creating = call(base, `/sessions/${session.id}/terminal`, { cols: 80, rows: 24 })
-  const create = await peer.wait(message => message.type === 'terminal.request' && message.operation === 'create')
-  assert.equal(create.type, 'terminal.request')
-  peer.send({ type: 'terminal.response', requestId: create.requestId, ok: true, operation: 'create', terminalId: 'terminal-1', pid: 42 })
-  assert.deepEqual(await creating, { status: 201, data: { type: 'terminal.response', requestId: create.requestId, ok: true, operation: 'create', terminalId: 'terminal-1', pid: 42 } })
-
-  for (const [operation, body] of [['write', { data: 'ls\r' }], ['resize', { cols: 120, rows: 40 }], ['dispose', {}]] as const) {
-    const pending = call(base, `/sessions/${session.id}/terminal/terminal-1/${operation}`, body)
-    const message = await peer.wait(value => value.type === 'terminal.request' && value.operation === operation)
-    assert.equal(message.type, 'terminal.request')
-    peer.send({ type: 'terminal.response', requestId: message.requestId, ok: true, operation })
-    assert.equal((await pending).status, 200)
+  for (const [path, body] of [
+    ['/terminal', { cols: 80, rows: 24 }],
+    ['/terminal/terminal-1/write', { data: 'ls\r' }],
+    ['/terminal/terminal-1/resize', { cols: 120, rows: 40 }],
+    ['/terminal/terminal-1/dispose', {}],
+  ] as const) {
+    assert.deepEqual(await call(base, `/sessions/${session.id}${path}`, body), {
+      status: 403, data: { error: { code: 'write_channel_closed', message: '平台当前未开放文件和终端写入通道。' } },
+    })
   }
+  assert.equal(peer.frames.filter(frame => frame.frameType === 'data' && frame.payload.type === 'terminal.request').length, 0)
 })

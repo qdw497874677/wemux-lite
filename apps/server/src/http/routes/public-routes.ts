@@ -1,5 +1,6 @@
 import type { CapabilityToolName } from '@wemux/domain'
 import { AppError } from '../../application/errors.ts'
+import { TaskError } from '../../application/task-service.ts'
 import { serveWorkerDownload } from '../worker-downloads.ts'
 import type { RouteDescriptor } from './types.ts'
 
@@ -41,7 +42,17 @@ export const publicRoutes: readonly RouteDescriptor[] = [
       const operation = params.operation as CapabilityToolName
       const input = await readBody() as any
       const claims = await capabilities.verify(token, operation)
-      const result = operation === 'session.info' ? await capabilities.sessionInfo(claims)
+      let result: unknown
+      try { result = operation === 'session.info' ? await capabilities.sessionInfo(claims)
+        : operation === 'project.list' ? await capabilities.listProjects(claims)
+        : operation === 'project.get' ? await capabilities.getProject(claims, input)
+        : operation === 'project.resources' ? await capabilities.projectResources(claims, input)
+        : operation === 'task.list' ? await capabilities.listTasks(claims, input)
+        : operation === 'task.get' ? await capabilities.getTask(claims, input)
+        : operation === 'task.create' ? await capabilities.createTask(claims, input)
+        : operation === 'task.sessions' ? await capabilities.taskSessions(claims, input)
+        : operation === 'session.get' ? await capabilities.sessionGet(claims, input)
+        : operation === 'session.events' ? await capabilities.sessionEvents(claims, input)
         : operation === 'agent.list' ? await capabilities.listAgents(claims)
         : operation === 'agent.send' ? await capabilities.sendAgentMessage(claims, input)
         : operation === 'agent.inbox.list' ? await capabilities.listInbox(claims, input)
@@ -50,6 +61,10 @@ export const publicRoutes: readonly RouteDescriptor[] = [
         : operation === 'delegation.reject' ? await capabilities.rejectDelegation(claims, input)
         : operation === 'delegation.complete' ? await capabilities.completeDelegation(claims, input)
         : (() => { throw new AppError(404, 'Capability not found') })()
+      } catch (error) {
+        if (error instanceof TaskError) throw new AppError(error.status, error.message, error.code)
+        throw error
+      }
       json(200, result)
     },
   },

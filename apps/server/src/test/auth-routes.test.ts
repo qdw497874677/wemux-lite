@@ -210,12 +210,25 @@ test('登录会话与 PAT、Worker 凭据互不冒充，旧会话前缀整体退
   const retired = await client.call('/workers', { bearer: 'wemux-session-legacy-token', cookie: null })
   assert.equal(retired.status, 401)
   assert.equal(errorCode(retired.data), 'retired_credential')
-  // PAT 也不是 Cookie 会话。
-  assert.equal((await client.call('/workers', { cookie: `${cookieName}=pat-shaped-token`, csrf: null })).status, 401)
-  assert.equal((await client.call('/workers', { cookie: `${cookieName}=${encodeURIComponent(`${client.token}x`)}`, csrf: null })).status, 401)
+  const validCookie = client.cookie
+  // Invalid-cookie responses clear their own jar; negative probes must not replace the valid session.
+  const rejection = { error: { code: 'authentication_required', message: '登录凭据无效或已失效，请重新登录。' } }
+  for (const cookie of [`${cookieName}=pat-shaped-token`, `${cookieName}=${encodeURIComponent(`${client.token}x`)}`]) {
+    const invalid = browser(base)
+    const denied = await invalid.call('/workers', { cookie, csrf: null })
+    assert.equal(denied.status, 401)
+    assert.deepEqual(denied.data, rejection)
+    assert.match(denied.setCookie ?? '', /wemux_login_session=; Path=\/; HttpOnly; SameSite=Lax; Max-Age=0/)
+    const replay = await invalid.call('/workers', { cookie, csrf: null })
+    assert.equal(replay.status, 401)
+    assert.deepEqual(replay.data, rejection)
+    const logout = await invalid.call('/auth/logout', { method: 'POST', cookie, csrf: null })
+    assert.equal(logout.status, 401)
+    assert.deepEqual(logout.data, rejection)
+  }
   // 会话被撤销后同一个令牌立即失去权限。
-  assert.equal((await client.call('/auth/logout', { method: 'POST' })).status, 204)
-  assert.equal((await client.call('/workers', { cookie: `${cookieName}=${encodeURIComponent(client.token)}`, csrf: null })).status, 401)
+  assert.equal((await client.call('/auth/logout', { method: 'POST', cookie: validCookie })).status, 204)
+  assert.equal((await browser(base).call('/workers', { cookie: validCookie, csrf: null })).status, 401)
 })
 
 test('登录失败被限流，而不是消耗哈希 CPU', async t => {

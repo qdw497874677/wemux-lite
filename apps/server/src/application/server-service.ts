@@ -1,3 +1,9 @@
+import { workspaceRevision } from './workspace-revision.ts'
+import { admitFileWriteInTx, snapshotFileWriteInput } from './file-write-admission.ts'
+import { FileWriteResultRejectedError, FileWriteResultUnavailableError, fileWriteResultAck, snapshotFileWriteResult } from './file-write-results.ts'
+import { assertSessionTaskMutable } from './task-lifecycle.ts'
+import { createRequest, replayCreate, recordCreate } from './create-request.ts'
+import { dedicatedConversationTask } from './dedicated-conversation-task.ts'
 import { sessionIdleReason } from './session-idle.ts'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { AgentKey, ApprovalId, CommandId, EventSeq, Id, MessageId, ModelId, ProjectId, RuntimeOperationId, SessionId, TeamId, Timestamp, TurnId, UserId, WorkerId, WorkspaceId } from '@wemux/domain'
@@ -31,6 +37,7 @@ export interface SessionProvenance {
 
 /** Inputs the Session Lineage module may set on a Fork target; binding validation stays here. */
 export interface ForkTargetSessionInput {
+  readonly taskId?: string | null
   readonly projectId: ProjectId
   readonly workspaceId: WorkspaceId
   readonly workerId: WorkerId
@@ -66,12 +73,12 @@ export class ServerService {
   async cancelCommand(id: CommandId) {
     const command = await this.getCommand(id)
     const cancelled = await this.store.transaction(async tx => {
-      const current = requireValue(await tx.commands.get(id))
+      requireValue(await tx.commands.get(id))
+      // Pending does not mean undispatched: transport replay or a terminal report may
+      // precede the application receipt. Generic cancellation cannot stop preparation.
+      const pending = await tx.commands.getPendingCommand(id)
+      if (pending?.command.kind === 'workspace.provision') throw new AppError(409, 'protected_command: Workspace preparation cancellation is unavailable', 'protected_command')
       if (await tx.tasks.runByCommand(id)) throw new AppError(409, 'protected_command: Run commands cannot be cancelled; Run cancellation is not implemented')
-      if (['pending', 'accepted'].includes(current.status)) {
-        const protectedWorkspace = (await tx.resources.listWorkspaces()).find(workspace => workspace.placements.some(placement => placement.provisioning?.commandId === id && placement.status === 'stopped'))
-        if (protectedWorkspace) throw new AppError(409, 'protected_command: current Workspace provision command cannot be cancelled')
-      }
       if (!await tx.commands.cancelPending(id, now())) return false
       await this.audit(tx, 'command.cancel', { kind: 'worker', id: command.workerId })
       return true
@@ -117,7 +124,7 @@ export class ServerService {
   }
   async reprovisionWorkspaceInTx(tx: ServerStoreTx, id: WorkspaceId, requestId: string, requestedWorkerId?: WorkerId, actor?: UserId) {
     if (typeof requestId !== 'string' || !requestId.trim() || requestId.length > 200) throw new AppError(400, 'Invalid retry requestId')
-    const workspace = await this.getWorkspace(id, tx.resources)
+    const workspace = await this.authorizedWorkspaceInTx(tx, id, actor)
     const legacyWorkerId = (workspace as Workspace & { workerId?: WorkerId }).workerId
     const workerId = requestedWorkerId ?? workspace.placements.find(placement => placement.status === 'failed' || placement.status === 'stopped')?.workerId ?? legacyWorkerId
     if (!workerId) throw new AppError(400, 'workerId is required when Workspace has no retryable placement')
@@ -140,6 +147,9 @@ export class ServerService {
     const repositories = workspace.spec.kind === 'repository'
       ? [requireValue(await tx.resources.getRepository(workspace.spec.repositoryId))].map(repository => ({ repositoryId: repository.id, gitUrl: repository.gitUrl, revision: repository.defaultBranch })) : []
     if (workspace.spec.kind === 'composite' && workspace.spec.memberWorkspaceIds.length) throw new AppError(409, 'Composite workspace is not reprovisionable')
+    // Preserve only a strictly correlated current terminal observation before replacement.
+    // Legacy status/receipt-only attempts remain unknown, even when retry is allowed.
+    if (placement) await this.preserveCurrentPreparationProof(tx, workspace, placement)
     const replacedAttempt = previous !== undefined || await tx.commands.hasProvisionAttempt(id)
     const commandId = await this.command(tx, worker.id, { kind: 'workspace.provision', workspace: { workspace: this.workspaceDefinition(workspace), repositories } })
     const nextPlacement: WorkspacePlacement = { workerId: worker.id, status: 'stopped', failureReason: null, location: null, provisioning: { commandId, startedAt: now(), replacedAttempt, requests: { ...previous?.requests, [requestId]: commandId } } }
@@ -147,6 +157,14 @@ export class ServerService {
     await tx.resources.saveWorkspace(next)
     await this.audit(tx, 'workspace.reprovision', { kind: 'workspace', id })
     return { workspace: next, workerId: worker.id, commandId, created: true }
+  }
+  private async preserveCurrentPreparationProof(tx: ServerStoreTx, workspace: Workspace, placement: WorkspacePlacement) {
+    const attempt = placement.provisioning, proof = attempt?.terminalReport
+    if (!proof || (placement.status !== 'ready' && placement.status !== 'failed') || proof.status !== placement.status || proof.workerId !== placement.workerId || proof.commandId !== attempt?.commandId || typeof proof.occurredAt !== 'string' || !Number.isFinite(Date.parse(proof.occurredAt))) return null
+    if (placement.location && (placement.location.workspaceId !== workspace.id || placement.location.workerId !== placement.workerId)) return null
+    const command = await tx.commands.getPendingCommand(proof.commandId as CommandId)
+    if (!command || command.command.kind !== 'workspace.provision' || command.command.workspace.workspace.id !== workspace.id || command.workerId !== placement.workerId) return null
+    return tx.resources.recordWorkspacePreparationProof({ workspaceId: workspace.id, workerId: placement.workerId, commandId: proof.commandId, status: proof.status, occurredAt: proof.occurredAt })
   }
   private workspaceDefinition(workspace: Workspace) { return { id: workspace.id, projectId: workspace.projectId, name: workspace.name, spec: workspace.spec } }
   private replacePlacement(workspace: Workspace, placement: WorkspacePlacement): Workspace {
@@ -230,11 +248,25 @@ export class ServerService {
   }
   async getWorkspace(id: WorkspaceId, resources = this.store.resources): Promise<Workspace> {
     const w = requireValue(await resources.getWorkspace(id)); await this.getProject(w.projectId, resources)
-    if (w.deletedAt) throw new AppError(404, 'Workspace deleted')
+    if (w.deletedAt) throw new AppError(410, 'Workspace is permanently deleted', 'workspace_deleted')
     return w
   }
-  private async placementHealthView(workspace: Workspace): Promise<Workspace> {
-    const workers = new Map((await this.store.resources.listWorkers()).map(worker => [worker.id, worker]))
+  /** Actor-facing lookups authorize the raw identity before lifecycle/placement details. */
+  private async authorizedWorkspaceInTx(tx: ServerStoreTx, id: WorkspaceId, actor?: UserId): Promise<Workspace> {
+    const workspace = await tx.resources.getWorkspace(id)
+    const hidden = () => new AppError(404, 'Workspace not found', 'workspace_not_found')
+    if (!workspace) throw hidden()
+    if (actor && this.projectAccess) {
+      try { await this.projectAccess.requireInTx(tx, actor, workspace.projectId, 'contributor') }
+      catch (error) { if (error instanceof AppError && error.status === 404) throw hidden(); throw error }
+    }
+    return this.getWorkspace(id, tx.resources)
+  }
+  private workspaceSnapshot(workspace: Workspace): Workspace & { revision: string } {
+    return { ...workspace, revision: workspaceRevision(workspace) }
+  }
+  private async placementHealthView(workspace: Workspace, workerList?: readonly Worker[]): Promise<Workspace & { revision: string }> {
+    const workers = new Map((workerList ?? await this.store.resources.listWorkers()).map(worker => [worker.id, worker]))
     const placements = workspace.placements.map(placement => {
       const worker = workers.get(placement.workerId)
       if (worker?.connectionState === 'online') return placement
@@ -242,10 +274,104 @@ export class ServerService {
       return { ...placement, status: 'unhealthy' as const, failureReason: placement.failureReason ? `${connectivityReason}；${placement.failureReason}` : connectivityReason }
     })
     const primary = workspace.workerId ? placements.find(placement => placement.workerId === workspace.workerId) : placements.length === 1 ? placements[0] : undefined
-    return { ...workspace, placements, ...(primary ? { status: primary.status, failureReason: primary.failureReason, location: primary.location } : {}) }
+    return { ...workspace, revision: workspaceRevision(workspace), placements, ...(primary ? { status: primary.status, failureReason: primary.failureReason, location: primary.location } : {}) }
   }
-  async workspaceView(id: WorkspaceId): Promise<Workspace> {
-    return this.placementHealthView(await this.getWorkspace(id))
+  async workspaceView(id: WorkspaceId, actor?: UserId): Promise<Workspace & { revision: string }> {
+    const workspace = requireValue(await this.store.resources.getWorkspace(id))
+    if (actor && this.projectAccess) await this.projectAccess.require(actor, workspace.projectId)
+    else await this.getProject(workspace.projectId)
+    if (workspace.deletedAt) return { ...workspace, revision: workspaceRevision(workspace) }
+    return { ...await this.placementHealthView(workspace), revision: workspaceRevision(workspace) }
+  }
+  /** Personal view state does not alter Workspace lifecycle or its preparation commands. */
+  async workspaceVisibility(id: WorkspaceId, input: unknown, actor: UserId) {
+    const body = object(input)
+    if (Object.keys(body).some(key => !['hidden', 'expectedRevision', 'requestId'].includes(key)) || typeof body.hidden !== 'boolean' || !Number.isSafeInteger(body.expectedRevision) || Number(body.expectedRevision) < 0 || Number(body.expectedRevision) >= Number.MAX_SAFE_INTEGER || body.requestId === undefined) throw new AppError(400, 'Workspace visibility requires hidden, expectedRevision and requestId', 'invalid_request')
+    const hidden = body.hidden as boolean
+    const request = createRequest(actor, 'workspace-visibility', id, body.requestId, { hidden, expectedRevision: body.expectedRevision })
+    return this.store.transaction(async tx => {
+      const workspace = await tx.resources.getWorkspace(id)
+      if (!workspace || !this.projectAccess) throw new AppError(404, 'Workspace not found', 'workspace_not_found')
+      await this.projectAccess.requireInTx(tx, actor, workspace.projectId)
+      if (workspace.deletedAt) throw new AppError(404, 'Workspace not found', 'workspace_not_found')
+      const previous = await replayCreate<{ workspaceId: WorkspaceId; hidden: boolean; revision: number }>(tx, request)
+      if (previous) return previous
+      const current = await tx.resources.getWorkspaceVisibility(actor, id)
+      const revision = current?.revision ?? 0
+      if (revision !== body.expectedRevision) throw new AppError(409, 'Workspace visibility changed; reload before retrying', 'workspace_visibility_conflict')
+      if (current?.hidden === hidden || (!current && !hidden)) {
+        const receipt = { workspaceId: id, hidden, revision }
+        await recordCreate(tx, request, receipt)
+        return receipt
+      }
+      const receipt = { workspaceId: id, hidden, revision: revision + 1 }
+      await tx.resources.saveWorkspaceVisibility(actor, receipt)
+      await recordCreate(tx, request, receipt)
+      return receipt
+    })
+  }
+  async listWorkspaceVisibilityViews(actor: UserId, input: { projectId?: string; teamId?: string; visibility: 'visible' | 'hidden' | 'all' }) {
+    return this.store.transaction(async tx => {
+      if (!this.projectAccess) throw new AppError(404, 'Not found')
+      const records = new Map((await tx.resources.listWorkspaceVisibility(actor)).map(record => [record.workspaceId, record]))
+      const workers = await tx.resources.listWorkers()
+      const result = [] as (Workspace & { revision: string; visibilityRevision: number; visibilityHidden: boolean })[]
+      for (const workspace of await tx.resources.listWorkspaces()) {
+        if (workspace.deletedAt || (input.projectId && workspace.projectId !== input.projectId)) continue
+        try {
+          const project = await this.projectAccess.requireInTx(tx, actor, workspace.projectId)
+          if (input.teamId && project.teamId !== input.teamId) continue
+        } catch (error) {
+          if (error instanceof AppError && error.status === 404) continue
+          throw error
+        }
+        const visibility = records.get(workspace.id)
+        const hidden = Boolean(visibility?.hidden)
+        if (input.visibility !== 'all' && hidden !== (input.visibility === 'hidden')) continue
+        result.push({ ...await this.placementHealthView(workspace, workers), visibilityRevision: visibility?.revision ?? 0, visibilityHidden: hidden })
+      }
+      return result
+    })
+  }
+  async deleteWorkspace(id: WorkspaceId, input: unknown, actor: UserId, teamScope?: string) {
+    const b = object(input)
+    if (Object.keys(b).some(key => !['expectedRevision', 'requestId'].includes(key)) || typeof b.expectedRevision !== 'string' || !/^[a-f0-9]{64}$/.test(b.expectedRevision) || b.requestId === undefined) throw new AppError(400, 'Workspace deletion requires expectedRevision and requestId', 'invalid_request')
+    const request = createRequest(actor, 'workspace-delete', id, b.requestId, { expectedRevision: b.expectedRevision })
+    return this.store.transaction(async tx => {
+      const workspace = requireValue(await tx.resources.getWorkspace(id))
+      if (!this.projectAccess) throw new AppError(403, 'Project authorization unavailable')
+      const project = await this.projectAccess.requireInTx(tx, actor, workspace.projectId, 'manager')
+      if (teamScope && project.teamId !== teamScope) throw new AppError(403, 'Project Team scope mismatch', 'forbidden')
+      const previous = await replayCreate<{ workspaceId: WorkspaceId; deletedAt: Timestamp }>(tx, request)
+      if (previous) return previous
+      if (workspace.deletedAt) throw new AppError(410, 'Workspace is permanently deleted', 'workspace_deleted')
+      if (workspaceRevision(workspace) !== b.expectedRevision) throw new AppError(409, 'Workspace state changed; reload before confirming deletion', 'workspace_revision_conflict')
+      const blocked = (message: string): never => { throw new AppError(409, message, 'workspace_in_use') }
+      if (await tx.tasks.binding(id)) blocked('Workspace is bound to a Task; explicitly unbind it first')
+      for (const project of await tx.resources.listProjects()) for (const task of await tx.tasks.list(project.id, true)) {
+        if (task.assignee?.workspaceId === id || (await tx.tasks.runs(task.id)).some(run => run.snapshot.workspaceId === id)) blocked('Workspace has retained Task assignment or Run history')
+      }
+      if ((await tx.resources.listSessions()).some(session => session.workspaceId === id || session.binding?.workspaceId === id)) blocked('Workspace has retained Session history; safe cleanup cannot be proven. Do not delete Sessions to bypass this restriction.')
+      if ((workspace.spec.kind === 'composite' && workspace.spec.memberWorkspaceIds.length) || (workspace.spec.kind === 'repository' && workspace.spec.ownership.kind === 'composite-member')) blocked('Workspace has composite membership or ownership references')
+      for (const other of await tx.resources.listWorkspaces()) {
+        if ((other.spec.kind === 'composite' && other.spec.memberWorkspaceIds.includes(id)) || (other.spec.kind === 'repository' && other.spec.ownership.kind === 'composite-member' && other.spec.ownership.compositeWorkspaceId === id)) blocked('Workspace is retained by a composite reference')
+      }
+      const commands = await tx.commands.listWorkspaceProvisions(id)
+      for (const placement of workspace.placements) {
+        const proof = await this.preserveCurrentPreparationProof(tx, workspace, placement)
+        if (!proof || !commands.some(command => command.commandId === proof.commandId && command.workerId === placement.workerId)) blocked('Placement has no correlated terminal preparation proof')
+      }
+      for (const command of commands) {
+        const status = (await tx.commands.get(command.commandId))?.status
+        const proof = await tx.resources.getWorkspacePreparationProof({ workspaceId: id, workerId: command.workerId, commandId: command.commandId })
+        if (status !== 'accepted' || command.command.kind !== 'workspace.provision' || command.command.workspace.workspace.id !== id || !proof) blocked('Preparation settlement is unproven for a current or historical command; deletion does not cancel preparation')
+      }
+      const deletedAt = now(), receipt = { workspaceId: id, deletedAt }
+      await tx.resources.saveWorkspace({ ...workspace, deletedAt })
+      await this.audit(tx, 'workspace.delete', { kind: 'workspace', id }, actor)
+      await recordCreate(tx, request, receipt)
+      return receipt
+    })
   }
   sessionView(id: SessionId, actor?: UserId) {
     return this.store.transaction(async tx => {
@@ -285,6 +411,46 @@ export class ServerService {
     }
     return { activeTurnId, activeTurnOwnerId, queuedMessages: [...queued.values()], freshness: await tx.cache.getFreshness(id) }
   }
+  /** Fresh authorization and lifecycle snapshot for file/terminal dispatch, not durable admission.
+   * Gateway I/O must run after this transaction. Trusted legacy compositions without
+   * SessionAccessService retain their existing behavior; configured access fails closed.
+   */
+  async requireSessionEffectAccess(id: SessionId, actor: UserId | undefined, capability: 'write' | 'control', requireMutable: boolean) {
+    return this.store.transaction(tx => this.requireSessionEffectAccessInTx(tx, id, actor, capability, requireMutable))
+  }
+  private async requireSessionEffectAccessInTx(tx: ServerStoreTx, id: SessionId, actor: UserId | undefined, capability: 'write' | 'control', requireMutable: boolean) {
+    if (this.sessionAccess && !actor) throw new AppError(401, 'Authentication required')
+    const session = this.sessionAccess
+      ? await this.sessionAccess.requireInTx(tx, actor!, id, capability)
+      : await this.getSession(id, tx.resources)
+    if (requireMutable) await assertSessionTaskMutable(tx, session)
+    return session
+  }
+  /** Stage 1 internal preparation only. No HTTP caller, notification or dispatcher. */
+  async admitFileWrite(id: SessionId, actor: UserId, input: unknown) {
+    if (typeof actor !== 'string' || !actor.trim()) throw new AppError(401, 'Authentication required')
+    if (!this.sessionAccess) throw new AppError(403, 'Session authorization unavailable')
+    const snapshot = snapshotFileWriteInput(input)
+    return this.store.transaction(async tx => {
+      const session = await this.requireSessionEffectAccessInTx(tx, id, actor, 'write', true)
+      return admitFileWriteInTx(tx, actor, session, snapshot)
+    })
+  }
+  /** Internal only: caller must authenticate the Worker independently of the payload.
+   * Optional internal gateway only, no waiter or actor read API. Retain historical observations even
+   * after access/lifecycle changes; expose the ACK only after durable commit.
+   */
+  async receiveFileWriteResult(authenticatedWorkerId: WorkerId, input: unknown) {
+    const snapshot = snapshotFileWriteResult(input)
+    const retained = await this.store.transaction(tx => tx.fileWrites.retainResult(authenticatedWorkerId, snapshot)).catch(cause => {
+      if (cause instanceof FileWriteResultRejectedError) throw cause
+      throw new FileWriteResultUnavailableError(cause)
+    })
+    return fileWriteResultAck(retained)
+  }
+  async requireSessionTaskMutable(id: SessionId) {
+    return this.store.transaction(async tx => { const session = await this.getSession(id, tx.resources); await assertSessionTaskMutable(tx, session); return session })
+  }
   async getSession(id: SessionId, resources = this.store.resources): Promise<Session> {
     const s = requireValue(await resources.getSession(id)); await this.getProject(s.projectId, resources)
     if (s.deletedAt) throw new AppError(404, 'Session deleted')
@@ -298,12 +464,24 @@ export class ServerService {
     if (requireExplicitTeam && actor && !(await this.store.identity.listMemberships(actor)).some(membership => membership.teamId === requestedTeamId)) throw new AppError(403, 'Team membership required', 'team_membership_required')
     const shareScope = b.shareScope === undefined ? 'owner-only' : text(b.shareScope, 'shareScope')
     if (shareScope !== 'owner-only' && shareScope !== 'selected-members' && shareScope !== 'team') throw new AppError(400, 'Invalid shareScope')
-    const project: Project = { id: newId(), teamId: requestedTeamId, ownerId: actor ?? await this.operator(), name: text(b.name, 'name', 200), shareScope, deletedAt: null }
-    await this.store.transaction(async tx => { await tx.resources.saveProject(project); await this.audit(tx, 'project.create', { kind: 'project', id: project.id }, actor) })
-    return project
+    const project: Project = { id: newId(), teamId: requestedTeamId, ownerId: actor ?? await this.operator(), name: text(b.name, 'name', 200), shareScope, reviewPolicy: 'none', reviewPolicyVersion: 1, deletedAt: null }
+    const request = createRequest(project.ownerId, 'project', requestedTeamId, b.requestId, { name: project.name, shareScope })
+    return this.store.transaction(async tx => {
+      const previous = await replayCreate<Project>(tx, request)
+      if (previous) {
+        await this.getProject(previous.id, tx.resources)
+        if (this.projectAccess) await this.projectAccess.requireInTx(tx, project.ownerId, previous.id)
+        return previous
+      }
+      await tx.resources.saveProject(project)
+      await this.audit(tx, 'project.create', { kind: 'project', id: project.id }, actor)
+      await recordCreate(tx, request, project)
+      return project
+    })
   }
   private async command(tx: ServerStoreTx, workerId: WorkerId, command: WorkerCommand, id = newId<'CommandId'>()) {
     const fingerprint = canonicalFingerprint(command)
+    if (await tx.commands.getRejection(id)) throw new AppError(409, 'Conflicting commandId')
     const existing = await tx.commands.get(id)
     if (existing) {
       if (existing.workerId !== workerId || existing.payloadFingerprint !== fingerprint) throw new AppError(409, 'Conflicting commandId')
@@ -312,14 +490,14 @@ export class ServerService {
     await tx.commands.insertPending({ commandId: id, workerId, command, payloadFingerprint: fingerprint, createdAt: now() })
     return id
   }
-  async createWorkspace(input: unknown, actor?: UserId): Promise<{ workspace: Workspace; workerId: WorkerId; commandId: CommandId } | { workspace: Workspace; workerId: undefined; commandId: undefined }> {
+  async createWorkspace(input: unknown, actor?: UserId): Promise<{ workspace: Workspace & { revision: string }; workerId: WorkerId; commandId: CommandId } | { workspace: Workspace & { revision: string }; workerId: undefined; commandId: undefined }> {
     const result = await this.store.transaction(tx => this.createWorkspaceInTx(tx, input, actor))
     if (result.workerId) this.notifications.commands(result.workerId)
     this.notifications.project({ id: randomUUID(), projectId: result.workspace.projectId, workspaceId: result.workspace.id, type: 'workspace.provisioning' })
     return result
   }
   /** Internal composition seam: caller owns the transaction and post-commit notification. */
-  async createWorkspaceInTx(tx: ServerStoreTx, input: unknown, actor?: UserId): Promise<{ workspace: Workspace; workerId: WorkerId; commandId: CommandId } | { workspace: Workspace; workerId: undefined; commandId: undefined }> {
+  async createWorkspaceInTx(tx: ServerStoreTx, input: unknown, actor?: UserId): Promise<{ workspace: Workspace & { revision: string }; workerId: WorkerId; commandId: CommandId } | { workspace: Workspace & { revision: string }; workerId: undefined; commandId: undefined }> {
     const b = object(input), projectId = text(b.projectId, 'projectId') as ProjectId
     const p = actor && this.projectAccess ? await this.projectAccess.requireInTx(tx, actor, projectId, 'contributor') : await this.getProject(projectId, tx.resources)
     const requestedWorkerId = b.workerId === undefined ? undefined : text(b.workerId, 'workerId') as WorkerId
@@ -333,18 +511,25 @@ export class ServerService {
     })() : null
     if (source === 'empty' && b.repository !== undefined) throw new AppError(400, 'Empty workspace cannot include repository')
     const workspace: Workspace = { id: newId(), projectId: p.id, name: text(b.name, 'name', 200), spec: repository ? { kind: 'repository', repositoryId: repository.id, ownership: { kind: 'standalone' } } : { kind: 'composite', memberWorkspaceIds: [] }, placements: [], deletedAt: null }
+    const request = createRequest(actor ?? p.ownerId, 'workspace', p.id, b.requestId, { name: workspace.name, workerId: requestedWorkerId, source, repository: repository ? { name: repository.name, gitUrl: repository.gitUrl, revision: repository.defaultBranch } : undefined })
+    const previous = await replayCreate<Awaited<ReturnType<ServerService['createWorkspaceInTx']>>>(tx, request)
+    if (previous) { await this.getWorkspace(previous.workspace.id, tx.resources); return { ...previous, workspace: this.workspaceSnapshot(previous.workspace) } }
     if (repository) await tx.resources.saveRepository(repository)
     await tx.resources.saveWorkspace(workspace)
     if (!worker) {
       await this.audit(tx, 'workspace.create', { kind: 'workspace', id: workspace.id })
-      return { workspace: { ...workspace, status: 'unplaced' as const, failureReason: null, location: null }, workerId: undefined, commandId: undefined }
+      const result = { workspace: this.workspaceSnapshot({ ...workspace, status: 'unplaced' as const, failureReason: null, location: null }), workerId: undefined, commandId: undefined }
+      await recordCreate(tx, request, result)
+      return result
     }
     const repositories = repository ? [{ repositoryId: repository.id, gitUrl: repository.gitUrl, revision: repository.defaultBranch }] : []
     const commandId = await this.command(tx, worker.id, { kind: 'workspace.provision', workspace: { workspace: this.workspaceDefinition(workspace), repositories } })
     const stopped = this.replacePlacement(workspace, { workerId: worker.id, status: 'stopped', failureReason: null, location: null, provisioning: { commandId, startedAt: now(), replacedAttempt: false, requests: {} } })
     await tx.resources.saveWorkspace(stopped)
     await this.audit(tx, 'workspace.create', { kind: 'workspace', id: workspace.id })
-    return { workspace: { ...stopped, workerId: worker.id, status: 'stopped' as const, failureReason: null, provisioning: stopped.placements[0].provisioning, location: null }, workerId: worker.id, commandId }
+    const result = { workspace: this.workspaceSnapshot({ ...stopped, workerId: worker.id, status: 'stopped' as const, failureReason: null, provisioning: stopped.placements[0].provisioning, location: null }), workerId: worker.id, commandId }
+    await recordCreate(tx, request, result)
+    return result
   }
   async createSession(input: unknown, actor?: UserId) {
     const result = await this.store.transaction(tx => this.createSessionInTx(tx, input, actor ? { ownerId: actor } : undefined))
@@ -358,22 +543,33 @@ export class ServerService {
    */
   async createForkTargetInTx(tx: ServerStoreTx, input: ForkTargetSessionInput) {
     const workspace = requireValue(await tx.resources.getWorkspace(input.workspaceId))
+    if (this.projectAccess) await this.projectAccess.requireInTx(tx, input.ownerId, workspace.projectId, 'contributor')
     if (workspace.projectId !== input.projectId) throw new AppError(409, 'Fork target Workspace belongs to another Project', 'fork_target_scope')
     if (workspace.deletedAt !== null) throw new AppError(409, 'Fork target Workspace is deleted', 'fork_target_deleted')
     // Session 级幂等键必须与 Fork 自己的键分开命名空间，否则一个客户端用同一个 requestId
     // 创建普通 Session 时会与 Fork 目标撞车。
-    const created = await this.createSessionInTx(tx, { requestId: `fork:${input.requestId}`, workspaceId: input.workspaceId, workerId: input.workerId, agentKey: input.agentKey, modelId: input.modelId, title: input.title, storageMode: input.storageMode ?? 'local' }, { ownerId: input.ownerId })
+    const created = await this.createSessionWithLineageInTx(tx, true, { requestId: `fork:${input.requestId}`, workspaceId: input.workspaceId, workerId: input.workerId, agentKey: input.agentKey, modelId: input.modelId, title: input.title, storageMode: input.storageMode ?? 'local' }, { ownerId: input.ownerId, ...(input.taskId ? { taskId: input.taskId, runId: null } : {}) })
     // 走到这里说明 Fork 记录还不存在却已有同 requestId 的目标：宁可失败，也不能给同一个目标补第二条边。
     if (!created.created) throw new AppError(409, 'Fork target Session already exists for this requestId', 'request_id_conflict')
     return created.session
   }
   /** Internal composition seam; never opens a transaction or notifies. */
   async createSessionInTx(tx: ServerStoreTx, input: unknown, provenance?: SessionProvenance) {
+    return this.createSessionWithLineageInTx(tx, false, input, provenance)
+  }
+  /** Only the trusted Fork composition seam may depart from a dedicated environment. */
+  private async createSessionWithLineageInTx(tx: ServerStoreTx, lineage: boolean, input: unknown, provenance?: SessionProvenance) {
     const b = object(input)
     if (b.storageMode !== undefined && b.storageMode !== 'local') throw new AppError(409, 'Session storage mode is not available', 'storage_mode_unavailable')
-    const workspace = await this.getWorkspace(text(b.workspaceId, 'workspaceId') as WorkspaceId, tx.resources)
-    if (provenance?.ownerId && this.projectAccess) await this.projectAccess.requireInTx(tx, provenance.ownerId, workspace.projectId, 'contributor')
-    const source = provenance === undefined || (provenance.taskId === undefined && provenance.runId === undefined) ? undefined : { taskId: provenance.taskId ?? null, runId: provenance.runId ?? null }
+    const workspace = await this.authorizedWorkspaceInTx(tx, text(b.workspaceId, 'workspaceId') as WorkspaceId, provenance?.ownerId)
+    let source = provenance === undefined || (provenance.taskId === undefined && provenance.runId === undefined) ? undefined : { taskId: provenance.taskId ?? null, runId: provenance.runId ?? null }
+    let dedicated: import('@wemux/web-contract').Task['dedicatedConversation']
+    if (source?.taskId) {
+      const task = await tx.tasks.get(source.taskId)
+      if (!task || task.projectId !== workspace.projectId) throw new AppError(404, 'Task not found')
+      if (task.deletedAt) throw new AppError(410, 'Task is permanently deleted', 'task_deleted')
+      dedicated = task.dedicatedConversation
+    }
     const requestedWorkerId = b.workerId === undefined ? undefined : text(b.workerId, 'workerId') as WorkerId
     const authorizedRequestedWorker = requestedWorkerId && provenance?.ownerId && this.workerAccess ? await this.workerAccess.requireInTx(tx, provenance.ownerId, requestedWorkerId) : null
     const readyPlacements = workspace.placements.filter(placement => placement.status === 'ready')
@@ -386,24 +582,44 @@ export class ServerService {
     // both require a concrete modelId on the Session binding.
     const requestedModelId = b.modelId === undefined || b.modelId === null ? null : text(b.modelId, 'modelId') as ModelId
     const title = text(b.title, 'title', 200)
-    if (!source && Object.keys(b).some(key => !['requestId', 'workspaceId', 'workerId', 'title', 'agentKey', 'modelId', 'shareScope', 'storageMode'].includes(key))) throw new AppError(400, 'Invalid Session creation request')
+    if (!source && Object.keys(b).some(key => !['requestId', 'workspaceId', 'workerId', 'title', 'agentKey', 'modelId', 'shareScope', 'storageMode', 'scenario'].includes(key))) throw new AppError(400, 'Invalid Session creation request')
     if (!source && b.shareScope !== undefined && b.shareScope !== 'owner-only') throw new AppError(400, 'Invalid Session shareScope')
-    const requestId = source || b.requestId === undefined ? undefined : text(b.requestId, 'requestId', 200)
+    // Run launch owns its own receipt; task conversation callers supply a Session receipt.
+    const requestId = b.requestId === undefined ? undefined : text(b.requestId, 'requestId', 200)
     if (!source && !requestId) throw new AppError(400, 'Invalid requestId')
     const agent = worker.capabilities?.find(c => c?.agentKey === agentKey)
     if (worker.connectionState === 'revoked' || !agent || agent.mode !== 'execution' || agent.availability?.status !== 'available') throw new AppError(409, 'Agent unavailable')
     if (requestedModelId !== null && !agent.models?.some(model => model?.modelId === requestedModelId)) throw new AppError(409, 'Model unavailable')
     const modelId = requestedModelId ?? agent.models?.map(model => model?.modelId).find(id => !!id) ?? null
     if (modelId === null) throw new AppError(409, 'Agent exposes no models')
-    const shareScope = provenance?.shareScope ?? 'owner-only'
-    const fingerprint = createHash('sha256').update(canonicalCommand({ workspaceId: workspace.id, workerId: worker.id, agentKey, modelId, title, shareScope })).digest('hex')
+    const shareScope = dedicated ? 'owner-only' : provenance?.shareScope ?? 'owner-only'
     const ownerId = provenance?.ownerId ?? await this.operator(undefined, tx)
-    if (requestId) {
-      const previous = await tx.resources.getSessionByCreateRequest(ownerId, workspace.projectId, requestId)
-      if (previous) {
-        if (previous.creation?.fingerprint !== fingerprint) throw new AppError(409, 'requestId already belongs to a different Session request', 'request_id_conflict')
+    if (dedicated && !lineage && (dedicated.ownerId !== ownerId || dedicated.workspaceId !== workspace.id || dedicated.workerId !== worker.id || dedicated.agentKey !== agentKey)) {
+      throw new AppError(409, 'Dedicated Task requires its original user, Workspace, Worker and Agent; start a new quick conversation for another environment', 'dedicated_task_binding_mismatch')
+    }
+    const previous = requestId ? await tx.resources.getSessionByCreateRequest(ownerId, workspace.projectId, requestId) : null
+    if (previous) {
+      if (provenance?.ownerId) await this.requireSessionAccessInTx(tx, provenance.ownerId, previous.id, 'write')
+      else await this.getSession(previous.id, tx.resources)
+      await assertSessionTaskMutable(tx, previous)
+    }
+    if (!source) {
+      const scenario = b.scenario ?? 'quick-chat'
+      if (scenario !== 'quick-chat' && scenario !== 'agent-test') throw new AppError(400, 'Invalid conversation scenario')
+      // Reconcile admitted pre-upgrade root requests without rebinding their Session.
+      // Both omitted and explicit-null stored provenance used the root fingerprint.
+      if (previous && previous.taskId == null && previous.runId == null) {
+        const legacyFingerprint = createHash('sha256').update(canonicalCommand({ workspaceId: workspace.id, workerId: worker.id, agentKey, modelId, title, shareScope })).digest('hex')
+        if (scenario !== 'quick-chat' || previous.creation?.fingerprint !== legacyFingerprint) throw new AppError(409, 'requestId already belongs to a different Session request', 'request_id_conflict')
         return { session: { ...previous, storageMode: previous.storageMode ?? 'local' }, commandId: previous.creation.commandId as CommandId, created: false }
       }
+      const taskId = await dedicatedConversationTask(tx, workspace.projectId, { ownerId, workspaceId: workspace.id, workerId: worker.id, agentKey, scenario }, requestId!)
+      source = { taskId, runId: null }
+    }
+    const fingerprint = createHash('sha256').update(canonicalCommand({ workspaceId: workspace.id, workerId: worker.id, agentKey, modelId, title, shareScope, ...(source ? { taskId: source.taskId, runId: source.runId } : {}) })).digest('hex')
+    if (previous) {
+      if (previous.creation?.fingerprint !== fingerprint) throw new AppError(409, 'requestId already belongs to a different Session request', 'request_id_conflict')
+      return { session: { ...previous, storageMode: previous.storageMode ?? 'local' }, commandId: previous.creation.commandId as CommandId, created: false }
     }
     const sessionId = newId<'SessionId'>(), commandId = newId<'CommandId'>()
     const session: Session = { id: sessionId, projectId: workspace.projectId, ownerId, workspaceId: workspace.id, title, shareScope, storageMode: 'local', binding: { workspaceId: workspace.id, agent: { workerId: worker.id, agentKey }, modelId }, runtimeState: 'idle', archivedAt: null, deletedAt: null, ...(requestId ? { creation: { requestId, fingerprint, commandId } } : {}), ...source }
@@ -420,6 +636,7 @@ export class ServerService {
   /** Internal composition seam; capability preparation is local and read-only. */
   async enqueueInTx(tx: ServerStoreTx, id: SessionId, input: unknown, actor?: UserId) {
     const b = object(input), session = actor && this.sessionAccess ? await this.sessionAccess.requireInTx(tx, actor, id, 'write') : await this.getSession(id, tx.resources)
+    await assertSessionTaskMutable(tx, session)
     await this.getWorkspace(session.workspaceId, tx.resources)
     const capability = await sendCapability(tx, session)
     if (!capability.allowed) throw new AppError(409, capability.reason, capability.reasonCode)
@@ -463,15 +680,18 @@ export class ServerService {
       return { kind: 'turn.stop', sessionId: id, turnId }
     })
   }
-  private async sessionControl(id: SessionId, commandId: CommandId, actor: UserId | undefined, build: (tx: ServerStoreTx) => Promise<WorkerCommand>) {
+  private async sessionControl(id: SessionId, commandId: CommandId, actor: UserId | undefined, build: (tx: ServerStoreTx) => Promise<WorkerCommand | null>) {
     const workerId = await this.store.transaction(async tx => {
       const session = actor && this.sessionAccess ? await this.sessionAccess.requireInTx(tx, actor, id, 'write') : await this.getSession(id, tx.resources)
+      await assertSessionTaskMutable(tx, session)
       const command = await build(tx)
+      if (command === null) return null // Commit a durable non-admission fence before responding.
       const existing = await tx.commands.get(commandId)
       await this.command(tx, session.binding.agent.workerId, command, commandId)
       if (!existing) await this.audit(tx, command.kind, { kind: 'session', id }, actor)
       return session.binding.agent.workerId
     })
+    if (workerId === null) throw new AppError(409, 'Model selection was not admitted; use a new request after checking model availability', 'model_not_admitted')
     this.notifications.commands(workerId)
     return { commandId }
   }
@@ -481,29 +701,76 @@ export class ServerService {
     const operationId = (b.operationId === undefined ? commandId : text(b.operationId, 'operationId', 200)) as RuntimeOperationId
     const name = text(b.name, 'name', 200)
     if (name !== 'compact' && name !== 'set_model' && name !== 'set_thinking_level') throw new AppError(400, 'Unsupported runtime command')
-    let args = b.arguments === undefined ? {} : object(b.arguments)
+    const args = b.arguments === undefined ? {} : object(b.arguments)
     const runtimeName = name as Extract<WorkerCommand, { kind: 'runtime.command' }>['name']
     return this.sessionControl(id, commandId, actor, async tx => {
       if (runtimeName === 'set_model') {
         const modelId = text(args.modelId, 'modelId', 200) as ModelId
         const session = await this.getSession(id, tx.resources)
-        if (session.runtimeState === 'running' || session.runtimeState === 'stopping') throw new AppError(409, 'Model cannot be changed while a turn is active')
+        const candidate: WorkerCommand = { kind: 'runtime.command', sessionId: id, operationId, name: runtimeName, arguments: args }
+        const fence = await tx.commands.getRejection(commandId)
+        if (fence) {
+          if (fence.workerId !== session.binding.agent.workerId || fence.payloadFingerprint !== canonicalFingerprint(candidate)) throw new AppError(409, 'Conflicting commandId')
+          return null
+        }
+        // Replay the immutable intent through the ordinary command fingerprint check.
+        // Current permissions still apply, but changed capabilities must not alter a receipt.
+        if (await tx.commands.get(commandId)) {
+          const retained = (await tx.commands.getPendingCommand(commandId))?.command
+          // Old Servers injected previousModelId into the wire identity. Compare only
+          // the caller intent, then replay the retained wire without rewriting it.
+          if (retained?.kind === 'runtime.command' && retained.name === 'set_model' &&
+            (typeof retained.arguments.previousModelId === 'string' || retained.arguments.previousModelId === null) &&
+            !Object.hasOwn(args, 'previousModelId')) {
+            const { previousModelId: _previous, ...originalArgs } = retained.arguments
+            const intent = { kind: 'runtime.command', sessionId: id, operationId, name: runtimeName, arguments: args }
+            if (canonicalCommand({ ...retained, arguments: originalArgs }) === canonicalCommand(intent)) return retained
+          }
+          return { kind: 'runtime.command', sessionId: id, operationId, name: runtimeName, arguments: args }
+        }
+        if (Object.hasOwn(args, 'previousModelId')) throw new AppError(400, 'previousModelId is reserved')
         const worker = await tx.resources.getWorker(session.binding.agent.workerId)
         if (!worker) throw new AppError(404, 'Worker not found')
         const capability = worker.capabilities.find(item => item.agentKey === session.binding.agent.agentKey)
-        if (!capability?.modelSwap) throw new AppError(409, 'This Agent does not support model swapping')
-        if (!capability.models.some(model => model.modelId === modelId)) throw new AppError(409, 'Model unavailable')
-        await tx.resources.saveSession({ ...session, binding: { ...session.binding, modelId } })
-        args = { ...args, previousModelId: session.binding.modelId }
+        if (!capability?.modelSwap || !capability.models.some(model => model.modelId === modelId)) {
+          // Reserve the identity permanently, including against earlier timed-out
+          // requests that have not reached admission yet. Do not throw before commit.
+          await tx.commands.rejectAdmission({ commandId, workerId: session.binding.agent.workerId, payloadFingerprint: canonicalFingerprint(candidate) })
+          return null
+        }
+        // Only the Worker's ordered model.changed Journal event updates this projection.
+        // Admission cannot confirm execution or mutate an already-started Turn.
       }
       return { kind: 'runtime.command', sessionId: id, operationId, name: runtimeName, arguments: args }
     })
   }
+  /** Receipt retrieval uses the same authority as sessionControl, without dispatch. */
+  async authorizeRuntimeApprovalReplay(id: SessionId, projectId: ProjectId, actor: UserId): Promise<void> {
+    await this.store.transaction(async tx => {
+      const session = await this.requireSessionAccessInTx(tx, actor, id, 'write')
+      if (session.projectId !== projectId) throw new AppError(404, 'Approval not found', 'approval_not_found')
+      if (session.taskId) {
+        const task = await tx.tasks.get(session.taskId)
+        if (!task || task.projectId !== projectId) throw new AppError(404, 'Approval not found', 'approval_not_found')
+      }
+      // Root-created Sessions legitimately have no Task/Run provenance. Validate
+      // recorded bindings, but do not invent one just to retrieve a receipt.
+      if (session.runId) {
+        const run = await tx.tasks.run(session.runId)
+        if (!run || run.sessionId !== id || run.projectId !== projectId || (session.taskId && run.taskId !== session.taskId)) {
+          throw new AppError(404, 'Approval not found', 'approval_not_found')
+        }
+      }
+      await assertSessionTaskMutable(tx, session)
+    })
+  }
+
   async resolveRuntimeApproval(id: SessionId, approvalId: ApprovalId, input: unknown, actor?: UserId) {
     const b = object(input), decision = text(b.decision, 'decision')
+    const turnId = text(b.turnId, 'turnId', 200) as TurnId
     if (decision !== 'approve' && decision !== 'deny') throw new AppError(400, 'decision must be approve or deny')
     const commandId = b.commandId === undefined ? newId<'CommandId'>() : text(b.commandId, 'commandId', 200) as CommandId
-    return this.sessionControl(id, commandId, actor, async () => ({ kind: 'runtime.approval.resolve', sessionId: id, approvalId, decision, ...(actor ? { decidedByAccountId: actor } : {}) }))
+    return this.sessionControl(id, commandId, actor, async () => ({ kind: 'runtime.approval.resolve', sessionId: id, turnId, approvalId, decision, ...(actor ? { decidedByAccountId: actor } : {}) }))
   }
   async requireSessionAccessInTx(tx: ServerStoreTx, actor: UserId, id: SessionId, capability: import('./session-access-service.ts').SessionAccessCapability = 'read') {
     if (!this.sessionAccess) return this.getSession(id, tx.resources)
@@ -517,9 +784,11 @@ export class ServerService {
   async update(kind: 'projects' | 'workspaces' | 'sessions', id: string, input: unknown, actor?: UserId) {
     const b = object(input)
     return this.store.transaction(async tx => {
+      if (kind === 'projects' && actor && this.projectAccess) await this.projectAccess.requireInTx(tx, actor, id as ProjectId, 'manager')
+      if (kind === 'sessions' && actor && this.sessionAccess) await this.sessionAccess.requireInTx(tx, actor, id as SessionId, 'control')
       await this.audit(tx, `${kind}.update`, kind === 'projects' ? { kind: 'project', id: id as ProjectId } : kind === 'workspaces' ? { kind: 'workspace', id: id as WorkspaceId } : { kind: 'session', id: id as SessionId }, actor)
       if (kind === 'projects') { const p = { ...await this.getProject(id as ProjectId, tx.resources), name: text(b.name, 'name', 200) }; await tx.resources.saveProject(p); return p }
-      if (kind === 'workspaces') { const w = { ...await this.getWorkspace(id as WorkspaceId, tx.resources), name: text(b.name, 'name', 200) }; await tx.resources.saveWorkspace(w); return w }
+      if (kind === 'workspaces') { const w = { ...await this.authorizedWorkspaceInTx(tx, id as WorkspaceId, actor), name: text(b.name, 'name', 200) }; await tx.resources.saveWorkspace(w); return this.workspaceSnapshot(w) }
       if (Object.keys(b).some(key => !['title', 'archived'].includes(key)) || (b.title === undefined && b.archived === undefined)) throw new AppError(400, 'Expected title or archived')
       if (b.archived !== undefined && typeof b.archived !== 'boolean') throw new AppError(400, 'archived must be boolean')
       const session = actor && this.sessionAccess ? await this.sessionAccess.requireInTx(tx, actor, id as SessionId, 'control') : await this.getSession(id as SessionId, tx.resources)
@@ -529,13 +798,16 @@ export class ServerService {
     })
   }
   async delete(kind: 'projects' | 'workspaces' | 'sessions', id: string, actor?: UserId) {
-    if (kind === 'projects') {
-      const project = await this.getProject(id as ProjectId)
-      if ((await this.store.resources.listWorkspaces()).some(workspace => workspace.projectId === project.id && !workspace.deletedAt)) throw new AppError(409, 'Delete workspaces first')
-    }
+
     await this.store.transaction(async tx => {
+      if (kind === 'projects' && actor && this.projectAccess) await this.projectAccess.requireInTx(tx, actor, id as ProjectId, 'manager')
+      if (kind === 'sessions' && actor && this.sessionAccess) await this.sessionAccess.requireInTx(tx, actor, id as SessionId, 'control')
       await this.audit(tx, `${kind}.delete`, kind === 'projects' ? { kind: 'project', id: id as ProjectId } : kind === 'workspaces' ? { kind: 'workspace', id: id as WorkspaceId } : { kind: 'session', id: id as SessionId }, actor)
-      if (kind === 'projects') await tx.resources.saveProject({ ...await this.getProject(id as ProjectId, tx.resources), deletedAt: now() })
+      if (kind === 'projects') {
+        if ((await tx.resources.listWorkspaces()).some(workspace => workspace.projectId === id)) throw new AppError(409, 'Project retains Workspace records (including deleted workspaces); deletion is unavailable', 'project_has_workspaces')
+        if ((await tx.tasks.list(id, true)).length) throw new AppError(409, 'Project retains Task history; deletion is unavailable', 'project_has_tasks')
+        await tx.resources.saveProject({ ...await this.getProject(id as ProjectId, tx.resources), deletedAt: now() })
+      }
       else if (kind === 'sessions') {
         const session = actor && this.sessionAccess ? await this.sessionAccess.requireInTx(tx, actor, id as SessionId, 'control') : await this.getSession(id as SessionId, tx.resources)
         for (const task of await tx.tasks.list(session.projectId)) {
@@ -556,7 +828,7 @@ export class ServerService {
       }
       else {
         await this.getWorkspace(id as WorkspaceId, tx.resources)
-        throw new AppError(501, 'Workspace deletion is not supported in this MVP')
+        throw new AppError(400, 'Use confirmed Workspace deletion with expectedRevision and requestId', 'invalid_request')
       }
     })
     if (kind === 'sessions') {

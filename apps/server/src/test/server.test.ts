@@ -116,6 +116,103 @@ test('serves the web UI bundle with SPA fallback without masking API 404s', asyn
   assert.equal((await traversal.text()).includes('root:'), false)
 })
 
+test('isolates root and /next/ bundles, refreshes deep links and never falls back for missing assets or backend paths', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'wemux-dual-static-'))
+  const legacy = join(dir, 'legacy'), next = join(dir, 'next')
+  for (const [root, name] of [[legacy, 'legacy'], [next, 'next']] as const) {
+    await mkdir(join(root, 'assets'), { recursive: true })
+    await writeFile(join(root, 'index.html'), `<!doctype html><title>${name}</title>`)
+    await writeFile(join(root, 'assets', 'app.js'), `console.log('${name}')`)
+    await writeFile(join(root, 'assets', 'app.css'), `/* ${name} */`)
+    // Backend namespaces must win even over a matching on-disk static file.
+    await mkdir(join(root, 'downloads'), { recursive: true })
+    await writeFile(join(root, 'downloads', 'worker.tgz'), 'wrong-static-download')
+  }
+  const tarball = join(dir, 'worker.tgz')
+  await writeFile(tarball, 'real-download-fixture')
+  const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail], webStaticPath: legacy, webNextStaticPath: next, workerPackagePath: tarball })
+  const base = await app.listen(0)
+  t.after(async () => { await app.close(); await rm(dir, { recursive: true, force: true }) })
+  const navigate = (path: string) => fetch(`${base}${path}`, { headers: { accept: 'text/html' }, redirect: 'manual' })
+
+  const similarlyNamedRoute = await navigate('/nextish/projects')
+  assert.equal(similarlyNamedRoute.status, 200)
+  assert.equal(await similarlyNamedRoute.text(), '<!doctype html><title>legacy</title>')
+  const canonical = await navigate('/next?returnTo=projects')
+  assert.equal(canonical.status, 308)
+  assert.equal(canonical.headers.get('location'), '/next/?returnTo=projects')
+  assert.equal(canonical.headers.get('cache-control'), 'no-cache')
+  for (const [prefix, name] of [['', 'legacy'], ['/next', 'next']] as const) {
+    for (const path of ['/', '/index.html', '/projects/project-1/tasks/task-1?tab=activity', '/auth/verify-email?token=fixture']) {
+      const response = await navigate(`${prefix}${path}`)
+      assert.equal(response.status, 200, `${prefix}${path}`)
+      assert.match(response.headers.get('content-type') ?? '', /text\/html/)
+      assert.equal(response.headers.get('cache-control'), 'no-cache')
+      assert.equal(await response.text(), `<!doctype html><title>${name}</title>`)
+    }
+    for (const [file, type, content] of [['app.js', 'text/javascript', `console.log('${name}')`], ['app.css', 'text/css', `/* ${name} */`]]) {
+      const response = await navigate(`${prefix}/assets/${file}`)
+      assert.equal(response.status, 200)
+      assert.ok(response.headers.get('content-type')?.startsWith(type!))
+      assert.equal(response.headers.get('cache-control'), 'public, max-age=3600')
+      assert.equal(await response.text(), content)
+    }
+    for (const missing of ['/assets/missing.js', '/assets/missing', '/missing.css', '/missing.svg', '/%ZZ']) {
+      const response = await navigate(`${prefix}${missing}`)
+      assert.equal(response.status, 404, `${prefix}${missing}`)
+      assert.match(response.headers.get('content-type') ?? '', /application\/json/)
+    }
+    const json = await fetch(`${base}${prefix}/unknown-page`, { headers: { accept: 'application/json' } })
+    assert.equal(json.status, 404)
+    const post = await fetch(`${base}${prefix}/projects/p`, { method: 'POST', headers: { accept: 'text/html' } })
+    assert.equal(post.status, 404)
+  }
+  const download = await navigate('/downloads/worker.tgz')
+  assert.equal(download.status, 200)
+  assert.equal(await download.text(), 'real-download-fixture')
+  const installer = await navigate('/downloads/install-worker.sh')
+  assert.equal(installer.status, 200)
+  assert.match(installer.headers.get('content-type') ?? '', /text\/x-shellscript/)
+  for (const path of ['/api/no-such-endpoint', '/downloads/missing', '/worker/ws', '/agent-capabilities/missing', '/auth/oauth/missing']) {
+    const response = await navigate(path)
+    assert.equal(response.status, 404, path)
+    assert.match(response.headers.get('content-type') ?? '', /application\/json/)
+  }
+  const enrollment = await navigate('/workers/enroll')
+  assert.equal(enrollment.status, 401)
+  assert.match(enrollment.headers.get('content-type') ?? '', /application\/json/)
+  const host = await navigate('/api/host')
+  assert.equal(host.status, 200)
+  assert.equal((await host.json() as { hostKind: string }).hostKind, 'cluster')
+  // Real upgrade path still rejects missing Worker credentials rather than returning either HTML bundle.
+  await new Promise<void>((resolve, reject) => {
+    const socket = new WebSocket(base.replace(/^http/, 'ws') + '/worker/ws')
+    socket.on('unexpected-response', (_request, response) => {
+      try { assert.equal(response.statusCode, 401); response.resume(); socket.terminate(); resolve() } catch (error) { reject(error) }
+    })
+    socket.on('open', () => { socket.close(); reject(new Error('Unauthenticated Worker upgrade accepted')) })
+    socket.on('error', () => undefined)
+  })
+})
+
+test('/next/ never serves the legacy bundle when its own bundle is unavailable', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'wemux-next-unavailable-'))
+  await writeFile(join(root, 'index.html'), '<title>legacy-only</title>')
+  t.after(() => rm(root, { recursive: true, force: true }))
+  for (const next of [undefined, join(root, 'not-built')]) {
+    const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail], webStaticPath: root, webNextStaticPath: next })
+    const base = await app.listen(0)
+    try {
+      for (const path of ['/next/', '/next/projects', '/next/assets/missing.js']) {
+        const response = await fetch(`${base}${path}`, { headers: { accept: 'text/html' } })
+        assert.equal(response.status, 404, path)
+        assert.doesNotMatch(await response.text(), /legacy-only/)
+      }
+      assert.equal((await fetch(base)).status, 200)
+    } finally { await app.close() }
+  }
+})
+
 test('installer downloads, installs, registers and starts with stubbed tools', { timeout: 15000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'wemux-lite-installer-'))
   const workerPackage = join(dir, 'worker.tgz')
@@ -551,11 +648,11 @@ test('HTTP + SQLite + Worker WS + SSE durable end-to-end loop', { timeout: 20000
   await eventually(async () => (await request(`/sessions/${session.id}/events`)).data.events.length === 4)
   assert.equal((await request(`/sessions/${session.id}/events`)).data.freshness.status, 'synced')
   assert.equal((await request(`/sessions/${session.id}`, 'PATCH', { title: 'Renamed' })).data.title, 'Renamed')
-  assert.equal((await request(`/workspaces/${workspace.id}`, 'DELETE')).status, 501)
+  assert.equal((await request(`/workspaces/${workspace.id}`, 'DELETE')).status, 400)
   // A durable enqueue not yet observed in Journal is not idle.
   assert.equal((await request(`/sessions/${session.id}`, 'DELETE')).status, 409)
   assert.equal((await request(`/sessions/${session.id}/events`)).status, 200)
-  assert.equal((await request(`/workspaces/${workspace.id}`, 'DELETE')).status, 501)
+  assert.equal((await request(`/workspaces/${workspace.id}`, 'DELETE')).status, 400)
   assert.equal((await request(`/projects/${project.id}`, 'DELETE')).status, 409)
   assert.equal((await request('/sessions')).data.items.length, 2)
   const db = new DatabaseSync(databasePath)

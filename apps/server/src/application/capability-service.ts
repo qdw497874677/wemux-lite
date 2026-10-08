@@ -26,6 +26,11 @@ import type {
   CapabilityDelegationActionResult,
 } from '@wemux/wire-protocol'
 import type { ServerStore } from './ports/server-store.ts'
+import type { TaskService } from './task-service.ts'
+import type { ProjectAccessService } from './project-access-service.ts'
+import type { WorkerAccessService } from './worker-access-service.ts'
+import type { SessionAccessService } from './session-access-service.ts'
+import type { ServerService } from './server-service.ts'
 import type { ConnectorRepository } from './ports/connector-repository.ts'
 import { CapabilityTokenService } from './capability-token-service.ts'
 import type { DelegationApplicationService } from './delegation-service.ts'
@@ -61,6 +66,11 @@ export class CapabilityService {
   private readonly tokens: CapabilityTokenService
   private readonly connectors?: Pick<ConnectorRepository, 'list'>
   private delegations?: DelegationApplicationService
+  private projectQueries?: ProjectAccessService
+  private workerQueries?: WorkerAccessService
+  private sessionQueries?: SessionAccessService
+  private taskQueries?: TaskService
+  private historyQueries?: ServerService
   constructor(
     store: ServerStore,
     now: () => Timestamp,
@@ -71,6 +81,14 @@ export class CapabilityService {
 
   attachDelegations(delegations: DelegationApplicationService): void {
     this.delegations = delegations
+  }
+
+  attachProjectQueries(projects: ProjectAccessService, workers: WorkerAccessService, sessions: SessionAccessService, tasks: TaskService, history: ServerService): void {
+    this.projectQueries = projects
+    this.workerQueries = workers
+    this.sessionQueries = sessions
+    this.taskQueries = tasks
+    this.historyQueries = history
   }
 
   async listProjectAssets(projectId: ProjectId): Promise<readonly CapabilityAsset[]> {
@@ -117,11 +135,14 @@ export class CapabilityService {
     const session = await this.requireSession(input.sessionId, resources)
     const workspace = await resources.getWorkspace(session.workspaceId)
     if (!workspace) throw new CapabilityError('not-found', 'Workspace not found')
+    const actorAccount = input.actorId ? await identity.getUser(input.actorId) : null
+    if (input.actorId && (!actorAccount || actorAccount.status !== 'active')) throw new CapabilityError('forbidden', 'Capability actor is not active')
     const assets = await resources.listCapabilityAssets(session.projectId)
     const connectors = await this.resolveConnectors(session, input, identity, resources)
     const allowedConnectorIds = connectors.map(connector => connector.id)
     const allowedTools = input.allowedTools ?? [
       'session.info',
+      ...(input.actorId ? ['project.list', 'project.get', 'project.resources', 'task.list', 'task.get', 'task.create', 'task.sessions', 'session.get', 'session.events'] as const : []),
       'agent.list',
       'agent.send',
       'agent.inbox.list',
@@ -169,6 +190,7 @@ export class CapabilityService {
       sessionId: session.id,
       turnId: input.turnId,
       actorAgentId: session.id,
+      ...(input.actorId ? { actorUserId: input.actorId, actorAuthVersion: actorAccount!.authVersion ?? 0 } : {}),
       projectId: session.projectId,
       workspaceId: session.workspaceId,
       allowedTools,
@@ -184,6 +206,7 @@ export class CapabilityService {
           sessionId: issued.claims.sessionId,
           turnId: issued.claims.turnId,
           actorAgentId: issued.claims.actorAgentId,
+          ...(issued.claims.actorUserId ? { actorUserId: issued.claims.actorUserId, actorAuthVersion: issued.claims.actorAuthVersion } : {}),
           projectId: issued.claims.projectId,
           workspaceId: issued.claims.workspaceId,
           allowedTools: issued.claims.allowedTools,
@@ -200,7 +223,114 @@ export class CapabilityService {
     if (!claims.allowedTools.includes(requiredTool)) throw new CapabilityError('forbidden', `Capability ${requiredTool} is not allowed`)
     const session = await this.store.resources.getSession(claims.sessionId)
     if (!session || session.deletedAt !== null || session.projectId !== claims.projectId || session.workspaceId !== claims.workspaceId) throw new CapabilityError('forbidden', 'Capability session is no longer active')
+    if (requiredTool === 'project.list' || requiredTool === 'project.get' || requiredTool === 'project.resources' || requiredTool === 'session.get' || requiredTool === 'task.list' || requiredTool === 'task.get' || requiredTool === 'task.create' || requiredTool === 'task.sessions' || requiredTool === 'session.events') {
+      if (!claims.actorUserId || !Number.isSafeInteger(claims.actorAuthVersion) || !this.sessionQueries || !this.projectQueries) throw new CapabilityError('forbidden', 'Project queries require a trusted actor')
+      const account = await this.store.identity.getUser(claims.actorUserId)
+      if (!account || account.status !== 'active' || (account.authVersion ?? 0) !== claims.actorAuthVersion) throw new CapabilityError('forbidden', 'Capability actor is no longer active')
+      await this.sessionQueries.require(claims.actorUserId, claims.sessionId)
+      await this.projectQueries.require(claims.actorUserId, claims.projectId)
+    }
     return claims
+  }
+
+  private queryContext(claims: CapabilityGrantClaims) {
+    if (!claims.actorUserId || !this.taskQueries || !this.projectQueries || !this.sessionQueries || !this.historyQueries) throw new CapabilityError('forbidden', 'Project queries are unavailable')
+    return { actor: claims.actorUserId, requestId: claims.id }
+  }
+
+  async listProjects(claims: CapabilityGrantClaims) {
+    const context = this.queryContext(claims)
+    // A Turn is scoped to its originating Project, not every Project the user may access.
+    const project = await this.projectQueries!.require(context.actor, claims.projectId)
+    return { items: [project] }
+  }
+
+  async getProject(claims: CapabilityGrantClaims, input: { projectId?: string }) {
+    const context = this.queryContext(claims)
+    if (input?.projectId !== claims.projectId) throw new CapabilityError('not-found', 'Project not found')
+    return { project: await this.projectQueries!.require(context.actor, claims.projectId) }
+  }
+
+  async projectResources(claims: CapabilityGrantClaims, input: { projectId?: string }) {
+    const context = this.queryContext(claims)
+    if (input?.projectId !== claims.projectId) throw new CapabilityError('not-found', 'Project not found')
+    if (!this.workerQueries) throw new CapabilityError('forbidden', 'Worker visibility is unavailable')
+    const project = await this.projectQueries!.require(context.actor, claims.projectId)
+    const workspaces = (await this.store.resources.listWorkspaces()).filter(space => space.projectId === claims.projectId && !space.deletedAt)
+    const repositories = await Promise.all([...new Set(workspaces.flatMap(space => space.spec.kind === 'repository' ? [space.spec.repositoryId] : []))]
+      .map(id => this.store.resources.getRepository(id)))
+    // Worker metadata is only discoverable after independent use authorization;
+    // placement path observations and connector credentials never leave this method.
+    const visibleWorkers = await this.workerQueries.list(context.actor)
+    const eligible = new Map(visibleWorkers.filter(worker => worker.teamId === project.teamId && worker.connectionState !== 'revoked').map(worker => [worker.id, worker]))
+    return { projectId: project.id,
+      // Repository URLs can contain embedded credentials; only expose bounded
+      // identities of repositories referenced by active Project Workspaces.
+      repositories: repositories.filter(repository => repository?.projectId === project.id).map(repository => ({ id: repository!.id, name: repository!.name })),
+      workspaces: workspaces.map(space => ({ id: space.id, name: space.name, kind: space.spec.kind,
+        placements: space.placements.filter(placement => eligible.has(placement.workerId)).map(placement => ({ workerId: placement.workerId, status: placement.status })) })),
+      workers: [...eligible.values()].map(worker => ({ id: worker.id, name: worker.name, connectionState: worker.connectionState,
+        agents: worker.capabilities.map(agent => ({ agentKey: agent.agentKey, displayName: agent.agentKey,
+          availability: { status: agent.availability.status },
+          // Never forward detector diagnostics, executable names, raw stderr, or
+          // free-form labels from a Worker into a cross-Project query.
+          models: agent.models?.map(model => ({ modelId: model.modelId })) ?? [] })) })),
+    }
+  }
+
+  async listTasks(claims: CapabilityGrantClaims, input: { projectId?: string; limit?: number; cursor?: string }) {
+    const context = this.queryContext(claims)
+    if (input?.projectId !== claims.projectId) throw new CapabilityError('not-found', 'Project not found')
+    const limit = queryLimit(input.limit), offset = queryCursor(input.cursor)
+    const tasks = await this.taskQueries!.list(claims.projectId, context)
+    const items = [...tasks].sort((a, b) => a.id.localeCompare(b.id)).slice(offset, offset + limit)
+    return { items, nextCursor: offset + limit < tasks.length ? String(offset + limit) : null }
+  }
+
+  async getTask(claims: CapabilityGrantClaims, input: { projectId?: string; taskId?: string }) {
+    const context = this.queryContext(claims)
+    if (input?.projectId !== claims.projectId || !input?.taskId) throw new CapabilityError('not-found', 'Task not found')
+    const task = await this.taskQueries!.get(claims.projectId, input.taskId as never, context)
+    if (task.projectId !== claims.projectId) throw new CapabilityError('not-found', 'Task not found')
+    return { task }
+  }
+
+  async createTask(claims: CapabilityGrantClaims, input: { projectId?: string; requestId?: string; title?: string; description?: string; acceptanceCriteria?: string | null; priority?: string; metadataJson?: unknown }) {
+    const context = this.queryContext(claims)
+    if (input?.projectId !== claims.projectId) throw new CapabilityError('not-found', 'Project not found')
+    if (typeof input.requestId !== 'string' || !input.requestId.trim() || input.requestId.length > 200 || input.requestId.includes('\0')) throw new CapabilityError('invalid-input', 'Task creation requires a valid requestId')
+    // Existing TaskService checks write permission and requestId replay atomically.
+    const { projectId: _scope, ...body } = input
+    return { task: await this.taskQueries!.create(claims.projectId, body, context) }
+  }
+
+  async taskSessions(claims: CapabilityGrantClaims, input: { projectId?: string; taskId?: string; limit?: number; cursor?: string }) {
+    const context = this.queryContext(claims)
+    if (input?.projectId !== claims.projectId || !input?.taskId) throw new CapabilityError('not-found', 'Task not found')
+    const limit = queryLimit(input.limit), offset = queryCursor(input.cursor)
+    const visible = await this.taskQueries!.sessions(claims.projectId, input.taskId as never, {}, context)
+    const items = [...visible].sort((a, b) => a.id.localeCompare(b.id)).slice(offset, offset + limit)
+    return { items, nextCursor: offset + limit < visible.length ? String(offset + limit) : null }
+  }
+
+  async sessionGet(claims: CapabilityGrantClaims, input: { sessionId?: string }) {
+    const context = this.queryContext(claims)
+    if (!input?.sessionId) throw new CapabilityError('not-found', 'Session not found')
+    const session = await this.sessionQueries!.require(context.actor, input.sessionId as SessionId)
+    if (session.projectId !== claims.projectId) throw new CapabilityError('not-found', 'Session not found')
+    return { session: await this.historyQueries!.sessionView(session.id, context.actor) }
+  }
+
+  async sessionEvents(claims: CapabilityGrantClaims, input: { sessionId?: string; fromSeq?: number; limit?: number }) {
+    const context = this.queryContext(claims)
+    if (!input?.sessionId) throw new CapabilityError('not-found', 'Session not found')
+    const session = await this.sessionQueries!.require(context.actor, input.sessionId as SessionId)
+    if (session.projectId !== claims.projectId) throw new CapabilityError('not-found', 'Session not found')
+    const fromSeq = input.fromSeq ?? 1
+    if (!Number.isSafeInteger(fromSeq) || fromSeq < 1) throw new CapabilityError('invalid-input', 'fromSeq must be a positive integer')
+    const events = await this.historyQueries!.events(session.id, fromSeq, queryLimit(input.limit, 100, 1000), context.actor)
+    const state = await this.historyQueries!.sessionView(session.id, context.actor)
+    return { ...events, sessionId: session.id, runtimeState: state.runtimeState, activeTurnId: state.activeTurnId }
   }
 
   async sessionInfo(claims: CapabilityGrantClaims): Promise<CapabilitySessionInfoResult> {
@@ -427,6 +557,19 @@ function assetTarget(kind: CapabilityAsset['kind'], name: string, targetPath: st
   if (kind === 'skill') return `skill:${name.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '') || 'skill'}`
   if (kind === 'file') return `file:${targetPath ?? name}`
   return `${kind}:${name}`
+}
+
+function queryLimit(value: number | undefined, defaultValue = 20, max = 100): number {
+  if (value === undefined) return defaultValue
+  if (!Number.isSafeInteger(value) || value < 1 || value > max) throw new CapabilityError('invalid-input', `limit must be 1..${max}`)
+  return value
+}
+function queryCursor(value: string | undefined): number {
+  if (value === undefined) return 0
+  if (!/^(0|[1-9]\d*)$/.test(value)) throw new CapabilityError('invalid-input', 'Invalid cursor')
+  const offset = Number(value)
+  if (!Number.isSafeInteger(offset) || offset > 1_000_000) throw new CapabilityError('invalid-input', 'Invalid cursor')
+  return offset
 }
 
 function invalidAsset(message: string): never {

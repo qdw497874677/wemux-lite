@@ -1,4 +1,4 @@
-import type { MailSettings } from './mail/email-delivery.ts'
+import { nextConsoleLink, type MailSettings } from './mail/email-delivery.ts'
 
 export interface TeamInvitationMailInput {
   readonly teamName: string
@@ -18,6 +18,7 @@ export async function sendTeamInvitationMail(mail: MailSettings, input: TeamInvi
       `${input.invitedBy} 邀请你加入 Wemux 团队「${input.teamName}」。`,
       '',
       `${action}：${mail.publicUrl}${path}`,
+      `在新版中打开：${nextConsoleLink(`${mail.publicUrl}${path}`)}`,
       '',
       '邀请将在 7 天后过期。若你未预期收到此邮件，可以忽略。',
     ].join('\n'),

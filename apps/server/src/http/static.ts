@@ -33,17 +33,18 @@ const sendFile = async (response: ServerResponse, file: string): Promise<boolean
 
 /**
  * Serve a built web bundle: exact file matches first, then an index.html SPA
- * fallback for browser navigations (requests accepting text/html). API clients
- * that miss every route still get the JSON 404 from the handler.
+ * fallback for extensionless browser navigations (requests accepting text/html).
+ * Missing assets and malformed URLs keep the handler's JSON 404, never HTML.
  */
 export async function serveStaticSite(response: ServerResponse, requestPath: string, accept: string | undefined, site: StaticSite): Promise<boolean> {
   if (response.writableEnded) return false
   const root = resolve(site.root)
   let decoded: string
   try { decoded = requestPath === '/' ? '/index.html' : decodeURIComponent(requestPath) }
-  catch { return /text\/html/.test(accept ?? '') ? sendFile(response, join(root, 'index.html')) : false }
+  catch { return false }
   const target = resolve(join(root, decoded.slice(1)))
   if ((target === root || target.startsWith(root + sep)) && await sendFile(response, target)) return true
+  if (decoded === '/assets' || decoded.startsWith('/assets/') || extname(decoded)) return false
   if (!/text\/html/.test(accept ?? '')) return false
   return sendFile(response, join(root, 'index.html'))
 }

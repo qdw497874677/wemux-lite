@@ -3,13 +3,21 @@ import { AppError } from '../../application/errors.ts'
 import type { RouteDescriptor } from './types.ts'
 
 export const workspaceRoutes: readonly RouteDescriptor[] = [
+  { method: 'DELETE', pattern: '/workspaces/:workspaceId', auth: 'authenticated', handler: async context => {
+    context.json(200, await context.service.deleteWorkspace(context.params.workspaceId as WorkspaceId, await context.readBody(), await context.actor(), context.url.searchParams.get('teamId') ?? undefined))
+  } },
   { method: 'GET', pattern: '/workspaces', auth: 'authenticated', handler: async context => {
-    if (!context.projects) throw new AppError(404, 'Not found')
-    const authorized = await context.projects.list(await context.actor(), context.url.searchParams.get('teamId') ?? undefined)
-    const allowed = new Set(authorized.map(project => project.id))
-    const items = (await context.service.listWorkspaceViews()).filter(item => allowed.has(item.projectId))
-    const projectId = context.url.searchParams.get('projectId')
-    context.json(200, { items: projectId ? items.filter(item => item.projectId === projectId) : items })
+    const visibility = context.url.searchParams.get('visibility') ?? 'visible'
+    if (visibility !== 'visible' && visibility !== 'hidden' && visibility !== 'all') throw new AppError(400, 'Unknown Workspace visibility', 'invalid_request')
+    const items = await context.service.listWorkspaceVisibilityViews(await context.actor(), {
+      projectId: context.url.searchParams.get('projectId') ?? undefined,
+      teamId: context.url.searchParams.get('teamId') ?? undefined,
+      visibility,
+    })
+    context.json(200, { items })
+  } },
+  { method: 'PUT', pattern: '/workspaces/:workspaceId/visibility', auth: 'authenticated', handler: async context => {
+    context.json(200, await context.service.workspaceVisibility(context.params.workspaceId as WorkspaceId, await context.readBody(), await context.actor()))
   } },
   { method: 'POST', pattern: '/workspaces', auth: 'authenticated', handler: async context => {
     if (!context.projects || !context.workerAccess) throw new AppError(404, 'Not found')
@@ -17,9 +25,7 @@ export const workspaceRoutes: readonly RouteDescriptor[] = [
   } },
   { method: 'GET', pattern: '/workspaces/:workspaceId', auth: 'authenticated', handler: async context => {
     if (!context.projects) throw new AppError(404, 'Not found')
-    const workspace = await context.service.getWorkspace(context.params.workspaceId as WorkspaceId)
-    await context.projects.require(await context.actor(), workspace.projectId)
-    context.json(200, await context.service.workspaceView(context.params.workspaceId as WorkspaceId))
+    context.json(200, await context.service.workspaceView(context.params.workspaceId as WorkspaceId, await context.actor()))
   } },
   { method: 'POST', pattern: '/workspaces/:workspaceId/reprovision', auth: 'admin', handler: async context => {
     const input = await context.readBody() as { requestId?: unknown; workerId?: unknown }

@@ -111,6 +111,9 @@ export class WorkerService {
         case 'capability':
           if (message.workerId !== workerId) throw new AppError(403, 'Worker identity mismatch')
           await tx.resources.saveWorker({ ...worker, capabilities: message.capabilities, lastSeenAt: now() })
+          if (JSON.stringify(worker.capabilities) !== JSON.stringify(message.capabilities)) {
+            for (const session of await tx.resources.listSessions()) if (!session.deletedAt && session.binding.agent.workerId === workerId) changed.add(session.id)
+          }
           break
         case 'resource.set.pull':
           if (!this.resources || message.workerId !== workerId) throw new AppError(403, 'Worker identity mismatch')
@@ -160,13 +163,13 @@ export class WorkerService {
           await tx.commands.recordReceipt(message.receipt, now())
           if (command.status === message.receipt.status) break
           commandsChanged = true
-          const pendingCommand = await tx.commands.getPendingCommand(message.receipt.commandId)
-          if (message.receipt.status === 'rejected' && pendingCommand?.command.kind === 'runtime.command' && pendingCommand.command.name === 'set_model') {
-            const session = await tx.resources.getSession(pendingCommand.command.sessionId)
-            const previousModelId = pendingCommand.command.arguments.previousModelId
-            if (session && (typeof previousModelId === 'string' || previousModelId === null)) {
-              await tx.resources.saveSession({ ...session, binding: { ...session.binding, modelId: previousModelId as ModelId | null } })
-              changed.add(session.id)
+          // Rejection can remove an admitted queue item without any Journal event.
+          // Notify its Session explicitly; repeated receipts were filtered above.
+          if (message.receipt.status === 'rejected') {
+            const pending = await tx.commands.getPendingCommand(message.receipt.commandId)
+            if (pending?.command.kind === 'session.enqueue') {
+              const session = await this.ownSession(workerId, pending.command.sessionId, tx.resources)
+              if (session && !session.deletedAt) changed.add(session.id)
             }
           }
           const run = await tx.tasks.runByCommand(message.receipt.commandId)
@@ -183,6 +186,7 @@ export class WorkerService {
           }
           if (message.receipt.status === 'rejected') {
             for (const workspace of await tx.resources.listWorkspaces()) {
+              if (workspace.deletedAt) continue
               const placement = workspace.placements.find(value => value.workerId === workerId && value.provisioning?.commandId === message.receipt.commandId && value.status === 'stopped')
               if (!placement?.provisioning) continue
               const at = now(), reason = message.receipt.error.message
@@ -198,12 +202,17 @@ export class WorkerService {
           } else if (message.scope === 'workspace') {
             const r = message.report, w = await tx.resources.getWorkspace(r.workspaceId)
             // 与 ownSession 同理：服务器没有该 workspace 的记录时跳过重放的旧报告，而不是回 transport.error。
-            if (!w) break
+            if (!w || w.deletedAt) break
             const placement = w.placements.find(value => value.workerId === workerId)
             if (!placement || (r.location && (r.location.workerId !== workerId || r.location.workspaceId !== w.id))) throw new AppError(403, 'Workspace ownership placement mismatch')
             // Attempt identity is authoritative. Legacy reports are accepted only
             // before any explicit retry; their timestamps cannot prove attempt ownership.
             if (r.commandId ? r.commandId !== placement.provisioning?.commandId : placement.provisioning?.replacedAttempt === true) break
+            if (!r.commandId && placement.provisioning?.terminalReport) break
+            if (r.commandId) {
+              const command = await tx.commands.getPendingCommand(r.commandId)
+              if (!command || command.workerId !== workerId || command.command.kind !== 'workspace.provision' || command.command.workspace.workspace.id !== w.id) throw new AppError(403, 'Workspace provision command ownership mismatch')
+            }
             const reportedStatus: import('@wemux/domain').WorkspacePlacementStatus = r.status === 'pending' || r.status === 'provisioning' || r.status === 'deleting' || r.status === 'unplaced' ? 'stopped' : r.status
             const allowed: import('@wemux/domain').WorkspacePlacementStatus[] = placement.status === 'deleted' ? ['deleted'] : placement.status === 'ready' ? ['ready', 'failed'] : placement.status === 'failed' ? ['failed'] : ['stopped', 'ready', 'failed', 'deleted']
             if (placement.status === 'ready' && reportedStatus !== 'ready') break
@@ -212,7 +221,11 @@ export class WorkerService {
             if (placement.status === 'failed' && reportedStatus !== 'failed') break
             if (!r.commandId && placement.provisioning && r.occurredAt < placement.provisioning.startedAt) break
             const same = placement.status === reportedStatus && placement.failureReason === r.reason && JSON.stringify(placement.location) === JSON.stringify(r.location)
-            const next: import('@wemux/server-domain').WorkspacePlacement = { ...placement, status: reportedStatus as import('@wemux/domain').WorkspacePlacementStatus, failureReason: r.reason, location: r.location, ...(placement.provisioning ? { provisioning: { ...placement.provisioning, reportedAt: r.occurredAt } } : {}) }
+            const next: import('@wemux/server-domain').WorkspacePlacement = { ...placement, status: reportedStatus as import('@wemux/domain').WorkspacePlacementStatus, failureReason: r.reason, location: r.location, ...(placement.provisioning ? { provisioning: { ...placement.provisioning, reportedAt: r.occurredAt, terminalReport: r.commandId && (r.status === 'ready' || r.status === 'failed') ? { commandId: r.commandId, workerId, status: r.status, occurredAt: r.occurredAt } : undefined } } : {}) }
+            // Only the report that passed all existing ownership, attempt and
+            // monotonic-placement checks may establish durable historical proof.
+            // Receipts and ignored legacy/superseded reports never reach this seam.
+            if (next.provisioning?.terminalReport) await tx.resources.recordWorkspacePreparationProof({ workspaceId: w.id, ...next.provisioning.terminalReport })
             await tx.resources.saveWorkspace({ ...w, workerId, status: next.status, failureReason: next.failureReason, provisioning: next.provisioning, location: next.location, placements: w.placements.map(value => value.workerId === workerId ? next : value) })
             if (!same) await workspaceActivity(w.id, r.status, r.reason, r.occurredAt)
           } else {
@@ -232,8 +245,11 @@ export class WorkerService {
             for (const head of message.heads) {
               const owner = await this.ownSession(workerId, head.sessionId, tx.resources)
               if (!owner || owner.deletedAt) continue
+              const previous = await tx.cache.getFreshness(head.sessionId)
               const state = await tx.cache.recordWorkerHead(head.sessionId, head.lastSeq)
-              changed.add(head.sessionId)
+              // Periodic identical heads are liveness, not new Session state. Keep
+              // gap repair below, but do not invalidate UI authority every second.
+              if (JSON.stringify(previous) !== JSON.stringify(state)) changed.add(head.sessionId)
               if (state.contiguousSeq < head.lastSeq) replies.push(this.request(head.sessionId, state.contiguousSeq))
               if (state.contiguousSeq > head.lastSeq) throw new AppError(409, 'Worker journal head regressed')
             }

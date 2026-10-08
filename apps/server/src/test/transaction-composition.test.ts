@@ -23,7 +23,7 @@ test('creation primitives compose in one transaction; every failure rolls back w
   t.after(() => { observer.close(); db.close(); rmSync(directory, { recursive: true, force: true }) })
   let active = false, transactions = 0, failAudit = false, wakeups = 0
   const store: ServerStore = {
-    tasks: db.tasks, identity: db.identity, resources: db.resources, commands: db.commands, cache: db.cache,
+    fileWrites: db.fileWrites, tasks: db.tasks, identity: db.identity, resources: db.resources, commands: db.commands, cache: db.cache,
     async transaction<T>(work: (tx: ServerStoreTx) => Promise<T>): Promise<T> {
       assert.equal(active, false, 'nested transaction would wait forever')
       transactions++

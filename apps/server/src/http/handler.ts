@@ -3,7 +3,7 @@ import { CapabilityError } from '../application/capability-service.ts'
 import { CapabilityTokenError } from '../application/capability-token-service.ts'
 import { AppError } from '../application/errors.ts'
 import { isWebConsoleAuthPath } from '../application/web-console-routes.ts'
-import { readCookie } from './cookies.ts'
+import { clearedSessionCookie, isSecureRequest, readCookie } from './cookies.ts'
 import { assertCookieWriteAllowed } from './routes-auth.ts'
 import { routes } from './routes/index.ts'
 import { requiredPatAccess } from './routes/access.ts'
@@ -47,9 +47,23 @@ export function httpHandler(options: HttpHandlerOptions) {
       // single-origin deployments (server hosting the built web bundle) work without a proxy.
       const path = rawPath === '/api' || rawPath.startsWith('/api/') ? (rawPath.slice(4) || '/') : rawPath
       const method = request.method
-      // API 命名空间不参与 SPA 回退。邮件链接目标是 Web 页面，仍允许静态站点接管。
-      const apiNamespace = rawPath === '/api' || rawPath.startsWith('/api/') || ((rawPath === '/auth' || rawPath.startsWith('/auth/')) && !isWebConsoleAuthPath(rawPath))
-      if (options.staticSite && method === 'GET' && !apiNamespace && await serveStaticSite(response, path, request.headers.accept, options.staticSite)) return
+      // Backend namespaces never fall through to either SPA, even for text/html.
+      // Email confirmation pages are the explicit exception inside /auth.
+      const backendNamespace = ['/api', '/downloads', '/worker', '/workers', '/agent-capabilities'].some(prefix => rawPath === prefix || rawPath.startsWith(`${prefix}/`))
+        || ((rawPath === '/auth' || rawPath.startsWith('/auth/')) && !isWebConsoleAuthPath(rawPath))
+      if (method === 'GET' && !backendNamespace) {
+        const nextPath = rawPath === '/next' || rawPath.startsWith('/next/')
+        if (nextPath) {
+          if (url.pathname === '/next' && options.nextStaticSite) {
+            response.writeHead(308, { Location: `/next/${url.search}`, 'Cache-Control': 'no-cache' }).end()
+            return
+          }
+          if (options.nextStaticSite && await serveStaticSite(response, rawPath.slice(5) || '/', request.headers.accept, options.nextStaticSite)) return
+          // An absent or incomplete next build must not render the legacy app.
+          throw new AppError(404, 'Not found')
+        }
+        if (options.staticSite && await serveStaticSite(response, path, request.headers.accept, options.staticSite)) return
+      }
 
       const matched = findRoute(routes, method, path)
       if (!matched) throw new AppError(404, 'Not found')
@@ -57,7 +71,11 @@ export function httpHandler(options: HttpHandlerOptions) {
       const header = request.headers.authorization
       const bearer = header?.startsWith('Bearer ') ? header.slice(7) : undefined
       // 浏览器会话与 Bearer 凭证互不冒充：Cookie 只在同源请求携带，且不可用于升级为代理令牌。
-      const resolved = options.identity ? await options.identity.resolveSession(readCookie(request.headers.cookie, options.identity.cookieName)) : null
+      const sessionToken = options.identity ? readCookie(request.headers.cookie, options.identity.cookieName) : undefined
+      const resolved = options.identity ? await options.identity.resolveSession(sessionToken) : null
+      if (sessionToken !== undefined && !resolved && options.identity) {
+        response.setHeader('Set-Cookie', clearedSessionCookie({ name: options.identity.cookieName, secure: isSecureRequest(request) }))
+      }
       const loginSession = resolved && options.identity ? await options.identity.touch(resolved) : null
       const credential = { bearer, loginSession }
       const unsafe = method !== 'GET' && method !== 'HEAD'
@@ -93,6 +111,15 @@ export function httpHandler(options: HttpHandlerOptions) {
     })().catch(error => {
       if (response.headersSent) { response.destroy(); return }
       const status = error instanceof AppError ? error.status : error instanceof CapabilityTokenError ? 401 : error instanceof CapabilityError ? error.code === 'forbidden' ? 403 : error.code === 'not-found' ? 404 : 400 : 500
+      // Unknown, expired and revoked credentials are deliberately indistinguishable.
+      // Keep explicit login/CSRF/domain codes; only normalize the generic auth rejection.
+      if (error instanceof AppError && status === 401 && !error.code) {
+        if (options.identity && readCookie(request.headers.cookie, options.identity.cookieName) !== undefined) {
+          response.setHeader('Set-Cookie', clearedSessionCookie({ name: options.identity.cookieName, secure: isSecureRequest(request) }))
+        }
+        json(response, status, { error: { code: 'authentication_required', message: '登录凭据无效或已失效，请重新登录。' } })
+        return
+      }
       json(response, status, { error: error instanceof AppError ? { code: error.code ?? 'error', message: error.message } : error instanceof Error ? { code: 'internal_error', message: error.message } : { code: 'internal_error', message: 'Internal server error' } })
     })
   }

@@ -37,6 +37,7 @@ export class CapabilityTokenService {
       sessionId: request.sessionId,
       turnId: request.turnId,
       actorAgentId: request.actorAgentId,
+      ...(request.actorUserId ? { actorUserId: request.actorUserId, actorAuthVersion: request.actorAuthVersion } : {}),
       projectId: request.projectId,
       workspaceId: request.workspaceId,
       allowedTools: request.allowedTools,

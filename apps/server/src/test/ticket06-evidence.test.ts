@@ -31,7 +31,7 @@ async function fixture(path: string, cancel = true) {
   await store.transaction(tx => tx.resources.saveWorkspace({ ...workspace, status: 'ready' }))
   const assignment = { workspaceId: workspace.id, workerId: worker.id, agentKey: 'test', modelId: 'model' }
   await tasks.assignment(task.projectId, task.id, { version: 1, assignee: assignment }, false, context)
-  const { session: independent } = await tasks.createSession(task.projectId, task.id, { title: 'Independent' }, context)
+  const { session: independent } = await tasks.createSession(task.projectId, task.id, { title: 'Independent', requestId: 'independent-session' }, context)
   const { run } = await tasks.launch(task.projectId, task.id, { requestId: 'launch', mode: 'new', reuseSessionId: null, prompt: 'Evidence', assignment }, context)
   if (cancel) await tasks.cancelRun(task.projectId, task.id, run.id, { runId: run.id, sessionId: run.sessionId, requestId: 'cancel' }, context)
   return { store, server, tasks, signals, task, worker, run: (await store.tasks.run(run.id))!, independent }
@@ -192,7 +192,11 @@ test('Ticket06 v7 migration preserves valid JSON and rejects invalid legacy rows
     const oldTriggers = ['task_workspaces_project', 'run_session_scope', 'active_run_session_delete', 'session_task_scope']
     for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type='trigger'").all()) if (!oldTriggers.includes(String(row.name))) db.exec(`DROP TRIGGER "${String(row.name)}"`)
     for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type='view'").all()) db.exec(`DROP VIEW "${String(row.name)}"`)
-    db.exec("DROP TABLE project_activity; DROP TABLE review_requests; ALTER TABLE records DROP COLUMN source_run_id; DELETE FROM schema_migrations WHERE version>=8; CREATE TRIGGER session_creation_provenance BEFORE UPDATE ON records WHEN 0 BEGIN SELECT RAISE(ABORT,'unused'); END;")
+    // v39/v40 的 attention 排序索引建在存活的 task_runs / channel_outbound_deliveries 上，
+    // 只删 schema_migrations 版本行而不删物理索引，会让重放的 CREATE INDEX 撞名。
+    // 与 task-runs.test.ts、attention-source-pages.test.ts 保持同一约定。
+    db.exec('DROP INDEX IF EXISTS attention_failed_runs_order; DROP INDEX IF EXISTS attention_dead_letters_order; DROP INDEX IF EXISTS attention_human_reviews_order')
+    db.exec("DROP TRIGGER IF EXISTS command_rejection_no_dispatch; DROP TABLE command_rejections; DROP TABLE project_activity; DROP TABLE review_requests; ALTER TABLE records DROP COLUMN source_run_id; DELETE FROM schema_migrations WHERE version>=8; CREATE TRIGGER session_creation_provenance BEFORE UPDATE ON records WHEN 0 BEGIN SELECT RAISE(ABORT,'unused'); END;")
     const valid = snapshot(db)
     for (const sql of [
       "UPDATE run_cancel_requests SET session_id='wrong'",

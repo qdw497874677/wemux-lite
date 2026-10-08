@@ -3,7 +3,10 @@ import type { Server } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { WorkerId } from '@wemux/domain'
-import { parseWorkerTransportFrame, type ServerPayload, type ServerToWorkerFrame, type WorkerHelloFrame } from '@wemux/wire-protocol'
+import { FS_WRITE_ADMISSION_V1, isFileWriteAdmissionType, supportsFileWriteAdmission, parseWorkerTransportFrame, type ServerPayload, type ServerToWorkerFrame, type WorkerHelloFrame } from '@wemux/wire-protocol'
+import { parseVerifiedWorkerFileWriteFrame } from '@wemux/wire-protocol/file-admission-node'
+import { FileWriteResultUnavailableError, fileWriteWireAdmission } from '../application/file-write-results.ts'
+import type { ServerFileResultIngress } from './file-result-ingress.ts'
 import { AuthenticationService } from '../application/auth.ts'
 import { AppError } from '../application/errors.ts'
 import { Notifications } from '../application/notifications.ts'
@@ -11,7 +14,7 @@ import { workerMessage } from '../application/validation.ts'
 import { WorkerService } from '../application/worker-service.ts'
 import { ServerTransportStore } from './transport-store.ts'
 
-interface ActiveConnection { readonly epoch: symbol; readonly socket: WebSocket }
+interface ActiveConnection { readonly epoch: symbol; readonly socket: WebSocket; readonly fileResults: boolean }
 
 export class WorkerGateway {
   private readonly wss = new WebSocketServer({ noServer: true, maxPayload: 4 * 1024 * 1024 })
@@ -25,7 +28,7 @@ export class WorkerGateway {
   private readonly service: WorkerService
   private readonly notifications: Notifications
   private readonly transport: ServerTransportStore
-  constructor(server: Server, auth: AuthenticationService, service: WorkerService, notifications: Notifications, transport: ServerTransportStore) { this.server = server; this.auth = auth; this.service = service; this.notifications = notifications; this.transport = transport; server.on('upgrade', this.upgrade) }
+  constructor(server: Server, auth: AuthenticationService, service: WorkerService, notifications: Notifications, transport: ServerTransportStore, private readonly fileResults?: ServerFileResultIngress) { this.server = server; this.auth = auth; this.service = service; this.notifications = notifications; this.transport = transport; server.on('upgrade', this.upgrade) }
   private track(task: Promise<unknown>): void { this.tasks.add(task); void task.finally(() => this.tasks.delete(task)).catch(() => undefined) }
   private serializeLifecycle<T>(workerId: WorkerId, operation: () => Promise<T>): Promise<T> {
     const previous = this.lifecycle.get(workerId) ?? Promise.resolve()
@@ -50,10 +53,12 @@ export class WorkerGateway {
   private connected(workerId: WorkerId, ws: WebSocket): void {
     const epoch = Symbol('worker-connection')
     let hello: WorkerHelloFrame | null = null, lastSeen = Date.now(), chain = Promise.resolve(), flushing = false
+    const current = () => !this.closing && this.connections.get(workerId)?.epoch === epoch && ws.readyState === WebSocket.OPEN
+    const fileNegotiated = () => supportsFileWriteAdmission(this.fileResults ? [FS_WRITE_ADMISSION_V1] : [], hello?.features)
     const send = (frame: ServerToWorkerFrame) => {
       if (ws.readyState !== WebSocket.OPEN) return
       if (ws.bufferedAmount > 2 * 1024 * 1024) return ws.terminate()
-      ws.send(JSON.stringify(frame))
+      ws.send(JSON.stringify(frame), error => { if (error) ws.terminate() })
     }
     // 重新入队 deliverable 只在「新连接 / 新命令 / 状态变化」时发生。
     // 传输确认触发的 flush 只做 outbox 重放：否则每次 ack 都会重新入队未收据的 Command，
@@ -63,6 +68,8 @@ export class WorkerGateway {
       flushing = true
       try {
         if (enqueueDeliverable) for (const command of await this.service.deliverable(workerId)) this.transport.enqueue(workerId, command)
+        if (!current()) return
+        if (!fileNegotiated() && this.transport.hasFileEnvelopes(workerId)) throw new Error('File result ingress needs attention: retained envelopes require negotiation')
         for (const frame of this.transport.pending(workerId, 64)) { send(frame); this.transport.sent(workerId, frame) }
       } catch { ws.terminate() }
       finally { flushing = false }
@@ -75,22 +82,28 @@ export class WorkerGateway {
     timer.unref()
     ws.on('error', () => ws.terminate())
     ws.on('message', (data, binary) => {
+      const text = data.toString() // Snapshot caller-owned buffers before queueing.
       chain = chain.then(async () => {
         if (ws.readyState !== WebSocket.OPEN) return
         try {
           if (binary) throw new AppError(400, 'JSON text frames required')
           let frame: ReturnType<typeof parseWorkerTransportFrame>
-          try { frame = parseWorkerTransportFrame(JSON.parse(data.toString())) }
+          try { frame = parseWorkerTransportFrame(JSON.parse(text)) }
           catch { throw new AppError(400, 'Invalid Worker transport v2 frame') }
           if (!hello) {
             if (frame.frameType !== 'transport.hello') throw new AppError(400, 'Expected initial transport.hello')
-            const negotiated = this.transport.negotiate(workerId, frame)
+            const negotiated = this.transport.negotiate(workerId, frame, Boolean(this.fileResults))
             await this.serializeLifecycle(workerId, async () => {
               const previous = this.connections.get(workerId)
               await this.service.connected(workerId, { workerVersion: frame.workerVersion, platform: frame.platform, name: frame.name })
-              this.connections.set(workerId, { epoch, socket: ws })
+              if (this.closing || ws.readyState !== WebSocket.OPEN) {
+                if (!previous) await this.service.disconnected(workerId)
+                return
+              }
+              this.connections.set(workerId, { epoch, socket: ws, fileResults: supportsFileWriteAdmission(this.fileResults ? [FS_WRITE_ADMISSION_V1] : [], frame.features) })
               if (previous && previous.epoch !== epoch) previous.socket.close(1012, 'Connection replaced')
             })
+            if (!current()) return
             hello = frame; send(negotiated); await flush(true); return
           }
           if (frame.frameType === 'transport.hello') throw new AppError(400, 'Duplicate transport.hello')
@@ -101,6 +114,22 @@ export class WorkerGateway {
           if (frame.frameType === 'transport.pong') return
           if (frame.frameType === 'transport.error') throw new AppError(400, frame.message)
           if (frame.frameType === 'data') {
+            if (frame.payload.type === 'fs.write.result') {
+              if (!this.fileResults || !fileNegotiated()) throw new Error('File write admission not negotiated')
+              const admission = await this.fileResults.admissions.get(frame.payload.requestId)
+              if (!current()) return
+              if (!admission || admission.workerId !== workerId) throw new AppError(403, 'File result admission Worker mismatch')
+              const verified = parseVerifiedWorkerFileWriteFrame(frame, { localFeatures: [FS_WRITE_ADMISSION_V1], peerFeatures: hello.features }, fileWriteWireAdmission(admission))
+              const accepted = this.transport.acceptFileResult(workerId, verified)
+              // Inbox commit is NOT application commit. Every replay re-enters the receiver,
+              // including an original sequence accepted before interruption/failure.
+              const ack = await this.fileResults.receiveFileWriteResult(workerId, verified.payload)
+              if (!current()) return
+              this.transport.enqueueFileResultAck(workerId, ack, verified.payload)
+              send({ frameType: 'transport.ack', deliveryEpoch: verified.deliveryEpoch, ackThrough: accepted.ackThrough })
+              await flush(false)
+              return
+            }
             if (frame.durability === 'volatile') { await this.service.receive(workerId, workerMessage(frame.payload)); return }
             const accepted = this.transport.accept(workerId, frame)
             if (accepted.isNew) {
@@ -113,9 +142,11 @@ export class WorkerGateway {
             await flush(true)
           }
         } catch (error) {
-          const code = error instanceof AppError && error.status === 403 ? 'revoked' : error instanceof Error && error.message.includes('Unsupported transport') ? 'unsupported-transport-major' : error instanceof Error && error.message.includes('ADK') ? 'unsupported-adk-profile' : error instanceof Error && (error.message.includes('integrity') || error.message.includes('gap') || error.message.includes('epoch')) ? 'integrity-error' : 'invalid-frame'
-          send({ frameType: 'transport.error', code, message: error instanceof Error ? error.message : 'Invalid message', retryable: false })
-          const close = () => { if (ws.readyState === WebSocket.OPEN) ws.close(1008, 'Protocol violation') }
+          if (hello && !current()) return
+          const retryable = error instanceof FileWriteResultUnavailableError
+          const code = retryable ? 'temporary-unavailable' : error instanceof AppError && error.status === 403 ? 'revoked' : error instanceof Error && error.message.includes('Unsupported transport') ? 'unsupported-transport-major' : error instanceof Error && error.message.includes('ADK') ? 'unsupported-adk-profile' : error instanceof Error && (error.message.includes('integrity') || error.message.includes('gap') || error.message.includes('epoch')) ? 'integrity-error' : 'invalid-frame'
+          send({ frameType: 'transport.error', code, message: retryable ? 'File result storage temporarily unavailable' : error instanceof Error ? error.message : 'Invalid message', retryable })
+          const close = () => { if (ws.readyState === WebSocket.OPEN) ws.close(retryable ? 1013 : 1008, retryable ? 'Temporary unavailable' : 'Protocol violation') }
           setTimeout(close, 100).unref()
         }
       })
@@ -131,11 +162,13 @@ export class WorkerGateway {
   }
   disconnect(workerId: WorkerId): void { this.connections.get(workerId)?.socket.close(1008, 'Worker revoked') }
   async send(workerId: WorkerId, payload: ServerPayload): Promise<void> {
-    this.transport.enqueue(workerId, payload)
+    if (isFileWriteAdmissionType(payload)) throw new Error('File traffic requires internal result ingress')
     const connection = this.connections.get(workerId)
+    if (connection && !connection.fileResults && this.transport.hasFileEnvelopes(workerId)) throw new Error('File result ingress needs attention: retained envelopes require negotiation')
+    this.transport.enqueue(workerId, payload)
     if (!connection || connection.socket.readyState !== WebSocket.OPEN) return
     for (const frame of this.transport.pending(workerId, 64)) {
-      connection.socket.send(JSON.stringify(frame))
+      connection.socket.send(JSON.stringify(frame), error => { if (error) connection.socket.terminate() })
       this.transport.sent(workerId, frame)
     }
   }

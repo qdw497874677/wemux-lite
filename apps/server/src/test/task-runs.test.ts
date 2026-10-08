@@ -1,10 +1,17 @@
 import test from 'node:test'
-import { administratorDirectory, administratorEmail, administratorToken, instanceOperatorId, seedAdministrator, seedOperator } from './fixtures/administrator.js'
+import { ProjectionService } from '../application/projection-service.ts'
+import { ApprovalDecisionRouter } from '../application/approval-decision-router.ts'
+import { SharedSqliteDatabase, type SqliteDatabaseSource } from '../storage/sqlite/shared-database.ts'
+import { SqliteApprovalDecisionRepository } from '../storage/sqlite/approval-decision-repository.ts'
+import { ProjectAccessService } from '../application/project-access-service.ts'
+import { SessionAccessService } from '../application/session-access-service.ts'
+import { AttentionService } from '../application/attention-service.ts'
+import { administratorDirectory, administratorEmail, administratorToken, instanceOperatorId, seedAdministrator, seedLocalAccount, seedOperator } from './fixtures/administrator.js'
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
 import { createServer } from 'node:http'
 import { AuthenticationService, hashSecret } from '../application/auth.js'
@@ -15,11 +22,12 @@ import { createWemuxServer } from '../server.js'
 import { TransportV2Peer } from './transport-v2-peer.js'
 import type { ServerStore, ServerStoreTx } from '../application/ports/server-store.js'
 import assert from 'node:assert/strict'
-import { projectRuns } from '../application/run-projection.js'
+import { projectRuns, saveRunProjection } from '../application/run-projection.js'
 import { WorkerService } from '../application/worker-service.js'
 import type { CredentialId, JournalEvent, SessionId, EventSeq, Timestamp, CommandId, MessageId, TurnId, UserId, AgentKey, ModelId } from '@wemux/domain'
 import { SqliteServerStore } from '../storage/sqlite/store.js'
 import { migrationCount } from '../storage/sqlite/migrations.js'
+import { runInvariants } from '../storage/sqlite/run-invariants.ts'
 import { ServerService } from '../application/server-service.js'
 import { Notifications } from '../application/notifications.js'
 import { TaskService } from '../application/task-service.js'
@@ -27,14 +35,14 @@ import { TaskService } from '../application/task-service.js'
 const context = { actor: instanceOperatorId, requestId: 'runs-test' }
 
 /** 直接写入 PAT：任务/运行测试关注语义，不掺入凭据签发路由；ttl 为负数可造出已过期凭据。 */
-async function issuePat(store: ServerStore, userId: UserId, ttlMs: number): Promise<string> {
+async function issuePat(store: ServerStore, userId: UserId, ttlMs: number, scopes: ('read' | 'write' | 'execute' | 'admin')[] = ['read', 'write', 'execute', 'admin']): Promise<string> {
   const token = `test-pat-${randomUUID()}`
   const expiresAt = new Date(Date.now() + ttlMs).toISOString() as Timestamp
-  await store.transaction(async tx => tx.identity.savePersonalAccessToken({ id: randomUUID() as CredentialId, userId, name: '任务测试', scopes: ['read', 'write', 'execute', 'admin'], tokenHash: hashSecret(token), createdAt: new Date().toISOString() as Timestamp, expiresAt, lastUsedAt: null, revokedAt: null }))
+  await store.transaction(async tx => tx.identity.savePersonalAccessToken({ id: randomUUID() as CredentialId, userId, name: '任务测试', scopes, tokenHash: hashSecret(token), createdAt: new Date().toISOString() as Timestamp, expiresAt, lastUsedAt: null, revokedAt: null }))
   return token
 }
 
-async function fixture(path = ':memory:') {
+async function fixture(path: SqliteDatabaseSource = ':memory:') {
   const store = new SqliteServerStore(path)
   const server = new ServerService(store, new Notifications())
   await seedOperator(store, server)
@@ -51,6 +59,55 @@ async function fixture(path = ':memory:') {
   const launch = (body = request) => tasks.launch(task.projectId, task.id, body, context)
   return { store, server, tasks, task, worker, credential, launch, request }
 }
+
+test('ordered model changes update Run Session selection without rewriting historical Run binding', async () => {
+  const f = await fixture()
+  try {
+    const { run } = await f.launch(), sessionId = run.sessionId as SessionId
+    const workers = new WorkerService(f.store, new Notifications())
+    const event: JournalEvent = { sessionId, seq: 1 as EventSeq, occurredAt: run.createdAt as Timestamp, payload: { kind: 'model.changed', previousModelId: 'model' as ModelId, modelId: 'next' as ModelId } }
+    const message = { protocolVersion: 1 as const, messageId: 'model-batch' as MessageId, type: 'sync' as const, kind: 'batch' as const, sessionId, throughSeq: 1 as EventSeq, hasMore: false, events: [event] }
+    await workers.receive(f.worker.id, message)
+    assert.equal((await f.store.resources.getSession(sessionId))!.binding.modelId, 'next')
+    assert.deepEqual((await f.store.tasks.run(run.id))!.snapshot, run.snapshot)
+    await workers.receive(f.worker.id, message)
+    assert.equal((await f.store.cache.readEvents(sessionId, 1 as EventSeq, 100)).events.length, 1)
+    await assert.rejects(f.store.transaction(tx => tx.tasks.saveRun({ ...run, snapshot: { ...run.snapshot, modelId: 'next' } })), /Immutable Run identity/)
+    const session = (await f.store.resources.getSession(sessionId))!
+    await assert.rejects(f.store.transaction(tx => tx.resources.saveSession({ ...session, binding: { ...session.binding, agent: { ...session.binding.agent, agentKey: 'other' as AgentKey } } })), /provenance is immutable/)
+    assert.equal((await f.store.resources.getSession(sessionId))!.binding.modelId, 'next')
+  } finally { f.store.close() }
+})
+
+test('model-selection migration upgrades retained Run data and preserves immutable guards after reopen', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'model-selection-upgrade-')), path = join(dir, 'server.db')
+  const f = await fixture(path)
+  let upgraded: SqliteServerStore | undefined
+  try {
+    const { run } = await f.launch(), sessionId = run.sessionId as SessionId
+    f.store.close()
+    const db = new DatabaseSync(path)
+    try {
+      for (const name of ['invalid_run_identity', 'invalid_session_source']) {
+        const definition = runInvariants.match(new RegExp(`CREATE VIEW ${name} AS[\\s\\S]*?;`))?.[0]
+        assert.ok(definition); db.exec(`DROP VIEW ${name}; ${definition}`)
+      }
+      // These attention indexes were added after v34 and must not survive the legacy fixture reset.
+      db.exec('DROP INDEX attention_failed_runs_order; DROP INDEX attention_dead_letters_order; DROP INDEX attention_human_reviews_order')
+      db.exec('DROP TRIGGER command_rejection_no_dispatch; DROP TABLE command_rejections')
+      db.prepare('DELETE FROM schema_migrations WHERE version>=?').run(35)
+      assert.throws(() => db.prepare("UPDATE records SET data=json_set(data,'$.binding.modelId','next') WHERE kind='session' AND id=?").run(sessionId), /Invalid Session source|Invalid Run identity/)
+    } finally { db.close() }
+    upgraded = new SqliteServerStore(path)
+    assert.deepEqual(await upgraded.tasks.run(run.id), run)
+    const session = (await upgraded.resources.getSession(sessionId))!
+    await upgraded.transaction(tx => tx.resources.saveSession({ ...session, binding: { ...session.binding, modelId: 'next' as ModelId } }))
+    await assert.rejects(upgraded.transaction(tx => tx.tasks.saveRun({ ...run, snapshot: { ...run.snapshot, modelId: 'next' } })), /Immutable Run identity/)
+    upgraded.close(); upgraded = new SqliteServerStore(path)
+    assert.equal((await upgraded.resources.getSession(sessionId))?.binding.modelId, 'next')
+    assert.deepEqual(await upgraded.tasks.run(run.id), run)
+  } finally { upgraded?.close(); f.store.close(); await rm(dir, { recursive: true, force: true }) }
+})
 
 test('Worker project Run invalidations see committed state and duplicate receipts stay silent', async () => {
   const f = await fixture()
@@ -80,7 +137,7 @@ test('Worker rolled back receipt publishes no project invalidation', async () =>
     const notifications = new Notifications()
     let count = 0
     notifications.onProject(f.task.projectId, () => { count++ })
-    const store: ServerStore = { tasks: f.store.tasks, resources: f.store.resources, identity: f.store.identity, commands: f.store.commands, cache: f.store.cache,
+    const store: ServerStore = { fileWrites: f.store.fileWrites, tasks: f.store.tasks, resources: f.store.resources, identity: f.store.identity, commands: f.store.commands, cache: f.store.cache,
       transaction: work => f.store.transaction(async tx => { await work(tx); throw Error('forced rollback') }) }
     const workers = new WorkerService(store, notifications)
     await assert.rejects(workers.receive(f.worker.id, { type: 'ack', receipt: { commandId: run.createCommandId as CommandId, status: 'rejected', error: { code: 'invalid-input', message: 'create failed', retryable: false } } }), /forced rollback/)
@@ -98,11 +155,710 @@ async function reviewFixture(path = ':memory:') {
   task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
   return { ...f, run, task }
 }
+test('first Run freezes inherited review without changing Task CAS; project changes and metadata replacement cannot erase it', async () => {
+  const f = await fixture()
+  try {
+    const project = await f.store.resources.getProject(f.task.projectId as never)
+    assert.ok(project)
+    await f.store.transaction(tx => tx.resources.saveProject({ ...project, reviewPolicy: 'human', reviewPolicyVersion: 2 }))
+    const before = await f.tasks.get(f.task.projectId, f.task.id, context)
+    await assert.rejects(f.tasks.launch(f.task.projectId, f.task.id, { ...f.request, assignment: { ...f.request.assignment, workerId: 'missing' } }, context))
+    assert.equal((await f.tasks.get(f.task.projectId, f.task.id, context)).metadataJson.values.reviewPolicyFrozen, undefined)
+    const { run } = await f.launch()
+    const frozen = await f.tasks.get(f.task.projectId, f.task.id, context)
+    assert.equal(frozen.version, before.version, 'server snapshot is part of Run launch, not a separate user edit')
+    assert.equal(frozen.metadataJson.values.reviewPolicy, 'human')
+    assert.equal(frozen.metadataJson.values.reviewPolicyFrozen, true)
+    assert.equal((await f.launch()).run.id, run.id, 'exact launch replay leaves snapshot unchanged')
+    await f.store.transaction(tx => tx.resources.saveProject({ ...project, reviewPolicy: 'none', reviewPolicyVersion: 3 }))
+    await assert.rejects(f.tasks.patch(f.task.projectId, f.task.id, { version: frozen.version, metadataJson: { schemaVersion: 1, values: { reviewPolicy: 'none' } } }, context), { code: 'invalid_transition' })
+    const updated = await f.tasks.patch(f.task.projectId, f.task.id, { version: frozen.version, metadataJson: { schemaVersion: 1, values: { note: 'retained' } } }, context)
+    assert.equal(updated.metadataJson.values.reviewPolicyFrozen, true)
+    assert.equal(updated.metadataJson.values.reviewPolicy, 'human')
+    assert.equal(updated.metadataJson.values.note, 'retained')
+    const updatedDetail = await f.tasks.get(f.task.projectId, f.task.id, context)
+    assert.equal(updatedDetail.capabilities?.transitions.in_review.allowed, false)
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'todo' }, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
+    await assert.rejects(f.tasks.complete(task.projectId, task.id, { version: task.version, requestId: 'no-bypass', runId: run.id, summary: 'done', evidence: [] }, context), { code: 'invalid_transition' })
+  } finally { f.store.close() }
+})
+
+test('human review submission is atomic, replayable and never grants a decision', async () => {
+  const f = await fixture()
+  try {
+    const project = await f.store.resources.getProject(f.task.projectId as never)
+    assert.ok(project)
+    await f.store.transaction(tx => tx.resources.saveProject({ ...project, reviewPolicy: 'human', reviewPolicyVersion: 2 }))
+    const { run } = await f.launch()
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'todo' }, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
+    const input = { version: task.version, requestId: 'human-review-1', runId: run.id, summary: '结果', evidence: ['ref://test'] }
+    const prior = await f.tasks.activity(task.projectId, task.id, 0, context)
+    const result = await f.tasks.submitHumanReview(task.projectId, task.id, input, context)
+    assert.equal(result.task.status, 'in_review')
+    assert.equal(result.task.currentReviewId, result.review.id)
+    assert.equal(result.review.status, 'requested')
+    assert.equal(result.review.reviewer, null)
+    assert.equal(result.task.metadataJson.values.reviewPolicyFrozen, true)
+    assert.equal((await f.tasks.pendingReviews(task.projectId, context)).length, 1)
+    assert.equal((await f.tasks.activity(task.projectId, task.id, 0, context)).length, prior.length + 1)
+    assert.deepEqual(await f.tasks.submitHumanReview(task.projectId, task.id, input, context), result)
+    assert.equal((await f.tasks.activity(task.projectId, task.id, 0, context)).length, prior.length + 1)
+    await assert.rejects(f.tasks.submitHumanReview(task.projectId, task.id, { ...input, summary: 'other' }, context), { code: 'request_id_conflict' })
+    await assert.rejects(f.tasks.submitHumanReview(task.projectId, task.id, { ...input, requestId: 'new' }, context), { code: 'version_conflict' })
+    await assert.rejects(f.tasks.reviewAction(task.projectId, task.id, run.id, { version: result.task.version, status: 'approved' }, context), { code: 'invalid_transition' })
+    await assert.rejects(f.tasks.complete(task.projectId, task.id, { ...input, version: result.task.version, requestId: 'complete' }, context), { code: 'invalid_transition' })
+    assert.equal((await f.tasks.get(task.projectId, task.id, context)).status, 'in_review')
+  } finally { f.store.close() }
+})
+
+function humanReviewProjections(store: ServerStore) {
+  const projects = new ProjectAccessService(store)
+  const projections = new ProjectionService(store, projects, new SessionAccessService(store, projects), { listOverlays: async () => [] } as never)
+  const attention = new AttentionService(projections, { listTasks: async () => [], listRuns: async () => [], listDeadLetters: async () => [], listApprovalsPage: async () => ({ items: [], nextCursor: null }), listRunsPage: async () => ({ items: [], nextCursor: null }), listDeadLettersPage: async () => ({ items: [], nextCursor: null }) }, store)
+  return { projections, attention }
+}
+
+test('current Project manager decides human review once; submitter, viewer, contributor and stale CAS cannot decide', async () => {
+  const f = await fixture()
+  try {
+    const owner = await f.store.resources.getProject(f.task.projectId as never); assert.ok(owner)
+    await f.store.transaction(tx => tx.resources.saveProject({ ...owner, reviewPolicy: 'human', reviewPolicyVersion: 2 }))
+    const { run } = await f.launch()
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    for (const status of ['todo', 'in_progress'] as const) task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status }, context)
+    const submission = await f.tasks.submitHumanReview(task.projectId, task.id, { version: task.version, requestId: 'decision-submission', runId: run.id, summary: '结果', evidence: ['ref://test'] }, context)
+    const manager = randomUUID() as UserId, contributor = randomUUID() as UserId, viewer = randomUUID() as UserId
+    const now = new Date().toISOString() as Timestamp
+    await f.store.transaction(async tx => {
+      for (const [id, role] of [[manager, 'manager'], [contributor, 'contributor'], [viewer, 'viewer']] as const) {
+        await tx.identity.saveUser({ id, username: `review-${role}`, email: null, status: 'active', authVersion: 0, createdAt: now, statusChangedAt: now, deletedAt: null })
+        await tx.identity.saveMembership({ teamId: f.worker.teamId, userId: id, role: 'member', joinedAt: now })
+        await tx.identity.saveProjectGrant({ projectId: task.projectId as never, userId: id, role })
+      }
+    })
+    const body = { version: submission.task.version, requestId: 'human-vote', reviewId: submission.review.id, status: 'approved' }
+    for (const actor of [context.actor, contributor, viewer]) await assert.rejects(f.tasks.decideHumanReview(task.projectId, task.id, body, { actor, requestId: 'trace' }), { code: 'forbidden' })
+    const { projections, attention } = humanReviewProjections(f.store)
+    const pending = async (actor: UserId) => (await projections.approvals(actor, { sourceKind: 'task_review', status: 'pending' })).items
+    for (const actor of [context.actor, contributor, viewer]) {
+      const rows = await pending(actor)
+      assert.equal(rows.length, 1, 'readable pending review remains visible without decision authority')
+      assert.deepEqual(rows[0]?.decisionCapabilities, [])
+      assert.equal((await attention.query(actor, false, { kind: 'approval' })).total, 0)
+    }
+    assert.deepEqual((await pending(manager))[0]?.decisionCapabilities, ['approve', 'changes_requested'])
+    assert.equal((await attention.query(manager, false, { kind: 'approval' })).total, 1)
+    const authorized = { actor: manager, requestId: 'trace' }
+    await f.store.transaction(tx => tx.identity.removeMembership(f.worker.teamId, manager))
+    assert.deepEqual(await pending(manager), [])
+    assert.equal((await attention.query(manager, false, { kind: 'approval' })).total, 0)
+    await assert.rejects(f.tasks.decideHumanReview(task.projectId, task.id, body, authorized), { code: 'forbidden' })
+    await f.store.transaction(tx => tx.identity.saveMembership({ teamId: f.worker.teamId, userId: manager, role: 'member', joinedAt: now }))
+    assert.deepEqual((await pending(manager))[0]?.decisionCapabilities, ['approve', 'changes_requested'])
+    await f.store.transaction(tx => tx.identity.removeProjectGrant(task.projectId as never, manager))
+    assert.ok((await pending(manager)).every(row => row.decisionCapabilities.length === 0))
+    assert.equal((await attention.query(manager, false, { kind: 'approval' })).total, 0)
+    await assert.rejects(f.tasks.decideHumanReview(task.projectId, task.id, body, authorized), { code: 'forbidden' })
+    await f.store.transaction(tx => tx.identity.saveProjectGrant({ projectId: task.projectId as never, userId: manager, role: 'manager' }))
+    await assert.rejects(f.tasks.decideHumanReview(task.projectId, task.id, { ...body, version: body.version - 1 }, authorized), { code: 'version_conflict' })
+    const before = await f.tasks.activity(task.projectId, task.id, 0, context)
+    const first = await f.tasks.decideHumanReview(task.projectId, task.id, body, authorized)
+    assert.equal(first.task.status, 'done'); assert.equal(first.task.currentReviewId, null)
+    assert.equal(first.review.status, 'approved'); assert.equal(first.review.reviewer, manager)
+    assert.deepEqual(await pending(manager), [])
+    assert.equal((await attention.query(manager, false, { kind: 'approval' })).total, 0)
+    assert.equal((await f.tasks.pendingReviews(task.projectId, context)).length, 0)
+    assert.equal((await f.tasks.activity(task.projectId, task.id, 0, context)).length, before.length + 1)
+    assert.deepEqual(await f.tasks.decideHumanReview(task.projectId, task.id, body, authorized), first)
+    await assert.rejects(f.tasks.decideHumanReview(task.projectId, task.id, { ...body, status: 'changes_requested', reason: '不完整' }, authorized), { code: 'request_id_conflict' })
+    await assert.rejects(f.tasks.decideHumanReview(task.projectId, task.id, { ...body, requestId: 'second-vote' }, authorized), { code: 'version_conflict' })
+    assert.equal((await f.tasks.activity(task.projectId, task.id, 0, context)).length, before.length + 1)
+    await f.store.transaction(tx => tx.identity.removeProjectGrant(task.projectId as never, manager))
+    await assert.rejects(f.tasks.decideHumanReview(task.projectId, task.id, body, authorized), { code: 'forbidden' })
+  } finally { f.store.close() }
+})
+
+test('human reviewer changes requested returns to implementation, closes old cycle and permits another Run', async () => {
+  const f = await fixture()
+  try {
+    const project = await f.store.resources.getProject(f.task.projectId as never); assert.ok(project)
+    await f.store.transaction(tx => tx.resources.saveProject({ ...project, reviewPolicy: 'human', reviewPolicyVersion: 2 }))
+    const { run } = await f.launch()
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    for (const status of ['todo', 'in_progress'] as const) task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status }, context)
+    const submitter = randomUUID() as UserId, now = new Date().toISOString() as Timestamp
+    await f.store.transaction(async tx => {
+      await tx.identity.saveUser({ id: submitter, username: 'review-submitter', email: null, status: 'active', authVersion: 0, createdAt: now, statusChangedAt: now, deletedAt: null })
+      await tx.identity.saveMembership({ teamId: f.worker.teamId, userId: submitter, role: 'member', joinedAt: now })
+      await tx.identity.saveProjectGrant({ projectId: task.projectId as never, userId: submitter, role: 'contributor' })
+    })
+    const submitted = await f.tasks.submitHumanReview(task.projectId, task.id, { version: task.version, requestId: 'needs-fix', runId: run.id, summary: '成果', evidence: [] }, { actor: submitter, requestId: 'submit-trace' })
+    const input = { version: submitted.task.version, requestId: 'return-fix', reviewId: submitted.review.id, status: 'changes_requested', reason: '缺少复现步骤' }
+    const { projections, attention } = humanReviewProjections(f.store)
+    await f.store.transaction(tx => tx.identity.saveProjectGrant({ projectId: task.projectId as never, userId: submitter, role: 'manager' }))
+    const selfReview = (await projections.approvals(submitter, { sourceKind: 'task_review', status: 'pending' })).items
+    assert.equal(selfReview.length, 1)
+    assert.deepEqual(selfReview[0]?.decisionCapabilities, [])
+    assert.equal((await attention.query(submitter, false, { kind: 'approval' })).total, 0)
+    await assert.rejects(f.tasks.decideHumanReview(task.projectId, task.id, input, { actor: submitter, requestId: 'self-vote' }), { code: 'forbidden' })
+    const pending = (await projections.approvals(context.actor, { sourceKind: 'task_review', status: 'pending' })).items
+    assert.equal(pending.length, 1)
+    assert.deepEqual(pending[0]?.decisionCapabilities, ['approve', 'changes_requested'])
+    assert.equal((await attention.query(context.actor, false, { kind: 'approval' })).total, 1)
+    const decision = await f.tasks.decideHumanReview(task.projectId, task.id, input, context)
+    assert.equal((await attention.query(context.actor, false, { kind: 'approval' })).total, 0)
+    assert.equal(decision.task.status, 'in_progress'); assert.equal(decision.review.status, 'changes_requested')
+    assert.equal(decision.task.currentReviewId, null); assert.equal(decision.review.closedAt, decision.review.decidedAt)
+    assert.deepEqual(await f.tasks.pendingReviews(task.projectId, context), [])
+    assert.equal((await f.tasks.activity(task.projectId, task.id, 0, context)).at(-1)?.payload.reason, input.reason)
+    assert.deepEqual(await f.tasks.decideHumanReview(task.projectId, task.id, input, context), decision)
+    const nextRun = await f.tasks.launch(task.projectId, task.id, { ...f.request, requestId: 'after-changes' }, context)
+    assert.equal(nextRun.run.attempt, run.attempt + 1)
+    await assert.rejects(f.tasks.decideHumanReview(task.projectId, task.id, { ...input, requestId: 'late-vote' }, context), { code: 'version_conflict' })
+  } finally { f.store.close() }
+})
+
+test('real HTTP human submission checks auth, PAT scope, exact replay and old decision denial', async () => {
+  const f = await fixture()
+  const http = createServer(httpHandler({ service: f.server, auth: new AuthenticationService(f.store, administratorDirectory(f.store)), streams: new SessionStreams(f.server), tasks: f.tasks }))
+  http.listen(0, '127.0.0.1'); await once(http, 'listening')
+  const address = http.address(); assert.ok(address && typeof address !== 'string')
+  const base = `http://127.0.0.1:${address.port}/projects/${f.task.projectId}/tasks/${f.task.id}`
+  const post = async (suffix: string, body: unknown, token: string | null = administratorToken) => {
+    const response = await fetch(base + suffix, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) })
+    return { status: response.status, data: await response.json() as Record<string, any> }
+  }
+  try {
+    const project = await f.store.resources.getProject(f.task.projectId as never); assert.ok(project)
+    await f.store.transaction(tx => tx.resources.saveProject({ ...project, reviewPolicy: 'human', reviewPolicyVersion: 2 }))
+    const { run } = await f.launch()
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'todo' }, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
+    const input = { version: task.version, requestId: 'human-http', runId: run.id, summary: '提交成果', evidence: ['test://ref'] }
+    const before = await f.tasks.activity(task.projectId, task.id, 0, context)
+    assert.equal((await post('/human-review-submission', input, null)).status, 401)
+    assert.equal((await post('/human-review-submission', input, await issuePat(f.store, context.actor, -1000))).status, 401)
+    assert.equal((await post('/human-review-submission', input, await issuePat(f.store, context.actor, 60_000, ['read']))).status, 403)
+    assert.equal((await post('/human-review-submission', { ...input, requestId: 'invalid', evidence: Array(21).fill('ref') })).status, 400)
+    assert.equal((await post('/human-review-submission', input, 'bad-pat')).status, 401)
+    assert.deepEqual(await f.tasks.activity(task.projectId, task.id, 0, context), before)
+    const first = await post('/human-review-submission', input)
+    assert.equal(first.status, 200, JSON.stringify(first))
+    assert.equal(first.data.review.status, 'requested')
+    assert.equal(first.data.review.reviewer, null)
+    const replay = await post('/human-review-submission', input)
+    assert.equal(replay.status, 200)
+    assert.deepEqual(replay.data, first.data)
+    assert.equal((await post('/human-review-submission', { ...input, summary: 'different' })).status, 409)
+    assert.equal((await post(`/runs/${run.id}/review`, { status: 'approved', version: first.data.task.version })).status, 409)
+    assert.equal((await f.tasks.activity(task.projectId, task.id, 0, context)).length, before.length + 1)
+  } finally { await new Promise<void>((resolve, reject) => http.close(error => error ? reject(error) : resolve())); f.store.close() }
+})
+
+test('real HTTP human decision enforces PAT write, current authority, explicit identity and exact replay', async () => {
+  const f = await fixture()
+  const http = createServer(httpHandler({ service: f.server, auth: new AuthenticationService(f.store, administratorDirectory(f.store)), streams: new SessionStreams(f.server), tasks: f.tasks }))
+  http.listen(0, '127.0.0.1'); await once(http, 'listening')
+  const address = http.address(); assert.ok(address && typeof address !== 'string')
+  const base = `http://127.0.0.1:${address.port}/projects/${f.task.projectId}/tasks/${f.task.id}`
+  const post = async (body: unknown, token: string | null = administratorToken, taskId = f.task.id) => {
+    const response = await fetch(base.replace(`/${f.task.id}`, `/${taskId}`) + '/human-review-decision', { method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) })
+    return { status: response.status, data: await response.json() as Record<string, any> }
+  }
+  try {
+    const project = await f.store.resources.getProject(f.task.projectId as never); assert.ok(project)
+    await f.store.transaction(tx => tx.resources.saveProject({ ...project, reviewPolicy: 'human', reviewPolicyVersion: 2 }))
+    const { run } = await f.launch()
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    for (const status of ['todo', 'in_progress'] as const) task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status }, context)
+    const submitter = randomUUID() as UserId, now = new Date().toISOString() as Timestamp
+    await f.store.transaction(async tx => {
+      await tx.identity.saveUser({ id: submitter, username: 'decision-http-submitter', email: null, status: 'active', authVersion: 0, createdAt: now, statusChangedAt: now, deletedAt: null })
+      await tx.identity.saveMembership({ teamId: f.worker.teamId, userId: submitter, role: 'member', joinedAt: now })
+      await tx.identity.saveProjectGrant({ projectId: task.projectId as never, userId: submitter, role: 'contributor' })
+    })
+    const submitted = await f.tasks.submitHumanReview(task.projectId, task.id, { version: task.version, requestId: 'http-submit-for-decision', runId: run.id, summary: '成果', evidence: [] }, { actor: submitter, requestId: 'trace' })
+    const body = { version: submitted.task.version, requestId: 'http-approve', reviewId: submitted.review.id, status: 'approved' }
+    const before = await f.tasks.activity(task.projectId, task.id, 0, context)
+    assert.equal((await post(body, null)).status, 401)
+    assert.equal((await post(body, await issuePat(f.store, context.actor, -1000))).status, 401)
+    assert.equal((await post(body, await issuePat(f.store, context.actor, 60_000, ['read']))).status, 403)
+    assert.equal((await post({ ...body, status: 'changes_requested' })).status, 400)
+    assert.equal((await post({ ...body, reviewId: 'unrelated' })).status, 404)
+    assert.equal((await post(body, administratorToken, 'other-task')).status, 404)
+    assert.deepEqual(await f.tasks.activity(task.projectId, task.id, 0, context), before)
+    const first = await post(body)
+    assert.equal(first.status, 200, JSON.stringify(first)); assert.equal(first.data.task.status, 'done')
+    const replay = await post(body); assert.equal(replay.status, 200); assert.deepEqual(replay.data, first.data)
+    assert.equal((await post({ ...body, status: 'changes_requested', reason: '拒绝' })).status, 409)
+    assert.equal((await f.tasks.activity(task.projectId, task.id, 0, context)).length, before.length + 1)
+  } finally { await new Promise<void>((resolve, reject) => http.close(error => error ? reject(error) : resolve())); f.store.close() }
+})
+
+test('legacy no-policy review receipt authorization still permits a current contributor', async () => {
+  const f = await reviewFixture()
+  try {
+    const requested = await f.tasks.reviewAction(f.task.projectId, f.task.id, f.run.id, { version: f.task.version, status: 'requested' }, context)
+    const contributor = randomUUID() as UserId, now = new Date().toISOString() as Timestamp
+    await f.store.transaction(async tx => {
+      await tx.identity.saveUser({ id: contributor, username: 'legacy-reviewer', email: null, status: 'active', authVersion: 0, createdAt: now, statusChangedAt: now, deletedAt: null })
+      await tx.identity.saveMembership({ teamId: f.worker.teamId, userId: contributor, role: 'member', joinedAt: now })
+      await tx.identity.saveProjectGrant({ projectId: f.task.projectId as never, userId: contributor, role: 'contributor' })
+    })
+    const legacyContext = { actor: contributor, requestId: 'legacy-vote' }
+    const decided = await f.tasks.reviewAction(f.task.projectId, f.task.id, f.run.id, { version: requested.task.version, status: 'approved' }, legacyContext)
+    await f.tasks.authorizeReviewReplay(f.task.projectId, f.task.id, f.run.id, decided.review.id, legacyContext)
+    assert.equal(decided.review.status, 'approved')
+  } finally { f.store.close() }
+})
+
+for (const decision of ['approve', 'changes_requested'] as const) test(`approval router HTTP ${decision} dispatches frozen human policy and reauthorizes durable replay`, async () => {
+  const f = await fixture()
+  const directory = await mkdtemp(join(tmpdir(), 'human-approval-router-'))
+  const receiptPath = join(directory, 'receipts.sqlite')
+  let receipts = new SqliteApprovalDecisionRepository(receiptPath)
+  const projects = new ProjectAccessService(f.store)
+  const projections = new ProjectionService(f.store, projects, new SessionAccessService(f.store, projects), receipts)
+  let router = new ApprovalDecisionRouter(projections, f.tasks, f.server, receipts)
+  const http = createServer(httpHandler({ service: f.server, auth: new AuthenticationService(f.store, administratorDirectory(f.store)), streams: new SessionStreams(f.server), tasks: f.tasks, projections, approvalDecisions: router }))
+  http.listen(0, '127.0.0.1'); await once(http, 'listening')
+  const address = http.address(); assert.ok(address && typeof address !== 'string')
+  const base = `http://127.0.0.1:${address.port}/api/approvals`
+  try {
+    const project = await f.store.resources.getProject(f.task.projectId as never); assert.ok(project)
+    await f.store.transaction(tx => tx.resources.saveProject({ ...project, reviewPolicy: 'human', reviewPolicyVersion: 2 }))
+    const { run } = await f.launch()
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    for (const status of ['todo', 'in_progress'] as const) task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status }, context)
+    const submitted = await f.tasks.submitHumanReview(task.projectId, task.id, { version: task.version, requestId: 'router-submit', runId: run.id, summary: '成果', evidence: [] }, context)
+    const manager = randomUUID() as UserId, now = new Date().toISOString() as Timestamp
+    await f.store.transaction(async tx => {
+      await tx.identity.saveUser({ id: manager, username: 'router-reviewer', email: null, status: 'active', authVersion: 0, createdAt: now, statusChangedAt: now, deletedAt: null })
+      await tx.identity.saveMembership({ teamId: project.teamId, userId: manager, role: 'member', joinedAt: now })
+      await tx.identity.saveProjectGrant({ projectId: project.id, userId: manager, role: 'manager' })
+    })
+    const token = await issuePat(f.store, manager, 60_000)
+    const listing = await fetch(`${base}?sourceKind=task_review`, { headers: { Authorization: `Bearer ${token}` } })
+    assert.equal(listing.status, 200)
+    const pending = (await listing.json() as { items: import('@wemux/server-domain').ApprovalView[] }).items[0]!
+    assert.deepEqual(pending.decisionCapabilities, ['approve', 'changes_requested'])
+    assert.equal(pending.projectionKey, `task_review:${task.id}:${run.id}:${submitted.review.id}`)
+    assert.equal(pending.sourceRevision, `${submitted.task.version}:requested`)
+    const body = { decision, requestId: 'router-vote', sourceRevision: pending.sourceRevision, ...(decision === 'changes_requested' ? { note: '请补充验证步骤' } : {}) }
+    const post = async (value: unknown = body, credential: string | null = token) => {
+      const response = await fetch(`${base}/${encodeURIComponent(pending.projectionKey)}/decisions`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(credential ? { Authorization: `Bearer ${credential}` } : {}) }, body: JSON.stringify(value) })
+      return { status: response.status, data: await response.json() as Record<string, any> }
+    }
+    const before = await f.tasks.activity(task.projectId, task.id, 0, context)
+    assert.equal((await post(body, null)).status, 401)
+    assert.equal((await post(body, await issuePat(f.store, manager, 60_000, ['read']))).status, 403)
+    assert.equal((await post(body, administratorToken)).data.error.code, 'approval_stale', 'submitter cannot review')
+    await f.store.transaction(tx => tx.identity.saveProjectGrant({ projectId: project.id, userId: manager, role: 'contributor' }))
+    assert.equal((await post()).data.error.code, 'approval_stale', 'contributor cannot decide')
+    await f.store.transaction(tx => tx.identity.saveProjectGrant({ projectId: project.id, userId: manager, role: 'manager' }))
+    assert.equal((await post({ ...body, sourceRevision: `${submitted.task.version - 1}:requested` })).data.error.code, 'source_revision_conflict')
+    assert.equal((await post({ ...body, decision: 'deny' })).data.error.code, 'approval_stale')
+    for (const note of [undefined, '', '   ']) assert.equal((await post({ ...body, decision: 'changes_requested', note })).status, 400)
+    assert.deepEqual(await f.tasks.activity(task.projectId, task.id, 0, context), before)
+    const first = await post()
+    assert.equal(first.status, 200, JSON.stringify(first.data))
+    assert.equal(first.data.replayed, false)
+    assert.equal(first.data.approval.status, decision === 'approve' ? 'approved' : 'changes_requested')
+    assert.deepEqual(first.data.approval.source, pending.source)
+    const savedTask = await f.tasks.get(task.projectId, task.id, context)
+    const review = await f.store.tasks.reviewById(submitted.review.id)
+    assert.equal(savedTask.status, decision === 'approve' ? 'done' : 'in_progress')
+    assert.equal(savedTask.currentReviewId, null)
+    assert.equal(review?.reviewer, manager)
+    assert.equal(review?.status, first.data.approval.status)
+    const after = await f.tasks.activity(task.projectId, task.id, 0, context)
+    assert.equal(after.length, before.length + 1)
+    assert.equal(after.at(-1)?.payload.reason, body.note ?? null)
+    assert.equal(await projections.approval(manager, pending.projectionKey), null, 'terminal review disappears from pending projections')
+    const replay = await post()
+    assert.equal(replay.status, 200)
+    assert.deepEqual(replay.data, { ...first.data, replayed: true })
+    assert.equal((await post({ ...body, note: 'different' })).data.error.code, 'idempotency_conflict')
+    await f.store.transaction(tx => tx.identity.saveProjectGrant({ projectId: project.id, userId: manager, role: 'contributor' }))
+    const revokedReplay = await post()
+    assert.equal(revokedReplay.status, 403)
+    assert.equal(revokedReplay.data.approval, undefined)
+    assert.equal(revokedReplay.data.replayed, undefined)
+    await f.store.transaction(tx => tx.identity.saveProjectGrant({ projectId: project.id, userId: manager, role: 'manager' }))
+    // The router must pass precisely the same identity/body as the domain receipt.
+    const domainReplay = await f.tasks.decideHumanReview(task.projectId, task.id, { version: submitted.task.version, reviewId: submitted.review.id, requestId: body.requestId, status: review!.status, reason: body.note }, { actor: manager, requestId: body.requestId })
+    assert.deepEqual(domainReplay.review, review)
+    const { capabilities: _capabilities, ...storedTask } = savedTask
+    assert.deepEqual(domainReplay.task, storedTask)
+    receipts.close(); receipts = new SqliteApprovalDecisionRepository(receiptPath)
+    router = new ApprovalDecisionRouter(projections, f.tasks, f.server, receipts)
+    const signed = { ...body, fingerprint: createHash('sha256').update(JSON.stringify({ decision, note: body.note ?? null, requestId: body.requestId, sourceRevision: body.sourceRevision })).digest('hex') }
+    assert.deepEqual(await router.decide(manager, pending.projectionKey, signed), { ...first.data, replayed: true })
+    await f.store.transaction(tx => tx.identity.saveProjectGrant({ projectId: project.id, userId: manager, role: 'contributor' }))
+    await assert.rejects(router.decide(manager, pending.projectionKey, signed), { code: 'forbidden' })
+    await assert.rejects(f.tasks.decideHumanReview(task.projectId, task.id, { version: submitted.task.version, reviewId: submitted.review.id, requestId: body.requestId, status: review!.status, reason: body.note }, { actor: manager, requestId: body.requestId }), { code: 'forbidden' })
+    await f.store.transaction(tx => tx.identity.saveProjectGrant({ projectId: project.id, userId: manager, role: 'manager' }))
+    await f.store.transaction(tx => tx.identity.removeMembership(project.teamId, manager))
+    await assert.rejects(router.decide(manager, pending.projectionKey, signed))
+    assert.deepEqual(await f.tasks.activity(task.projectId, task.id, 0, context), after)
+  } finally {
+    await new Promise<void>((resolve, reject) => http.close(error => error ? reject(error) : resolve()))
+    receipts.close(); f.store.close(); await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('human review submission concurrent CAS, durable replay, revoked writer and wrong-scoped replay', async () => {
+  const path = join(await mkdtemp(join(tmpdir(), 'human-review-')), 'server.sqlite')
+  let f = await fixture(path)
+  try {
+    const project = await f.store.resources.getProject(f.task.projectId as never)
+    assert.ok(project)
+    await f.store.transaction(tx => tx.resources.saveProject({ ...project, reviewPolicy: 'human', reviewPolicyVersion: 2 }))
+    const { run } = await f.launch()
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'todo' }, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
+    const input = { version: task.version, requestId: 'human-race', runId: run.id, summary: 'verified result', evidence: [] }
+    const decisions = await Promise.allSettled([f.tasks.submitHumanReview(task.projectId, task.id, input, context), f.tasks.submitHumanReview(task.projectId, task.id, input, context)])
+    assert.equal(decisions.filter(item => item.status === 'fulfilled').length, 2)
+    const receipt = (decisions[0] as PromiseFulfilledResult<Awaited<ReturnType<typeof f.tasks.submitHumanReview>>>).value
+    assert.deepEqual((decisions[1] as typeof decisions[0]).status === 'fulfilled' ? (decisions[1] as PromiseFulfilledResult<typeof receipt>).value : null, receipt)
+    assert.equal((await f.tasks.activity(task.projectId, task.id, 0, context)).filter(event => event.type === 'task.transitioned' && event.payload.action === 'review.submitted').length, 1)
+    const taskId = task.id, projectId = task.projectId
+    const ownerBefore = await f.store.resources.getProject(projectId as never)
+    assert.ok(ownerBefore)
+    f.store.close()
+    const persisted = new SqliteServerStore(path)
+    try {
+      const reopened = new TaskService(persisted)
+      assert.deepEqual(await reopened.submitHumanReview(projectId, taskId, input, context), receipt)
+      await assert.rejects(reopened.submitHumanReview(projectId, 'not-this-task', input, context), { code: 'not_found' })
+      await persisted.transaction(tx => tx.resources.saveProject({ ...ownerBefore, ownerId: 'another-owner' as never }))
+      await assert.rejects(reopened.submitHumanReview(projectId, taskId, input, context), { code: 'forbidden' })
+    } finally { persisted.close() }
+  } finally { try { f.store.close() } catch { /* already closed */ } await rm(join(path, '..'), { recursive: true, force: true }) }
+})
+
+for (const status of ['failed', 'cancelled', 'succeeded'] as const) test(`human review submission checks latest ${status} Run independently of policy`, async () => {
+  const f = await fixture()
+  try {
+    const project = await f.store.resources.getProject(f.task.projectId as never)
+    assert.ok(project)
+    await f.store.transaction(tx => tx.resources.saveProject({ ...project, reviewPolicy: 'human', reviewPolicyVersion: 2 }))
+    const { run } = await f.launch()
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'todo' }, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
+    const input = { version: task.version, requestId: 'human-invalid', runId: run.id, summary: '成果', evidence: [] }
+    const before = await f.tasks.activity(task.projectId, task.id, 0, context)
+    await assert.rejects(f.tasks.submitHumanReview(task.projectId, task.id, input, context), { code: 'active_run' })
+    await f.store.transaction(tx => saveRunProjection(tx, { ...run, status, finishedAt: new Date().toISOString() }, 'run.finished'))
+    const afterTerminal = await f.tasks.activity(task.projectId, task.id, 0, context)
+    assert.equal(afterTerminal.length, before.length + 1)
+    await assert.rejects(f.tasks.submitHumanReview(task.projectId, task.id, { ...input, runId: 'wrong-run' }, context), { code: 'invalid_transition' })
+    if (status !== 'succeeded') {
+      await assert.rejects(f.tasks.submitHumanReview(task.projectId, task.id, input, context), { code: 'invalid_transition' })
+      assert.deepEqual(await f.tasks.activity(task.projectId, task.id, 0, context), afterTerminal)
+      assert.equal(await f.store.tasks.review(run.id), null)
+    }
+  } finally { f.store.close() }
+})
+
+for (const policy of ['none', 'agent'] as const) test(`human review submission rejects ${policy} policy with an eligible succeeded Run`, async () => {
+  const f = await fixture()
+  try {
+    const project = await f.store.resources.getProject(f.task.projectId as never)
+    assert.ok(project)
+    await f.store.transaction(tx => tx.resources.saveProject({ ...project, reviewPolicy: policy, reviewPolicyVersion: 2 }))
+    const { run } = await f.launch()
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'todo' }, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
+    const before = await f.tasks.activity(task.projectId, task.id, 0, context)
+    await assert.rejects(f.tasks.submitHumanReview(task.projectId, task.id, { version: task.version, requestId: `human-${policy}`, runId: run.id, summary: '成果', evidence: [] }, context), { code: 'invalid_transition' })
+    assert.equal(await f.store.tasks.review(run.id), null)
+    assert.deepEqual(await f.tasks.activity(task.projectId, task.id, 0, context), before)
+  } finally { f.store.close() }
+})
+
+test('Project default changes pin active pre-Run and legacy executed Tasks without weakening requirements', async () => {
+  const f = await fixture()
+  try {
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'todo' }, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
+    const project = await f.store.resources.getProject(task.projectId as never)
+    assert.ok(project)
+    await f.store.transaction(tx => tx.resources.saveProject({ ...project, reviewPolicy: 'human', reviewPolicyVersion: 2 }))
+    const { ProjectAccessService } = await import('../application/project-access-service.ts')
+    const access = new ProjectAccessService(f.store)
+    await access.updateReviewPolicy(context.actor, task.projectId as never, { reviewPolicy: 'none', version: 2 })
+    const frozen = await f.tasks.get(task.projectId, task.id, context)
+    assert.equal(frozen.version, task.version)
+    assert.equal(frozen.metadataJson.values.reviewPolicy, 'human')
+    assert.equal(frozen.metadataJson.values.reviewPolicyFrozen, true)
+    assert.equal(frozen.capabilities?.transitions.in_review.allowed, false)
+    const { run } = await f.launch()
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    const afterRun = await f.tasks.get(task.projectId, task.id, context)
+    await assert.rejects(f.tasks.complete(task.projectId, task.id, { version: afterRun.version, requestId: 'legacy-requirement', runId: run.id, summary: 'done', evidence: [] }, context), { code: 'invalid_transition' })
+    // Emulate an upgraded database with a historical Run but no policy snapshot.
+    await f.store.transaction(async tx => {
+      const saved = await tx.tasks.get(task.id)
+      assert.ok(saved)
+      await tx.tasks.save({ ...saved, metadataJson: { schemaVersion: 1, values: {} } })
+    })
+    await access.updateReviewPolicy(context.actor, task.projectId as never, { reviewPolicy: 'human', version: 3 })
+    // This record represents a historical Run created before policy snapshots existed.
+    await f.store.transaction(async tx => {
+      const saved = await tx.tasks.get(task.id)
+      assert.ok(saved)
+      await tx.tasks.save({ ...saved, metadataJson: { schemaVersion: 1, values: {} } })
+    })
+    await access.updateReviewPolicy(context.actor, task.projectId as never, { reviewPolicy: 'none', version: 4 })
+    const legacy = await f.tasks.get(task.projectId, task.id, context)
+    assert.equal(legacy.metadataJson.values.reviewPolicy, 'human')
+    assert.equal(legacy.metadataJson.values.reviewPolicyFrozen, true)
+    // A legacy Run created under a Project with no review cannot be treated
+    // as proof of that old default after the Project changes.
+    await f.store.transaction(async tx => {
+      const saved = await tx.tasks.get(task.id)
+      assert.ok(saved)
+      await tx.tasks.save({ ...saved, metadataJson: { schemaVersion: 1, values: {} } })
+    })
+    await access.updateReviewPolicy(context.actor, task.projectId as never, { reviewPolicy: 'agent', version: 5 })
+    assert.equal((await f.tasks.get(task.projectId, task.id, context)).metadataJson.values.reviewPolicy, 'human')
+  } finally { f.store.close() }
+})
+
+test('explicit completion requires terminal latest Run, CAS, stable receipt, and never follows Run success automatically', async () => {
+  const f = await fixture()
+  try {
+    const { run } = await f.launch()
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'todo' }, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
+    const input = { version: task.version, requestId: 'finish-1', runId: run.id, summary: '测试完成', evidence: ['https://example.org/result'] }
+    await assert.rejects(f.tasks.complete(task.projectId, task.id, input, context), { code: 'active_run' })
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    assert.equal((await f.tasks.get(task.projectId, task.id, context)).status, 'in_progress')
+    await assert.rejects(f.tasks.complete(task.projectId, task.id, { ...input, version: input.version - 1 }, context), { code: 'version_conflict' })
+    const receipt = await f.tasks.complete(task.projectId, task.id, input, context)
+    assert.equal(receipt.task.status, 'done')
+    assert.equal(receipt.task.version, input.version + 1)
+    assert.deepEqual(await f.tasks.complete(task.projectId, task.id, input, context), receipt)
+    await assert.rejects(f.tasks.complete(task.projectId, task.id, { ...input, summary: 'changed' }, context), { code: 'request_id_conflict' })
+    const activities = await f.tasks.activity(task.projectId, task.id, 0, context)
+    assert.equal(activities.filter(activity => activity.payload.action === 'completion.submitted').length, 1)
+    assert.deepEqual(activities.at(-1)?.payload.evidence, input.evidence)
+  } finally { f.store.close() }
+})
+
+test('completion HTTP exact replay is durable; revoked Project grant denies replay and creates no new activity', async () => {
+  const f = await fixture()
+  const http = createServer(httpHandler({ service: f.server, auth: new AuthenticationService(f.store, administratorDirectory(f.store)), streams: new SessionStreams(f.server), tasks: f.tasks }))
+  http.listen(0, '127.0.0.1'); await once(http, 'listening')
+  const address = http.address(); assert.ok(address && typeof address !== 'string')
+  try {
+    const member = randomUUID() as UserId, now = new Date().toISOString() as Timestamp
+    await f.store.transaction(async tx => {
+      await tx.identity.saveUser({ id: member, username: 'completion-grantee', email: null, status: 'active', authVersion: 0, createdAt: now, statusChangedAt: now, deletedAt: null })
+      await tx.identity.saveMembership({ teamId: f.worker.teamId, userId: member, role: 'member', joinedAt: now })
+      await tx.identity.saveProjectGrant({ projectId: f.task.projectId as never, userId: member, role: 'contributor' })
+    })
+    const token = await issuePat(f.store, member, 60_000)
+    const { run } = await f.launch()
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    for (const status of ['todo', 'in_progress'] as const) task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status }, context)
+    const request = { requestId: 'http-completion-replay', version: task.version, runId: run.id, summary: '已交付', evidence: ['artifact://run'] }
+    const path = `http://127.0.0.1:${address.port}/projects/${task.projectId}/tasks/${task.id}/completion`
+    const send = async (body = request) => {
+      const response = await fetch(path, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      return { status: response.status, data: await response.json() }
+    }
+    const first = await send(); assert.equal(first.status, 200)
+    assert.equal(first.data.task.status, 'done'); assert.equal(first.data.runId, run.id)
+    const replay = await send(); assert.equal(replay.status, 200); assert.deepEqual(replay.data, first.data)
+    const conflict = await send({ ...request, summary: '冲突的摘要' }); assert.equal(conflict.status, 409); assert.equal(conflict.data.error.code, 'request_id_conflict')
+    const before = await f.tasks.activity(task.projectId, task.id, 0, context)
+    await f.store.transaction(tx => tx.identity.removeProjectGrant(task.projectId as never, member))
+    const denied = await send(); assert.equal(denied.status, 403); assert.equal(denied.data.error.code, 'forbidden')
+    assert.deepEqual(await f.tasks.activity(task.projectId, task.id, 0, context), before)
+  } finally { await new Promise<void>((resolve, reject) => http.close(error => error ? reject(error) : resolve())); f.store.close() }
+})
+
+test('completed Task restoration survives block/cancel round trips without permitting first-time done bypass', async () => {
+  const f = await fixture()
+  try {
+    const { run } = await f.launch()
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    for (const status of ['todo', 'in_progress'] as const) task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status }, context)
+    await assert.rejects(f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'done' }, context), { code: 'invalid_transition' })
+    task = (await f.tasks.complete(task.projectId, task.id, { version: task.version, requestId: 'completion-restorable', runId: run.id, summary: '完成', evidence: [] }, context)).task
+    for (const statuses of [
+      ['blocked', 'done'], ['cancelled', 'done'], ['blocked', 'cancelled', 'blocked', 'done'], ['cancelled', 'blocked', 'cancelled', 'done'],
+    ] as const) {
+      for (const status of statuses) task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status }, context)
+      assert.equal(task.status, 'done')
+    }
+  } finally { f.store.close() }
+})
+
+test('latest completed Run cannot be replaced while done or in its restoration chain', async () => {
+  const f = await fixture()
+  try {
+    const { run } = await f.launch()
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'todo' }, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
+    task = (await f.tasks.complete(task.projectId, task.id, { version: task.version, requestId: 'completion-for-run-fence', runId: run.id, summary: '已完成', evidence: [] }, context)).task
+    const beforeReplay = await f.tasks.activity(task.projectId, task.id, 0, context)
+    const original = await f.launch()
+    assert.equal(original.run.id, run.id, 'exact launch receipt replays without restarting a completed Run')
+    assert.deepEqual(await f.tasks.activity(task.projectId, task.id, 0, context), beforeReplay)
+    const launch = (id: string) => f.launch({ ...f.request, requestId: id })
+    for (const status of ['done', 'blocked', 'cancelled', 'blocked', 'done'] as const) {
+      if (task.status !== status) task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status }, context)
+      await assert.rejects(launch(`reopen-fence-${status}`), { code: 'invalid_transition' })
+      await assert.rejects(f.tasks.launch(task.projectId, task.id, { ...f.request, requestId: `reopen-fence-reuse-${status}`, mode: 'reuse', reuseSessionId: run.sessionId }, context), { code: 'invalid_transition' })
+      assert.equal((await f.tasks.runs(task.projectId, task.id, context)).length, 1)
+    }
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
+    const next = await launch('reopen-after-explicit-progress')
+    assert.equal(next.run.attempt, 2)
+    await assert.rejects(f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'done' }, context), { code: 'active_run' })
+    await f.store.transaction(tx => saveReviewRun(tx, next.run))
+    task = await f.tasks.get(task.projectId, task.id, context)
+    await assert.rejects(f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'done' }, context), { code: 'invalid_transition' })
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'blocked' }, context)
+    await assert.rejects(f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'done' }, context), { code: 'invalid_transition' })
+    assert.equal((await f.tasks.get(task.projectId, task.id, context)).status, 'blocked')
+  } finally { f.store.close() }
+})
+
+test('completion receipt survives store restart; revoked project authority cannot replay and invalid payload never writes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'completion-restart-')), path = join(dir, 'db')
+  const f = await fixture(path)
+  let reopened: SqliteServerStore | undefined
+  try {
+    const { run } = await f.launch()
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'todo' }, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
+    const body = { version: task.version, requestId: 'durable-completion', runId: run.id, summary: '已完成', evidence: ['https://example.org/evidence'] }
+    for (const invalid of [{ ...body, summary: '中'.repeat(6000) }, { ...body, evidence: ['x\0y'] }, { ...body, requestId: '' }]) {
+      await assert.rejects(f.tasks.complete(task.projectId, task.id, invalid, context), { code: 'invalid_request' })
+      assert.equal((await f.tasks.get(task.projectId, task.id, context)).status, 'in_progress')
+    }
+    const receipt = await f.tasks.complete(task.projectId, task.id, body, context)
+    f.store.close()
+    reopened = new SqliteServerStore(path)
+    const reopenedTasks = new TaskService(reopened)
+    assert.deepEqual(await reopenedTasks.complete(task.projectId, task.id, body, context), receipt)
+    await reopened.transaction(async tx => {
+      const project = (await tx.resources.getProject(task.projectId as never))!
+      await tx.resources.saveProject({ ...project, ownerId: randomUUID() as UserId, shareScope: 'owner-only' })
+    })
+    await assert.rejects(reopenedTasks.complete(task.projectId, task.id, body, context), { code: 'forbidden' })
+  } finally { reopened?.close(); f.store.close(); await rm(dir, { recursive: true, force: true }) }
+})
+
+test('review policy is manager-controlled and direct completion fails closed while required review is configured', async () => {
+  const f = await fixture()
+  try {
+    const contributor = randomUUID() as UserId, at = new Date().toISOString() as Timestamp
+    await f.store.transaction(async tx => {
+      await tx.identity.saveUser({ id: contributor, email: 'run-contributor@example.test', username: 'run-contributor', status: 'active', createdAt: at })
+      await tx.identity.saveMembership({ teamId: f.worker.teamId, userId: contributor, role: 'member', joinedAt: at })
+      await tx.identity.saveProjectGrant({ projectId: f.task.projectId as never, userId: contributor, role: 'contributor' })
+    })
+    const author = { actor: contributor, requestId: 'run-contributor' }
+    const metadataJson = { schemaVersion: 1, values: { reviewPolicy: 'human' } }
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    await assert.rejects(f.tasks.patch(task.projectId, task.id, { metadataJson }, author), { code: 'forbidden' })
+    await assert.rejects(f.tasks.create(task.projectId, { title: 'Contributor review override', metadataJson, requestId: 'review-override' }, author), { code: 'forbidden' })
+    task = await f.tasks.patch(task.projectId, task.id, { metadataJson, version: task.version }, context)
+    await assert.rejects(f.tasks.patch(task.projectId, task.id, { metadataJson: { schemaVersion: 1, values: {} }, version: task.version }, author), { code: 'forbidden' })
+    await assert.rejects(f.tasks.patch(task.projectId, task.id, { metadataJson: { schemaVersion: 1, values: { reviewPolicy: 'future-unknown' } }, version: task.version }, context), { code: 'invalid_request' })
+    const { run } = await f.launch()
+    assert.equal((await f.tasks.get(task.projectId, task.id, context)).metadataJson.values.reviewPolicyFrozen, true, 'an explicit policy is pinned on the first Run too')
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'todo' }, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
+    const advertised = await f.tasks.get(task.projectId, task.id, context)
+    assert.equal(advertised.capabilities?.transitions.in_review.allowed, false, 'configured review entry must not advertise an unavailable decision workflow')
+    assert.equal((await f.tasks.run(task.projectId, task.id, run.id, context)).capabilities.reviewRequest.allowed, false)
+    const completion = { version: task.version, requestId: 'cannot-bypass-policy', runId: run.id, summary: '已完成', evidence: [] }
+    await assert.rejects(f.tasks.complete(task.projectId, task.id, completion, context), { code: 'invalid_transition' })
+    await assert.rejects(f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'done' }, author), { code: 'invalid_transition' })
+    await assert.rejects(f.tasks.patch(task.projectId, task.id, { metadataJson: { schemaVersion: 1, values: {} }, version: task.version }, context), { code: 'invalid_transition' })
+    await assert.rejects(f.tasks.patch(task.projectId, task.id, { status: 'in_review', version: task.version }, context), { code: 'invalid_transition' })
+    await assert.rejects(f.tasks.reviewAction(task.projectId, task.id, run.id, { version: task.version, status: 'requested' }, context), { code: 'invalid_transition' })
+    assert.equal((await f.tasks.get(task.projectId, task.id, context)).status, 'in_progress')
+  } finally { f.store.close() }
+})
+
+test('inherited configured Project review cannot be bypassed and freezes at first Run; manager cannot weaken it after a retry', async () => {
+  const f = await fixture()
+  try {
+    const projectId = f.task.projectId
+    await f.store.transaction(async tx => {
+      const project = (await tx.resources.getProject(projectId as never))!
+      await tx.resources.saveProject({ ...project, reviewPolicy: 'human' })
+    })
+    let task = await f.tasks.get(projectId, f.task.id, context)
+    assert.equal(task.metadataJson.values.reviewPolicy, undefined)
+    assert.equal(task.capabilities?.transitions.in_review.allowed, false)
+    const { run } = await f.launch()
+    task = await f.tasks.get(projectId, task.id, context)
+    assert.equal(task.metadataJson.values.reviewPolicy, 'human')
+    assert.equal(task.metadataJson.values.reviewPolicyFrozen, true)
+    await f.store.transaction(async tx => {
+      const project = (await tx.resources.getProject(projectId as never))!
+      await tx.resources.saveProject({ ...project, reviewPolicy: 'none' })
+    })
+    await f.store.transaction(tx => saveReviewRun(tx, run))
+    task = await f.tasks.patch(projectId, task.id, { version: task.version, status: 'todo' }, context)
+    task = await f.tasks.patch(projectId, task.id, { version: task.version, status: 'in_progress' }, context)
+    await assert.rejects(f.tasks.patch(projectId, task.id, { version: task.version, metadataJson: { schemaVersion: 1, values: { reviewPolicy: 'none' } } }, context), { code: 'invalid_transition' })
+    await assert.rejects(f.tasks.complete(projectId, task.id, { version: task.version, requestId: 'inherited-bypass', runId: run.id, summary: 'no', evidence: [] }, context), { code: 'invalid_transition' })
+    await assert.rejects(f.tasks.reviewAction(projectId, task.id, run.id, { version: task.version, status: 'requested' }, context), { code: 'invalid_transition' })
+    assert.equal((await f.tasks.get(projectId, task.id, context)).metadataJson.values.reviewPolicy, 'human')
+  } finally { f.store.close() }
+})
+
+test('legacy Run with no explicit review policy is immutable to manager metadata replacement', async () => {
+  const f = await fixture()
+  try {
+    await f.launch()
+    const task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    await assert.rejects(f.tasks.patch(task.projectId, task.id, { version: task.version, metadataJson: { schemaVersion: 1, values: { reviewPolicy: 'none' } } }, context), { code: 'invalid_transition' })
+  } finally { f.store.close() }
+})
+
 test('review cycles close ordinary exits, preserve decisions and reject stale same-state assignment CAS', async () => {
   const f = await reviewFixture()
   try {
     let task = f.task
-    for (const exit of ['done', 'in_progress', 'blocked', 'cancelled'] as const) {
+    for (const exit of ['in_progress', 'blocked', 'cancelled'] as const) {
       task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_review' }, context)
       const pending = (await f.store.tasks.review(f.run.id))!
       assert.equal(task.currentReviewId, pending.id)
@@ -114,13 +870,15 @@ test('review cycles close ordinary exits, preserve decisions and reject stale sa
       assert.deepEqual(await f.tasks.pendingReviews(task.projectId, context), [])
       const closed = (await f.store.tasks.reviewById(pending.id))!
       assert.equal(closed.status, 'requested'); assert.ok(closed.closedAt)
-      if (exit === 'done') task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
       if (exit === 'blocked' || exit === 'cancelled') {
         task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_review' }, context)
         assert.notEqual(task.currentReviewId, pending.id)
         task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
       }
     }
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_review' }, context)
+    await assert.rejects(f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'done' }, context), { code: 'invalid_transition' })
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
     const first = await f.tasks.reviewAction(task.projectId, task.id, f.run.id, { version: task.version, status: 'requested' }, context)
     const approved = await f.tasks.reviewAction(task.projectId, task.id, f.run.id, { version: first.task.version, status: 'approved' }, context)
     task = await f.tasks.patch(task.projectId, task.id, { version: approved.task.version, status: 'in_progress' }, context)
@@ -139,7 +897,7 @@ for (const operation of ['entry', 'exit', 'decision'] as const) for (const fault
     const snapshot = () => db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => [row.name, db.prepare(`SELECT * FROM "${row.name}" ORDER BY rowid`).all()])
     const task = operation === 'entry' ? f.task : await f.tasks.patch(f.task.projectId, f.task.id, { version: f.task.version, status: 'in_review' }, context)
     const before = snapshot(), events: unknown[] = []
-    const store: ServerStore = { tasks: f.store.tasks, resources: f.store.resources, identity: f.store.identity, commands: f.store.commands, cache: f.store.cache,
+    const store: ServerStore = { fileWrites: f.store.fileWrites, tasks: f.store.tasks, resources: f.store.resources, identity: f.store.identity, commands: f.store.commands, cache: f.store.cache,
       transaction: work => f.store.transaction(tx => work({ ...tx, tasks: { ...tx.tasks,
         saveReview: async r => { await tx.tasks.saveReview(r); if (fault === 'saveReview') throw Error('cycle fault') },
         save: async t => { await tx.tasks.save(t); if (fault === 'save') throw Error('cycle fault') },
@@ -308,7 +1066,7 @@ test('review rollback and committed-read barrier hide paused projection and supp
     const gate = new Promise<void>(resolve => { release = resolve })
     const paused = new Promise<void>(resolve => { entered = resolve })
     let notifications = 0
-    const store: ServerStore = { tasks: f.store.tasks, resources: f.store.resources, identity: f.store.identity, commands: f.store.commands, cache: f.store.cache,
+    const store: ServerStore = { fileWrites: f.store.fileWrites, tasks: f.store.tasks, resources: f.store.resources, identity: f.store.identity, commands: f.store.commands, cache: f.store.cache,
       transaction: work => f.store.transaction(tx => work({ ...tx, audit: { append: async entry => { await tx.audit.append(entry); entered(); await gate; throw Error('review rollback') } } })) }
     const tasks = new TaskService(store, () => { notifications++ })
     const before = await f.store.tasks.projectActivity(f.task.projectId, 0)
@@ -326,6 +1084,47 @@ test('review rollback and committed-read barrier hide paused projection and supp
     assert.deepEqual(await f.store.tasks.projectActivity(f.task.projectId, 0), before)
     assert.equal(notifications, 0)
   } finally { f.store.close() }
+})
+
+for (const terminal of ['failed', 'cancelled'] as const) test(`review cannot submit a ${terminal} Run, including from an otherwise eligible Task`, async () => {
+  const f = await fixture()
+  try {
+    const { run } = await f.launch()
+    await f.store.transaction(async tx => saveRunProjection(tx, { ...run, status: terminal, finishedAt: new Date().toISOString() }, 'run.finished'))
+    let task = await f.tasks.get(f.task.projectId, f.task.id, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'todo' }, context)
+    task = await f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_progress' }, context)
+    const before = await f.tasks.activity(task.projectId, task.id, 0, context)
+    assert.equal((await f.tasks.get(task.projectId, task.id, context)).capabilities?.transitions.in_review.allowed, false)
+    await assert.rejects(f.tasks.patch(task.projectId, task.id, { version: task.version, status: 'in_review' }, context), { code: 'invalid_transition' })
+    await assert.rejects(f.tasks.reviewAction(task.projectId, task.id, run.id, { version: task.version, status: 'requested' }, context), { code: 'invalid_transition' })
+    assert.deepEqual(await f.tasks.activity(task.projectId, task.id, 0, context), before)
+    assert.equal(await f.store.tasks.review(run.id), null)
+    assert.equal((await f.tasks.get(task.projectId, task.id, context)).status, 'in_progress')
+  } finally { f.store.close() }
+})
+
+for (const terminal of ['failed', 'cancelled'] as const) test(`persisted review for a now-${terminal} Run cannot approve`, async () => {
+  const f = await reviewFixture()
+  const auth = new AuthenticationService(f.store, administratorDirectory(f.store))
+  const streams = new SessionStreams(f.server)
+  const http = createServer(httpHandler({ service: f.server, auth, streams, tasks: f.tasks }))
+  http.listen(0, '127.0.0.1'); await once(http, 'listening')
+  try {
+    const requested = await f.tasks.reviewAction(f.task.projectId, f.task.id, f.run.id, { status: 'requested', version: f.task.version }, context)
+    await f.store.transaction(tx => saveRunProjection(tx, { ...f.run, status: terminal, finishedAt: new Date().toISOString() }, 'run.finished'))
+    const before = await f.tasks.projectActivity(f.task.projectId, 0, context)
+    const address = http.address() as import('node:net').AddressInfo
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/projects/${f.task.projectId}/tasks/${f.task.id}/runs/${f.run.id}/review`, {
+      method: 'POST', headers: { Authorization: `Bearer ${administratorToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'approved', version: requested.task.version }),
+    })
+    assert.equal(response.status, 409)
+    assert.equal((await response.json()).error.code, 'invalid_transition')
+    assert.deepEqual(await f.tasks.projectActivity(f.task.projectId, 0, context), before)
+    assert.deepEqual(await f.store.tasks.reviewById(requested.review.id), requested.review)
+    assert.equal((await f.tasks.get(f.task.projectId, f.task.id, context)).status, 'in_review')
+  } finally { streams.close(); http.closeAllConnections(); await new Promise<void>(resolve => http.close(() => resolve())); f.store.close() }
 })
 
 test('review enforces terminal Run, legal workflow and concurrent competing decisions', async () => {
@@ -433,8 +1232,20 @@ for (const status of ['pending', 'accepted'] as const) test(`idle safety finds $
   const dir = await mkdtemp(join(tmpdir(), 'idle-window-')), path = join(dir, 'server.db')
   const f = await fixture(path)
   try {
-    const { session } = await f.tasks.createSession(f.task.projectId, f.task.id, { title: 'Idle candidate' }, context)
+    const { session } = await f.tasks.createSession(f.task.projectId, f.task.id, { title: 'Idle candidate', requestId: 'idle-candidate' }, context)
     await f.store.transaction(tx => tx.cache.recordWorkerHead(session.id, 0 as EventSeq))
+    // Reuse now requires a historical Run; settle its command before inserting
+    // the independent pending enqueue that this test is designed to detect.
+    const prior = await f.server.enqueue(session.id, { content: 'Historical submission' })
+    const at = new Date().toISOString() as Timestamp
+    await f.store.transaction(async tx => {
+      await tx.commands.recordReceipt({ commandId: prior.commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Not queued', retryable: false } }, at)
+      await tx.tasks.saveRun({ id: 'idle-historical', taskId: f.task.id, projectId: f.task.projectId, requestId: 'idle-historical', attempt: 1,
+        sessionId: session.id, snapshot: f.request.assignment, status: 'failed',
+        request: { ...f.request, requestId: 'idle-historical', mode: 'reuse', reuseSessionId: session.id }, fingerprint: 'a'.repeat(64),
+        createdAt: at, startedAt: at, finishedAt: at, cancelRequestedAt: null, createCommandId: null, enqueueCommandId: prior.commandId,
+        messageId: null, turnId: null, cancelCommandIds: [], failure: { code: 'invalid-input', message: 'Not queued' }, resultSummary: null, lastProjectedSeq: 0 })
+    })
     const queued = await f.server.enqueue(session.id, { content: 'Not yet in Journal' })
     if (status === 'accepted') await f.store.transaction(tx => tx.commands.recordReceipt({ commandId: queued.commandId, status }, new Date().toISOString() as Timestamp))
     const db = new DatabaseSync(path)
@@ -449,7 +1260,7 @@ for (const status of ['pending', 'accepted'] as const) test(`idle safety finds $
     await assert.rejects(f.tasks.launch(f.task.projectId, f.task.id, { ...f.request, mode: 'reuse', reuseSessionId: session.id }, context), /pending enqueue delivery/)
     await assert.rejects(f.server.delete('sessions', session.id), /pending enqueue delivery/)
     assert.equal((await f.store.resources.getSession(session.id))!.deletedAt, null)
-    assert.equal((await f.store.tasks.runs(f.task.id)).length, 0)
+    assert.equal((await f.store.tasks.runs(f.task.id)).length, 1)
   } finally { f.store.close(); await rm(dir, { recursive: true, force: true }) }
 })
 
@@ -464,7 +1275,7 @@ for (const point of ['saveSession:1', 'insertPending:1', 'insertPending:2', 'dep
       if (typeof value !== 'function') return value
       return async (...args: unknown[]) => { const result = await value(...args); const name = prefix ?? String(key); const n = (counts.get(name) ?? 0) + 1; counts.set(name, n); if (`${name}:${n}` === point) throw Error('injected'); return result }
     } })
-    const store: import('../application/ports/server-store.js').ServerStore = { ...f.store, tasks: f.store.tasks, resources: f.store.resources, identity: f.store.identity, commands: f.store.commands, cache: f.store.cache, transaction: work => f.store.transaction(tx => work({ ...tx, resources: wrap(tx.resources), commands: wrap(tx.commands), tasks: wrap(tx.tasks), audit: wrap(tx.audit, 'audit') })) }
+    const store: import('../application/ports/server-store.js').ServerStore = { ...f.store, fileWrites: f.store.fileWrites, tasks: f.store.tasks, resources: f.store.resources, identity: f.store.identity, commands: f.store.commands, cache: f.store.cache, transaction: work => f.store.transaction(tx => work({ ...tx, resources: wrap(tx.resources), commands: wrap(tx.commands), tasks: wrap(tx.tasks), audit: wrap(tx.audit, 'audit') })) }
     const tasks = new TaskService(store, () => { notifications++ }, new ServerService(store, signals))
     const commands = await f.store.commands.list({ limit: 100 }), activity = await f.store.tasks.activity(f.task.id, 0), originalTask = await f.store.tasks.get(f.task.id)
     await assert.rejects(tasks.launch(f.task.projectId, f.task.id, f.request, context), /injected/)
@@ -553,14 +1364,14 @@ test('task-bound independent Session survives disk restart with immutable proven
   const dir = await mkdtemp(join(tmpdir(), 'independent-restart-')), path = join(dir, 'server.db')
   const f = await fixture(path)
   try {
-    const { session } = await f.tasks.createSession(f.task.projectId, f.task.id, { title: 'Independent' }, context)
+    const { session } = await f.tasks.createSession(f.task.projectId, f.task.id, { title: 'Independent', requestId: 'independent' }, context)
     assert.equal(session.taskId, f.task.id); assert.equal(session.runId, null)
     assert.equal((await f.store.tasks.runs(f.task.id)).length, 0)
     await assert.rejects(f.tasks.createSession(f.task.projectId, f.task.id, { title: 'Bad', runId: 'override' }, context), /unknown fields/)
     await assert.rejects(f.tasks.createSession(f.task.projectId, f.task.id, { title: 'Bad' }, { ...context, teamId: 'wrong' }), /ownership/)
     await assert.rejects(f.store.transaction(tx => tx.resources.saveSession({ ...session, runId: 'rebound' })), /provenance/)
     const { run } = await f.launch()
-    const duringRun = await f.tasks.createSession(f.task.projectId, f.task.id, { title: 'During active Run' }, context)
+    const duringRun = await f.tasks.createSession(f.task.projectId, f.task.id, { title: 'During active Run', requestId: 'during-run' }, context)
     assert.equal(duringRun.session.runId, null)
     assert.equal(duringRun.session.taskId, f.task.id)
     assert.equal((await f.store.tasks.run(run.id))!.status, 'pending')
@@ -580,6 +1391,49 @@ test('task-bound independent Session survives disk restart with immutable proven
   } finally { try { f.store.close() } catch {} await rm(dir, { recursive: true, force: true }) }
 })
 
+test('queued Run cancellation terminates without a Turn start and keeps accepted receipts idempotent', async () => {
+  const f = await fixture()
+  try {
+    const { run } = await f.launch(), sessionId = run.sessionId as SessionId
+    const workers = new WorkerService(f.store, new Notifications())
+    const cancelInput = { runId: run.id, sessionId, requestId: 'cancel-before-start' }
+    const cancelled = (await f.tasks.cancelRun(run.projectId, run.taskId, run.id, cancelInput, context)).run
+    const commandId = cancelled.cancelCommandIds[0] as CommandId
+    assert.equal(cancelled.status, 'cancelling')
+    assert.deepEqual(cancelled.cancelCommandIds, [`run-cancel:${run.id}:queued`])
+    assert.deepEqual((await f.store.commands.getPendingCommand(commandId))?.command, {
+      kind: 'session.cancel-queued', sessionId, submissionCommandId: run.enqueueCommandId,
+    })
+    const receipt = { type: 'ack' as const, receipt: { commandId, status: 'accepted' as const } }
+    await workers.receive(f.worker.id, receipt)
+    await workers.receive(f.worker.id, receipt)
+    assert.equal((await f.store.commands.get(commandId))?.status, 'accepted')
+    assert.equal((await f.store.tasks.run(run.id))?.status, 'cancelling', 'command acceptance is not terminal evidence')
+    const at = '2020-01-01T00:00:00.000Z' as Timestamp
+    const events: JournalEvent[] = [
+      { sessionId, seq: 1 as EventSeq, occurredAt: at, payload: { kind: 'message.queued', commandId: run.enqueueCommandId as CommandId, messageId: 'queued-only' as MessageId, content: f.request.prompt, position: 0 } },
+      { sessionId, seq: 2 as EventSeq, occurredAt: at, payload: { kind: 'message.cancelled', commandId: run.enqueueCommandId as CommandId, messageId: 'queued-only' as MessageId } },
+    ]
+    const sync = { protocolVersion: 1 as const, messageId: 'queued-cancel-sync' as MessageId, type: 'sync' as const, kind: 'batch' as const, sessionId, throughSeq: 2 as EventSeq, hasMore: false, events }
+    await workers.receive(f.worker.id, sync)
+    const terminal = (await f.store.tasks.run(run.id))!
+    assert.equal(terminal.status, 'cancelled')
+    assert.equal(terminal.turnId, null)
+    assert.equal(terminal.startedAt, null)
+    assert.equal(terminal.finishedAt, at)
+    assert.deepEqual(terminal.cancelCommandIds, [commandId])
+    assert.equal((await f.store.tasks.get(run.taskId))?.activeRun, null)
+    const activity = await f.store.tasks.activity(run.taskId, 0)
+    assert.equal(activity.filter(item => item.type === 'run.started').length, 0)
+    assert.equal(activity.filter(item => item.type === 'run.finished').length, 1)
+    await workers.receive(f.worker.id, sync)
+    await workers.receive(f.worker.id, receipt)
+    assert.deepEqual((await f.tasks.cancelRun(run.projectId, run.taskId, run.id, cancelInput, context)).run, terminal)
+    assert.deepEqual(await f.store.tasks.activity(run.taskId, 0), activity)
+    assert.equal((await f.store.commands.list({ limit: 100 })).filter(item => item.commandId.startsWith('run-cancel:')).length, 1)
+  } finally { f.store.close() }
+})
+
 for (const cancelFirst of [false, true]) test(`natural completion and cancel serialize deterministically: cancelFirst=${cancelFirst}`, async () => {
   const f = await fixture()
   try {
@@ -596,14 +1450,24 @@ for (const cancelFirst of [false, true]) test(`natural completion and cancel ser
     const done = (await f.store.tasks.run(run.id))!
     assert.equal(done.status, cancelFirst ? 'cancelled' : 'succeeded')
     assert.equal(done.cancelCommandIds.length, cancelFirst ? 1 : 0)
+    assert.equal(done.turnId, 'race-turn', 'this race is after start, unlike queued-only cancellation')
+    assert.equal(done.failure, null)
+    assert.ok(done.finishedAt)
+    assert.equal((await f.store.tasks.get(run.taskId))?.activeRun, null)
     const before = await f.store.tasks.activity(run.taskId, 0)
     await apply([events[2]!, events[0]!])
     await cancel()
     assert.deepEqual(await f.store.tasks.run(run.id), done)
     assert.deepEqual(await f.store.tasks.activity(run.taskId, 0), before)
     assert.equal(before.filter(a => a.type === 'run.finished').length, 1)
+    assert.equal(before.filter(a => a.type === 'run.started').length, 1)
+    const workers = new WorkerService(f.store, new Notifications())
+    const enqueueReceipt = { type: 'ack' as const, receipt: { commandId: run.enqueueCommandId as CommandId, status: 'accepted' as const } }
+    await workers.receive(f.worker.id, enqueueReceipt)
+    await workers.receive(f.worker.id, enqueueReceipt)
+    assert.deepEqual(await f.store.tasks.run(run.id), done, 'late duplicate enqueue receipt must not reopen terminal Run')
+    assert.deepEqual(await f.store.tasks.activity(run.taskId, 0), before)
     if (cancelFirst) {
-      const workers = new WorkerService(f.store, new Notifications())
       await workers.receive(f.worker.id, { type: 'ack', receipt: { commandId: done.cancelCommandIds[0] as CommandId, status: 'rejected', error: { code: 'invalid-input', message: 'Already finished', retryable: false } } })
       assert.deepEqual(await f.store.tasks.run(run.id), done)
       assert.deepEqual(await f.store.tasks.activity(run.taskId, 0), before)
@@ -810,7 +1674,7 @@ for (const outcome of ['completed', 'failed', 'cancelled'] as const) test(`Worke
 
 /** Test-only transaction seam: production store/services execute unchanged. */
 function intercepted(store: SqliteServerStore, work: (tx: ServerStoreTx) => ServerStoreTx): ServerStore {
-  return { tasks: store.tasks, resources: store.resources, identity: store.identity, commands: store.commands, cache: store.cache, transaction: callback => store.transaction(tx => callback(work(tx))) }
+  return { fileWrites: store.fileWrites, tasks: store.tasks, resources: store.resources, identity: store.identity, commands: store.commands, cache: store.cache, transaction: callback => store.transaction(tx => callback(work(tx))) }
 }
 for (const rollback of [false, true]) test(`cancel public readers wait for ${rollback ? 'rollback' : 'commit'}`, async () => {
   const f = await fixture()
@@ -1096,7 +1960,7 @@ test('real server listen recovers contiguous disk cache with cursor behind exact
       db.exec(`DROP ${String(type)} "${String(row.name)}"`)
     }
     db.exec('ALTER TABLE records DROP COLUMN source_run_id')
-    db.exec('DROP TRIGGER IF EXISTS project_activity_append; DROP TABLE project_activity; DROP TABLE review_requests; DROP TRIGGER session_creation_provenance; DROP TRIGGER session_task_scope; DROP TRIGGER active_run_session_delete; DROP TRIGGER run_session_scope; DROP TABLE run_cancel_requests; DROP TABLE command_dependencies; DROP TABLE task_runs; DROP INDEX task_activity_source; ALTER TABLE task_activity DROP COLUMN source_key; DELETE FROM schema_migrations WHERE version>=5;')
+    db.exec('DROP TABLE command_rejections; DROP TRIGGER IF EXISTS project_activity_append; DROP TABLE project_activity; DROP TABLE review_requests; DROP TRIGGER session_creation_provenance; DROP TRIGGER session_task_scope; DROP TRIGGER active_run_session_delete; DROP TRIGGER run_session_scope; DROP TABLE run_cancel_requests; DROP TABLE command_dependencies; DROP TABLE task_runs; DROP INDEX task_activity_source; ALTER TABLE task_activity DROP COLUMN source_key; DELETE FROM schema_migrations WHERE version>=5;')
     assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(r => r.version), [1, 2, 3, 4])
   } finally { db.close() }
   try {
@@ -1211,14 +2075,14 @@ test('Run HTTP ownership/resource/raw JSON matrix has exact envelopes and zero f
     }
     for (const task of [other, cross]) await check(`/projects/${task.projectId}/tasks/${task.id}/runs/${run.id}`, 'GET', undefined, 404, { code: 'not_found', message: 'Run not found in this Task' })
     await check(path + '/transition', 'POST', '{', 400, { code: 'invalid_request', message: 'Invalid JSON' })
-    await check(path + '/transition', 'POST', JSON.stringify({ version: 2, status: 'in_review' }), 409, { code: 'invalid_transition', message: 'Transition not permitted' })
+    await check(path + '/transition', 'POST', JSON.stringify({ version: 2, status: 'in_review' }), 409, { code: 'active_run', message: 'Review requires a terminal Run and no active Task Run' })
     const independentPath = path + '/sessions'
     for (const bearer of [outsiderToken]) await check(independentPath, 'POST', JSON.stringify({ title: 'Independent' }), 403, { code: 'forbidden', message: 'Project ownership required' }, bearer)
     await check(independentPath + '?teamId=wrong', 'POST', JSON.stringify({ title: 'Independent' }), 403, { code: 'forbidden', message: 'Project ownership required' })
     await check(`/projects/${project.id}/tasks/${f.task.id}/sessions`, 'POST', JSON.stringify({ title: 'Independent' }), 404, { code: 'not_found', message: 'Task not found in this project' })
     await check(independentPath, 'POST', '{', 400, { code: 'invalid_request', message: 'Invalid JSON' })
-    for (const body of [{ title: '' }, { title: 'Independent', workspaceId: 'wrong' }, { title: 'Independent', assignment: {} }, { title: 'Independent', runId: run.id }, { title: 'Independent', requestId: 'unsupported' }, { title: 'Independent', taskId: other.id }]) await check(independentPath, 'POST', JSON.stringify(body), 400, { code: 'invalid_request', message: 'Session title required; unknown fields are not allowed' })
-    await check(`/projects/${project.id}/tasks/${cross.id}/sessions`, 'POST', JSON.stringify({ title: 'Independent' }), 409, { code: 'assignment_changed', message: 'Task assignment required' })
+    for (const body of [{ title: '' }, { title: 'Independent', workspaceId: 'wrong' }, { title: 'Independent', assignment: {} }, { title: 'Independent', runId: run.id }, { title: 'Independent', requestId: '' }, { title: 'Independent', taskId: other.id }]) await check(independentPath, 'POST', JSON.stringify(body), 400, { code: 'invalid_request', message: 'Session title and requestId required; unknown fields are not allowed' })
+    await check(`/projects/${project.id}/tasks/${cross.id}/sessions`, 'POST', JSON.stringify({ title: 'Independent', requestId: 'unassigned' }), 409, { code: 'assignment_changed', message: 'Task assignment required' })
     const cancelPath = path + '/runs/' + run.id + '/cancel'
     const cancelBody = { runId: run.id, sessionId: run.sessionId, requestId: 'cancel-http' }
     for (const task of [other, cross]) await check(`/projects/${task.projectId}/tasks/${task.id}/runs/${run.id}/cancel`, 'POST', JSON.stringify(cancelBody), 404, { code: 'not_found', message: 'Run not found in this Task' })
@@ -1229,6 +2093,29 @@ test('Run HTTP ownership/resource/raw JSON matrix has exact envelopes and zero f
     await check(path + '/launch', 'POST', JSON.stringify({ ...f.request, requestId: 'changed', assignment: { ...f.request.assignment, modelId: 'changed' } }), 409, { code: 'assignment_changed', message: 'Assignment changed; retain draft and explicitly confirm current assignment', details: { assignment: f.request.assignment } })
     await check(path + '/launch', 'POST', JSON.stringify({ ...f.request, requestId: 'new' }), 409, { code: 'active_run', message: 'Task already has an active Run', details: { runId: run.id } })
   } finally { db.close(); await new Promise<void>((resolve, reject) => http.close(error => error ? reject(error) : resolve())); f.store.close(); await rm(dir, { recursive: true, force: true }) }
+})
+
+test('real Run cancel HTTP route requires the client target tuple and reaches the service exactly once', async () => {
+  const f = await fixture()
+  const { run } = await f.launch()
+  const auth = new AuthenticationService(f.store, administratorDirectory(f.store))
+  const http = createServer(httpHandler({ service: f.server, auth, streams: new SessionStreams(f.server), tasks: f.tasks }))
+  http.listen(0, '127.0.0.1'); await once(http, 'listening')
+  const address = http.address(); assert.ok(address && typeof address !== 'string')
+  const path = `http://127.0.0.1:${address.port}/projects/${f.task.projectId}/tasks/${f.task.id}/runs/${run.id}/cancel`
+  try {
+    const input = { runId: run.id, sessionId: run.sessionId, requestId: 'client-target' }
+    const first = await fetch(path, { method: 'POST', headers: { Authorization: `Bearer ${administratorToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(input) })
+    assert.equal(first.status, 200)
+    const accepted = await first.json() as { run: { id: string; sessionId: string; cancelRequestedAt: string | null } }
+    assert.equal(accepted.run.id, run.id)
+    assert.equal(accepted.run.sessionId, run.sessionId)
+    assert.ok(accepted.run.cancelRequestedAt)
+    const replay = await fetch(path, { method: 'POST', headers: { Authorization: `Bearer ${administratorToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(input) })
+    assert.equal(replay.status, 200)
+    assert.equal((await replay.json() as { run: { id: string } }).run.id, run.id)
+    assert.ok(await f.store.transaction(tx => tx.tasks.cancelRequest(run.id, input.requestId)), 'one durable cancellation identity survives replay')
+  } finally { await new Promise<void>((resolve, reject) => http.close(error => error ? reject(error) : resolve())); f.store.close() }
 })
 
 test('real HTTP Run launch rejection envelopes leave all launch resources unchanged', async () => {
@@ -1302,10 +2189,12 @@ for (const phase of ['pending', 'running'] as const) for (const outcome of ['com
     const apply = (events: JournalEvent[]) => f.store.transaction(async tx => { await tx.cache.applyEvents(sessionId, events); await projectRuns(tx, sessionId) })
     if (phase === 'running') await apply(start)
     assert.equal((await f.store.tasks.run(run.id))!.status, phase)
-    for (const status of ['todo', 'in_progress', 'in_review']) {
+    for (const status of ['todo', 'in_progress']) {
       const task = await f.tasks.get(f.task.projectId, f.task.id, context)
       assert.equal((await call(path, 'PATCH', { version: task.version, status })).status, 200)
     }
+    const reviewEntry = await f.tasks.get(f.task.projectId, f.task.id, context)
+    assert.equal((await call(path, 'PATCH', { version: reviewEntry.version, status: 'in_review' })).status, 409)
     for (const status of ['done', 'cancelled']) {
       const before = await f.tasks.get(f.task.projectId, f.task.id, context)
       const response = await call(path, 'PATCH', { version: before.version, status })
@@ -1337,9 +2226,16 @@ for (const phase of ['pending', 'running'] as const) for (const outcome of ['com
     assert.equal(terminalDelete.status, 409); assert.equal(terminalDelete.data.error.code, 'run_session_protected')
     assert.equal((await call('/sessions/' + sessionId + '/events', 'GET')).status, 200)
     current = await f.tasks.get(f.task.projectId, f.task.id, context)
-    assert.equal((await call(path, 'PATCH', { version: current.version, status: 'in_review' })).status, 200)
+    assert.equal((await call(path, 'PATCH', { version: current.version, status: 'in_review' })).status, 409, 'a blocked Task must return to implementation before review')
     current = await f.tasks.get(f.task.projectId, f.task.id, context)
-    assert.equal((await call(path, 'PATCH', { version: current.version, status: 'done' })).status, 200)
+    for (const [method, suffix] of [['PATCH', ''], ['POST', '/transition'], ['POST', '/move']] as const) {
+      const bypass = await call(path + suffix, method, { version: current.version, status: 'done' })
+      assert.equal(bypass.status, 409); assert.equal(bypass.data.error.code, 'invalid_transition')
+    }
+    current = await f.tasks.get(f.task.projectId, f.task.id, context)
+    assert.equal((await call(path, 'PATCH', { version: current.version, status: 'in_progress' })).status, 200)
+    current = await f.tasks.get(f.task.projectId, f.task.id, context)
+    assert.equal((await call(path, 'PATCH', { version: current.version, status: 'in_review' })).status, outcome === 'completed' ? 200 : 409)
     current = await f.tasks.get(f.task.projectId, f.task.id, context)
     assert.equal((await call(path + '/workspaces/' + run.snapshot.workspaceId, 'DELETE', { version: current.version })).status, 200)
     const next = await call(path + '/launch', 'POST', { ...f.request, assignment, requestId: 'terminal-release' })
@@ -1436,12 +2332,13 @@ test('ordinary review transition concurrent and restart stale requests conflict;
     const events: unknown[] = []
     const tasks = new TaskService(f.store, event => events.push(event))
     const input = { version: task.version, status: 'in_review' }
+    await f.store.transaction(tx => saveReviewRun(tx, run))
     const before = await f.store.tasks.activity(task.id, 0)
     const outcomes = await Promise.allSettled([tasks.patch(task.projectId, task.id, input, context), tasks.patch(task.projectId, task.id, input, context)])
     assert.equal(outcomes.filter(r => r.status === 'fulfilled').length, 1)
     assert.equal(outcomes.filter(r => r.status === 'rejected' && r.reason.code === 'version_conflict').length, 1)
     assert.equal(events.length, 1)
-    assert.equal((await f.store.tasks.run(run.id))?.status, 'pending')
+    assert.equal((await f.store.tasks.run(run.id))?.status, 'succeeded')
     assert.equal((await f.store.tasks.review(run.id))?.status, 'requested')
     assert.equal((await f.store.tasks.activity(task.id, 0)).length, before.length + 1)
     const check = new DatabaseSync(path)
@@ -1458,4 +2355,236 @@ test('ordinary review transition concurrent and restart stale requests conflict;
       assert.equal((await reopened.tasks.get(task.id))?.status, 'in_review')
     } finally { reopened.close(); check.close() }
   } finally { try { f.store.close() } catch {} await rm(dir, { recursive: true, force: true }) }
+})
+
+for (const decision of ['approve', 'changes_requested'] as const) test(`approval router ${decision}: shared SQLite rollback, concurrent binding and HTTP reopen`, async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'human-approval-atomic-'))
+  const path = join(directory, 'server.sqlite')
+  let database = new SharedSqliteDatabase(path)
+  const f = await fixture(database)
+  let store = f.store
+  let service = f.server
+  const events: unknown[] = []
+  const publishedReceiptCounts: unknown[] = []
+  let tasks = new TaskService(store, event => {
+    // A separate connection must observe the receipt before publication.
+    const observer = new DatabaseSync(path)
+    try { publishedReceiptCounts.push(observer.prepare('SELECT COUNT(*) AS n FROM approval_decision_receipts').get()!.n) }
+    finally { observer.close() }
+    events.push(event)
+  }, service)
+  let receipts = new SqliteApprovalDecisionRepository(database)
+  const start = async () => {
+    const projects = new ProjectAccessService(store)
+    const projections = new ProjectionService(store, projects, new SessionAccessService(store, projects), receipts)
+    const router = new ApprovalDecisionRouter(projections, tasks, service, receipts)
+    const http = createServer(httpHandler({ service, auth: new AuthenticationService(store, administratorDirectory(store)), streams: new SessionStreams(service), tasks, projections, approvalDecisions: router }))
+    http.listen(0, '127.0.0.1'); await once(http, 'listening')
+    const address = http.address(); assert.ok(address && typeof address !== 'string')
+    return { http, base: `http://127.0.0.1:${address.port}/api/approvals`, projections }
+  }
+  let host = await start()
+  const stop = () => new Promise<void>((resolve, reject) => host.http.close(error => error ? reject(error) : resolve()))
+  try {
+    const project = await store.resources.getProject(f.task.projectId as never); assert.ok(project)
+    await store.transaction(tx => tx.resources.saveProject({ ...project, reviewPolicy: 'human', reviewPolicyVersion: 2 }))
+    const manager = randomUUID() as UserId, now = new Date().toISOString() as Timestamp
+    await store.transaction(async tx => {
+      await tx.identity.saveUser({ id: manager, username: 'atomic-reviewer', email: null, status: 'active', authVersion: 0, createdAt: now, statusChangedAt: now, deletedAt: null })
+      await tx.identity.saveMembership({ teamId: project.teamId, userId: manager, role: 'member', joinedAt: now })
+      await tx.identity.saveProjectGrant({ projectId: project.id, userId: manager, role: 'manager' })
+    })
+    const token = await issuePat(store, manager, 60_000)
+    const other = await f.tasks.create(project.id, { title: 'Other atomic review' }, context)
+    const workspace = await f.tasks.createWorkspace(project.id, other.id, { name: other.title, workerId: f.worker.id, source: 'empty' }, context)
+    await store.transaction(tx => tx.resources.saveWorkspace({ ...workspace.workspace, status: 'ready' }))
+    const otherAssignment = { ...f.request.assignment, workspaceId: workspace.workspace.id }
+    await f.tasks.assignment(project.id, other.id, { version: other.version, assignee: otherAssignment }, false, context)
+    for (const [id, assignment] of [[f.task.id, f.request.assignment], [other.id, otherAssignment]] as const) {
+      const { run } = await f.tasks.launch(project.id, id, { ...f.request, assignment, requestId: `launch-${id}` }, context)
+      await store.transaction(tx => saveReviewRun(tx, run))
+      let task = await f.tasks.get(project.id, id, context)
+      for (const status of ['todo', 'in_progress'] as const) task = await f.tasks.patch(project.id, id, { version: task.version, status }, context)
+      await f.tasks.submitHumanReview(project.id, id, { version: task.version, requestId: `submit-${id}`, runId: run.id, summary: '成果', evidence: [] }, context)
+    }
+    const approvals = (await host.projections.approvals(manager, { sourceKind: 'task_review', status: 'pending' })).items
+    assert.equal(approvals.length, 2)
+    const first = approvals.find(a => a.source.kind === 'task_review' && a.source.taskId === f.task.id)!
+    const second = approvals.find(a => a.projectionKey !== first.projectionKey)!
+    const body = { decision, requestId: 'atomic-vote', sourceRevision: first.sourceRevision, ...(decision === 'changes_requested' ? { note: '补充验证' } : {}) }
+    const post = async (approval = first, value: unknown = body) => {
+      const response = await fetch(`${host.base}/${encodeURIComponent(approval.projectionKey)}/decisions`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(value) })
+      return { status: response.status, data: await response.json() as Record<string, any> }
+    }
+    const snapshot = () => {
+      const db = database.connection
+      return {
+        tasks: db.prepare('SELECT * FROM tasks ORDER BY id').all(),
+        reviews: db.prepare('SELECT * FROM review_requests ORDER BY id').all(),
+        activity: db.prepare('SELECT * FROM task_activity ORDER BY seq').all(),
+        records: db.prepare("SELECT * FROM records WHERE kind IN ('audit', 'create-request') ORDER BY kind,id").all(),
+        receipts: db.prepare('SELECT * FROM approval_decision_receipts ORDER BY actor_id,request_id').all(),
+        overlays: db.prepare('SELECT * FROM approval_decision_overlays ORDER BY projection_key').all(),
+      }
+    }
+    const before = snapshot()
+    const save = receipts.save.bind(receipts)
+    receipts.save = async (...args) => { await save(...args); throw new Error('injected router save failure') }
+    assert.equal((await post()).status, 500)
+    assert.deepEqual(snapshot(), before, 'save failure must roll back domain, audit, domain receipt, router receipt and overlay')
+    assert.equal(events.length, 0, 'rollback must not publish')
+    receipts.save = save
+
+    // HTTP requests also serialize through authentication; direct router overlap is tested below.
+    let entered!: () => void, release!: () => void
+    const saving = new Promise<void>(resolve => { entered = resolve })
+    const held = new Promise<void>(resolve => { release = resolve })
+    receipts.save = async (...args) => { entered(); await held; await save(...args) }
+    const winner = post()
+    await saving
+    const loser = post(second, { ...body, sourceRevision: second.sourceRevision, note: 'conflicting fingerprint' })
+    const publicationsBeforeCommit = events.length
+    release()
+    const [accepted, rejected] = await Promise.all([winner, loser])
+    assert.equal(publicationsBeforeCommit, 0, 'domain publication waits for outer commit')
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.data))
+    assert.equal(rejected.status, 409, JSON.stringify(rejected.data))
+    assert.equal(rejected.data.error.code, 'idempotency_conflict')
+    assert.equal(accepted.data.approval.status, decision === 'approve' ? 'approved' : 'changes_requested')
+    assert.deepEqual(accepted.data.approval.freshness, first.freshness)
+    assert.equal((await tasks.get(project.id, f.task.id, context)).status, decision === 'approve' ? 'done' : 'in_progress')
+    assert.equal((await tasks.get(project.id, other.id, context)).status, 'in_review')
+    assert.equal(events.length, 1)
+    assert.deepEqual(publishedReceiptCounts, [1], 'publication sees the committed router receipt on another connection')
+    const after = snapshot()
+    assert.equal(after.activity.length, before.activity.length + 1)
+    assert.equal(after.records.length, before.records.length + 2, 'one audit and one domain receipt')
+    assert.equal(after.receipts.length, 1); assert.equal(after.overlays.length, 1)
+    const replay = await post()
+    assert.equal(replay.status, 200)
+    assert.deepEqual(replay.data, { ...accepted.data, replayed: true })
+    assert.deepEqual(snapshot(), after)
+    // Same fingerprint on another review is also bound to the winning resource.
+    assert.equal((await post(second)).data.error.code, 'idempotency_conflict')
+
+    await stop(); receipts.close(); store.close(); database.close()
+    database = new SharedSqliteDatabase(path)
+    store = new SqliteServerStore(database)
+    service = new ServerService(store, new Notifications())
+    tasks = new TaskService(store, event => events.push(event), service)
+    receipts = new SqliteApprovalDecisionRepository(database)
+    host = await start()
+    assert.deepEqual((await post()).data, { ...accepted.data, replayed: true })
+    assert.equal((await receipts.listOverlays(new Date().toISOString() as Timestamp))[0]!.status, accepted.data.approval.status)
+    await store.transaction(tx => tx.identity.saveProjectGrant({ projectId: project.id, userId: manager, role: 'contributor' }))
+    const revoked = await post()
+    assert.equal(revoked.status, 403); assert.equal(revoked.data.approval, undefined)
+    await store.transaction(tx => tx.identity.saveProjectGrant({ projectId: project.id, userId: manager, role: 'manager' }))
+    await store.transaction(tx => tx.identity.removeMembership(project.teamId, manager))
+    const removed = await post()
+    assert.equal(removed.status, 404, 'removed membership hides the Project')
+    assert.equal(removed.data.approval, undefined)
+    assert.deepEqual(snapshot(), after)
+    assert.equal(events.length, 1)
+  } finally { await stop(); receipts.close(); store.close(); database.close(); await rm(directory, { recursive: true, force: true }) }
+})
+
+for (const decision of ['approve', 'changes_requested'] as const) for (const fingerprint of ['different', 'identical'] as const) test(`approval router direct ${decision}: queued ${fingerprint} fingerprint remains bound to the first review`, { timeout: 10_000 }, async () => {
+  const database = new SharedSqliteDatabase(':memory:')
+  const f = await fixture(database)
+  const receipts = new SqliteApprovalDecisionRepository(database)
+  const events: unknown[] = []
+  const tasks = new TaskService(f.store, event => events.push(event), f.server)
+  const projects = new ProjectAccessService(f.store)
+  const projections = new ProjectionService(f.store, projects, new SessionAccessService(f.store, projects), receipts)
+  const router = new ApprovalDecisionRouter(projections, tasks, f.server, receipts)
+  let release!: () => void
+  const operations: Promise<unknown>[] = []
+  try {
+    const project = await f.store.resources.getProject(f.task.projectId as never); assert.ok(project)
+    await f.store.transaction(tx => tx.resources.saveProject({ ...project, reviewPolicy: 'human', reviewPolicyVersion: 2 }))
+    // A real Project manager distinct from the submitter; no HTTP auth can serialize calls before the router.
+    const actor = randomUUID() as UserId, now = new Date().toISOString() as Timestamp
+    await f.store.transaction(async tx => {
+      await tx.identity.saveUser({ id: actor, username: 'direct-reviewer', email: null, status: 'active', authVersion: 0, createdAt: now, statusChangedAt: now, deletedAt: null })
+      await tx.identity.saveMembership({ teamId: project.teamId, userId: actor, role: 'member', joinedAt: now })
+      await tx.identity.saveProjectGrant({ projectId: project.id, userId: actor, role: 'manager' })
+    })
+    const other = await f.tasks.create(project.id, { title: 'Competing direct review' }, context)
+    const workspace = await f.tasks.createWorkspace(project.id, other.id, { name: other.title, workerId: f.worker.id, source: 'empty' }, context)
+    await f.store.transaction(tx => tx.resources.saveWorkspace({ ...workspace.workspace, status: 'ready' }))
+    const otherAssignment = { ...f.request.assignment, workspaceId: workspace.workspace.id }
+    await f.tasks.assignment(project.id, other.id, { version: other.version, assignee: otherAssignment }, false, context)
+    for (const [id, assignment] of [[f.task.id, f.request.assignment], [other.id, otherAssignment]] as const) {
+      const { run } = await f.tasks.launch(project.id, id, { ...f.request, assignment, requestId: `launch-${id}` }, context)
+      await f.store.transaction(tx => saveReviewRun(tx, run))
+      let task = await f.tasks.get(project.id, id, context)
+      for (const status of ['todo', 'in_progress'] as const) task = await f.tasks.patch(project.id, id, { version: task.version, status }, context)
+      await f.tasks.submitHumanReview(project.id, id, { version: task.version, requestId: `submit-${id}`, runId: run.id, summary: '成果', evidence: [] }, context)
+    }
+    const approvals = (await projections.approvals(actor, { sourceKind: 'task_review', status: 'pending' })).items
+    assert.equal(approvals.length, 2)
+    const first = approvals.find(a => a.source.kind === 'task_review' && a.source.taskId === f.task.id)!
+    const second = approvals.find(a => a.projectionKey !== first.projectionKey)!
+    assert.ok(first.decisionCapabilities.includes(decision))
+    assert.ok(second.decisionCapabilities.includes(decision))
+    const input = (sourceRevision: string, note: string) => {
+      const body = { decision, note, requestId: 'direct-atomic-vote', sourceRevision }
+      return { ...body, fingerprint: createHash('sha256').update(JSON.stringify(body)).digest('hex') }
+    }
+    const winningInput = input(first.sourceRevision, '审核结果')
+    const losingInput = fingerprint === 'identical' ? winningInput : input(second.sourceRevision, 'conflicting fingerprint')
+    assert.equal(winningInput.fingerprint === losingInput.fingerprint, fingerprint === 'identical')
+    const otherBefore = await f.store.tasks.get(other.id)
+    const domainSnapshot = () => ({
+      tasks: database.connection.prepare('SELECT * FROM tasks ORDER BY id').all(),
+      reviews: database.connection.prepare('SELECT * FROM review_requests ORDER BY id').all(),
+      activity: database.connection.prepare('SELECT * FROM task_activity ORDER BY seq').all(),
+      records: database.connection.prepare("SELECT * FROM records WHERE kind IN ('audit', 'create-request') ORDER BY kind,id").all(),
+    })
+    let saving!: () => void, submitted!: () => void
+    const firstSaving = new Promise<void>(resolve => { saving = resolve })
+    const held = new Promise<void>(resolve => { release = resolve })
+    const secondSubmitted = new Promise<void>(resolve => { submitted = resolve })
+    const save = receipts.save.bind(receipts)
+    receipts.save = async (...args) => { saving(); await held; await save(...args) }
+    const transaction = receipts.transaction.bind(receipts)
+    let transactionCalls = 0
+    const entered: number[] = []
+    receipts.transaction = work => {
+      const call = ++transactionCalls
+      const result = transaction(() => { entered.push(call); return work() })
+      // Signal only after the second router has submitted its callback to the real FIFO.
+      if (call === 2) queueMicrotask(submitted)
+      return result
+    }
+    const winner = router.decide(actor, first.projectionKey, winningInput)
+    operations.push(winner)
+    await firstSaving
+    const atFirstSave = domainSnapshot()
+    const loser = assert.rejects(router.decide(actor, second.projectionKey, losingInput), { status: 409, code: 'idempotency_conflict' })
+    operations.push(loser)
+    await secondSubmitted
+    assert.equal(transactionCalls, 2, 'both calls reached the router transaction boundary')
+    assert.deepEqual(entered, [1], 'second transaction callback must not enter while the first save is held')
+    assert.equal(events.length, 0, 'publication waits for the first transaction commit')
+    release()
+    const [accepted] = await Promise.all([winner, loser])
+    assert.deepEqual(entered, [1, 2], 'second callback runs after the first transaction releases the FIFO')
+    assert.equal(accepted.approval.projectionKey, first.projectionKey)
+    assert.equal(accepted.approval.status, decision === 'approve' ? 'approved' : 'changes_requested')
+    assert.equal((await f.store.tasks.get(f.task.id))?.status, decision === 'approve' ? 'done' : 'in_progress')
+    assert.deepEqual(await f.store.tasks.get(other.id), otherBefore, 'losing review must not mutate its Task')
+    assert.deepEqual(domainSnapshot(), atFirstSave, 'loser must not change either Task, review, activity, audit or domain receipt')
+    assert.equal(events.length, 1)
+    const receipt = await receipts.getReceipt(actor, winningInput.requestId, new Date().toISOString() as Timestamp)
+    assert.equal(receipt?.fingerprint, winningInput.fingerprint)
+    assert.equal(receipt?.result.approval.projectionKey, first.projectionKey)
+    assert.equal(database.connection.prepare('SELECT COUNT(*) AS n FROM approval_decision_receipts').get()!.n, 1)
+    assert.deepEqual((await receipts.listOverlays(new Date().toISOString() as Timestamp)).map(a => a.projectionKey), [first.projectionKey])
+  } finally {
+    release?.()
+    await Promise.allSettled(operations)
+    receipts.close(); f.store.close(); database.close()
+  }
 })

@@ -9,7 +9,7 @@ test('attention source queries the real migrated schema, including an empty inst
   try {
     assert.deepEqual(await source.listTasks(), [])
     assert.deepEqual(await source.listRuns(), [])
-    assert.deepEqual(await source.listDeadLetters(), [])
+    assert.deepEqual(await source.listDeadLetters({ actorId: 'actor' as never, authorizedProjectIds: [] }), [])
   } finally { database.close() }
 })
 

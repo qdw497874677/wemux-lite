@@ -19,12 +19,12 @@ test('approval replay receipt and optimistic overlay survive SQLite reopen and e
   t.after(() => rm(directory, { recursive: true, force: true }))
   let authorityCalls = 0
   const firstRepository = new SqliteApprovalDecisionRepository(path)
-  const first = new ApprovalDecisionRouter({ approval: async () => pending } as never, { reviewAction: async () => { authorityCalls += 1 } } as never, {} as never, firstRepository, () => new Date('2026-04-01T01:00:00.000Z'))
+  const first = new ApprovalDecisionRouter({ approval: async () => pending, requireApprovalProject: async () => {} } as never, { get: async () => ({ metadataJson: { values: { reviewPolicy: 'none' } } }), authorizeReviewReplay: async () => {}, reviewAction: async () => { authorityCalls += 1 } } as never, {} as never, firstRepository, () => new Date('2026-04-01T01:00:00.000Z'))
   assert.equal((await first.decide('actor-1' as never, pending.projectionKey, input('durable-request'))).replayed, false)
   firstRepository.close()
 
   const reopened = new SqliteApprovalDecisionRepository(path)
-  const second = new ApprovalDecisionRouter({ approval: async () => pending } as never, { reviewAction: async () => { authorityCalls += 1 } } as never, {} as never, reopened, () => new Date('2026-04-01T02:00:00.000Z'))
+  const second = new ApprovalDecisionRouter({ approval: async () => pending, requireApprovalProject: async () => {} } as never, { get: async () => ({ metadataJson: { values: { reviewPolicy: 'none' } } }), authorizeReviewReplay: async () => {}, reviewAction: async () => { authorityCalls += 1 } } as never, {} as never, reopened, () => new Date('2026-04-01T02:00:00.000Z'))
   const replay = await second.decide('actor-1' as never, pending.projectionKey, input('durable-request'))
   assert.equal(replay.replayed, true)
   assert.equal(authorityCalls, 1)

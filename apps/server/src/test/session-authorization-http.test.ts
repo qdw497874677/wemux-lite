@@ -98,6 +98,15 @@ test('Session policy separates read, write and control while hiding unauthorized
   assert.equal((await ownerClient.call(`/sessions/${sessionId}/grants/${contributor.id}`, { method: 'DELETE' })).status, 204)
   assert.equal((await contributorClient.call(`/sessions/${sessionId}`)).status, 404)
 
+  const approvalPath = `/sessions/${sessionId}/runtime/approvals/identity`
+  const approvalBody = { commandId: 'authorized-approval', turnId: contributorTurn, decision: 'approve' }
+  assert.equal((await ownerClient.call(approvalPath, { method: 'POST', body: approvalBody })).status, 202)
+  assert.equal((await ownerClient.call(approvalPath, { method: 'POST', body: approvalBody })).status, 202)
+  assert.equal((await contributorClient.call(approvalPath, { method: 'POST', body: approvalBody })).status, 404)
+  const approvalCommand = await app.store.commands.getPendingCommand('authorized-approval' as CommandId)
+  assert.equal(approvalCommand?.command.kind, 'runtime.approval.resolve')
+  if (approvalCommand?.command.kind === 'runtime.approval.resolve') assert.equal(approvalCommand.command.turnId, contributorTurn)
+
   const audit = await app.store.identity.listAudit(100)
   assert.equal(audit.some(entry => entry.action === 'session.enqueue' && entry.actorId === contributor.id), true)
   assert.equal(audit.some(entry => entry.action === 'turn.stop' && entry.actorId === manager.id), true)

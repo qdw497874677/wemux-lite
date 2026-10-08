@@ -19,6 +19,9 @@ const context = { actor: instanceOperatorId, requestId: 'account-upgrade' }
 const downgradeToPreAccount = (path: string): void => {
   const db = new DatabaseSync(path)
   db.exec('DROP TABLE IF EXISTS login_sessions; DROP TABLE IF EXISTS instance_claim;')
+  db.exec('DROP TRIGGER IF EXISTS command_rejection_no_dispatch; DROP TABLE command_rejections')
+  // v39/v40 的 attention 排序索引建在存活表上；只删版本行不删物理索引会让重放的 CREATE INDEX 撞名。
+  db.exec('DROP INDEX IF EXISTS attention_failed_runs_order; DROP INDEX IF EXISTS attention_dead_letters_order; DROP INDEX IF EXISTS attention_human_reviews_order; DROP TABLE IF EXISTS workspace_account_visibility')
   db.prepare('DELETE FROM schema_migrations WHERE version >= ?').run(firstAccountMigrationVersion)
   db.close()
 }
@@ -43,7 +46,7 @@ test('升级前实例：账号迁移保留真实归属，退役旧 PAT 并留下
     const { workspace } = await tasks.createWorkspace(task.projectId, task.id, { name: 'Legacy workspace', workerId: worker.id, source: 'empty' }, context)
     await store.transaction(tx => tx.resources.saveWorkspace({ ...workspace, status: 'ready' }))
     await tasks.assignment(task.projectId, task.id, { version: 1, assignee: { workspaceId: workspace.id, workerId: worker.id, agentKey: 'test', modelId: 'model' } }, false, context)
-    const { session } = await tasks.createSession(task.projectId, task.id, { title: 'Upgrade session' }, context)
+    const { session } = await tasks.createSession(task.projectId, task.id, { title: 'Upgrade session', requestId: 'upgrade-session' }, context)
     // 会话创建后把 Worker 恢复成镜像里真实的样子：连接状态不跨重启存活，不应被误认为迁移改写。
     await store.transaction(async tx => tx.resources.saveWorker({ ...(await tx.resources.getWorker(worker.id))!, connectionState: 'offline' }))
     await store.transaction(async tx => {

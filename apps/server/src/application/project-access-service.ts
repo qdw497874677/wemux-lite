@@ -44,12 +44,46 @@ export class ProjectAccessService {
     const affected = new Set((await this.store.identity.listTeamMemberships(project.teamId)).map(value => value.userId))
     for (const grant of await this.store.identity.listProjectGrants(projectId)) affected.add(grant.userId)
     const updated = await this.store.transaction(async tx => {
-      await tx.resources.saveProject({ ...project, shareScope })
-      await this.audit(tx, actor, 'project.access.update', project, { shareScope })
-      return { ...project, shareScope }
+      const current = await this.requireInTx(tx, actor, projectId, 'manager')
+      await tx.resources.saveProject({ ...current, shareScope })
+      await this.audit(tx, actor, 'project.access.update', current, { shareScope })
+      return { ...current, shareScope }
     })
     for (const userId of affected) this.notifications?.authorization(userId)
     return updated
+  }
+
+  /** The review default is project-scoped, manager-controlled and independently CAS protected. */
+  async updateReviewPolicy(actor: UserId, projectId: ProjectId, input: unknown): Promise<Project & { accessRole: ProjectAccessRole }> {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new AppError(400, 'Invalid Project review policy request', 'invalid_request')
+    const body = input as Record<string, unknown>
+    if (Object.keys(body).some(key => key !== 'reviewPolicy' && key !== 'version') ||
+      typeof body.reviewPolicy !== 'string' || !['none', 'agent', 'human', 'multi-stage'].includes(body.reviewPolicy) ||
+      !Number.isSafeInteger(body.version) || Number(body.version) < 1) throw new AppError(400, 'Review policy and positive version required', 'invalid_request')
+    return this.store.transaction(async tx => {
+      const project = await this.requireInTx(tx, actor, projectId, 'manager')
+      const currentVersion = project.reviewPolicyVersion ?? 1
+      if (body.version !== currentVersion) throw new AppError(409, 'Project review policy changed; refresh before updating', 'project_review_policy_conflict')
+      const reviewPolicy = body.reviewPolicy as NonNullable<Project['reviewPolicy']>
+      if ((project.reviewPolicy ?? 'none') === reviewPolicy) return project
+      // Legacy active Tasks may predate first-Run policy snapshots. Preserve
+      // their old effective requirement before changing this Project default.
+      for (const summary of await tx.tasks.list(projectId)) {
+        const runs = await tx.tasks.runs(summary.id)
+        if ((summary.status === 'backlog' || summary.status === 'todo') && !runs.length) continue
+        const task = await tx.tasks.get(summary.id)
+        if (!task || task.metadataJson.values.reviewPolicy !== undefined) continue
+        // Historical execution without a snapshot cannot prove the former
+        // requirement. Pin the conservative human policy rather than making
+        // a later Project-default change a completion bypass.
+        const inheritedPolicy = runs.length ? 'human' : project.reviewPolicy ?? 'none'
+        await tx.tasks.save({ ...task, metadataJson: { schemaVersion: 1, values: { ...task.metadataJson.values, reviewPolicy: inheritedPolicy, reviewPolicyFrozen: true } } })
+      }
+      const next: Project = { ...project, reviewPolicy, reviewPolicyVersion: currentVersion + 1 }
+      await tx.resources.saveProject(next)
+      await this.audit(tx, actor, 'project.review-policy.update', project, { reviewPolicy, previousPolicy: project.reviewPolicy ?? 'none', version: String(next.reviewPolicyVersion) })
+      return { ...next, accessRole: project.accessRole }
+    })
   }
 
   async grants(actor: UserId, projectId: ProjectId): Promise<readonly ProjectGrant[]> {
@@ -67,6 +101,7 @@ export class ProjectAccessService {
       await tx.identity.saveProjectGrant({ projectId, ...value })
       await this.audit(tx, actor, 'project.grant.save', project, { userId: value.userId, role: value.role })
     })
+    this.notifications?.authorization(value.userId)
     return { projectId, ...value }
   }
 

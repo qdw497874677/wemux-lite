@@ -28,7 +28,7 @@ const taskHandler = (handler: (context: RouteRequestContext, tasks: NonNullable<
     if (context.bearer && !context.loginSession && error instanceof AppError && error.code === 'pat_scope_required' && context.personalAccessTokens) {
       await context.personalAccessTokens.recordFailedAuthentication({ bearer: context.bearer, requiredScope: requiredPatAccess(context.path, context.method), reason: error.code })
     }
-    const failure = error instanceof TaskError ? error : error instanceof AppError ? new TaskError(error.status === 401 ? 'unauthorized' : error.status === 403 ? 'forbidden' : error.status === 404 ? 'not_found' : error.status === 409 ? 'runtime_unavailable' : 'invalid_request', error.message) : null
+    const failure = error instanceof TaskError ? error : error instanceof AppError ? new TaskError(error.status === 401 ? 'unauthorized' : error.status === 403 ? 'forbidden' : error.status === 404 ? 'not_found' : error.status === 409 ? error.code === 'request_id_conflict' ? 'request_id_conflict' : 'runtime_unavailable' : 'invalid_request', error.message) : null
     if (!failure) throw error
     context.json(failure.status, { error: { code: failure.code, message: failure.message, ...(failure.details ? { details: failure.details } : {}) } })
   }
@@ -44,6 +44,7 @@ export const taskRoutes: readonly RouteDescriptor[] = [
   { method: 'GET', pattern: '/projects/:projectId/tasks', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, { items: await tasks.list(context.params.projectId, task) })) },
   { method: 'POST', pattern: '/projects/:projectId/tasks', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(201, await tasks.create(context.params.projectId, await context.readBody(), task))) },
   { method: 'GET', pattern: '/projects/:projectId/tasks/:taskId', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.get(context.params.projectId, context.params.taskId, task))) },
+  { method: 'DELETE', pattern: '/projects/:projectId/tasks/:taskId', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.delete(context.params.projectId, context.params.taskId, await context.readBody(), task))) },
   { method: 'PATCH', pattern: '/projects/:projectId/tasks/:taskId', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.patch(context.params.projectId, context.params.taskId, await context.readBody(), task))) },
   { method: 'POST', pattern: '/projects/:projectId/tasks/:taskId/transition', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.patch(context.params.projectId, context.params.taskId, await context.readBody(), task))) },
   { method: 'POST', pattern: '/projects/:projectId/tasks/:taskId/move', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.patch(context.params.projectId, context.params.taskId, await context.readBody(), task))) },
@@ -58,10 +59,21 @@ export const taskRoutes: readonly RouteDescriptor[] = [
   { method: 'PUT', pattern: '/projects/:projectId/tasks/:taskId/assignment', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.assignment(context.params.projectId, context.params.taskId, await context.readBody(), false, task))) },
   { method: 'DELETE', pattern: '/projects/:projectId/tasks/:taskId/assignment', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.assignment(context.params.projectId, context.params.taskId, await context.readBody(), true, task))) },
   { method: 'GET', pattern: '/projects/:projectId/tasks/:taskId/runs', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, { items: await tasks.runs(context.params.projectId, context.params.taskId, task) })) },
+  { method: 'POST', pattern: '/projects/:projectId/tasks/:taskId/completion', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.complete(context.params.projectId, context.params.taskId, await context.readBody(), task))) },
+  { method: 'POST', pattern: '/projects/:projectId/tasks/:taskId/human-review-submission', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.submitHumanReview(context.params.projectId, context.params.taskId, await context.readBody(), task))) },
+  { method: 'POST', pattern: '/projects/:projectId/tasks/:taskId/human-review-decision', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.decideHumanReview(context.params.projectId, context.params.taskId, await context.readBody(), task))) },
   { method: 'GET', pattern: '/projects/:projectId/tasks/:taskId/runs/:runId', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.run(context.params.projectId, context.params.taskId, context.params.runId, task))) },
   { method: 'POST', pattern: '/projects/:projectId/tasks/:taskId/runs/:runId/cancel', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.cancelRun(context.params.projectId, context.params.taskId, context.params.runId, await context.readBody(), task))) },
   { method: 'GET', pattern: '/projects/:projectId/tasks/:taskId/runs/:runId/review', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, { review: await tasks.review(context.params.projectId, context.params.taskId, context.params.runId, task) })) },
   { method: 'POST', pattern: '/projects/:projectId/tasks/:taskId/runs/:runId/review', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.reviewAction(context.params.projectId, context.params.taskId, context.params.runId, await context.readBody(), task))) },
   { method: 'POST', pattern: '/projects/:projectId/tasks/:taskId/launch', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.launch(context.params.projectId, context.params.taskId, await context.readBody(), task))) },
+  { method: 'GET', pattern: '/projects/:projectId/tasks/:taskId/sessions', auth: 'task', handler: taskHandler(async (context, tasks, task) => {
+    const query = context.url.searchParams, archived = query.get('archived')
+    if (archived !== null && archived !== 'true' && archived !== 'false') throw new TaskError('invalid_request', 'archived must be true or false')
+    context.json(200, { items: await tasks.sessions(context.params.projectId, context.params.taskId, {
+      projectId: query.get('projectId') ?? undefined, workspaceId: query.get('workspaceId') ?? undefined,
+      taskId: query.get('taskId') ?? undefined, archived: archived === null ? undefined : archived === 'true',
+    }, task) })
+  }) },
   { method: 'POST', pattern: '/projects/:projectId/tasks/:taskId/sessions', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(201, await tasks.createSession(context.params.projectId, context.params.taskId, await context.readBody(), task))) },
 ]

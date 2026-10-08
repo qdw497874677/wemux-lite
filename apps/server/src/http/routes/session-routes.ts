@@ -1,6 +1,7 @@
 import type { ApprovalId, CommandId, SessionForkId, SessionId } from '@wemux/domain'
 import { AppError } from '../../application/errors.ts'
 import { integer, object } from '../../application/validation.ts'
+import { createStreamCredentialAuthorizer } from '../stream-credential-authorizer.ts'
 import type { RouteDescriptor, RouteRequestContext } from './types.ts'
 
 const eventCursor = (context: RouteRequestContext): number => {
@@ -13,15 +14,17 @@ export const sessionRoutes: readonly RouteDescriptor[] = [
   { method: 'GET', pattern: '/sessions', auth: 'authenticated', handler: async context => {
     const archived = context.url.searchParams.get('archived')
     if (archived !== null && archived !== 'true' && archived !== 'false') throw new AppError(400, 'archived must be true or false')
+    const projectId = context.url.searchParams.get('projectId'), workspaceId = context.url.searchParams.get('workspaceId'), taskId = context.url.searchParams.get('taskId')
+    const matches = (item: { projectId: string; workspaceId: string; taskId?: string | null }) =>
+      (projectId === null || item.projectId === projectId) && (workspaceId === null || item.workspaceId === workspaceId) && (taskId === null || item.taskId === taskId)
     if (!context.projects || !context.sessionAccess) {
       await context.operator()
-      const projectId = context.url.searchParams.get('projectId'), workspaceId = context.url.searchParams.get('workspaceId')
       const items = await Promise.all((await context.service.listSessions({ archived: archived === null ? undefined : archived === 'true' })).map(session => context.service.sessionView(session.id)))
-      context.json(200, { items: workspaceId ? items.filter(item => item.workspaceId === workspaceId) : projectId ? items.filter(item => item.projectId === projectId) : items }); return
+      context.json(200, { items: items.filter(matches) }); return
     }
     const actor = await context.actor(), authorized = await context.projects.list(actor, context.url.searchParams.get('teamId') ?? undefined)
     const allowed = new Set(authorized.map(project => project.id))
-    const items = (await context.sessionAccess.list(actor)).filter(item => allowed.has(item.projectId) && (archived === null || Boolean(item.archivedAt) === (archived === 'true')))
+    const items = (await context.sessionAccess.list(actor)).filter(item => allowed.has(item.projectId) && matches(item) && (archived === null || Boolean(item.archivedAt) === (archived === 'true')))
     context.json(200, { items: await Promise.all(items.map(item => context.service.sessionView(item.id, actor))) })
   } },
   { method: 'POST', pattern: '/sessions', auth: 'authenticated', handler: async context => {
@@ -68,13 +71,10 @@ export const sessionRoutes: readonly RouteDescriptor[] = [
     context.json(200, await context.sessionFiles.read(id, subpath, maxBytes))
   } },
   { method: 'POST', pattern: '/sessions/:sessionId/fs/write', auth: 'authenticated', handler: async context => {
-    if (!context.sessionFiles) throw new AppError(404, 'Not found')
-    const id = context.params.sessionId as SessionId
-    if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.operator()
-    const body = object(await context.readBody()), subpath = body.subpath, base64Content = body.base64Content
-    if (typeof subpath !== 'string' || !subpath || subpath.length > 4096 || subpath.includes('\0')) throw new AppError(400, 'Invalid subpath')
-    if (typeof base64Content !== 'string' || base64Content.length > Math.ceil((10 * 1024 * 1024) / 3) * 4 + 4) throw new AppError(400, 'Invalid base64Content')
-    context.json(200, await context.sessionFiles.write(id, subpath, base64Content))
+    // 平台鉴权保持匿名/失效凭据401，不能因关闭写入而省略。
+    await context.actor()
+    // 先于注入、资源授权、存在性与Task生命周期判定，已认证调用方统一403，不构成oracle。
+    throw new AppError(403, '平台当前未开放文件和终端写入通道。', 'write_channel_closed')
   } },
   { method: 'POST', pattern: '/sessions/:sessionId/fs/diff', auth: 'authenticated', handler: async context => {
     if (!context.sessionFiles) throw new AppError(404, 'Not found')
@@ -85,38 +85,47 @@ export const sessionRoutes: readonly RouteDescriptor[] = [
     context.json(200, await context.sessionFiles.diff(id, subpath))
   } },
   { method: 'POST', pattern: '/sessions/:sessionId/terminal', auth: 'authenticated', handler: async context => {
-    if (!context.sessionTerminals) throw new AppError(404, 'Not found')
-    const id = context.params.sessionId as SessionId
-    if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.operator()
-    const body = object(await context.readBody())
-    context.json(201, await context.sessionTerminals.request(id, { operation: 'create', cols: integer(body.cols ?? 80, 'cols', 2, 500), rows: integer(body.rows ?? 24, 'rows', 2, 300) }))
+    // 平台鉴权保持匿名/失效凭据401，不能因关闭写入而省略。
+    await context.actor()
+    // 先于注入、资源授权、存在性与Task生命周期判定，已认证调用方统一403，不构成oracle。
+    throw new AppError(403, '平台当前未开放文件和终端写入通道。', 'write_channel_closed')
   } },
   { method: 'POST', pattern: '/sessions/:sessionId/terminal/:terminalId/write', auth: 'authenticated', handler: async context => {
-    if (!context.sessionTerminals) throw new AppError(404, 'Not found')
-    const id = context.params.sessionId as SessionId
-    if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.operator()
-    const body = object(await context.readBody())
-    if (typeof body.data !== 'string' || body.data.length > 65536) throw new AppError(400, 'Invalid terminal input')
-    context.json(200, await context.sessionTerminals.request(id, { operation: 'write', terminalId: context.params.terminalId!, data: body.data }))
+    // 平台鉴权保持匿名/失效凭据401，不能因关闭写入而省略。
+    await context.actor()
+    // 先于注入、资源授权、存在性与Task生命周期判定，已认证调用方统一403，不构成oracle。
+    throw new AppError(403, '平台当前未开放文件和终端写入通道。', 'write_channel_closed')
   } },
   { method: 'POST', pattern: '/sessions/:sessionId/terminal/:terminalId/resize', auth: 'authenticated', handler: async context => {
-    if (!context.sessionTerminals) throw new AppError(404, 'Not found')
-    const id = context.params.sessionId as SessionId
-    if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.operator()
-    const body = object(await context.readBody())
-    context.json(200, await context.sessionTerminals.request(id, { operation: 'resize', terminalId: context.params.terminalId!, cols: integer(body.cols, 'cols', 2, 500), rows: integer(body.rows, 'rows', 2, 300) }))
+    // 平台鉴权保持匿名/失效凭据401，不能因关闭写入而省略。
+    await context.actor()
+    // 先于注入、资源授权、存在性与Task生命周期判定，已认证调用方统一403，不构成oracle。
+    throw new AppError(403, '平台当前未开放文件和终端写入通道。', 'write_channel_closed')
   } },
   { method: 'POST', pattern: '/sessions/:sessionId/terminal/:terminalId/dispose', auth: 'authenticated', handler: async context => {
-    if (!context.sessionTerminals) throw new AppError(404, 'Not found')
-    const id = context.params.sessionId as SessionId
-    if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.operator()
-    context.json(200, await context.sessionTerminals.request(id, { operation: 'dispose', terminalId: context.params.terminalId! }))
+    // 平台鉴权保持匿名/失效凭据401，不能因关闭写入而省略。
+    await context.actor()
+    // 先于注入、资源授权、存在性与Task生命周期判定，已认证调用方统一403，不构成oracle。
+    throw new AppError(403, '平台当前未开放文件和终端写入通道。', 'write_channel_closed')
   } },
   { method: 'GET', pattern: '/sessions/:sessionId/terminal/stream', auth: 'authenticated', handler: async context => {
     if (!context.terminalStreams) throw new AppError(404, 'Not found')
     const id = context.params.sessionId as SessionId
-    if (context.sessionAccess) await context.sessionAccess.require(await context.actor(), id); else await context.service.getSession(id)
-    context.terminalStreams.open(context.response, id)
+    const actor = await context.actor('read')
+    const authorizeCredential = createStreamCredentialAuthorizer(context, actor, 'read')
+    const authorize = async () => {
+      await authorizeCredential()
+      const session = context.sessionAccess ? await context.sessionAccess.require(actor, id) : await context.service.getSession(id)
+      if (session.taskId && context.tasks) {
+        const task = await context.tasks.get(session.projectId, session.taskId, { actor, requestId: `terminal-stream:${id}` })
+        if (task.deletedAt) throw new AppError(404, 'Task deleted')
+      }
+      const worker = await context.service.getWorker(session.binding.agent.workerId)
+      if (worker.connectionState === 'revoked') throw new AppError(403, 'Worker revoked')
+      return session
+    }
+    const session = await authorize()
+    context.terminalStreams.open(context.response, id, actor, session.projectId, authorize)
   } },
   { method: 'POST', pattern: '/sessions/:sessionId/messages', auth: 'authenticated', handler: async context => {
     const actor = context.sessionAccess ? await context.actor() : (await context.operator(), undefined)
@@ -146,9 +155,12 @@ export const sessionRoutes: readonly RouteDescriptor[] = [
   } },
   { method: 'GET', pattern: '/sessions/:sessionId/stream', auth: 'authenticated', handler: async context => {
     const id = context.params.sessionId as SessionId
-    const actor = context.sessionAccess ? await context.actor() : (await context.operator(), undefined)
-    if (context.sessionAccess) await context.sessionAccess.require(actor!, id); else await context.service.getSession(id)
-    context.streams.open(context.response, id, eventCursor(context), actor, actor && context.bearer && !context.loginSession ? () => context.auth.actor(context.credential, 'read') : undefined)
+    const credentialActor = context.sessionAccess ? await context.actor() : await context.operator()
+    const actor = context.sessionAccess ? credentialActor : undefined
+    const authorizeResource = () => context.sessionAccess ? context.sessionAccess.require(credentialActor, id) : context.service.getSession(id)
+    const authorizeCredential = createStreamCredentialAuthorizer(context, credentialActor, 'read', !context.sessionAccess)
+    await authorizeResource()
+    context.streams.open(context.response, id, eventCursor(context), actor, authorizeCredential, authorizeResource, credentialActor)
   } },
   { method: 'GET', pattern: '/sessions/:sessionId/lineage', auth: 'admin', handler: async context => {
     if (!context.lineage) throw new AppError(404, 'Not found')

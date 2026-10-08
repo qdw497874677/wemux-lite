@@ -210,24 +210,45 @@ export class IdentityService {
   /** 解析 Cookie 令牌；无效、被撤销或过期都返回 null，不区分原因以免探测。 */
   async resolveSession(token: string | undefined): Promise<LoginSession | null> {
     if (!token || token.length > 200) return null
-    const session = await this.store.identity.findLoginSessionByTokenHash(hashSecret(token))
-    if (!session || session.revokedAt !== null) return null
-    const user = await this.store.identity.getUser(session.userId)
-    if (!user || (user.status ?? 'active') !== 'active' || (user.authVersion !== undefined && (session.authVersion ?? 0) !== user.authVersion)) return null
-    const now = this.clock.now().getTime()
-    if (now >= Date.parse(session.absoluteExpiresAt) || now >= Date.parse(session.idleExpiresAt)) return null
-    return session
+    const tokenHash = hashSecret(token)
+    const read = async (identity: ServerStore['identity']): Promise<'missing' | 'rejected' | LoginSession> => {
+      const session = await identity.findLoginSessionByTokenHash(tokenHash)
+      if (!session) return 'missing'
+      if (session.revokedAt !== null) return 'rejected'
+      const user = await identity.getUser(session.userId)
+      if (!user || (user.status ?? 'active') !== 'active' || (user.authVersion !== undefined && (session.authVersion ?? 0) !== user.authVersion)) return 'rejected'
+      const now = this.clock.now().getTime()
+      if (now >= Date.parse(session.absoluteExpiresAt) || now >= Date.parse(session.idleExpiresAt)) return 'rejected'
+      return session
+    }
+    const resolved = await read(this.store.identity)
+    // Renewal cannot create a missing row or change an existing row's token hash.
+    if (resolved === 'missing') return null
+    if (resolved !== 'rejected') return resolved
+    // Only a candidate rejection pays for BEGIN IMMEDIATE. A renewal may have
+    // committed while the user read waited; recheck records and time in one FIFO lease.
+    return this.store.transaction(async tx => {
+      const rechecked = await read(tx.identity)
+      return typeof rechecked === 'string' ? null : rechecked
+    })
   }
 
   /** 空闲窗口滑动：仅在超过 touch 间隔时写一次，且不越过绝对期限。 */
   async touch(session: LoginSession): Promise<LoginSession> {
-    const now = this.clock.now().getTime()
-    if (now >= Date.parse(session.absoluteExpiresAt)) throw new AppError(401, 'Unauthorized')
-    if (now - Date.parse(session.lastSeenAt) < this.policy.touchIntervalMs) return session
-    const idleExpiresAt = new Date(Math.min(now + this.policy.idleMs, Date.parse(session.absoluteExpiresAt) - 1))
-    const lastSeenAt = timestamp(new Date(now))
-    await this.store.transaction(tx => tx.identity.touchLoginSession({ id: session.id, lastSeenAt, idleExpiresAt: timestamp(idleExpiresAt) }))
-    return { ...session, lastSeenAt, idleExpiresAt: timestamp(idleExpiresAt) }
+    return this.store.transaction(async tx => {
+      // Read after the FIFO wait: another request may have renewed or revoked this snapshot.
+      const current = await tx.identity.getLoginSession(session.id)
+      const now = this.clock.now().getTime()
+      if (!current || current.revokedAt !== null || now >= Date.parse(current.absoluteExpiresAt) || now >= Date.parse(current.idleExpiresAt)) throw new AppError(401, 'Unauthorized')
+      if (now - Date.parse(current.lastSeenAt) < this.policy.touchIntervalMs) return current
+      const idleExpiresAt = timestamp(new Date(Math.min(
+        Math.max(Date.parse(current.idleExpiresAt), now + this.policy.idleMs),
+        Date.parse(current.absoluteExpiresAt) - 1,
+      )))
+      const lastSeenAt = timestamp(new Date(now))
+      await tx.identity.touchLoginSession({ id: current.id, lastSeenAt, idleExpiresAt })
+      return { ...current, lastSeenAt, idleExpiresAt }
+    })
   }
 
   /**

@@ -212,6 +212,7 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<boolea
     const query = new URL(request.url ?? '/', 'http://localhost').searchParams
     let location = '/'
     const intentCookieValue = readCookie(request.headers.cookie, oauthIntentCookieName)
+    const recovery = await google.callbackRecovery(query.get('state'), readCookie(request.headers.cookie, oauthStateCookieName))
     // 回调是浏览器流：两个短时 Cookie 无论成败都不留给下一次。
     const clearOauthCookies = (): void => {
       response.setHeader('Set-Cookie', [
@@ -242,7 +243,9 @@ export async function handleAuthRoute(context: AuthRouteContext): Promise<boolea
       if (!(error instanceof AppError)) throw error
       clearOauthCookies()
       const failure = error.code ?? 'oauth_failed'
-      location = intentCookieValue === 'link' ? withQuery('/settings', { link_error: failure }) : withQuery('/', { oauth_error: failure })
+      location = recovery
+        ? withQuery(recovery.path, recovery.intent === 'link' ? { link_error: failure } : { oauth_error: failure })
+        : intentCookieValue === 'link' ? withQuery('/settings', { link_error: failure }) : withQuery('/', { oauth_error: failure })
     }
     // 302 而非 307：回调是 GET 且目标由服务端决定，不携带原始查询与授权码。
     response.writeHead(302, { Location: location, 'Cache-Control': 'no-store' })

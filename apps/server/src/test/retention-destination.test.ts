@@ -24,7 +24,11 @@ for (const side of ['server', 'worker'] as const) test(`built ${side} UPDATE OR 
       if (side === 'server') db.prepare("INSERT INTO records(kind,id,data) VALUES('session','live',?)").run(JSON.stringify({ id: 'live', deletedAt: null }))
       // Reconstruct the previous version to exercise upgrade installation too.
       db.exec(`DROP TRIGGER IF EXISTS ${side === 'server' ? 'session_record_destination' : 'tombstone_destination'}`)
-      if (side === 'worker') db.exec('DROP TABLE provider_credentials') // v5 table did not exist in v2.
+      if (side === 'worker') {
+        // A v2 fixture must not retain tables installed by schemas 5–7;
+        // simply lowering user_version on a current database is not an upgrade.
+        db.exec('DROP TABLE worker_file_result_delivery; DROP TABLE worker_file_results; DROP TABLE worker_file_admissions; DROP TABLE provider_credentials')
+      }
       db.exec(side === 'server' ? 'DELETE FROM schema_migrations WHERE version=10' : 'PRAGMA user_version=2')
       for (let restart = 0; restart < 2; restart++) {
         new Store(path).close()

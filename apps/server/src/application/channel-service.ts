@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto'
-import type { ProjectId, Timestamp, UserId } from '@wemux/domain'
+import type { ProjectId, SessionId, Timestamp, UserId } from '@wemux/domain'
 import type { Channel, ChannelBinding, ChannelBindingId, ChannelId, ConnectorCredentialId, DingTalkChannel, FeishuChannel, GenericWebhookChannel } from '@wemux/connector'
 import { stableFingerprint, type SecretCodec } from '@wemux/connector'
 import type { ChannelBindingMutationResult, ChannelBindingView, ChannelMutationResult, OutboundDelivery } from '@wemux/server-domain'
@@ -30,8 +30,55 @@ constructor(
     this.repository = repository; this.codec = codec; this.projects = projects; this.sessions = sessions; this.workers = workers; this.adapterFor = adapterFor;}
 
   async list(actorId: UserId, projectId: ProjectId): Promise<readonly Channel[]> { await this.projects.require(actorId, projectId, 'viewer'); return this.repository.listChannels(projectId) }
-  async bindings(actorId: UserId, projectId: ProjectId, channelId?: ChannelId): Promise<readonly ChannelBindingView[]> { await this.projects.require(actorId, projectId, 'viewer'); return this.repository.listBindings(projectId, channelId) }
-  async deliveries(actorId: UserId, projectId: ProjectId): Promise<{ inbound: readonly import('@wemux/server-domain').InboundDelivery[]; outbound: readonly OutboundDelivery[] }> { await this.projects.require(actorId, projectId, 'viewer'); return { inbound: await this.repository.listInbound(projectId, 100), outbound: await this.repository.listOutbound(projectId, 100) } }
+  async bindings(actorId: UserId, projectId: ProjectId, channelId?: ChannelId): Promise<readonly ChannelBindingView[]> {
+    const project = await this.projects.require(actorId, projectId, 'viewer')
+    if (project.accessRole !== 'manager' && project.accessRole !== 'owner') return []
+    const visible: ChannelBindingView[] = []
+    for (const record of await this.repository.listBindings(projectId, channelId)) {
+      if (await this.canReadSession(actorId, projectId, record.binding.sessionId)) visible.push(record)
+    }
+    return visible
+  }
+
+  async deliveries(actorId: UserId, projectId: ProjectId): Promise<{ inbound: readonly import('@wemux/server-domain').InboundDelivery[]; outbound: readonly OutboundDelivery[] }> {
+    const project = await this.projects.require(actorId, projectId, 'viewer')
+    const inbound: import('@wemux/server-domain').InboundDelivery[] = [], outbound: OutboundDelivery[] = []
+    if (project.accessRole !== 'manager' && project.accessRole !== 'owner') return { inbound, outbound }
+    for (const delivery of await this.repository.listInbound(projectId, 100)) {
+      if (delivery.sessionId !== null) {
+        if (await this.canReadSession(actorId, projectId, delivery.sessionId)) inbound.push(delivery)
+      } else {
+        // Deletion removes bindings, so historical Session access cannot be established.
+        if (delivery.channelDeleted) continue
+        // Pending or rejected messages may not yet have persisted their Session binding.
+        const record = delivery.bindingId !== null
+          ? await this.repository.getBinding(delivery.bindingId)
+          : await this.repository.findBinding(delivery.channelId, delivery.externalConversationKey)
+        if (record) {
+          if (await this.canReadSession(actorId, projectId, record.binding.sessionId)) inbound.push(delivery)
+        } else if (delivery.bindingId === null) {
+          // Unbound, project-level diagnostics remain available to managers.
+          inbound.push(delivery)
+        }
+      }
+    }
+    for (const delivery of await this.repository.listOutbound(projectId, 100)) {
+      if (await this.canReadSession(actorId, projectId, delivery.sessionId)) outbound.push(delivery)
+    }
+    return { inbound, outbound }
+  }
+
+  async delivery(actorId: UserId, projectId: ProjectId, deliveryId: string): Promise<OutboundDelivery> {
+    await this.projects.require(actorId, projectId, 'manager')
+    const delivery = await this.repository.getProjectOutbound(projectId, deliveryId)
+    if (!delivery || delivery.projectId !== projectId || !await this.canReadSession(actorId, projectId, delivery.sessionId)) throw new AppError(404, 'Outbound delivery not found', 'delivery_not_found')
+    return delivery
+  }
+
+  private async canReadSession(actorId: UserId, projectId: ProjectId, sessionId: SessionId): Promise<boolean> {
+    try { return (await this.sessions.require(actorId, sessionId, 'read')).projectId === projectId }
+    catch (error) { if (error instanceof AppError && error.status === 404) return false; throw error }
+  }
 
   async create(actorId: UserId, input: WriteInput & ({ readonly kind?: 'generic_webhook'; readonly name: string; readonly callbackUrl: string | null; readonly sourceCidrs: readonly string[] } | { readonly kind: 'feishu'; readonly name: string; readonly appId: string; readonly appSecret: string; readonly verificationToken: string; readonly encryptKey: string | null } | { readonly kind: 'dingtalk'; readonly name: string; readonly clientId: string; readonly clientSecret: string; readonly robotCode: string })): Promise<ChannelMutationResult> {
     await this.projects.require(actorId, input.projectId, 'manager')

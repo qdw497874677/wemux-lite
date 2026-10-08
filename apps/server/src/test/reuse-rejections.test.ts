@@ -9,6 +9,7 @@ import { SqliteServerStore } from '../storage/sqlite/store.js'
 import { ServerService } from '../application/server-service.js'
 import { TaskService, TaskError } from '../application/task-service.js'
 import { Notifications } from '../application/notifications.js'
+import { sessionIdleReason } from '../application/session-idle.js'
 import { seedOperator, instanceOperatorId } from './fixtures/administrator.js'
 
 const context = { actor: instanceOperatorId, requestId: 'reuse-matrix' }
@@ -17,7 +18,8 @@ const stale = 'Session Journal is not fresh; wait for synchronization; explicitl
 const busy = 'Session has queued messages or a running Turn; explicitly confirm a new Session'
 const runtime = 'Worker must be online with an available execution Agent and reported Model'
 const cases = [
-  ['eligible', null, null],
+  ['historical Run Session with idle Journal', null, null],
+  ['unreferenced Task Session', 'reuse_ineligible', mismatch],
   ['wrong owner', 'reuse_ineligible', mismatch],
   ['wrong project', 'reuse_ineligible', mismatch],
   ['wrong task provenance', 'reuse_ineligible', mismatch],
@@ -55,10 +57,10 @@ for (const [name, code, message] of cases) test(`public reuse rejection matrix: 
     await store.transaction(tx => tx.resources.saveWorkspace({ ...workspace, status: 'ready' }))
     const assignment = { workspaceId: workspace.id, workerId: worker.id, agentKey: 'test', modelId: 'model' }
     await tasks.assignment(task.projectId, task.id, { version: 1, assignee: assignment }, false, context)
-    const { session: eligible } = await tasks.createSession(task.projectId, task.id, { title: 'Eligible Task Session' }, context)
+    const { session: eligible } = await tasks.createSession(task.projectId, task.id, { title: 'Eligible Task Session', requestId: 'eligible-session' }, context)
     // Immutable bindings/provenance cannot be corrupted by UPDATE. Construct each
     // candidate from the same eligible Session before its first persisted insert.
-    const candidate = structuredClone({ ...eligible, id: 'candidate' as SessionId, ownerId: context.actor, shareScope: 'owner-only' as const, binding: { ...eligible.binding, agent: { ...eligible.binding.agent } } })
+    const candidate = structuredClone({ ...eligible, id: 'candidate' as SessionId, creation: undefined, ownerId: context.actor, shareScope: 'owner-only' as const, binding: { ...eligible.binding, agent: { ...eligible.binding.agent } } })
     if (name === 'wrong owner') candidate.ownerId = 'another-owner' as UserId
     if (name === 'wrong task provenance' || name === 'wrong project') {
       let projectId = task.projectId
@@ -81,6 +83,21 @@ for (const [name, code, message] of cases) test(`public reuse rejection matrix: 
     if (name === 'Worker binding mismatch') candidate.binding.agent.workerId = 'other-worker' as typeof worker.id
     if (name !== 'missing Session') await store.transaction(tx => tx.resources.saveSession(candidate))
     if (name !== 'unknown Journal') await store.transaction(tx => tx.cache.recordWorkerHead(candidate.id, 0 as EventSeq))
+    // Healthy matrix rows need actual Run provenance so idle/runtime checks
+    // cannot pass merely because a raw Task Session exists. Invalid Session
+    // metadata either cannot be enqueued or violates SQL Run binding guards.
+    const invalidRunBinding = ['workspace binding mismatch', 'agent binding mismatch', 'model binding mismatch', 'Worker binding mismatch'].includes(name)
+    if (name !== 'unreferenced Task Session' && name !== 'missing Session' && name !== 'missing provenance' && name !== 'wrong project' && name !== 'deleted Session' && !invalidRunBinding) {
+      const queued = await server.enqueue(candidate.id, { content: 'Historical submission' })
+      await store.transaction(async tx => {
+        await tx.commands.recordReceipt({ commandId: queued.commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Not queued', retryable: false } }, at)
+        const priorTaskId = candidate.taskId ?? task.id
+        await tx.tasks.saveRun({ id: `historical-${name}`, taskId: priorTaskId, projectId: candidate.projectId, requestId: `historical-${name}`, attempt: 1,
+          sessionId: candidate.id, snapshot: assignment, status: 'failed', request: { requestId: `historical-${name}`, mode: 'reuse', reuseSessionId: candidate.id, prompt: 'Historical submission', assignment }, fingerprint: 'a'.repeat(64),
+          createdAt: at, startedAt: at, finishedAt: at, cancelRequestedAt: null, createCommandId: null, enqueueCommandId: queued.commandId,
+          messageId: null, turnId: null, cancelCommandIds: [], failure: { code: 'invalid-input', message: 'Not queued' }, resultSummary: null, lastProjectedSeq: 0 })
+      })
+    }
     if (name === 'Worker offline') await store.transaction(async tx => { const current = (await tx.resources.getWorker(worker.id))!; await tx.resources.saveWorker({ ...current, connectionState: 'offline' }) })
     if (name === 'Worker active Session invocation') await store.transaction(tx => tx.resources.saveSession({ ...eligible, runtimeState: 'running' }))
     const event = (seq: number, payload: JournalEvent['payload']): JournalEvent => ({ sessionId: candidate.id, seq: seq as EventSeq, occurredAt: at, payload })
@@ -112,6 +129,13 @@ for (const [name, code, message] of cases) test(`public reuse rejection matrix: 
         await store.transaction(tx => tx.commands.recordReceipt({ commandId: cancelled.run.cancelCommandIds[0] as CommandId, status: 'accepted' }, at))
         assert.equal((await store.tasks.run(run.id))!.status, 'cancelling')
       }
+    }
+    if (name === 'historical Run Session with idle Journal' || name === 'unreferenced Task Session') {
+      const historical = await store.tasks.runs(task.id)
+      assert.equal(historical.length, name === 'historical Run Session with idle Journal' ? 1 : 0)
+      if (historical.length) { assert.equal(historical[0]!.sessionId, candidate.id); assert.equal(historical[0]!.status, 'failed') }
+      assert.equal((await store.cache.getFreshness(candidate.id))?.status, 'synced')
+      assert.equal(await store.transaction(tx => sessionIdleReason(tx, candidate.id)), null)
     }
     const seen: string[] = []
     for (const id of [worker.id, candidate.binding.agent.workerId, 'unrelated-worker' as typeof worker.id]) signals.onCommands(id, () => { seen.push(`commands:${id}`) })

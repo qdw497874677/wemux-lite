@@ -107,6 +107,7 @@ export class SessionAccessService {
       await tx.identity.saveSessionGrant(grant)
       await this.audit(tx, actor, 'session.grant.save', sessionId, { userId })
     })
+    this.notifications?.authorization(userId)
     return grant
   }
 

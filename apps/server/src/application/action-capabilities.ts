@@ -1,3 +1,5 @@
+import { AppError } from './errors.ts'
+import { assertSessionTaskMutable } from './task-lifecycle.ts'
 import { evaluateCapability, taskStatuses, type TaskDetail, type Run, type CapabilityFacts, type TaskCapabilities, type RunCapabilities, type ActionCapability } from '@wemux/web-contract/task-platform'
 import type { SessionId, WorkerId, WorkspaceId, ProjectId } from '@wemux/domain'
 import type { ServerStoreTx } from './ports/server-store.ts'
@@ -9,8 +11,15 @@ export async function taskFacts(tx: ServerStoreTx, task: TaskDetail, actor: stri
   const worker = a && typeof a.workerId === 'string' ? await tx.resources.getWorker(a.workerId as WorkerId) : null
   const project = await tx.resources.getProject(task.projectId as ProjectId)
   const runs = await tx.tasks.runs(task.id)
+  // An executed record predating review snapshots cannot prove which Project
+  // default applied at its first Run. Never interpret an absent snapshot as
+  // today's (possibly lowered) default when advertising permissions.
+  const inheritedPolicy = runs.length > 0 ? 'human' : project?.reviewPolicy ?? 'none'
+  const values = task.metadataJson?.values
+  const effectiveTask = values && typeof values === 'object' && !Array.isArray(values) && values.reviewPolicy === undefined
+    ? { ...task, metadataJson: { ...task.metadataJson, values: { ...values, reviewPolicy: inheritedPolicy } } } : task
   const run = runs.reduce<Run | undefined>((last, value) => !last || value.attempt > last.attempt ? value : last, undefined)
-  return { task, actor, runs, run, review: task.currentReviewId ? await tx.tasks.reviewById(task.currentReviewId) : run ? await tx.tasks.review(run.id) : null, workspace, worker, teamId: project?.teamId,
+  return { task: effectiveTask, actor, runs, run, review: task.currentReviewId ? await tx.tasks.reviewById(task.currentReviewId) : run ? await tx.tasks.review(run.id) : null, workspace, worker, teamId: project?.teamId,
     binding: workspace ? await tx.tasks.binding(workspace.id) : null }
 }
 export async function reuseFacts(tx: ServerStoreTx, facts: CapabilityFacts, sessionId: string): Promise<CapabilityFacts> {
@@ -26,7 +35,7 @@ export async function taskCapabilities(tx: ServerStoreTx, task: TaskDetail, acto
   const reuse: Record<string, ActionCapability> = {}
   const sessions = await tx.resources.listSessions()
   const runs = facts.runs as Run[]
-  for (const session of sessions) if (session.projectId === task.projectId && (session.taskId === task.id || runs.some(run => run.sessionId === session.id))) {
+  for (const session of sessions) if (session.projectId === task.projectId && session.taskId === task.id && runs.some(run => run.taskId === task.id && run.sessionId === session.id)) {
     reuse[session.id] = evaluateCapability('launch_reuse', await reuseFacts(tx, facts, session.id))
   }
   return { transitions, launchNew: evaluateCapability('launch_new', facts), reuse }
@@ -40,5 +49,9 @@ export async function sendCapability(tx: ServerStoreTx, session: import('@wemux/
   const workerId = session.binding?.agent?.workerId
   const worker = typeof workerId === 'string' ? await tx.resources.getWorker(workerId) : null
   const project = await tx.resources.getProject(session.projectId)
+  try { await assertSessionTaskMutable(tx, session) } catch (error) {
+    if (!(error instanceof AppError) || error.code !== 'task_deleted') throw error
+    return { allowed: false, reasonCode: 'task_deleted', reason: error.message }
+  }
   return evaluateCapability('send', { session, workspace, worker, teamId: project?.teamId })
 }

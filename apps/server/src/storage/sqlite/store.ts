@@ -1,11 +1,16 @@
 import { validReviewMetadata } from '@wemux/web-contract/task-platform'
+import { parseFileWriteResult } from '@wemux/wire-protocol/file-admission-node'
+import { FileWriteResultRejectedError, validateFileWriteResult, fileWriteWireAdmission, snapshotFileWriteResult } from '../../application/file-write-results.ts'
+import type { FileWriteAdmission } from '../../application/ports/file-write-admission.ts'
 import type { DatabaseSync } from 'node:sqlite'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import type { AgentInboxMessage, CapabilityAsset, EventSeq, JournalEvent, ProjectId, SessionId, TeamId, Timestamp, WorkerId } from '@wemux/domain'
+import type { AgentInboxMessage, CapabilityAsset, EventSeq, JournalEvent, ProjectId, SessionId, TeamId, Timestamp, WorkerId, WorkspaceId } from '@wemux/domain'
 import type { AuditEntry, AuditPage, AuditQuery, CommandProjection, EnrollmentTokenRecord, ExternalLoginIdentity, Membership, OAuthTransaction, PersonalAccessTokenRecord, RegistrationAttempt, SessionCacheState, SessionForkRecord, TeamInvitation, User, UserEmail, VerificationChallenge, VerificationPurpose, Worker, WorkerCredentialRecord, Workspace } from '@wemux/server-domain'
 import type { ServerStore, ServerStoreTx } from '../../application/ports/server-store.ts'
 import type { PendingCommand } from '../../application/ports/server-store-types.ts'
+import type { WorkspacePreparationProof, WorkspacePreparationProofIdentity } from '../../application/ports/workspace-preparation-proof.ts'
 import { AppError } from '../../application/errors.ts'
+import { listAccessibleProjectIds } from './accessible-projects.ts'
 import { resolveSqliteDatabase, type SharedSqliteDatabase, type SqliteDatabaseSource } from './shared-database.ts'
 
 /** One Fork per (Project, requestId): the idempotency index row points at the winning Fork. */
@@ -31,6 +36,7 @@ export class SqliteServerStore implements ServerStore {
       },
     })
     return {
+      fileWrites: guard(this.tx.fileWrites),
       tasks: guard(this.tx.tasks), identity: guard(this.tx.identity), resources: guard(this.tx.resources),
       commands: guard(this.tx.commands), cache: guard(this.tx.cache), audit: guard(this.tx.audit),
     }
@@ -239,7 +245,21 @@ export class SqliteServerStore implements ServerStore {
     findWorkerCredential: async hash => this.list<WorkerCredentialRecord>('worker-credential').find(r => r.credentialHash === hash) ?? null,
   }
   readonly identity = this.committed(this.identityReader)
+  private workspacePreparationProof(identity: WorkspacePreparationProofIdentity): WorkspacePreparationProof | null {
+    // commandId is globally unique; storing by it prevents a second owner from
+    // creating another historical identity for the same preparation command.
+    const proof = this.get<WorkspacePreparationProof>('workspace-preparation-proof', identity.commandId)
+    if (proof && (proof.commandId !== identity.commandId || proof.workerId !== identity.workerId || proof.workspaceId !== identity.workspaceId || (proof.status !== 'ready' && proof.status !== 'failed') || typeof proof.occurredAt !== 'string' || !Number.isFinite(Date.parse(proof.occurredAt)))) throw new AppError(409, 'Workspace preparation proof identity is corrupt or conflicting')
+    return proof
+  }
   private readonly resourceReader: ServerStore['resources'] = {
+    getWorkspaceVisibility: async (actorId, workspaceId) => {
+      const row = this.db.prepare('SELECT hidden,revision FROM workspace_account_visibility WHERE account_id=? AND workspace_id=?').get(actorId, workspaceId)
+      return row ? { workspaceId, hidden: Boolean(row.hidden), revision: Number(row.revision) } : null
+    },
+    listWorkspaceVisibility: async actorId => this.db.prepare('SELECT workspace_id,hidden,revision FROM workspace_account_visibility WHERE account_id=?').all(actorId).map(row => ({ workspaceId: String(row.workspace_id) as WorkspaceId, hidden: Boolean(row.hidden), revision: Number(row.revision) })),
+    getWorkspacePreparationProof: async identity => this.workspacePreparationProof(identity),
+    getCreateRequest: async key => this.get('create-request', key),
     getWorker: async id => this.get('worker', id), getProject: async id => this.get('project', id),
     getRepository: async id => this.get('repository', id), getWorkspace: async id => this.workspace(id), getSession: async id => this.get('session', id),
     getSessionByCreateRequest: async (ownerId, projectId, requestId) => this.list<import('@wemux/server-domain').Session>('session').find(session => session.ownerId === ownerId && session.projectId === projectId && session.creation?.requestId === requestId) ?? null,
@@ -252,6 +272,7 @@ export class SqliteServerStore implements ServerStore {
       return forkId ? this.get<SessionForkRecord>('session-fork', forkId) : null
     },
     listWorkers: async () => this.list('worker'), listProjects: async () => this.list('project'),
+    listAccessibleProjectIds: async (actorId, scopedProjectId) => listAccessibleProjectIds(this.db, actorId, scopedProjectId),
     listWorkspaces: async () => this.workspaces(), listSessions: async () => this.list('session'),
     listCapabilityAssets: async projectId => this.get<CapabilityAsset[]>('capability-assets', projectId) ?? [],
     listAgentInboxMessages: async (sessionId, unreadOnly) => this.list<AgentInboxMessage>('agent-inbox').filter(message => message.toSessionId === sessionId && (!unreadOnly || message.status !== 'read')),
@@ -263,8 +284,13 @@ export class SqliteServerStore implements ServerStore {
     return row ? JSON.parse(String(row.projection)) as CommandProjection : null
   }
   private readonly commandReader: ServerStore['commands'] = {
+    getRejection: async id => {
+      const row = this.db.prepare('SELECT data FROM command_rejections WHERE id=?').get(id)
+      return row ? JSON.parse(String(row.data)) : null
+    },
     getPendingCommand: async id => { const row = this.db.prepare('SELECT data FROM commands WHERE id=?').get(id); return row ? JSON.parse(String(row.data)) : null },
     get: async id => this.commandProjection(id),
+    listWorkspaceProvisions: async id => this.db.prepare("SELECT data FROM commands WHERE json_extract(data,'$.command.kind')='workspace.provision' AND json_extract(data,'$.command.workspace.workspace.id')=? ORDER BY rowid").all(id).map(row => JSON.parse(String(row.data)) as PendingCommand),
     hasProvisionAttempt: async id => Boolean(this.db.prepare("SELECT 1 FROM commands WHERE json_extract(data,'$.command.kind')='workspace.provision' AND json_extract(data,'$.command.workspace.workspace.id')=? LIMIT 1").get(id)),
     listUnsettledEnqueues: async id => this.db.prepare("SELECT data FROM commands WHERE json_extract(data,'$.command.sessionId')=? AND json_extract(data,'$.command.kind')='session.enqueue' AND status IN ('pending','accepted')").all(id).map(row => JSON.parse(String(row.data)) as PendingCommand),
     listDeliverable: async (id, limit) => this.db.prepare("SELECT data FROM commands WHERE worker_id=? AND status='pending' AND NOT EXISTS (SELECT 1 FROM command_dependencies d JOIN commands p ON p.id=d.prerequisite_id WHERE d.command_id=commands.id AND p.status<>'accepted') ORDER BY rowid LIMIT ?").all(id, limit).map(row => JSON.parse(String(row.data)) as PendingCommand),
@@ -319,7 +345,8 @@ export class SqliteServerStore implements ServerStore {
   private readonly taskReader: ServerStore['tasks'] = {
     reviewById: async id => this.readReviews('id=?', id)[0] ?? null,
     review: async runId => this.readReviews('run_id=? ORDER BY rowid DESC LIMIT 1', runId)[0] ?? null,
-    pendingReviews: async projectId => this.readReviews("project_id=? AND status='requested' AND json_extract(data,'$.closedAt') IS NULL ORDER BY rowid", projectId),
+    reviews: async taskId => this.readReviews('task_id=? ORDER BY rowid', taskId),
+    pendingReviews: async projectId => this.readReviews("project_id=? AND status='requested' AND json_extract(data,'$.closedAt') IS NULL AND task_id IN (SELECT id FROM tasks WHERE json_extract(tasks.data,'$.deletedAt') IS NULL) ORDER BY rowid", projectId),
     projectActivity: async (projectId, after) => this.db.prepare('SELECT p.cursor,a.data FROM project_activity p JOIN task_activity a ON a.task_id=p.task_id AND a.seq=p.seq WHERE p.project_id=? AND p.cursor>? ORDER BY p.cursor').all(projectId, after).map(row => ({ cursor: Number(row.cursor), activity: JSON.parse(String(row.data)) })),
     cancelRequest: async (runId, requestId) => { const row = this.db.prepare('SELECT session_id FROM run_cancel_requests WHERE run_id=? AND request_id=?').get(runId, requestId); return row ? String(row.session_id) : null },
     runs: async id => this.readRuns('task_id=?', id),
@@ -328,8 +355,8 @@ export class SqliteServerStore implements ServerStore {
     runByCommand: async id => this.readRuns('create_command_id=? OR enqueue_command_id=? OR EXISTS (SELECT 1 FROM json_each(task_runs.data, \'$.cancelCommandIds\') WHERE value=?)', id, id, id)[0] ?? null,
     bindings: async id => this.taskBindings(id),
     binding: async id => this.taskBindings(undefined, id)[0] ?? null,
-    activeRunUsesWorkspace: async id => Boolean(this.db.prepare("SELECT 1 FROM tasks WHERE json_extract(data,'$.activeRun.snapshot.workspaceId')=? AND json_extract(data,'$.activeRun.status') IN ('pending','running','cancelling') LIMIT 1").get(id)),
-    list: async projectId => this.db.prepare('SELECT data FROM tasks WHERE project_id=? ORDER BY rowid').all(projectId).map(row => {
+    activeRunUsesWorkspace: async id => Boolean(this.db.prepare("SELECT 1 FROM task_runs WHERE json_extract(data,'$.snapshot.workspaceId')=? AND status IN ('pending','running','cancelling') LIMIT 1").get(id)),
+    list: async (projectId, includeDeleted = false) => this.db.prepare("SELECT data FROM tasks WHERE project_id=? AND (? OR json_extract(data,'$.deletedAt') IS NULL) ORDER BY rowid").all(projectId, Number(includeDeleted)).map(row => {
       const { description, acceptanceCriteria, metadataJson, blockedFrom, cancelledFrom, workspaces, links, ...summary } = JSON.parse(String(row.data)) as import('@wemux/web-contract/task-platform').TaskDetail
       return summary
     }),
@@ -337,7 +364,39 @@ export class SqliteServerStore implements ServerStore {
     activity: async (id, after) => this.db.prepare('SELECT data FROM task_activity WHERE task_id=? AND seq>? ORDER BY seq').all(id, after).map(row => JSON.parse(String(row.data))),
   }
   readonly tasks = this.committed(this.taskReader)
+  private readonly fileWriteReader: ServerStore['fileWrites'] = {
+    find: async key => {
+      const row = this.db.prepare("SELECT data FROM records WHERE kind='file-write-admission' AND json_extract(data,'$.actorId')=? AND json_extract(data,'$.sessionId')=? AND json_extract(data,'$.requestId')=?").get(key.actorId, key.sessionId, key.requestId)
+      return row ? JSON.parse(String(row.data)) as import('../../application/ports/file-write-admission.ts').FileWriteAdmission : null
+    },
+    get: async id => this.get('file-write-admission', id),
+    getIntent: async id => this.get('file-write-intent', id),
+    getResult: async id => this.get('file-write-result', id),
+  }
+  readonly fileWrites = this.committed(this.fileWriteReader)
   private readonly tx: ServerStoreTx = {
+    fileWrites: {
+      ...this.fileWriteReader,
+      retainResult: async (authenticatedWorkerId, input) => {
+        const snapshot = snapshotFileWriteResult(input)
+        const admission = this.get<FileWriteAdmission>('file-write-admission', snapshot.requestId)
+        if (!admission || authenticatedWorkerId !== admission.workerId) throw new FileWriteResultRejectedError('File write result admission or authenticated Worker mismatch')
+        const verified = validateFileWriteResult(() => parseFileWriteResult(snapshot, fileWriteWireAdmission(admission)))
+        const retained = this.get<import('@wemux/wire-protocol').FileWriteResultPayload>('file-write-result', snapshot.requestId)
+        if (retained) {
+          validateFileWriteResult(() => parseFileWriteResult(retained, fileWriteWireAdmission(admission)))
+          if ((Object.keys(verified) as (keyof typeof verified)[]).some(key => verified[key] !== retained[key])) throw new FileWriteResultRejectedError('Conflicting retained file write result')
+          return retained
+        }
+        this.db.prepare('INSERT INTO records(kind,id,data) VALUES(?,?,?)').run('file-write-result', verified.requestId, JSON.stringify(verified))
+        return verified
+      },
+      insertHeld: async admission => {
+        const insert = this.db.prepare('INSERT INTO records(kind,id,data) VALUES(?,?,?)')
+        // The migration trigger inserts the held intent in this same statement.
+        insert.run('file-write-admission', admission.admissionId, JSON.stringify(admission))
+      },
+    },
     tasks: {
       ...this.taskReader,
       saveReview: async review => { this.db.prepare('INSERT INTO review_requests(id,run_id,task_id,project_id,status,data) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,data=excluded.data').run(review.id, review.taskRunId, review.taskId, review.projectId, review.status, JSON.stringify(review)) },
@@ -529,6 +588,24 @@ export class SqliteServerStore implements ServerStore {
     },
     resources: {
       ...this.resourceReader,
+      saveWorkspaceVisibility: async (actorId, record) => {
+        const result = this.db.prepare('INSERT INTO workspace_account_visibility(account_id,workspace_id,hidden,revision) VALUES(?,?,?,?) ON CONFLICT(account_id,workspace_id) DO UPDATE SET hidden=excluded.hidden,revision=excluded.revision WHERE workspace_account_visibility.revision=excluded.revision-1').run(actorId, record.workspaceId, Number(record.hidden), record.revision)
+        if (result.changes !== 1) throw new AppError(409, 'Workspace visibility changed; reload before retrying', 'workspace_visibility_conflict')
+      },
+      recordWorkspacePreparationProof: async proof => {
+        const command = await this.commandReader.getPendingCommand(proof.commandId as import('@wemux/domain').CommandId)
+        if (!command || command.workerId !== proof.workerId || command.command.kind !== 'workspace.provision' || command.command.workspace.workspace.id !== proof.workspaceId) throw new AppError(409, 'Workspace preparation proof command ownership mismatch')
+        if ((proof.status !== 'ready' && proof.status !== 'failed') || typeof proof.occurredAt !== 'string' || !Number.isFinite(Date.parse(proof.occurredAt))) throw new AppError(409, 'Invalid Workspace preparation terminal proof')
+        const previous = this.workspacePreparationProof(proof)
+        if (previous) {
+          if (previous.status !== proof.status) throw new AppError(409, 'Conflicting Workspace preparation terminal proof')
+          return previous
+        }
+        const record: WorkspacePreparationProof = { workspaceId: proof.workspaceId, workerId: proof.workerId, commandId: proof.commandId, status: proof.status, occurredAt: proof.occurredAt }
+        this.put('workspace-preparation-proof', proof.commandId, record)
+        return record
+      },
+      saveCreateRequest: async (key, record) => this.put('create-request', key, record),
       saveWorker: async r => this.put('worker', r.id, r), saveProject: async r => this.put('project', r.id, r),
       saveRepository: async r => this.put('repository', r.id, r), saveWorkspace: async r => this.put('workspace', r.id, r), saveSession: async r => this.put('session', r.id, r),
       saveSessionFork: async fork => {
@@ -563,6 +640,7 @@ export class SqliteServerStore implements ServerStore {
     commands: {
       ...this.commandReader,
       depend: async (id, prerequisite) => { this.db.prepare('INSERT INTO command_dependencies VALUES(?,?)').run(id, prerequisite) },
+      rejectAdmission: async r => { this.db.prepare('INSERT INTO command_rejections(id,data) VALUES(?,?)').run(r.commandId, JSON.stringify(r)) },
       insertPending: async r => {
         const projection: CommandProjection = { commandId: r.commandId, workerId: r.workerId, payloadFingerprint: r.payloadFingerprint, status: 'pending', createdAt: r.createdAt, updatedAt: r.createdAt }
         this.db.prepare('INSERT INTO commands VALUES(?,?,?,?,?)').run(r.commandId, r.workerId, 'pending', JSON.stringify(r), JSON.stringify(projection))

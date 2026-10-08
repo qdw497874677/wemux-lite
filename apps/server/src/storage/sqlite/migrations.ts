@@ -1,5 +1,12 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { runInvariants } from './run-invariants.ts'
+import { attentionPageIndexesMigration, attentionHumanReviewIndexMigration } from './attention-page-indexes.ts'
+import { commandRejectionsMigration } from './command-rejections.ts'
+import { sessionModelSelectionMigration } from './session-model-selection.ts'
+import { legacyModelSelectionMigration } from './legacy-model-selection.ts'
+import { legacyModelChainMigration } from './legacy-model-chain.ts'
+import { fileWriteAdmissionMigration, fileWriteReplacementMigration } from './file-write-admission.ts'
+import { fileWriteResultsMigration } from './file-write-results.ts'
 import { retentionDestinationInvariants, retentionInvariants } from './retention-invariants.ts'
 
 const legacyMigrations = [
@@ -661,7 +668,14 @@ const accountMigrations = [
    CREATE INDEX IF NOT EXISTS artifact_requests_created ON artifact_requests(created_at);`,
 ]
 
-const migrations = [...legacyMigrations, ...accountMigrations]
+const workspaceAccountVisibilityMigration = `CREATE TABLE IF NOT EXISTS workspace_account_visibility (
+  account_id TEXT NOT NULL, workspace_id TEXT NOT NULL,
+  hidden INTEGER NOT NULL CHECK(hidden IN (0,1)),
+  revision INTEGER NOT NULL CHECK(revision > 0),
+  PRIMARY KEY(account_id,workspace_id));
+CREATE INDEX IF NOT EXISTS workspace_account_visibility_actor_hidden ON workspace_account_visibility(account_id,hidden);`
+
+const migrations = [...legacyMigrations, ...accountMigrations, fileWriteAdmissionMigration, fileWriteReplacementMigration, fileWriteResultsMigration, sessionModelSelectionMigration, legacyModelSelectionMigration, legacyModelChainMigration, commandRejectionsMigration, attentionPageIndexesMigration, attentionHumanReviewIndexMigration, workspaceAccountVisibilityMigration]
 
 /** 迁移条目数：升级测试用它验证重放不重复插入版本行，避免硬编码数字后静默失效。 */
 export const migrationCount = migrations.length

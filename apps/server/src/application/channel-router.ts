@@ -48,7 +48,7 @@ export class ChannelRouter {
       await this.workers.require(record.createdBy, binding.workerId, 'use')
       if (session.projectId !== binding.projectId || session.binding.agent.workerId !== binding.workerId) throw new Error('Session binding changed')
       const commandId = stableCommandId(delivery.sessionEnqueueRequestId)
-      await this.server.enqueue(binding.sessionId, { commandId, messageId: commandId, content: delivery.content })
+      await this.server.enqueue(binding.sessionId, { commandId, messageId: commandId, content: delivery.content }, record.createdBy)
       await this.repository.updateInbound({ ...delivery, status: 'enqueued', bindingId: binding.id, sessionId: binding.sessionId, diagnostic: null, updatedAt: now() })
     } catch (error) {
       await this.fail(delivery, error instanceof Error ? error.message : '权限检查失败', now(), binding.id, binding.sessionId)

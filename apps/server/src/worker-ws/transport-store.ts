@@ -1,16 +1,20 @@
 import { randomUUID } from 'node:crypto'
+import { FileWriteResultUnavailableError } from '../application/file-write-results.ts'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { MessageId, Timestamp, WorkerId } from '@wemux/domain'
 import type {
+  FileWriteResultAckPayload,
+  FileWriteResultPayload,
   ServerDataFrame,
   ServerHelloFrame,
   ServerPayload,
   WorkerDataFrame,
   WorkerHelloFrame,
 } from '@wemux/wire-protocol'
-import { TRANSPORT_V2_MAJOR, TRANSPORT_V2_MINOR, WEMUX_ADK_PROFILE_V1 } from '@wemux/wire-protocol'
+import { parseFileWriteResultAck } from '@wemux/wire-protocol/file-admission-node'
+import { FS_WRITE_ADMISSION_V1, isFileWriteAdmissionType, supportsFileWriteAdmission, TRANSPORT_V2_MAJOR, TRANSPORT_V2_MINOR, WEMUX_ADK_PROFILE_V1 } from '@wemux/wire-protocol'
 
 const now = () => new Date().toISOString() as Timestamp
 export class ServerTransportStore {
@@ -50,10 +54,12 @@ export class ServerTransportStore {
     `)
   }
 
-  negotiate(workerId: WorkerId, hello: WorkerHelloFrame): ServerHelloFrame {
+  negotiate(workerId: WorkerId, hello: WorkerHelloFrame, fileResults = false): ServerHelloFrame {
     if (hello.workerId !== workerId) throw new Error('Worker identity mismatch')
     if (!hello.transport.supportedMajors.includes(TRANSPORT_V2_MAJOR)) throw new Error('Unsupported transport major')
     if (!hello.adkProfiles.includes(WEMUX_ADK_PROFILE_V1)) throw new Error('Unsupported ADK profile')
+    const fileNegotiated = supportsFileWriteAdmission(fileResults ? [FS_WRITE_ADMISSION_V1] : [], hello.features)
+    if (!fileNegotiated && this.hasFileEnvelopes(workerId)) throw new Error('File result ingress needs attention: retained envelopes require negotiation')
     const logicalConnectionId = this.meta(workerId, 'logical_connection_id') ?? this.setMeta(workerId, 'logical_connection_id', randomUUID())
     const outboundEpoch = this.meta(workerId, 'outbound_epoch') ?? this.setMeta(workerId, 'outbound_epoch', randomUUID())
     const inboundEpoch = hello.resume.workerToServer?.deliveryEpoch ?? randomUUID()
@@ -70,7 +76,7 @@ export class ServerTransportStore {
       frameType: 'transport.hello', side: 'server',
       selectedTransport: { major: TRANSPORT_V2_MAJOR, minor: TRANSPORT_V2_MINOR },
       selectedAdkProfile: WEMUX_ADK_PROFILE_V1,
-      enabledFeatures: ['durable-ack', 'bounded-replay'],
+      enabledFeatures: ['durable-ack', 'bounded-replay', ...(fileNegotiated ? [FS_WRITE_ADMISSION_V1] : [])],
       logicalConnectionId,
       connectionEpoch: randomUUID(),
       resumeAccepted: hello.resume.logicalConnectionId === null || hello.resume.logicalConnectionId === logicalConnectionId,
@@ -83,10 +89,28 @@ export class ServerTransportStore {
   }
 
   enqueue(workerId: WorkerId, payload: ServerPayload): void {
+    if (isFileWriteAdmissionType(payload)) throw new Error('File traffic requires internal result ingress')
+    this.enqueuePayload(workerId, payload)
+  }
+
+  /** Called only after receiver commit and current-connection negotiation checks. */
+  enqueueFileResultAck(workerId: WorkerId, ack: FileWriteResultAckPayload, result: FileWriteResultPayload): void {
+    const payload = parseFileWriteResultAck(structuredClone(ack), result)
+    if (payload.workerId !== workerId) throw new Error('File result Worker mismatch')
+    try { this.enqueuePayload(workerId, payload) }
+    catch (cause) { throw new FileWriteResultUnavailableError(cause) }
+  }
+
+  hasFileEnvelopes(workerId: WorkerId): boolean {
+    return this.db.prepare("SELECT 1 FROM transport_outbox WHERE worker_id=? AND json_extract(payload_json,'$.type') IN ('fs.write.admit','fs.write.result','fs.write.result.ack') LIMIT 1").get(workerId) !== undefined
+  }
+
+  private enqueuePayload(workerId: WorkerId, payload: ServerPayload): void {
     const epoch = this.meta(workerId, 'outbound_epoch') ?? this.setMeta(workerId, 'outbound_epoch', randomUUID())
     const dedupeKey = payload.type === 'command' ? `command:${payload.commandId}`
       : payload.type === 'resource.set.notify' ? `resource-set:${payload.setRevision}:${payload.fingerprint}`
-        : null
+        : payload.type === 'fs.write.result.ack' ? `file-result-ack:${JSON.stringify([payload.requestId, payload.sessionId, payload.workerId, payload.operation, payload.fingerprintVersion, payload.fingerprint, payload.resultVersion, payload.resultDigest])}`
+          : null
     this.db.exec('BEGIN IMMEDIATE')
     try {
       // 去重只对「仍在 outbox 里等传输确认」的帧生效：帧被传输确认后必须允许按同一 commandId 重新入队，
@@ -140,6 +164,16 @@ export class ServerTransportStore {
       this.db.exec('ROLLBACK')
       throw error
     }
+  }
+
+  /** Transport has no payload digest. A matching inbox identity permits application
+   * revalidation, never bypasses it. First application commit fixes the result. */
+  acceptFileResult(workerId: WorkerId, frame: Extract<WorkerDataFrame, { readonly durability: 'durable' }>): { readonly isNew: boolean; readonly ackThrough: number } {
+    if (frame.directionSeq <= this.inboundAckThrough(workerId, frame.deliveryEpoch)) {
+      const row = this.db.prepare('SELECT message_id FROM transport_inbox WHERE worker_id=? AND delivery_epoch=? AND seq=?').get(workerId, frame.deliveryEpoch, frame.directionSeq) as { message_id: string } | undefined
+      if (!row || row.message_id !== frame.messageId) throw new Error('File replay transport integrity mismatch')
+    }
+    return this.accept(workerId, frame)
   }
 
   accept(workerId: WorkerId, frame: Extract<WorkerDataFrame, {readonly durability:'durable'}>): { readonly isNew: boolean; readonly ackThrough: number } {

@@ -1,4 +1,5 @@
 import type { ProjectId } from '@wemux/domain'
+import { createStreamCredentialAuthorizer } from '../stream-credential-authorizer.ts'
 import { AppError } from '../../application/errors.ts'
 import type { RouteDescriptor } from './types.ts'
 
@@ -17,7 +18,8 @@ export const canvasRoutes: readonly RouteDescriptor[] = [
     const lastEventId = context.request.headers['last-event-id']
     if (lastEventId !== undefined && (typeof lastEventId !== 'string' || !/^\d+$/.test(lastEventId))) throw new AppError(400, 'Invalid Last-Event-ID')
     const after = Number(lastEventId ?? context.url.searchParams.get('after') ?? 0)
-    await context.canvasCollaborationStreams.open(context.response, await context.actor(), context.params.projectId as ProjectId, after)
+    const actor = await context.actor()
+    await context.canvasCollaborationStreams.open(context.response, actor, context.params.projectId as ProjectId, after, createStreamCredentialAuthorizer(context, actor, 'read'))
   } },
   { method: 'GET', pattern: '/projects/:projectId/canvas/collaboration', auth: 'authenticated', handler: async context => {
     if (!context.canvasCollaboration) throw new AppError(404, 'Not found')

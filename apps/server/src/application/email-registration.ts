@@ -6,7 +6,7 @@ import { AppError } from './errors.ts'
 import { hashSecret } from './auth.ts'
 import { invalidEmailReason, maskEmail, normalizeEmail, type NormalizedEmail } from './email-address.ts'
 import { PasswordPolicyError, assertPasswordPolicy, hashPassword, passwordPolicy } from './password.ts'
-import { verificationLink, passwordResetLink, type MailSettings, type OutgoingMail } from './mail/email-delivery.ts'
+import { nextConsoleLink, verificationLink, passwordResetLink, type MailSettings, type OutgoingMail } from './mail/email-delivery.ts'
 import { systemClock, type Clock, type IdentityService, type IssuedLoginSession } from './identity-service.ts'
 import type { InstanceSettingsService } from './instance-settings.ts'
 import type { TeamService } from './team-service.ts'
@@ -513,6 +513,7 @@ function verificationMail(mail: MailSettings, email: NormalizedEmail, token: str
     text: emailBodyLines('请验证你的邮箱以完成 Wemux 账号注册', [
       '点击下面的链接完成验证（先打开确认页，再点击确认按钮）：',
       verificationLink(mail.publicUrl, token),
+      `在新版中打开：${nextConsoleLink(verificationLink(mail.publicUrl, token))}`,
       '',
       `链接在 ${hours} 小时内有效，且只能使用一次。`,
     ]),
@@ -527,6 +528,7 @@ function resetMail(mail: MailSettings, email: NormalizedEmail, token: string, ex
     text: emailBodyLines('重置 Wemux 密码', [
       '点击下面的链接设置新密码：',
       passwordResetLink(mail.publicUrl, token),
+      `在新版中打开：${nextConsoleLink(passwordResetLink(mail.publicUrl, token))}`,
       '',
       `链接在 ${minutes} 分钟内有效，且只能使用一次。重置成功后所有登录会话与访问令牌都会被撤销。`,
     ]),

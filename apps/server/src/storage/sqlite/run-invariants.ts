@@ -1,6 +1,6 @@
 // Keep JSON as the public representation. Views give migration preflight and write
 // triggers exactly the same predicates; reverse triggers protect referenced rows.
-const identity = (value: string) => `typeof(${value})='text' AND instr(${value},char(0))=0
+export const identity = (value: string) => `typeof(${value})='text' AND instr(${value},char(0))=0
   AND length(trim(${value}, char(9,10,11,12,13,32,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288,65279)))>0
   AND length(${value})<=200
   AND (WITH RECURSIVE units(i,n) AS (SELECT 1,0 UNION ALL SELECT i+1,n+CASE WHEN unicode(substr(${value},i,1))>65535 THEN 2 ELSE 1 END FROM units WHERE i<=min(length(${value}),201)) SELECT max(n) FROM units)<=200`

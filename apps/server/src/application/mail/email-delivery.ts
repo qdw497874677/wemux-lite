@@ -137,3 +137,10 @@ export function passwordResetLink(publicUrl: string, token: string): string {
 export function changeEmailLink(publicUrl: string, token: string): string {
   return `${publicUrl.replace(/\/+$/, '')}${WEB_CONSOLE_AUTH_PATHS.confirmEmailChange}?token=${encodeURIComponent(token)}`
 }
+
+/** A second UI entry uses the same challenge, never a second credential. */
+export function nextConsoleLink(legacyLink: string): string {
+  const url = new URL(legacyLink)
+  url.pathname = `/next${url.pathname}`
+  return url.href
+}

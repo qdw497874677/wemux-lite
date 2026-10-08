@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { SessionId } from '@wemux/domain'
+import type { SessionId, UserId } from '@wemux/domain'
 import type { FileRequestPayload, FileResponsePayload } from '@wemux/wire-protocol'
 import { AppError } from './errors.ts'
 import type { ServerService } from './server-service.ts'
@@ -29,15 +29,16 @@ export class SessionFileService {
     return this.request(sessionId, { operation: 'read', subpath, maxBytes }) as Promise<Extract<FileResponsePayload, { ok: true; operation: 'read' }>>
   }
 
-  async write(sessionId: SessionId, subpath: string, base64Content: string): Promise<Extract<FileResponsePayload, { ok: true; operation: 'write' }>> {
-    return this.request(sessionId, { operation: 'write', subpath, base64Content }) as Promise<Extract<FileResponsePayload, { ok: true; operation: 'write' }>>
+  async write(sessionId: SessionId, subpath: string, base64Content: string, actor?: UserId): Promise<Extract<FileResponsePayload, { ok: true; operation: 'write' }>> {
+    return this.request(sessionId, { operation: 'write', subpath, base64Content }, actor) as Promise<Extract<FileResponsePayload, { ok: true; operation: 'write' }>>
   }
 
   async diff(sessionId: SessionId, subpath: string): Promise<Extract<FileResponsePayload, { ok: true; operation: 'diff' }>> {
     return this.request(sessionId, { operation: 'diff', subpath }) as Promise<Extract<FileResponsePayload, { ok: true; operation: 'diff' }>>
   }
 
-  private async request(sessionId: SessionId, input: { readonly operation: 'list'; readonly subpath: string } | { readonly operation: 'read'; readonly subpath: string; readonly maxBytes: number } | { readonly operation: 'write'; readonly subpath: string; readonly base64Content: string } | { readonly operation: 'diff'; readonly subpath: string }): Promise<FileResponsePayload> {
+  private async request(sessionId: SessionId, input: { readonly operation: 'list'; readonly subpath: string } | { readonly operation: 'read'; readonly subpath: string; readonly maxBytes: number } | { readonly operation: 'write'; readonly subpath: string; readonly base64Content: string } | { readonly operation: 'diff'; readonly subpath: string }, _actor?: UserId): Promise<FileResponsePayload> {
+    if (input.operation === 'write') throw new AppError(403, '平台当前未开放文件和终端写入通道。', 'write_channel_closed')
     const session = await this.sessions.getSession(sessionId)
     const workerId = session.binding.agent.workerId
     const requestId = randomUUID()

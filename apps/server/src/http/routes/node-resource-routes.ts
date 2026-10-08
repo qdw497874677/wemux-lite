@@ -43,7 +43,10 @@ export const nodeResourceRoutes: readonly RouteDescriptor[] = [
       context.json(201, await service(context).applyPreset({ presetId: context.params.presetId, presetRevision: body.presetRevision as number, workerId: body.workerId as WorkerId, requestId: body.requestId, expectedSetRevision: body.expectedSetRevision as number, createdBy: actor }))
     } catch (error) { throw presetError(error) }
   } },
-  { method: 'GET', pattern: '/resources', auth: 'admin', handler: context => context.json(200, { items: service(context).resources() }) },
+  { method: 'GET', pattern: '/resources', auth: 'admin', handler: async context => {
+    await context.operator()
+    context.json(200, { items: service(context).resources() })
+  } },
   { method: 'POST', pattern: '/resources', auth: 'admin', handler: async context => {
     const actor = await context.operator()
     const body = object(await context.readBody())

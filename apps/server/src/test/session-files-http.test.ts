@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { WebSocket } from 'ws'
 import type { AgentKey, ModelId, Timestamp } from '@wemux/domain'
 import { createWemuxServer } from '../server.js'
@@ -12,14 +16,17 @@ const request = async (base: string, token: string, path: string, body: unknown)
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
-  return { status: response.status, data: await response.json() }
+  const text = await response.text()
+  return { status: response.status, data: JSON.parse(text), text }
 }
 
 test('session file routes authorize the session and proxy list/read/diff responses through the owning Worker', async t => {
-  const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail] })
+  const root = await mkdtemp(join(tmpdir(), 'wemux-files-http-')), databasePath = join(root, 'server.sqlite')
+  const app = createWemuxServer({ databasePath, administratorEmails: [administratorEmail] })
   await seedOperator(app.store, app.service)
   const base = await app.listen(0)
-  t.after(() => app.close())
+  t.after(async () => { await app.close(); await rm(root, { recursive: true, force: true }) })
+  assert.notEqual(new URL(base).port, '8004')
   const token = administratorToken
   const enrollment = await app.service.createEnrollment({})
   const enrolled = await app.service.enroll({ token: enrollment.token, name: 'files-worker' })
@@ -53,17 +60,9 @@ test('session file routes authorize the session and proxy list/read/diff respons
   assert.equal(read.status, 200)
   assert.equal(read.data.content, 'export {}\n')
 
-  const writeRequest = request(base, token, `/sessions/${session.id}/fs/write`, { subpath: 'uploads/image.png', base64Content: 'AAEC/w==' })
-  const writeMessage = await peer.wait(message => message.type === 'fs.request' && message.operation === 'write')
-  assert.equal(writeMessage.type, 'fs.request')
-  assert.equal(writeMessage.operation, 'write')
-  if (writeMessage.operation !== 'write') throw new Error('Expected file write request')
-  assert.equal(writeMessage.subpath, 'uploads/image.png')
-  assert.equal(writeMessage.base64Content, 'AAEC/w==')
-  peer.send({ type: 'fs.response', requestId: writeMessage.requestId, ok: true, operation: 'write', subpath: writeMessage.subpath, size: 4 })
-  const written = await writeRequest
-  assert.equal(written.status, 200)
-  assert.deepEqual(written.data, { type: 'fs.response', requestId: writeMessage.requestId, ok: true, operation: 'write', subpath: 'uploads/image.png', size: 4 })
+  const written = await request(base, token, `/sessions/${session.id}/fs/write`, { subpath: 'uploads/image.png', base64Content: 'AAEC/w==' })
+  assert.equal(written.status, 403)
+  assert.deepEqual(written.data, { error: { code: 'write_channel_closed', message: '平台当前未开放文件和终端写入通道。' } })
 
   const diffRequest = request(base, token, `/sessions/${session.id}/fs/diff`, { subpath: 'src/index.ts' })
   const diffMessage = await peer.wait(message => message.type === 'fs.request' && message.operation === 'diff')
@@ -74,7 +73,23 @@ test('session file routes authorize the session and proxy list/read/diff respons
   assert.deepEqual(diff.data.lines, [{ type: 'del', oldLine: 1, text: 'export {}' }, { type: 'add', newLine: 1, text: 'export const value = 1' }])
 
   assert.equal((await request(base, token, `/sessions/${session.id}/fs/read`, { subpath: 'x', maxBytes: 10 * 1024 * 1024 + 1 })).status, 400)
-  assert.equal((await request(base, token, `/sessions/${session.id}/fs/write`, { subpath: '', base64Content: 'YQ==' })).status, 400)
-  assert.equal((await request(base, token, `/sessions/${session.id}/fs/write`, { subpath: 'uploads/too-large.bin', base64Content: 'x'.repeat(Math.ceil((10 * 1024 * 1024) / 3) * 4 + 5) })).status, 400)
+  const db = new DatabaseSync(databasePath, { readOnly: true }), transport = new DatabaseSync(`${databasePath}.transport`, { readOnly: true })
+  const stored = () => ({
+    sessions: db.prepare("SELECT count(*) AS n FROM records WHERE kind='session'").get(),
+    forks: db.prepare("SELECT count(*) AS n FROM records WHERE kind='session-fork'").get(),
+    commands: db.prepare('SELECT count(*) AS n FROM commands').get(),
+    outbox: transport.prepare('SELECT count(*) AS n FROM transport_outbox').get(),
+    sequences: transport.prepare("SELECT worker_id,key,value FROM transport_meta WHERE key LIKE 'outbound_last_seq:%' ORDER BY worker_id,key").all(),
+  })
+  try {
+    for (const body of [{ subpath: '', base64Content: 'YQ==' }, { subpath: 'uploads/too-large.bin', base64Content: 'x'.repeat(Math.ceil((10 * 1024 * 1024) / 3) * 4 + 5) }]) {
+      const before = stored()
+      const response = await request(base, token, `/sessions/${session.id}/fs/write`, body)
+      const denied = { error: { code: 'write_channel_closed', message: '平台当前未开放文件和终端写入通道。' } }
+      assert.deepEqual(response, { status: 403, data: denied, text: JSON.stringify(denied) })
+      assert.deepEqual(stored(), before)
+    }
+    assert.equal(peer.frames.filter(frame => frame.frameType === 'data' && frame.payload.type === 'fs.request' && frame.payload.operation === 'write').length, 0)
+  } finally { db.close(); transport.close() }
   assert.equal((await request(base, token, `/sessions/${session.id}/fs/diff`, { subpath: '' })).status, 400)
 })

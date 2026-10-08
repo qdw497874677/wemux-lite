@@ -64,6 +64,7 @@ export interface ChannelRepository {
 
   saveOutbound(delivery: OutboundDelivery): Promise<boolean>
   getOutbound(id: string): Promise<OutboundDelivery | null>
+  getProjectOutbound(projectId: ProjectId, id: string): Promise<OutboundDelivery | null>
   listOutbound(projectId: ProjectId, limit: number): Promise<readonly OutboundDelivery[]>
   claimOutbound(now: Timestamp, leaseUntil: Timestamp, limit: number): Promise<readonly OutboundDelivery[]>
   updateOutbound(delivery: OutboundDelivery): Promise<void>

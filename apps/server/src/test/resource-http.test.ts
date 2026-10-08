@@ -72,6 +72,18 @@ test('resource management routes are administrator-only and expose catalog, bind
   assert.deepEqual(desired.output.body, { workerId: 'worker-1', revision: 1, bindings: [] })
 })
 
+test('administrator resource reads await authorization before querying or returning data', async () => {
+  for (const target of nodeResourceRoutes.filter(item => item.method === 'GET' && item.auth === 'admin')) {
+    const denied = new Error('administrator access denied')
+    const fixture = context({
+      operator: async () => { await Promise.resolve(); throw denied },
+      resources: new Proxy({}, { get: () => { assert.fail(`${target.pattern} queried resources before authorization`) } }),
+    })
+    await assert.rejects(async () => target.handler(fixture.value), error => error === denied)
+    assert.deepEqual(fixture.output, {}, target.pattern)
+  }
+})
+
 test('Provider version route requires admin and reports CAS conflicts without persisting a revision', async () => {
   const target = route('POST', '/resources/:resourceId/provider-revisions')
   let operatorChecked = false

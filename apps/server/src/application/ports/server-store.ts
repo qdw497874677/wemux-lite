@@ -18,6 +18,7 @@ import type {
  * awaiting public readers or nested transactions is rejected, never self-blocked.
  */
 export interface ServerStore {
+  readonly fileWrites: import('./file-write-admission.ts').FileWriteReader
   readonly tasks: import('./server-store-types.ts').ServerTaskReader
   readonly identity: ServerIdentityReader
   readonly resources: ServerResourceReader
@@ -32,6 +33,7 @@ export interface ServerStore {
  * Derived async contexts become inactive on completion; start background work outside.
  */
 export interface ServerStoreTx {
+  readonly fileWrites: import('./file-write-admission.ts').FileWriteReader & import('./file-write-admission.ts').FileWriteWriter
   readonly tasks: import('./server-store-types.ts').ServerTaskReader & import('./server-store-types.ts').ServerTaskWriter
   readonly identity: ServerIdentityReader & ServerIdentityWriter
   readonly resources: ServerResourceReader & ServerResourceWriter

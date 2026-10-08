@@ -10,6 +10,7 @@ import type {
   UserId,
   ProjectId,
   WorkerId,
+  WorkspaceId,
 } from '@wemux/domain'
 import type {
   AuditEntry,
@@ -47,10 +48,12 @@ import type {
   Workspace,
 } from '@wemux/server-domain'
 import type { CommandReceipt, WorkerCommand } from '@wemux/wire-protocol'
+import type { WorkspacePreparationProof, WorkspacePreparationProofIdentity } from './workspace-preparation-proof.ts'
 
 export interface ServerTaskReader {
   reviewById(id: string): Promise<import('@wemux/web-contract/task-platform').ReviewRequest | null>
   review(runId: string): Promise<import('@wemux/web-contract/task-platform').ReviewRequest | null>
+  reviews(taskId: string): Promise<readonly import('@wemux/web-contract/task-platform').ReviewRequest[]>
   pendingReviews(projectId: string): Promise<readonly import('@wemux/web-contract/task-platform').ReviewRequest[]>
   projectActivity(projectId: string, after: number): Promise<readonly import('@wemux/web-contract/task-platform').ProjectActivityItem[]>
   cancelRequest(runId: string, requestId: string): Promise<string | null>
@@ -62,7 +65,7 @@ export interface ServerTaskReader {
   binding(workspaceId: string): Promise<import('@wemux/web-contract/task-platform').TaskWorkspace | null>
   /** Query seam for Run snapshot occupancy; never infer occupancy from Assignment. */
   activeRunUsesWorkspace(workspaceId: string): Promise<boolean>
-  list(projectId: string): Promise<readonly import('@wemux/web-contract/task-platform').TaskSummary[]>
+  list(projectId: string, includeDeleted?: boolean): Promise<readonly import('@wemux/web-contract/task-platform').TaskSummary[]>
   get(id: string): Promise<import('@wemux/web-contract/task-platform').TaskDetail | null>
   activity(id: string, after: number): Promise<readonly import('@wemux/web-contract/task-platform').TaskActivity[]>
 }
@@ -227,9 +230,23 @@ export interface AgentInboxMessageInput {
   readonly idempotencyKey: string
 }
 
+export interface WorkspaceAccountVisibility {
+  readonly workspaceId: WorkspaceId
+  readonly hidden: boolean
+  readonly revision: number
+}
+
 export interface ServerResourceReader {
+  /** Personal visibility is independent of the shared Workspace state and preparation history. */
+  getWorkspaceVisibility(actorId: UserId, workspaceId: WorkspaceId): Promise<WorkspaceAccountVisibility | null>
+  listWorkspaceVisibility(actorId: UserId): Promise<readonly WorkspaceAccountVisibility[]>
+  /** Exact immutable attempt lookup; missing evidence remains unknown. */
+  getWorkspacePreparationProof(identity: WorkspacePreparationProofIdentity): Promise<WorkspacePreparationProof | null>
+  getCreateRequest(key: string): Promise<{ fingerprint: string; result: unknown } | null>
   listWorkers(): Promise<readonly Worker[]>
   listProjects(): Promise<readonly Project[]>
+  /** Set-based visibility for bounded pages; does not hydrate Project records. */
+  listAccessibleProjectIds(actorId: UserId, scopedProjectId?: ProjectId): Promise<readonly ProjectId[]>
   listWorkspaces(): Promise<readonly Workspace[]>
   listSessions(): Promise<readonly Session[]>
   getWorker(workerId: WorkerId): Promise<Worker | null>
@@ -249,6 +266,13 @@ export interface ServerResourceReader {
 }
 
 export interface ServerResourceWriter {
+  saveWorkspaceVisibility(actorId: UserId, record: WorkspaceAccountVisibility): Promise<void>
+  /** Insert first validated observation. Same identity/status returns the original
+   * proof even with a later timestamp; conflicting identity/status rejects. Must
+   * share the placement update/backfill transaction. Never infer from a receipt.
+   */
+  recordWorkspacePreparationProof(proof: WorkspacePreparationProof): Promise<WorkspacePreparationProof>
+  saveCreateRequest(key: string, record: { fingerprint: string; result: unknown }): Promise<void>
   saveWorker(worker: Worker): Promise<void>
   saveProject(project: Project): Promise<void>
   saveRepository(repository: Repository): Promise<void>
@@ -261,10 +285,19 @@ export interface ServerResourceWriter {
   markAgentInboxMessageRead(messageId: string, readAt: Timestamp): Promise<AgentInboxMessage | null>
 }
 
+export interface ServerCommandRejection {
+  readonly commandId: CommandId
+  readonly workerId: WorkerId
+  readonly payloadFingerprint: string
+}
+
 export interface ServerCommandReader {
+  /** Durable non-admission fence, never a deliverable Worker command. */
+  getRejection(commandId: CommandId): Promise<ServerCommandRejection | null>
   getPendingCommand(commandId: CommandId): Promise<PendingCommand | null>
   get(commandId: CommandId): Promise<CommandProjection | null>
   /** Includes pending and terminal history, even for legacy Workspaces without attempt metadata. */
+  listWorkspaceProvisions(workspaceId: import('@wemux/domain').WorkspaceId): Promise<readonly PendingCommand[]>
   hasProvisionAttempt(workspaceId: import('@wemux/domain').WorkspaceId): Promise<boolean>
   /** All pending/accepted Turn submissions for this Session, without a history window. */
   listUnsettledEnqueues(sessionId: SessionId): Promise<readonly PendingCommand[]>
@@ -273,6 +306,7 @@ export interface ServerCommandReader {
 }
 
 export interface ServerCommandWriter {
+  rejectAdmission(rejection: ServerCommandRejection): Promise<void>
   depend(commandId: CommandId, prerequisiteId: CommandId): Promise<void>
   insertPending(command: PendingCommand): Promise<void>
   recordReceipt(receipt: CommandReceipt, recordedAt: Timestamp): Promise<void>

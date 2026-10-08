@@ -15,7 +15,7 @@ import { AppError } from './errors.ts'
 import { hashSecret } from './auth.ts'
 import { invalidEmailReason, maskEmail, normalizeEmail, type NormalizedEmail } from './email-address.ts'
 import { PasswordPolicyError, assertPasswordPolicy, hashPassword, passwordPolicy, verifyPassword } from './password.ts'
-import { changeEmailLink, type MailSettings, type OutgoingMail } from './mail/email-delivery.ts'
+import { nextConsoleLink, changeEmailLink, type MailSettings, type OutgoingMail } from './mail/email-delivery.ts'
 import { FlowThrottle } from './email-registration.ts'
 import { systemClock, type Clock, type IdentityService, type LoginSessionPolicy } from './identity-service.ts'
 
@@ -433,6 +433,7 @@ function changeEmailVerificationMail(mail: MailSettings, target: NormalizedEmail
     text: mailBody('确认新增 Wemux 账号邮箱', [
       '点击下面的链接确认把这个邮箱设为你 Wemux 账号的主邮箱：',
       changeEmailLink(mail.publicUrl, token),
+      `在新版中打开：${nextConsoleLink(changeEmailLink(mail.publicUrl, token))}`,
       '',
       `链接在 ${minutes} 分钟内有效，且只能使用一次。确认之前账号邮箱不会改变。`,
     ]),
