@@ -75,6 +75,8 @@ export interface TaskSummary {
     readonly agentKey: string
     readonly scenario: 'quick-chat' | 'agent-test'
   }
+  /** Team-level coordination mode (Ticket 05); projectId is the anchor `team:{teamId}`, never a real Project. */
+  readonly teamCoordination?: TeamCoordinationIdentity
   readonly activeRun: RunSummary | null
   /** Non-negative external-link count; board/list markers need no detail requests. */
   readonly linkCount: number
@@ -83,6 +85,18 @@ export interface TaskSummary {
   readonly lastActivityAt: string
 }
 export interface TaskMetadata { readonly schemaVersion: 1; readonly values: Readonly<Record<string, unknown>> }
+/** Team-level coordination Task identity (Ticket 05). Reuse key is Team + owner + Worker + Agent;
+ * Model and Session requestId are deliberately absent. Coordination Tasks express progress as
+ * active/waiting derived from Session runtime state and never enter ordinary Task review flows. */
+export interface TeamCoordinationIdentity {
+  readonly teamId: string
+  readonly ownerId: string
+  readonly workerId: string
+  readonly agentKey: string
+}
+/** Storage anchor for Team-level Tasks; real Project IDs are server-generated and never use this prefix. */
+export const teamCoordinationAnchorPrefix = 'team:'
+export function isTeamCoordinationAnchor(projectId: string): boolean { return projectId.startsWith(teamCoordinationAnchorPrefix) }
 export interface TaskCreate extends TaskContentPatch { readonly title: string }
 export interface TaskActivity {
   readonly taskId: string

@@ -9,7 +9,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { launchFingerprintInput, type LaunchRequest, type Run } from '@wemux/web-contract/task-platform'
 import { ensureRunCancel, saveRunProjection, isActiveRun } from './run-projection.ts'
 import { transitionTask, type ProjectId, type UserId } from '@wemux/domain'
-import { taskStatuses, taskErrorStatus, type TaskDetail, type TaskErrorCode, type TaskActivity, type ProjectEvent, type TaskStatus, type Assignment } from '@wemux/web-contract/task-platform'
+import { taskStatuses, taskErrorStatus, isTeamCoordinationAnchor, type TaskDetail, type TaskErrorCode, type TaskActivity, type ProjectEvent, type TaskStatus, type Assignment } from '@wemux/web-contract/task-platform'
 import type { WorkspaceId, WorkerId } from '@wemux/domain'
 import type { ServerService } from './server-service.ts'
 import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
@@ -72,6 +72,9 @@ export class TaskService {
     await this.project(tx, projectId, context, write)
     const task = await tx.tasks.get(id)
     if (!task || task.projectId !== projectId) throw new TaskError('not_found', 'Task not found in this project')
+    // Defense in depth (Ticket 05): even if a Project row ever matched an anchor, coordination
+    // Tasks stay unaddressable through ordinary Project Task routes.
+    if (task.teamCoordination || isTeamCoordinationAnchor(task.projectId)) throw new TaskError('forbidden', 'Team coordination Task is not addressable as a Project Task')
     if (write && task.deletedAt) throw new TaskError('task_deleted', 'Task is permanently deleted')
     return task
   }
