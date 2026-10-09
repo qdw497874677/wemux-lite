@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessByStdio } from 'node:child_process'
+import { agentEnvironment } from './launch-environment.js'
 import type { Readable } from 'node:stream'
 import type { ApprovalId, NativeSessionRef, RuntimeOperationId, ToolCallId } from '@wemux/domain'
 import type { AgentSignal, AgentTurnHandle } from '../application/ports/agent-adapter.js'
@@ -35,7 +36,7 @@ class OpenCodeRuntimeSession implements AgentRuntimeSession {
       args.push('--model', `${selected.provider}/${selected.id}`)
     }
     args.push(request.message.content)
-    const child = spawn(this.executable, args, { cwd: this.input.cwd, env: { ...process.env, ...request.launchContext?.environment }, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(this.executable, args, { cwd: this.input.cwd, env: agentEnvironment(request.launchContext), stdio: ['ignore', 'pipe', 'pipe'] })
     const queue = new SignalQueue()
     let stopped = false
     let terminal = false

@@ -144,3 +144,28 @@ test('connector pending consumption requires exact Session and Turn and active c
   await result; assert.equal(nativeCalls, 1)
   await registered.release()
 })
+
+test('Connector turn binding rejects moved Worker and ended Turn before outbound dispatch', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'wemux-connector-binding-'))
+  const store = new SqliteWorkerStore(join(directory, 'worker.sqlite'))
+  let owner = 'worker-1', running = true, outbound = 0
+  const runtime = new WorkerConnectorRuntime(store, {
+    verifyBinding: async (_turn, workerId) => running && workerId === owner ? { projectId: 'project-1', workspaceId: 'workspace-1' } : null,
+    lookup: async () => [{ address: '8.8.8.8', family: 4 }],
+    fetch: (async () => { outbound++; return new Response('{}') }) as typeof fetch,
+  })
+  t.after(async () => { await runtime.shutdown(); store.close(); await rm(directory, { recursive: true, force: true }) })
+  const connector = http()
+  await store.saveConnectorDefinition({ ...connector, credentialRef: null, credentialAvailability: 'not_required', config: { ...connector.config, authentication: 'none' } })
+  const snapshot: CapabilitySnapshot = { id: 'binding-snapshot', projectId: 'project-1' as never, workspaceId: 'workspace-1' as never, sessionId: 'binding-session' as never, version: 1, assets: [], allowedTools: ['http.call'], allowedConnectorIds: [connector.id], connectors: [{ ...connector, credentialRef: null, credentialAvailability: 'not_required', config: { ...connector.config, authentication: 'none' } }], createdAt: timestamp }
+  const registration = await runtime.registerTurn({ id: 'binding-turn', sessionId: snapshot.sessionId, capabilitySnapshot: snapshot } as Turn, owner)
+  const call = (requestId: string) => runtime.handle('http.call', registration.token, { connectorId: connector.id, connectorRevision: 1, operationId: 'create', requestId, toolCallId: requestId, input: { body: {} } })
+  owner = 'worker-2'
+  const moved = await call('moved-worker')
+  assert.equal((moved?.body as { error: { code: string } }).error.code, 'scope_denied')
+  owner = 'worker-1'; running = false
+  const ended = await call('ended-turn')
+  assert.equal((ended?.body as { error: { code: string } }).error.code, 'scope_denied')
+  assert.equal(outbound, 0)
+  await registration.release()
+})

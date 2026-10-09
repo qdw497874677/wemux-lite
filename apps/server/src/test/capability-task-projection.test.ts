@@ -193,8 +193,10 @@ test('Revoked, unprivileged, cross-Project and expired capability tokens cannot 
       grantId, sessionId: claims.sessionId, turnId: claims.turnId, actorAgentId: claims.actorAgentId, projectId: claims.projectId, workspaceId: claims.workspaceId,
       allowedTools: claims.allowedTools, allowedConnectorIds: claims.allowedConnectorIds,
       ...(actorUserId ? { actorUserId, actorAuthVersion: claims.actorAuthVersion ?? 0 } : {}) })
-    const expired = reissue('expired-grant', '2025-01-01T00:00:00.000Z' as Timestamp)
+    const expired = new CapabilityTokenService(capabilitySecret, () => at).issue({ grantId: 'expired-grant', sessionId: claims.sessionId, turnId: claims.turnId, actorAgentId: claims.actorAgentId, actorUserId: claims.actorUserId, actorAuthVersion: claims.actorAuthVersion, projectId: claims.projectId, workspaceId: claims.workspaceId, allowedTools: claims.allowedTools, allowedConnectorIds: claims.allowedConnectorIds, ttlMs: -1 })
     assert.equal((await f.ask('task.list', { projectId: f.project.id }, expired.token)).status, 401, 'an expired token is refused before any Task fact is read')
+    const forged = `${bearer.slice(0, -1)}${bearer.at(-1) === 'a' ? 'b' : 'a'}`
+    assert.equal((await f.ask('task.list', { projectId: f.project.id }, forged)).status, 401, 'tampered signature must not authenticate')
     const unprivileged = reissue('outsider-grant', new Date().toISOString() as Timestamp, outsider)
     const denied = await f.ask('task.get', { projectId: f.project.id, taskId: task.id }, unprivileged.token)
     assert.ok([403, 404].includes(denied.status), `an account without a Project grant is refused (${denied.status})`)
@@ -203,5 +205,40 @@ test('Revoked, unprivileged, cross-Project and expired capability tokens cannot 
     const revoked = await f.ask('task.list', { projectId: f.project.id }, bearer)
     assert.ok([403, 404].includes(revoked.status), `removing the grant revokes the Turn grant authority with it (${revoked.status})`)
     assert.ok(!JSON.stringify(revoked.data).includes('Guarded work'))
+  } finally { await f.close() }
+})
+
+test('Server current Connector grant verification fences cached Turn tokens on expiry and revocation', async () => {
+  const f = await fixture()
+  try {
+    const task = await f.createTask('Connector access fixture')
+    const { bearer } = await f.openSession(task.id, contributor)
+    const first = await f.ask('grant.verify', { requiredTool: 'http.call' }, bearer)
+    assert.equal(first.status, 200, JSON.stringify(first.data))
+    const invalid = await f.ask('grant.verify', { requiredTool: 'task.create' }, bearer)
+    assert.equal(invalid.status, 400)
+    const claims = new CapabilityTokenService(capabilitySecret, () => at).verify(bearer)
+    const expired = new CapabilityTokenService(capabilitySecret, () => at).issue({ grantId: 'expired-connector', sessionId: claims.sessionId, turnId: claims.turnId, actorAgentId: claims.actorAgentId, actorUserId: claims.actorUserId, actorAuthVersion: claims.actorAuthVersion, projectId: claims.projectId, workspaceId: claims.workspaceId, allowedTools: claims.allowedTools, allowedConnectorIds: claims.allowedConnectorIds, ttlMs: -1 })
+    assert.equal((await f.ask('grant.verify', { requiredTool: 'http.call' }, expired.token)).status, 401)
+    await f.app.store.transaction(tx => tx.identity.removeProjectGrant(f.project.id, contributor))
+    const revoked = await f.ask('grant.verify', { requiredTool: 'http.call' }, bearer)
+    assert.ok([403, 404].includes(revoked.status), JSON.stringify(revoked.data))
+  } finally { await f.close() }
+})
+
+
+test('Capability preparation and verification reject contradictory Task coordination identity', async () => {
+  const f = await fixture()
+  try {
+    const task = await f.createTask('Identity conflict')
+    const { session, bearer } = await f.openSession(task.id, contributor)
+    await f.app.store.transaction(async tx => {
+      const stored = await tx.tasks.get(task.id)
+      await tx.tasks.save({ ...stored!, teamCoordination: { teamId: f.project.teamId, ownerId: contributor, workerId: f.workerId, agentKey: 'test' } })
+    })
+    assert.equal((await f.ask('grant.verify', { requiredTool: 'http.call' }, bearer)).status, 403)
+    assert.equal((await f.ask('task.list', { projectId: f.project.id }, bearer)).status, 403)
+    const next = await f.call(`/sessions/${session.id}/messages`, { content: 'must not gain ambient scope' }, contributor)
+    assert.notEqual(next.status, 202, JSON.stringify(next.data))
   } finally { await f.close() }
 })

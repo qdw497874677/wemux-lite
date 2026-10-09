@@ -33,6 +33,7 @@ export interface AgentTurnInput {
 
 export interface AgentLaunchContext {
   readonly assetsRoot: string
+  readonly restrictedEnvironment?: boolean
   readonly instructions: string | null
   readonly skillsRoot: string | null
   readonly capabilityEndpoint: string | null

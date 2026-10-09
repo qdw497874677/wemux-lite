@@ -11,6 +11,7 @@ import { ServerService, now } from '../application/server-service.js'
 import { Notifications } from '../application/notifications.js'
 import { SqliteServerStore } from '../storage/sqlite/store.js'
 import { seedOperator } from './fixtures/administrator.js'
+import { coordinationQueryOperations } from '../application/team-coordination-task.js'
 
 const timestamp = '2026-01-01T00:00:00.000Z' as never
 
@@ -46,6 +47,24 @@ test('capability grant resolves enabled Project connectors visible to the actor 
   assert.deepEqual(context.runtime.grant.allowedConnectorIds, [visible.id])
   assert.deepEqual(tokens.verify(context.token).allowedConnectorIds, [visible.id])
   assert.equal(context.runtime.snapshot.allowedTools.includes('http.call'), true)
+})
+
+test('coordination Task grant cannot issue connector or management writes, including explicit allowedTools', async t => {
+  const f = await fixture(t)
+  const tokens = new CapabilityTokenService('coordination-secret'.repeat(4), () => timestamp)
+  const capabilities = new CapabilityService(f.store, () => timestamp, tokens, { list: async () => [connector(f.project.id)] })
+  const task = await f.store.tasks.get(f.session.taskId!)
+  assert.ok(task)
+  await f.store.transaction(async tx => tx.tasks.save({ ...task, teamCoordination: { teamId: f.project.teamId, ownerId: f.user.id, workerId: f.workerId, agentKey: 'pi' } }))
+  for (const explicit of [undefined, ['http.call', 'mcp.call', 'task.create', 'project.list'] as const]) {
+    const issued = await capabilities.prepareTurn({ sessionId: f.session.id, turnId: 'coord-turn' as never, actorId: f.user.id, ...(explicit ? { allowedTools: explicit } : {}) })
+    assert.deepEqual(issued.runtime.snapshot.allowedTools, explicit ? ['project.list'] : coordinationQueryOperations)
+    assert.deepEqual(issued.runtime.snapshot.allowedConnectorIds, [])
+    assert.deepEqual(issued.runtime.grant.allowedConnectorIds, [])
+    assert.deepEqual(issued.runtime.grant.allowedTools, issued.runtime.snapshot.allowedTools)
+    assert.deepEqual(tokens.verify(issued.token).allowedTools, issued.runtime.snapshot.allowedTools)
+    for (const operation of ['http.call', 'mcp.call', 'task.create'] as const) await assert.rejects(capabilities.verify(issued.token, operation), /read-only|not allowed/)
+  }
 })
 
 test('session enqueue resolves connectors through transaction readers', async t => {

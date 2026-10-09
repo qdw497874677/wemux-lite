@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { agentEnvironment } from './launch-environment.js'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,6 +11,7 @@ import { parseJsonLines } from './json-lines.js'
 import { mapRuntimeRecord } from './runtime-event-mapper.js'
 import { splitModelId } from '../domain/model-id.js'
 import { piCapabilityExtension } from '../capabilities/pi-tools.js'
+import { secureSessionDirectory } from '../application/secure-session-directory.js'
 
 /** Pi CLI expects `provider/model`, while the platform modelId convention is `provider::model`. */
 function piModelArgument(modelId: string): string {
@@ -61,7 +63,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
 
   async execute(request: RuntimeOperationInput): Promise<AgentTurnHandle> {
     if (this.activeOperation) throw new Error('Pi runtime session is busy')
-    const child = await this.ensureChild(request.launchContext)
+    const child = await this.ensureChild(request.launchContext, true)
     this.activeOperation = request.operationId
     await this.requireCapabilityToolsReady()
     await writeLine(child, { type: 'prompt', id: request.operationId, message: request.message.content })
@@ -70,6 +72,10 @@ class PiRuntimeSession implements AgentRuntimeSession {
 
   async command(command: RuntimeCommand): Promise<void> {
     if (this.input.piProvider && command.name === 'set_model') throw new Error('pi_provider_model_locked')
+    // A command must not boot a new Pi child without the Turn launch context
+    // established by execute(). In particular, set_model before the first Turn
+    // would otherwise inherit the Worker's ambient credentials and HOME.
+    if (!this.child || this.exitInfo || this.child.killed) throw new Error('pi_runtime_scoped_child_unavailable')
     const child = await this.ensureChild(null)
     const type = command.name === 'interrupt' ? 'abort' : command.name
     if (command.name === 'set_model') {
@@ -82,6 +88,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
   }
 
   async resolveApproval(approvalId: ApprovalId, decision: 'approve' | 'deny'): Promise<void> {
+    if (!this.child || this.exitInfo || this.child.killed) throw new Error('pi_runtime_scoped_child_unavailable')
     const child = await this.ensureChild(null)
     await writeLine(child, { type: 'approval_response', id: approvalId, approved: decision === 'approve' })
   }
@@ -121,13 +128,15 @@ class PiRuntimeSession implements AgentRuntimeSession {
    * buffered) becomes an unhandled `'error'` event and crashes the whole Worker
    * process — the root cause of sessions stuck in "正在处理" with 0/1 nodes online.
    */
-  private async ensureChild(context: import('../application/ports/agent-adapter.js').AgentLaunchContext | null) {
+  private async ensureChild(context: import('../application/ports/agent-adapter.js').AgentLaunchContext | null, fromTurn = false) {
+    if (!fromTurn && (!this.child || this.exitInfo || this.child.killed)) throw new Error('pi_runtime_scoped_child_unavailable')
     const nextLaunchKey = context ? JSON.stringify({
       assetsRoot: context.assetsRoot,
       capabilityEndpoint: context.capabilityEndpoint,
       capabilityToken: context.capabilityToken,
       instructions: context.instructions,
       skillsRoot: context.skillsRoot,
+      environment: context.environment,
     }) : this.launchKey
     if (this.child && !this.child.killed && !this.exitInfo && nextLaunchKey === this.launchKey) return this.child
     if (this.child && !this.child.killed && !this.exitInfo) await this.close()
@@ -144,7 +153,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
       if (this.input.modelId !== `openai-compatible::${provider.definition.modelIds[0]}`) throw new Error('pi_provider_model_mismatch')
       const names = Object.keys(provider.environment)
       if (names.length !== 1 || names[0] !== 'OPENAI_API_KEY' || !provider.environment.OPENAI_API_KEY?.trim()) throw new Error('pi_provider_credential_unavailable')
-      if (context?.environment && Object.keys(context.environment).some(key => !key.startsWith('WEMUX_'))) throw new Error('pi_provider_environment_conflict')
+      if (context?.environment && Object.keys(context.environment).some(key => !['WEMUX_SESSION_ID', 'WEMUX_TURN_ID', 'WEMUX_ASSETS_ROOT', 'WEMUX_CAPABILITY_ENDPOINT', 'WEMUX_CAPABILITY_TOKEN'].includes(key) && !(context.restrictedEnvironment && ['HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'PI_CODING_AGENT_DIR', 'CLAUDE_CONFIG_DIR'].includes(key)))) throw new Error('pi_provider_environment_conflict')
     }
     const args = ['--mode', 'rpc']
     if (this.input.modelId) args.push('--model', piModelArgument(this.input.modelId))
@@ -160,7 +169,16 @@ class PiRuntimeSession implements AgentRuntimeSession {
         await writeFile(extensionPath, piCapabilityExtension(this.capabilityReadyPath), { mode: 0o600 })
         args.push('--extension', extensionPath)
       }
-      if (provider) this.providerDirectory = await preparePiProviderDirectory(provider.definition)
+      if (provider && context?.restrictedEnvironment) {
+        if (!context.environment.HOME || !context.environment.PI_CODING_AGENT_DIR) throw new Error('agent_launch_home_mismatch')
+        await secureSessionDirectory(this.input.cwd, context.environment.HOME)
+        await secureSessionDirectory(context.environment.HOME, context.environment.PI_CODING_AGENT_DIR)
+        for (const key of ['XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'CLAUDE_CONFIG_DIR'] as const) {
+          const directory = context.environment[key]
+          if (directory) await secureSessionDirectory(context.environment.HOME, directory)
+        }
+      }
+      if (provider) this.providerDirectory = await preparePiProviderDirectory(provider.definition, context?.restrictedEnvironment ? context.environment.PI_CODING_AGENT_DIR : undefined)
     } catch (error) {
       await this.cleanupExtension()
       throw error
@@ -182,7 +200,16 @@ class PiRuntimeSession implements AgentRuntimeSession {
     try {
       child = spawn(this.executable, args, {
         cwd: this.input.cwd,
-        env: { ...environment, ...context?.environment, WEMUX_PI_CAPABILITY_ENDPOINT: context?.capabilityEndpoint ?? '', WEMUX_PI_CAPABILITY_TOKEN: context?.capabilityToken ?? '' },
+        env: {
+          ...(provider ? {
+            ...environment,
+            // Only explicit capability metadata and restricted session paths may cross
+            // the Provider boundary. Ordinary Sessions must not reintroduce host env.
+            ...Object.fromEntries(Object.entries(context?.environment ?? {}).filter(([key]) => ['WEMUX_SESSION_ID', 'WEMUX_TURN_ID', 'WEMUX_ASSETS_ROOT', 'WEMUX_CAPABILITY_ENDPOINT', 'WEMUX_CAPABILITY_TOKEN'].includes(key) || (context?.restrictedEnvironment && ['HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'CLAUDE_CONFIG_DIR'].includes(key)))),
+            PI_CODING_AGENT_DIR: this.providerDirectory!.directory,
+          } : agentEnvironment(context)),
+          WEMUX_PI_CAPABILITY_ENDPOINT: context?.capabilityEndpoint ?? '', WEMUX_PI_CAPABILITY_TOKEN: context?.capabilityToken ?? '',
+        },
         stdio: ['pipe', 'pipe', 'pipe'],
       })
       if (!child.stdin || !child.stdout || !child.stderr) throw new Error('Pi runtime streams unavailable')

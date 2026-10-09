@@ -1,5 +1,6 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
+import { agentEnvironment } from './launch-environment.js'
 import { promisify } from 'node:util'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -74,7 +75,7 @@ export class PiAgent implements Extract<AgentAdapter, { mode: 'execution' }> {
         await writeFile(extensionPath, piCapabilityExtension(readyPath), { mode: 0o600 })
         args.push('--extension', extensionPath)
       }
-      rpc = new PiRpc(executable, args, input.cwd, { ...process.env, ...context?.environment,
+      rpc = new PiRpc(executable, args, input.cwd, { ...agentEnvironment(context),
         WEMUX_PI_CAPABILITY_ENDPOINT: context?.capabilityEndpoint ?? '', WEMUX_PI_CAPABILITY_TOKEN: context?.capabilityToken ?? '',
       }, this.requestTimeout)
       rpc.onFailure = error => { startupError = error }

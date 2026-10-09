@@ -423,3 +423,49 @@ test('claude runtime session maps native json events', async () => {
   if (signals[2]?.kind === 'event') assert.deepEqual(signals[2].event, { kind: 'usage.updated', usage: { scope: 'operation', subjectId: 'turn-claude', source: 'runtime', revision: 1, completeness: 'complete', inputTokens: 4, outputTokens: 5, totalTokens: 9 } })
   assert.deepEqual(signals.at(-1), { kind: 'finished', outcome: { status: 'completed' } })
 })
+
+test('Pi commands and approvals before first Turn do not spawn an ambient child', async () => {
+  const source = await executable('pi-pre-turn', 'echo spawned > "$0.spawned"; sleep 10')
+  const session = await new PiRuntimeSessionAdapter(source).openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  try {
+    await assert.rejects(session.command({ name: 'set_model', operationId: 'pre-turn' as TurnId, arguments: { modelId: 'fixture::model' } }), /pi_runtime_scoped_child_unavailable/)
+    await assert.rejects(session.resolveApproval('pre-turn-approval' as never, 'approve'), /pi_runtime_scoped_child_unavailable/)
+    await assert.rejects(access(`${source}.spawned`), { code: 'ENOENT' })
+  } finally { await session.close() }
+})
+
+test('Pi Provider ordinary launch drops ambient and context secrets; restricted launch retains scoped HOME/config', async t => {
+  const { mkdir, rm } = await import('node:fs/promises')
+  const root = await mkdtemp(join(tmpdir(), 'wemux-provider-env-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const cli = join(root, 'fake-pi.cjs')
+  const output = join(root, 'child-env.json')
+  await writeFile(cli, `#!/usr/bin/env node
+const fs=require('node:fs'); process.stdin.on('data',()=>{fs.writeFileSync(${JSON.stringify(output)},JSON.stringify({host:process.env.WEMUX_HOST_SECRET_MARKER,context:process.env.WEMUX_SESSION_ID,ordinary:process.env.UNRELATED_CONTEXT_SECRET,home:process.env.HOME,config:process.env.XDG_CONFIG_HOME,pi:process.env.PI_CODING_AGENT_DIR,token:process.env.WEMUX_PI_CAPABILITY_TOKEN}));process.stdout.write(JSON.stringify({type:'agent_settled'})+'\\n')});`, { mode: 0o755 })
+  const original = process.env.WEMUX_HOST_SECRET_MARKER
+  process.env.WEMUX_HOST_SECRET_MARKER = 'host-should-not-leak'
+  t.after(() => { if (original === undefined) delete process.env.WEMUX_HOST_SECRET_MARKER; else process.env.WEMUX_HOST_SECRET_MARKER = original })
+  const definition = { providerKey: 'openai-compatible' as const, endpoint: 'https://example.invalid/v1', modelIds: ['offline-model'], agentKeys: ['pi' as never], credential: { kind: 'worker-credential' as const, credentialRef: 'id', variableNames: ['OPENAI_API_KEY'] } }
+  for (const restricted of [false, true]) {
+    const home = join(root, 'scoped-home')
+    if (restricted) await mkdir(home, { recursive: true })
+    const context = { restrictedEnvironment: restricted, assetsRoot: null, instructions: null, skillsRoot: null, capabilityEndpoint: null, capabilityToken: null, capabilitySnapshot: null, environment: {
+      WEMUX_SESSION_ID: 'safe-session',
+      ...(restricted ? { HOME: home, XDG_CONFIG_HOME: join(home, '.config'), PI_CODING_AGENT_DIR: join(home, '.pi', 'agent') } : {}),
+    } }
+    const session = await new PiRuntimeSessionAdapter(cli).openSession({ sessionId, cwd: root, modelId: 'openai-compatible::offline-model' as ModelId, resume: null, piProvider: { definition, environment: { OPENAI_API_KEY: 'private' } } })
+    try {
+      for await (const _ of (await session.execute({ operationId: 'provider-scope' as TurnId, message: { content: 'go' }, launchContext: context })).signals) { /* consume */ }
+      const observed = JSON.parse(await readFile(output, 'utf8'))
+      assert.equal(observed.host, undefined)
+      assert.equal(observed.context, 'safe-session')
+      assert.equal(observed.ordinary, undefined)
+      assert.equal(observed.token, '')
+      if (restricted) {
+        assert.equal(observed.home, home)
+        assert.equal(observed.config, join(home, '.config'))
+        assert.ok(observed.pi.startsWith(join(home, '.pi', 'agent')))
+      } else assert.notEqual(observed.home, process.env.HOME)
+    } finally { await session.close() }
+  }
+})

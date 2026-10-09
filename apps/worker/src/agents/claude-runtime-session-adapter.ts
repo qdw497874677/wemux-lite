@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { agentEnvironment } from './launch-environment.js'
 import type { ApprovalId } from '@wemux/domain'
 import type { AgentRuntimeSession, RuntimeCommand, RuntimeOperationInput, RuntimeSessionAdapter, RuntimeSessionOpenInput } from '../application/ports/runtime-session.js'
 import type { AgentSignal, AgentTurnHandle } from '../application/ports/agent-adapter.js'
@@ -19,7 +20,7 @@ class ClaudeRuntimeSession implements AgentRuntimeSession {
 
   async execute(request: RuntimeOperationInput): Promise<AgentTurnHandle> {
     if (this.active) throw new Error('Claude runtime session is busy')
-    const child = spawn(this.executable, this.args(request.message.content), { cwd: this.input.cwd, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(this.executable, this.args(request.message.content), { cwd: this.input.cwd, env: agentEnvironment(request.launchContext), stdio: ['ignore', 'pipe', 'pipe'] })
     const completion = new Promise<number | null>((resolve, reject) => { child.once('error', reject); child.once('close', resolve) })
     this.active = { operationId: request.operationId, child }
     const signals = this.signals(request.operationId, child, completion)

@@ -1,8 +1,9 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, normalize, relative, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import type { AgentKey, CapabilityAsset, ProjectId, Turn } from '@wemux/domain'
 import type { AgentLaunchContextProvider, PreparedAgentLaunchContext } from './ports/agent-launch-context.js'
+import { secureSessionDirectory } from './secure-session-directory.js'
 
 export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextProvider {
   private readonly active = new Set<string>()
@@ -10,13 +11,13 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
   private readonly capabilityEndpoint: string | null
   private readonly prepareConnectors?: (turn: Turn) => Promise<{ readonly token: string; readonly snapshot: import('@wemux/domain').CapabilitySnapshot; release(): Promise<void> }>
   private readonly resolveSkills?: (projectId: ProjectId, agentKey: AgentKey) => Promise<readonly { resourceId: string; revisionId: string; content: Uint8Array }[]>
-  private readonly sessionScope?: (turn: Turn) => Promise<{ projectId: ProjectId; agentKey: AgentKey } | null>
+  private readonly sessionScope?: (turn: Turn) => Promise<{ projectId: ProjectId; workspaceId: string; rootPath: string; agentKey: AgentKey } | null>
   constructor(
     workerDataDir: string,
     capabilityEndpoint: string | null,
     prepareConnectors?: (turn: Turn) => Promise<{ readonly token: string; readonly snapshot: import('@wemux/domain').CapabilitySnapshot; release(): Promise<void> }>,
     resolveSkills?: (projectId: ProjectId, agentKey: AgentKey) => Promise<readonly { resourceId: string; revisionId: string; content: Uint8Array }[]>,
-    sessionScope?: (turn: Turn) => Promise<{ projectId: ProjectId; agentKey: AgentKey } | null>,
+    sessionScope?: (turn: Turn) => Promise<{ projectId: ProjectId; workspaceId: string; rootPath: string; agentKey: AgentKey } | null>,
   ) {
     this.workerDataDir = workerDataDir
     this.capabilityEndpoint = capabilityEndpoint
@@ -35,7 +36,18 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
     const skillsRoot = join(root, 'skills')
     const promptParts: string[] = []
     let hasSkills = false
+    let touchedRoot = false
     try {
+      // Validate trusted placement before touching even the temporary runtime directory.
+      const scope = this.sessionScope ? await this.sessionScope(turn) : null
+      if (this.sessionScope && !scope) throw new Error('agent_launch_binding_unavailable')
+      if (scope && (snapshot.projectId !== scope.projectId || snapshot.workspaceId !== scope.workspaceId || snapshot.sessionId !== turn.sessionId)) throw new Error('agent_launch_binding_mismatch')
+      if (!this.sessionScope && snapshot.projectId.startsWith('team:')) throw new Error('agent_launch_binding_unavailable')
+      const restrictedEnvironment = Boolean(scope?.projectId.startsWith('team:'))
+      if (restrictedEnvironment && (!scope?.workspaceId || !scope.rootPath)) throw new Error('agent_launch_placement_unavailable')
+      const expected = restrictedEnvironment ? resolve(this.workerDataDir, 'workspaces', createHash('sha256').update(scope!.workspaceId).digest('hex')) : null
+      if (restrictedEnvironment && (resolve(scope!.rootPath) !== expected || await realpath(expected!).catch(() => null) !== expected)) throw new Error('agent_launch_placement_mismatch')
+      touchedRoot = true
       await rm(root, { recursive: true, force: true })
       await mkdir(root, { recursive: true, mode: 0o700 })
       for (const asset of snapshot.assets) {
@@ -53,8 +65,7 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
           await writeFile(target, asset.content, 'utf8')
         }
       }
-      const scope = this.sessionScope ? await this.sessionScope(turn) : null
-      if (scope && this.resolveSkills && snapshot.projectId === scope.projectId) {
+      if (scope && this.resolveSkills) {
         for (const skill of await this.resolveSkills(scope.projectId, scope.agentKey)) {
           const target = safePath(skillsRoot, `${skill.resourceId}/SKILL.md`)
           await mkdir(dirname(target), { recursive: true })
@@ -66,10 +77,20 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
       const instructions = promptParts.length ? promptParts.join('\n\n') : null
       if (instructions) await writeFile(join(root, 'instructions.md'), instructions, 'utf8')
       await writeFile(join(root, 'execution-spec.json'), JSON.stringify({ snapshot, turnId: turn.id }, null, 2), 'utf8')
+      const sessionHome = restrictedEnvironment ? join(expected!, '.wemux-agent', createHash('sha256').update(turn.sessionId).digest('hex')) : null
+      if (sessionHome) await secureSessionDirectory(expected!, sessionHome)
       const environment: Record<string, string> = {
         WEMUX_SESSION_ID: turn.sessionId,
         WEMUX_TURN_ID: turn.id,
         WEMUX_ASSETS_ROOT: root,
+      }
+      if (sessionHome) {
+        environment.HOME = sessionHome
+        environment.XDG_CONFIG_HOME = join(sessionHome, '.config')
+        environment.XDG_DATA_HOME = join(sessionHome, '.local', 'share')
+        environment.XDG_CACHE_HOME = join(sessionHome, '.cache')
+        environment.PI_CODING_AGENT_DIR = join(sessionHome, '.pi', 'agent')
+        environment.CLAUDE_CONFIG_DIR = join(sessionHome, '.claude')
       }
       const capabilityToken = connectorContext?.token ?? turn.capabilityToken
       if (this.capabilityEndpoint && capabilityToken) {
@@ -79,6 +100,7 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
       return {
         context: {
           assetsRoot: root,
+          restrictedEnvironment,
           instructions,
           skillsRoot: hasSkills ? skillsRoot : null,
           capabilityEndpoint: this.capabilityEndpoint,
@@ -95,7 +117,7 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
     } catch (error) {
       this.active.delete(turn.sessionId)
       await connectorContext?.release().catch(() => undefined)
-      await rm(root, { recursive: true, force: true }).catch(() => undefined)
+      if (touchedRoot) await rm(root, { recursive: true, force: true }).catch(() => undefined)
       throw error
     }
   }

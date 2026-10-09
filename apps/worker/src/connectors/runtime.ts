@@ -25,10 +25,12 @@ export class WorkerConnectorRuntime {
   private readonly pending = new Map<string, Pending>()
   private readonly finalizing = new Map<string, { sessionId: string; turnId: string; done: Promise<void> }>()
   private closing = false
+  private readonly verifyBinding?: (turn: Turn, workerId: string) => Promise<{ projectId: string; workspaceId: string } | null>
   private shutdownPromise: Promise<void> | null = null
 
-  constructor(store: WorkerConnectorStore, options: { readonly fetch?: typeof fetch; readonly lookup?: import('@wemux/connector').GuardedFetchDnsLookup; readonly supervisor?: McpProcessSupervisor; readonly onApproval?: (event: ConnectorApprovalEvent) => void | Promise<void> } = {}) {
+  constructor(store: WorkerConnectorStore, options: { readonly fetch?: typeof fetch; readonly lookup?: import('@wemux/connector').GuardedFetchDnsLookup; readonly supervisor?: McpProcessSupervisor; readonly onApproval?: (event: ConnectorApprovalEvent) => void | Promise<void>; readonly verifyBinding?: (turn: Turn, workerId: string) => Promise<{ projectId: string; workspaceId: string } | null>; readonly verifyServerGrant?: (token: string, operation: 'mcp.list_tools' | 'mcp.call' | 'http.call', local: boolean) => Promise<boolean> } = {}) {
     this.store = store
+    this.verifyBinding = options.verifyBinding
     this.credentials = WorkerCredentialStore.fromEnvironment(store)
     this.supervisor = options.supervisor ?? new McpProcessSupervisor()
     this.mcp = new WorkerMcpClient({ supervisor: this.supervisor, fetch: options.fetch, lookup: options.lookup, deploymentAllowsPrivateNetwork: process.env.WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK === 'true' })
@@ -38,13 +40,22 @@ export class WorkerConnectorRuntime {
       const active = this.turns.get(token)
       if (!active) throw new Error('Unknown capability token')
       return active.claims
-    } }, approval, this.http)
+    }, verifyBinding: async (token, snapshot, turn) => {
+      const active = this.turns.get(token)
+      if (!active || active.snapshot !== snapshot || active.workerId !== turn.workerId || active.claims.sessionId !== turn.sessionId || active.claims.turnId !== turn.turnId || active.claims.projectId !== turn.projectId || active.claims.workspaceId !== turn.workspaceId) return false
+      if (!this.verifyBinding) return true
+      const binding = await this.verifyBinding({ sessionId: turn.sessionId, id: turn.turnId } as Turn, turn.workerId)
+      return !!binding && binding.projectId === turn.projectId && binding.workspaceId === turn.workspaceId
+    }, verifyCurrentGrant: options.verifyServerGrant ? (token, operation) => options.verifyServerGrant!(token, operation, this.turns.get(token)?.claims.projectId === 'local' && this.turns.get(token)?.workerId.startsWith('local-') === true) : undefined }, approval, this.http)
   }
 
   async registerTurn(turn: Turn, workerId: string): Promise<{ token: string; snapshot: CapabilitySnapshot; release(): Promise<void> }> {
     if (this.closing) throw new Error('Connector runtime is shutting down')
     const installed = (await this.store.listConnectorDefinitions()).filter(definition => definition.enabled && (!definition.allowedWorkerIds.length || definition.allowedWorkerIds.includes(workerId as never)))
+    const binding = this.verifyBinding ? await this.verifyBinding(turn, workerId) : null
+    if (this.verifyBinding && !binding) throw new Error('connector_turn_binding_mismatch')
     const existing = turn.capabilitySnapshot
+    if (binding && existing && (binding.projectId !== existing.projectId || binding.workspaceId !== existing.workspaceId || existing.sessionId !== turn.sessionId)) throw new Error('connector_turn_binding_mismatch')
     const pinned = existing?.connectors ?? installed
     for (const definition of pinned) {
       const local = installed.find(item => item.id === definition.id && item.revision === definition.revision)
@@ -53,7 +64,7 @@ export class WorkerConnectorRuntime {
     const connectorIds = intersect(existing?.allowedConnectorIds ?? installed.map(item => item.id), installed.map(item => item.id))
     const connectors = pinned.filter(item => connectorIds.includes(item.id as never))
     const snapshot: CapabilitySnapshot = existing ? { ...existing, allowedConnectorIds: connectorIds, connectors } : {
-      id: `local-${turn.id}`, projectId: 'local' as never, workspaceId: 'local' as never, sessionId: turn.sessionId, version: 1, assets: [], allowedTools: ['mcp.list_tools', 'mcp.call', 'http.call'], allowedConnectorIds: connectorIds, connectors, createdAt: new Date().toISOString(),
+      id: `local-${turn.id}`, projectId: (binding?.projectId ?? connectors[0]?.projectId ?? 'local') as never, workspaceId: (binding?.workspaceId ?? 'local') as never, sessionId: turn.sessionId, version: 1, assets: [], allowedTools: ['mcp.list_tools', 'mcp.call', 'http.call'], allowedConnectorIds: connectorIds, connectors, createdAt: new Date().toISOString(),
     }
     const token = turn.capabilityToken ?? randomBytes(32).toString('base64url')
     const claims: CapabilityGrantClaims = { id: `worker-${turn.id}`, sessionId: turn.sessionId, turnId: turn.id, actorAgentId: turn.sessionId, projectId: snapshot.projectId, workspaceId: snapshot.workspaceId, allowedTools: snapshot.allowedTools, allowedConnectorIds: snapshot.allowedConnectorIds, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 60_000).toISOString() }

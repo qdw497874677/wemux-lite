@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
@@ -74,4 +74,36 @@ test('CLI and MCP surface structured capability denial and idempotency conflicts
 test('MCP exposes the minimal tool surface', async () => {
   const listed = await handleMcpRequest({ method: 'tools/list' })
   assert.deepEqual(listed.tools.map((tool: any) => tool.name), ['wemux_session_info', 'wemux_project_list', 'wemux_project_get', 'wemux_project_resources', 'wemux_task_list', 'wemux_task_get', 'wemux_task_create', 'wemux_task_sessions', 'wemux_session_get', 'wemux_session_events', 'wemux_agent_list', 'wemux_agent_send', 'wemux_inbox_list', 'wemux_inbox_read', 'wemux_delegation_accept', 'wemux_delegation_reject', 'wemux_delegation_complete', 'mcp_list_tools', 'mcp_call', 'http_call'])
+})
+
+test('coordination launch binding mismatch writes no assets or runtime directory', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'wemux-coordination-no-write-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  const sessionId = 'coord-session'
+  const turnId = 'coord-turn'
+  const root = join(home, 'runtime', sessionId, turnId)
+  const provider = new FilesystemAgentLaunchContextProvider(home, null, undefined, undefined, async () => ({ projectId: 'team:other' as never, workspaceId: 'workspace-1', rootPath: home, agentKey: 'pi' as never }))
+  await assert.rejects(provider.prepare({ id: turnId, sessionId, capabilitySnapshot: { id: 'scope', projectId: 'team:team-1', workspaceId: 'workspace-1', sessionId, version: 1, assets: [{ kind: 'file', id: 'file', name: 'marker', version: '1', content: 'marker', checksum: hash('marker'), targetPath: null }], allowedTools: [], allowedConnectorIds: [], createdAt: '2026-01-01T00:00:00.000Z' } } as never), /agent_launch_binding_mismatch/)
+  assert.equal(await stat(root).then(() => true, () => false), false)
+})
+
+test('coordination launch context assigns session home under Placement and filters host credentials at child launch', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'wemux-coordination-launch-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  const cwd = join(home, 'workspaces', createHash('sha256').update('workspace-1').digest('hex'))
+  await import('node:fs/promises').then(fs => fs.mkdir(cwd, { recursive: true }))
+  const provider = new FilesystemAgentLaunchContextProvider(home, null, undefined, undefined, async () => ({ projectId: 'team:team-1' as never, workspaceId: 'workspace-1', rootPath: cwd, agentKey: 'pi' as never }))
+  const prepared = await provider.prepare({ id: 'coord-turn', sessionId: 'coord-session', capabilitySnapshot: { id: 'coord', projectId: 'team:team-1', workspaceId: 'workspace-1', sessionId: 'coord-session', version: 1, assets: [], allowedTools: ['project.list'], allowedConnectorIds: [], createdAt: '2026-01-01T00:00:00.000Z' } } as any)
+  t.after(() => prepared.cleanup())
+  const context = prepared.context!
+  assert.equal(context.restrictedEnvironment, true)
+  assert.equal(context.environment.HOME, join(cwd, '.wemux-agent', createHash('sha256').update('coord-session').digest('hex')))
+  const previous = process.env.WEMUX_HOST_CREDENTIAL_MARKER
+  process.env.WEMUX_HOST_CREDENTIAL_MARKER = 'host-private-marker'
+  t.after(() => { if (previous === undefined) delete process.env.WEMUX_HOST_CREDENTIAL_MARKER; else process.env.WEMUX_HOST_CREDENTIAL_MARKER = previous })
+  const { spawnSync } = await import('node:child_process')
+  const { agentEnvironment } = await import('../src/agents/launch-environment.js')
+  const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(JSON.stringify({cwd:process.cwd(),home:process.env.HOME,marker:process.env.WEMUX_HOST_CREDENTIAL_MARKER||null,path:!!process.env.PATH}))'], { cwd, env: agentEnvironment(context), encoding: 'utf8' })
+  assert.equal(child.status, 0, child.stderr)
+  assert.deepEqual(JSON.parse(child.stdout), { cwd, home: context.environment.HOME, marker: null, path: true })
 })
