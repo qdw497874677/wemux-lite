@@ -62,7 +62,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
 
   async execute(request: RuntimeOperationInput): Promise<AgentTurnHandle> {
     if (this.activeOperation) throw new Error('Pi runtime session is busy')
-    const child = await this.ensureChild(request.launchContext)
+    const child = await this.ensureChild(request.launchContext, true)
     this.activeOperation = request.operationId
     await this.requireCapabilityToolsReady()
     await writeLine(child, { type: 'prompt', id: request.operationId, message: request.message.content })
@@ -71,6 +71,10 @@ class PiRuntimeSession implements AgentRuntimeSession {
 
   async command(command: RuntimeCommand): Promise<void> {
     if (this.input.piProvider && command.name === 'set_model') throw new Error('pi_provider_model_locked')
+    // A command must not boot a new Pi child without the Turn launch context
+    // established by execute(). In particular, set_model before the first Turn
+    // would otherwise inherit the Worker's ambient credentials and HOME.
+    if (!this.child || this.exitInfo || this.child.killed) throw new Error('pi_runtime_scoped_child_unavailable')
     const child = await this.ensureChild(null)
     const type = command.name === 'interrupt' ? 'abort' : command.name
     if (command.name === 'set_model') {
@@ -83,6 +87,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
   }
 
   async resolveApproval(approvalId: ApprovalId, decision: 'approve' | 'deny'): Promise<void> {
+    if (!this.child || this.exitInfo || this.child.killed) throw new Error('pi_runtime_scoped_child_unavailable')
     const child = await this.ensureChild(null)
     await writeLine(child, { type: 'approval_response', id: approvalId, approved: decision === 'approve' })
   }
@@ -122,7 +127,8 @@ class PiRuntimeSession implements AgentRuntimeSession {
    * buffered) becomes an unhandled `'error'` event and crashes the whole Worker
    * process — the root cause of sessions stuck in "正在处理" with 0/1 nodes online.
    */
-  private async ensureChild(context: import('../application/ports/agent-adapter.js').AgentLaunchContext | null) {
+  private async ensureChild(context: import('../application/ports/agent-adapter.js').AgentLaunchContext | null, fromTurn = false) {
+    if (!fromTurn && (!this.child || this.exitInfo || this.child.killed)) throw new Error('pi_runtime_scoped_child_unavailable')
     const nextLaunchKey = context ? JSON.stringify({
       assetsRoot: context.assetsRoot,
       capabilityEndpoint: context.capabilityEndpoint,

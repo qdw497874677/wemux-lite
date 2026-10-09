@@ -142,12 +142,25 @@ test('cached result is fenced after token revocation and approval is rechecked b
 
 test('forged and expired gateway credentials reject without invoking a connector', async t => {
   const h = await harness(t, { approval: 'approve' })
-  const invalid = await h.gateway.executeHttp({ ...h.common, snapshot: { ...h.snapshot, allowedConnectorIds: [] } })
-  assert.equal(invalid.ok, false)
+  const credentials = new WorkerCredentialStore(h.store)
+  const mcp = new WorkerMcpClient({ supervisor: new McpProcessSupervisor() })
+  t.after(() => mcp.shutdown())
+  const gateway = new ToolExecutionGateway(h.store, credentials, mcp, {
+    verify: token => {
+      if (token !== 'signed-token') throw new Error('Signature mismatch')
+      return { ...h.claims, expiresAt: '2000-01-01T00:00:00.000Z' }
+    },
+  }, { request: async () => 'approve' }, new HttpConnectorExecutor(credentials, {
+    fetch: (async () => { throw new Error('unexpected outbound call') }) as typeof fetch,
+    lookup: async () => [{ address: '8.8.8.8', family: 4 }],
+  }))
+  for (const [token, requestId] of [['tampered-token', 'forged'], ['signed-token', 'expired']] as const) {
+    const result = await gateway.executeHttp({ ...h.common, token, requestId })
+    assert.equal(result.ok, false)
+    if (!result.ok) assert.equal(result.error.code, 'scope_denied')
+  }
   const records = await h.store.listConnectorDenials()
-  assert.equal(records.at(-1)?.reasonCode, 'scope_denied')
-  assert.equal(records.at(-1)?.operation, 'http.call')
-  assert.equal(records.at(-1)?.actor, ids.sessionId)
+  assert.deepEqual(records.slice(-2).map(record => record.reasonCode), ['scope_denied', 'scope_denied'])
   assert.equal(h.calls(), 0)
 })
 
@@ -204,4 +217,23 @@ test('server revocation during approval wait denies dispatch after approval reso
   if (!result.ok) assert.equal(result.error.code, 'scope_denied')
   assert.equal(h.calls(), 0)
   assert.equal((await h.store.listConnectorDenials()).at(-1)?.reasonCode, 'scope_denied')
+})
+
+test('denial audit covers direct request, revision, idempotency and approval returns', async t => {
+  const h = await harness(t, { approval: 'deny' })
+  let denials = 0
+  const record = h.store.recordConnectorDenial.bind(h.store)
+  h.store.recordConnectorDenial = async input => { denials++; return record(input) }
+  const reject = async (input: typeof h.common, code: string) => {
+    const before = denials
+    const result = await h.gateway.executeHttp(input)
+    assert.equal(result.ok, false)
+    if (!result.ok) assert.equal(result.error.code, code)
+    assert.equal(denials, before + 1)
+  }
+  await reject({ ...h.common, requestId: '' }, 'invalid_input')
+  await reject({ ...h.common, requestId: 'wrong-revision', connectorRevision: 2 }, 'revision_conflict')
+  await reject(h.common, 'approval_denied')
+  await reject({ ...h.common, input: { body: { title: 'other' } } }, 'idempotency_conflict')
+  assert.equal(h.calls(), 0)
 })

@@ -140,7 +140,8 @@ export class CapabilityService {
     if (input.actorId && (!actorAccount || actorAccount.status !== 'active')) throw new CapabilityError('forbidden', 'Capability actor is not active')
     const task = session.taskId ? await readers.tasks.get(session.taskId) : null
     if (session.taskId && (!task || task.deletedAt != null)) throw new CapabilityError('forbidden', 'Capability Task is unavailable')
-    const coordination = Boolean(task?.teamCoordination) || session.projectId.startsWith('team:')
+    if (task && (Boolean(task.teamCoordination) !== session.projectId.startsWith('team:') || task.projectId !== session.projectId || (task.teamCoordination && `team:${task.teamCoordination.teamId}` !== session.projectId))) throw new CapabilityError('forbidden', 'Capability Task and Session coordination binding disagree')
+    const coordination = session.projectId.startsWith('team:')
     const assets = await resources.listCapabilityAssets(session.projectId)
     const connectors = coordination ? [] : await this.resolveConnectors(session, input, identity, resources)
     const allowedConnectorIds = connectors.map(connector => connector.id)
@@ -231,7 +232,8 @@ export class CapabilityService {
     if (!session || session.deletedAt !== null || session.projectId !== claims.projectId || session.workspaceId !== claims.workspaceId) throw new CapabilityError('forbidden', 'Capability session is no longer active')
     const task = session.taskId ? await this.store.tasks.get(session.taskId) : null
     if (session.taskId && (!task || task.deletedAt != null)) throw new CapabilityError('forbidden', 'Capability Task is unavailable')
-    if ((task?.teamCoordination || session.projectId.startsWith('team:')) && !(coordinationQueryOperations as readonly string[]).includes(requiredTool)) throw new CapabilityError('forbidden', 'Coordination capability is read-only')
+    if (task && (Boolean(task.teamCoordination) !== session.projectId.startsWith('team:') || task.projectId !== session.projectId || (task.teamCoordination && `team:${task.teamCoordination.teamId}` !== session.projectId))) throw new CapabilityError('forbidden', 'Capability Task and Session coordination binding disagree')
+    if (session.projectId.startsWith('team:') && !(coordinationQueryOperations as readonly string[]).includes(requiredTool)) throw new CapabilityError('forbidden', 'Coordination capability is read-only')
     // Actor revocation must fence Connector dispatch too, not only Project queries.
     if (claims.actorUserId) {
       const account = await this.store.identity.getUser(claims.actorUserId)

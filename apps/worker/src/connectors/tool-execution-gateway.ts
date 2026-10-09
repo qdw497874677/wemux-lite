@@ -88,14 +88,14 @@ export class ToolExecutionGateway {
   }
 
   private async executeInternal(input: ToolExecutionInput, kind: 'mcp' | 'http'): Promise<ExecutionResult> {
-    if (!input.requestId || Buffer.byteLength(input.requestId) > 200) return failure('invalid_input', input.requestId || '', null, 'requestId must contain at most 200 UTF-8 bytes')
+    if (!input.requestId || Buffer.byteLength(input.requestId) > 200) return this.denied(input, kind, failure('invalid_input', input.requestId || '', null, 'requestId must contain at most 200 UTF-8 bytes'))
     const fingerprint = stableFingerprint({ projectId: input.currentTurn.projectId, workspaceId: input.currentTurn.workspaceId, sessionId: input.currentTurn.sessionId, turnId: input.currentTurn.turnId, toolCallId: input.toolCallId, connectorId: input.connectorId, connectorRevision: input.connectorRevision, toolName: input.toolName, input: input.input })
     const operation = kind === 'http' ? 'http.call' : 'mcp.call'
     try { await this.authorize(input.token, input.snapshot, input.currentTurn, input.connectorId, operation) }
     catch (error) { const result = mappedFailure(error, input.requestId, null); await this.auditDenial(input, operation, result); return result }
     const existing = await this.store.getConnectorExecution(input.requestId)
     if (existing) {
-      if (existing.fingerprint !== fingerprint) return failure('idempotency_conflict', input.requestId, existing.toolCall.connectorRevision, 'requestId is already bound to different input')
+      if (existing.fingerprint !== fingerprint) return this.denied(input, kind, failure('idempotency_conflict', input.requestId, existing.toolCall.connectorRevision, 'requestId is already bound to different input'))
       if (existing.result) {
         try { this.assertConnector(input.snapshot, input.currentTurn, await this.definition(input.connectorId, kind), input.connectorRevision) }
         catch (error) { const result = mappedFailure(error, input.requestId, null); await this.auditDenial(input, operation, result); return result }
@@ -106,7 +106,7 @@ export class ToolExecutionGateway {
         try { await this.authorize(input.token, input.snapshot, input.currentTurn, input.connectorId, operation); this.assertConnector(input.snapshot, input.currentTurn, await this.definition(input.connectorId, kind), input.connectorRevision); return result }
         catch (error) { const denied = mappedFailure(error, input.requestId, null); await this.auditDenial(input, operation, denied); return denied }
       })
-      return failure('connector_unavailable', input.requestId, existing.toolCall.connectorRevision, 'An earlier execution is still in progress', true)
+      return this.denied(input, kind, failure('connector_unavailable', input.requestId, existing.toolCall.connectorRevision, 'An earlier execution is still in progress', true))
     }
     const promise = this.run(input, fingerprint, kind)
     this.active.set(input.requestId, promise)
@@ -118,19 +118,19 @@ export class ToolExecutionGateway {
     try {
       const claims = await this.authorize(input.token, input.snapshot, input.currentTurn, input.connectorId, kind === 'http' ? 'http.call' : 'mcp.call')
       connector = await this.definition(input.connectorId, kind)
-      if (connector.revision !== input.connectorRevision) return failure('revision_conflict', input.requestId, connector.revision, 'Connector revision changed', true)
+      if (connector.revision !== input.connectorRevision) return this.denied(input, kind, failure('revision_conflict', input.requestId, connector.revision, 'Connector revision changed', true))
       this.assertConnector(input.snapshot, input.currentTurn, connector, input.connectorRevision)
       const operationType = kind === 'http' ? httpOperation(connector as HttpConnectorDefinition, input.toolName) : 'write'
       const provisionalCall: ToolCall = { requestId: input.requestId, fingerprint, projectId: input.currentTurn.projectId as never, workspaceId: input.currentTurn.workspaceId as never, sessionId: input.currentTurn.sessionId as never, turnId: input.currentTurn.turnId as never, toolCallId: input.toolCallId, connectorId: connector.id, connectorRevision: connector.revision, action: kind === 'http' ? { kind: 'http', operationId: input.toolName } : { kind: 'mcp', toolName: input.toolName }, operationType, input: input.input, actor: { kind: 'agent', agentId: claims.actorAgentId, requestedByAccountId: (input.requestedByAccountId ?? null) as never, channelDeliveryId: input.channelDeliveryId ?? null }, createdAt: new Date().toISOString() as never }
       const started = await this.store.beginConnectorExecution({ requestId: input.requestId, fingerprint, state: 'running', toolCall: provisionalCall, result: null, journalSummary: null, createdAt: provisionalCall.createdAt, completedAt: null })
-      if (started === 'exists') return failure('connector_unavailable', input.requestId, connector.revision, 'Connector execution is already running', true)
+      if (started === 'exists') return this.denied(input, kind, failure('connector_unavailable', input.requestId, connector.revision, 'Connector execution is already running', true))
       const call: ToolCall = kind === 'mcp'
         ? await this.resolveMcpCall(input, connector as McpConnectorDefinition, provisionalCall)
         : provisionalCall
       if (requiresApproval(call.operationType, connector)) {
-        if (!input.agentSupportsApproval || input.channelDeliveryId || !this.approval) return await this.persist(call, failure('approval_denied', input.requestId, connector.revision, 'Interactive approval is unavailable'))
+        if (!input.agentSupportsApproval || input.channelDeliveryId || !this.approval) return this.denied(input, kind, await this.persist(call, failure('approval_denied', input.requestId, connector.revision, 'Interactive approval is unavailable')))
         const decision = await this.approval.request({ approvalId: call.toolCallId, sessionId: call.sessionId, turnId: call.turnId, toolCallId: call.toolCallId, requestId: call.requestId, fingerprint, connectorRevision: call.connectorRevision, operationType: call.operationType }, input.signal)
-        if (decision !== 'approve') return await this.persist(call, failure('approval_denied', input.requestId, connector.revision, 'Connector call was denied'))
+        if (decision !== 'approve') return this.denied(input, kind, await this.persist(call, failure('approval_denied', input.requestId, connector.revision, 'Connector call was denied')))
       }
       await this.authorize(input.token, input.snapshot, input.currentTurn, input.connectorId, kind === 'http' ? 'http.call' : 'mcp.call')
       this.assertConnector(input.snapshot, input.currentTurn, await this.definition(input.connectorId, kind), input.connectorRevision)
@@ -176,6 +176,11 @@ export class ToolExecutionGateway {
         (pinned.allowedWorkerIds.length && !pinned.allowedWorkerIds.includes(turn.workerId))) {
       throw new GatewayError('scope_denied', 'Connector is outside the current Project, Worker or pinned revision')
     }
+  }
+
+  private async denied(input: ToolExecutionInput, kind: 'mcp' | 'http', result: ExecutionResult): Promise<ExecutionResult> {
+    await this.auditDenial(input, kind === 'http' ? 'http.call' : 'mcp.call', result)
+    return result
   }
 
   private async auditDenial(input: Pick<ToolExecutionInput, 'currentTurn' | 'connectorId' | 'toolName'>, operation: string, result: ExecutionResult) {

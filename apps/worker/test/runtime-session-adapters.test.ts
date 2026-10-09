@@ -423,3 +423,13 @@ test('claude runtime session maps native json events', async () => {
   if (signals[2]?.kind === 'event') assert.deepEqual(signals[2].event, { kind: 'usage.updated', usage: { scope: 'operation', subjectId: 'turn-claude', source: 'runtime', revision: 1, completeness: 'complete', inputTokens: 4, outputTokens: 5, totalTokens: 9 } })
   assert.deepEqual(signals.at(-1), { kind: 'finished', outcome: { status: 'completed' } })
 })
+
+test('Pi commands and approvals before first Turn do not spawn an ambient child', async () => {
+  const source = await executable('pi-pre-turn', 'echo spawned > "$0.spawned"; sleep 10')
+  const session = await new PiRuntimeSessionAdapter(source).openSession({ sessionId, cwd: process.cwd(), modelId, resume: null })
+  try {
+    await assert.rejects(session.command({ name: 'set_model', operationId: 'pre-turn' as TurnId, arguments: { modelId: 'fixture::model' } }), /pi_runtime_scoped_child_unavailable/)
+    await assert.rejects(session.resolveApproval('pre-turn-approval' as never, 'approve'), /pi_runtime_scoped_child_unavailable/)
+    await assert.rejects(access(`${source}.spawned`), { code: 'ENOENT' })
+  } finally { await session.close() }
+})
