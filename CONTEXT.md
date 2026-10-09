@@ -38,6 +38,18 @@ _Avoid_: Agent、智能体、客户端、Agent 直接入网、必然等同于一
 某个 Worker 上可选择并由 Adapter 桥接的 Agent 程序类型，如 Pi、Claude Code、Codex 或 OpenCode；其选择身份由 `(Worker, Agent key)` 确定，不直接注册或连接 Server。
 _Avoid_: 网络节点、注册主体、角色人格、Session、一次运行的进程、跨 Worker 单例
 
+**Loop-in**:
+使用 Worker 本机 Agent Runtime 运行完整 Agent loop 的执行形态。
+_Avoid_: 模型本地推理、操作系统隔离保证
+
+**Loop-out**:
+使用平台 Runtime 驱动 Agent loop，并通过获权工具接口使用 Worker 执行环境的形态；平台 Runtime 的物理部署位置不由此术语指定。
+_Avoid_: 任意外部 Agent 的远程工具调用、仅有模型 HTTP 请求、必然运行于 Server 进程
+
+**Platform Runtime（平台 Runtime）**:
+平台提供、用于 loop-out 的 Agent loop 运行能力，组织模型交互、工具调用与持续执行；不等同于项目管理角色或模型服务。
+_Avoid_: 管理员权限、模型推理服务、项目管理 Agent 的同义词
+
 **Model**:
 由特定 Agent 使用、通过提供方与模型标识区分的模型选择，其可用性属于该 Worker 上该 Agent 的能力上下文。
 _Avoid_: Agent、Worker、跨所有 Agent 通用的裸模型名称
@@ -185,8 +197,12 @@ _Avoid_: 离线排队伪装成已运行、queued 或 accepted 等同 running、�
 ## 任务与审查
 
 **Task**:
-承载工作目标或专用对话意图、作为 Session 固定归属的工作单元；普通实施任务属于 Project，平台协调专用任务直接属于 Team，Worker 独立任务由本地宿主管理。
+承载工作目标或专用对话意图、作为 Session 固定归属的工作单元，一个 Task 可关联多个 Session；普通实施任务属于 Project，平台协调专用任务直接属于 Team，Worker 独立任务由本地宿主管理。
 _Avoid_: Session、Turn、必须由用户手工创建、任务归属等于工作区文件所有权
+
+**Task Progress Record（任务进度记录）**:
+人或 Agent 在 Task 推进过程中留下的可追溯工作上下文，说明已做工作、剩余事项、问题与成果依据，也可直接作为其他 Agent 或 Session 接手同一任务的交接依据。一个 Task 可有多条进度记录，记录归属 Task 并保留作者及适用的来源 Session/Run，不自动改变任务状态或执行绑定。
+_Avoid_: Task 状态、完整聊天副本、平台认证的完成证明、每次接手必须新建 Task
 
 **Task Workflow**:
 普通实施 Task 的管理状态机：`backlog | todo | in_progress | in_review | blocked | done | cancelled`；显式提交完成按任务审查策略推进，看板只是其视图，专用对话使用独立的处理/等待语义。

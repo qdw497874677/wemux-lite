@@ -1,11 +1,17 @@
 # 02: 文件、Diff、终端与成果审查引用
 
 Status: ready-for-agent
-Blocked by: [01 画布与 Fork](01-canvas-fork.md)、[协调入口人工签收与开门](../../web-next-coordination-closure/issues/04-coordination-acceptance.md)；复用 Run/审查合同，写能力开放前继续遵守既有写通道关闭裁定。
+Blocked by: 独立后端和受控测试可先行；界面联调需 [01](01-canvas-fork.md)，新增写能力开放仍需[协调安全签收](../../web-next-coordination-closure/issues/04-coordination-acceptance.md)。复用既有 Run/审查合同，不取消安全门。
 
 **Spec:** [会话协作界面](../spec.md)
 **合并来源:** `43966aa` 的原票 02、03。
 **What to build:** 获权实施用户可浏览修改文件、看 Diff、使用完整生命周期的终端，并阅读下载成果、以引用供审查使用。读取、写入与下载都受权限约束，协调模式始终没有实施写权。
+
+## 实现计划
+
+1. 盘点 Server 文件/终端路由、Worker 文件端口及 web-next 操作入口，补路径授权、CAS 写入与共享 Placement 冲突处理。
+2. 终端建立、断线重连、关闭及异常退出共用生命周期清理；成果下载与审查引用各自校验权限，不复制私有会话。
+3. 测无权限读取/写入/下载、路径穿越、协调工具拒绝、终端遗留进程及引用失效，再以真实浏览器验收。
 
 ## 文件、Diff 与终端
 

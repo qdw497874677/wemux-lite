@@ -1,11 +1,18 @@
 # 03: 连接器、渠道与协作界面验收
 
 Status: ready-for-agent
-Blocked by: [01 画布与 Fork](01-canvas-fork.md)、[协调入口人工签收与开门](../../web-next-coordination-closure/issues/04-coordination-acceptance.md)；同候选验收与关闭另需 [02 文件、终端与成果](02-files-terminal-artifacts.md) 完成。
+Blocked by: 独立连接器合同与受控测试可先行；界面联调需 [01](01-canvas-fork.md)，新增写能力开放仍需[协调安全签收](../../web-next-coordination-closure/issues/04-coordination-acceptance.md)；最终同候选验收另需 [02](02-files-terminal-artifacts.md)。
 
 **Spec:** [会话协作界面](../spec.md)
 **合并来源:** `43966aa` 的原票 04、05。
 **What to build:** 补齐连接器与渠道的配置、审批、投递、死信、撤权及幂等重试，并在本票收集协作界面 spec 的同候选证据。连接器实施不必等待文件与成果部分；同候选验收必须等 01、02 的实施完成。真实外部服务签收由[外部服务 ticket](../../web-next-external-gates/issues/01-real-external-services.md)跟踪，不因本票合并而授权外发。
+
+## 实现计划
+
+1. 盘点 Server Connector/Channel 服务与 Worker 工具网关，复用现有存储和审批，不另造万能外发入口。
+2. 在 web-next 补配置、审批、投递、死信、撤权入口；Secret 输入与投影分离，结果未知和明确失败分开。
+3. 稳定投递身份透传支持的外部幂等键；不支持且 ACK 丢失则暂停人工核对。测试撤权队列、发送/回执竞态、日志脱敏及未知结果禁止盲重试。
+4. 本地外部服务桩与真实浏览器可先验收；真实外发交外部门票授权。三 e2e 同候选更新后转人工关闭门。
 
 ## 连接器与渠道
 
@@ -13,7 +20,7 @@ Blocked by: [01 画布与 Fork](01-canvas-fork.md)、[协调入口人工签收�
 - [ ] Secret 写入后接口、界面、日志与事件均无明文
 - [ ] 外部写入未获审批时不投递
 - [ ] 投递记录与死信可查，含失败原因
-- [ ] 死信幂等重试不产生重复外部副作用
+- [ ] 死信保留稳定投递身份；有外部幂等支持时验证去重，无支持且结果未知时暂停人工核对，不承诺外部 exactly-once
 - [ ] 撤权后未投递项立即失效，不再外发
 - [ ] 连接器调用受能力令牌、allowedTools 与资源绑定约束
 - [ ] 断言与截图作为证据留存

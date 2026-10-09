@@ -4,11 +4,13 @@
 
 ## 1. 产品定位
 
-Wemux Lite 是面向个人与团队、自托管的 AI Agent 集群管理、协作与编排平台，也是运行时无关的 Agent Network 控制层。Worker 通过 Adapter Bridge 把 Pi、OpenCode、Claude Code 及后续 Agent 统一到 Wemux ADK Profile，再通过主动长连接加入网络；Server 负责授权、路由、协作关系和治理，不要求 Agent 原生实现 Wemux 网络协议。它以 Project 为组织中心，统一管理分布在不同 Worker 上的 Agent、模型能力、工作环境和持续 Session，支持从直接对话、会话 Fork 与空间化协作，到任务指派、执行监督与结果审查的完整工作过程。
+Wemux Lite 是面向个人与团队、自托管的 AI 集群工作台，也是运行时无关的 Agent Network 控制层。目标是让 AI 在授权内自主完成项目工作，人处理关键决策并能随时介入。Worker 通过 Adapter Bridge 把 Pi、OpenCode、Claude Code 及后续 Agent 统一到 Wemux ADK Profile，再通过主动长连接加入网络；Server 负责授权、路由、协作关系和治理，不要求 Agent 原生实现 Wemux 网络协议。它以 Project 为组织中心，统一管理分布在不同 Worker 上的 Agent、模型能力、工作环境和持续 Session，支持从直接对话、会话 Fork 与空间化协作，到任务指派、执行监督与结果审查的完整工作过程。
 
 “Lite”表示轻量部署、必要依赖和可理解的架构，不表示演示版、功能残缺或降低可靠性。目标不是做 MVP，也不是复制 Wemux Slim 的全部技术栈；参考其产品能力，根据本产品边界选择实现。
 
-这里的集群是受管的分布式 Agent 执行资源，不是 GPU 训练集群、模型推理服务集群或通用容器调度平台。Agent 使用的模型可以来自远程服务，Worker 不必拥有 GPU。
+这里的集群是受管的分布式 Agent 执行资源，不是 GPU 训练集群、模型推理服务集群或通用容器调度平台。Agent 使用的模型可以来自远程服务，Worker 不必拥有 GPU。这里利用的是 Agent loop、工具和构建测试占用的 CPU/内存及环境能力：通过任务机器范围、申领或指定派发，把执行交给有资格且有剩余容量的远程机器。多用户团队共同使用同一套项目与任务。
+
+平台支持两种目标形态：loop-in 使用 Worker 本机 Agent Runtime，loop-out 使用平台 Runtime 驱动 loop 并调用 Worker 工具。平台 Runtime 是 loop-out 的组成部分，不等同于项目管理角色；首个 loop-out 场景已确认是单 Worker 的完整任务执行，共用看板、分配、权限、容量及会话/成果视图；部署位置与实现选型仍待设计。容量初始化值及持续授权规则也尚待确认，见[需求基线 D1–D6](specs/ai-workbench-requirements-alignment.md)。现有 Worker 执行架构不代表这些形态均已实现，也不要求 Server 本身变成 Runtime。
 
 ## 2. 用户与核心问题
 
@@ -37,13 +39,13 @@ Team → 协调对话 Task → Session → 经授权交接 Project 内普通 Tas
 
 ### 协调讨论与测试对话
 
-所有 Session 必须绑定 Task。平台协调入口自动提供 Team 级专用 Task，用于讨论、研究、计划和受权交接；项目内测试也自动提供专用 Task，不要求用户先填任务表单。协调执行者可以位于任意获授权 Worker，不要求 Server 本机执行。讨论模式由运行时强制限制，无法保证限制的 Runtime 不开放此模式。
+所有 Session 必须绑定 Task。平台协调入口自动提供 Team 级专用 Task，用于讨论、研究、计划和受权交接；项目内测试也自动提供专用 Task，不要求用户先填任务表单。协调执行者可以位于任意获授权 Worker，不要求 Server 本机执行。协调入口目前保持关闭。已选择 L1 会话配置及平台中介工具授权收口，不承诺 OS 文件/网络隔离；开门须真实证据及部署者书面残余风险接受，见[协调 spec](../.scratch/web-next-coordination-closure/spec.md)。
 
 ### 任务协作
 
 Project → Task（目标与验收标准）→ Assignment → Run → Session → 显式提交完成及配置的审查流程。
 
-Task 看板是管理视图，不是必须先打开的页面。Run 成功不等于 Task 完成；新项目默认不强制审查，管理者可配置 Agent、人工或多阶段审查，执行者不得自行取消要求。
+Vibe Kanban 式 Task 看板是主要管理视图，但不是手工会话的必经页面。任务组织多个 Session 以完成项目；项目管理 Agent 与人共用任务管理工具，获权后可以组织和持续推进，只有用户或策略要求先审计划时才批准 revision。Run 成功不等于 Task 完成；新项目默认不强制审查，管理者可配置 Agent、人工或多阶段审查，执行者不得自行取消要求。
 
 两条集群路径共享同一套执行、历史、权限与故障恢复机制，不建设两套会话系统。
 
@@ -61,7 +63,7 @@ Worker 可独立安装，不注册 Server 也可通过自身鉴权的 Web/API �
 
 集群连接与 Agent 对话协议保持分层：Worker 到 Server 的一条主动出站连接负责认证、版本协商、多路复用、可靠投递、重连和补传；Wemux ADK Profile 继续独立定义 Session、Invocation、Event、Content、Action、Approval、Cancel 与终态。`@wemux/agent-interchange` 的 `AgentEvent` 是唯一公共执行 Event；Worker 内部 Provider signal、Session Journal 投影与 transport frame 都不是第二套 Agent 协议。升级 transport 不得改写对话身份。具体技术基线见 [Agent 互操作模块设计](design/agent-interchange-module.md) 与 [Worker 可靠长连接模块设计](design/worker-reliable-connection.md)。
 
-当前 Agent Network 的实施顺序是：P0 先完成公共执行协议收敛；P1 用 Pi 与 OpenCode 两个真实 Adapter 验证多 Agent seam 和能力差异；P2 再在稳定的单 Agent 语义上增加团队委派、handoff、父子 invocation、审批、预算和取消传播。Claude Code 保留兼容与后续扩展，但不替代 P1 的 Pi + OpenCode 验收基线。会话协作画布采用独立 C0–C6 纵向线：先冻结模块合同和 Fork 权威，再引入画布投影与连续会话表面，随后分别交付授权实时同步、布局性能和编排关系投影；Ticket 23 先冻结 P2 编排合同，画布 UI 不作为 P2 编排的前置条件。
+协议、Adapter、协作和运行形态按功能票据依赖推进，不再使用 P0/P1/P2 或 C0–C6 作为执行层级。现有有效 Runtime 的真实验收范围见[项目管理 spec](../.scratch/web-next-plan-handoff/spec.md)；新增运行形态单独跟踪，不以历史适配验收代替。
 
 ## 4. 必须完整建设的能力
 
@@ -99,11 +101,11 @@ Worker 可独立安装，不注册 Server 也可通过自身鉴权的 Web/API �
 
 ## 6. 当前基础与目标严格分开
 
-以下仅为本轮代码阅读确认的基础，不是发布验收结果：
+以下为历史基础记录，不能当作当前完整实现盘点或发布验收结果；当前缺口按 spec/ticket 及操作登记核验：
 
 - 仓库已有 Server、Worker、Web、共享协议与领域包。
 - `packages/domain/src/workspace.ts` 与 `packages/server-domain/src/resources.ts` 已包含逻辑 Workspace 与 placements；旧单 Placement 投影仍存在，端到端契约尚需逐项核验。
-- `apps/worker/src/agents/` 已有 Pi 与 Claude Code 执行适配相关代码；P1 将优先补 OpenCode，并以 Pi + OpenCode 的同一合同测试和真实运行作为多 Agent 基线。其他 Agent 的可执行程度以运行时上报和真实验收为准，不从目录名或检测结果推断。
+- `apps/worker/src/agents/` 已有 Pi、Claude Code、OpenCode 适配代码；能力以运行时上报及真实验收为准，不从目录名推断。历史阶段编号不再定义当前验收范围。
 - 已有任务、会话、命令、日志投影与部分管理入口；入口存在不代表所有异常路径已闭环。
 - 账号入口已按 Ticket 04/05/07/06/08 换成独立登录会话与完整自助身份：实例管理员由部署声明 `WEMUX_ADMIN_EMAILS` 决定（命中即管理员，声明邮箱不受邀请制/关闭限制），`POST /auth/login` 建 Cookie 会话、`GET /auth/me` 与 `GET /auth/sessions` 管账号；邮箱注册/验证/找回与密码、邮箱安全管理已交付，Google OIDC 注册/登录及已有账号显式绑定/解绑已交付，并保护最后一种登录方式。引导令牌与首次认领（`POST /auth/setup`）已移除，旧 `POST /auth/session` 已退役（410）。但集群控制面仍只对实例管理员开放（非管理员请求返回 403 `admin_required`），不能因此宣称团队邀请、完整资源授权或 PAT 管理已完成。
 
@@ -114,7 +116,7 @@ Worker 可独立安装，不注册 Server 也可通过自身鉴权的 Web/API �
 - GPU 训练/推理资源编排和通用容器平台。
 - 多 Server 高可用与跨 Team 资源共享。
 - 隐式跨 Worker 文件同步、原生会话无损迁移与透明故障转移。
-- 无需审批的自主执行、无限自动重试或自动认定任务验收完成。
+- 未获授权的自主执行、无限自动重试或绕过验收策略自动完成；已授权目标内自主推进属于产品目标，不强制每一步人工批准。
 - 通用企业 SSO/SAML、其他社交登录与原生桌面/移动客户端先保留方向。邮箱注册和 Google OAuth/OIDC 登录已纳入近期账号系统，不受本条延期；设计与验收见 [账号系统设计](design/account-identity-system.md)。
 
 这些是当前投资顺序，不是通过“MVP 不做”永久排除产品能力。调整时必须更新范围和验收计划。

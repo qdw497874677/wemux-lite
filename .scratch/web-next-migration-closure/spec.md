@@ -4,7 +4,7 @@ Status: ready-for-agent
 
 ## Problem Statement
 
-新版功能已覆盖大部分旧版能力，但缺少操作级迁移登记：无法逐操作说明"这一项在新版哪里、证据是什么"。旧根前端与旧 Worker 工作台仍保留无 Task 的兼容业务旁路，调用方可能继续走旧路径，迁移没有真正收口；跨页、跨宿主、跨 Runtime 的授权交叉矩阵与桌面手机全链路也尚未验证。
+新版已有部分功能与历史验收，但在操作级盘点前不能断言大部分已迁移；当前缺少操作级迁移登记：无法逐操作说明"这一项在新版哪里、证据是什么"。旧根前端与旧 Worker 工作台仍保留无 Task 的兼容业务旁路，调用方可能继续走旧路径，迁移没有真正收口；跨页、跨宿主、跨 Runtime 的授权交叉矩阵与桌面手机全链路也尚未验证。
 
 作为维护者，我想逐操作确认新版覆盖并有证据，让旧调用方转到合法 Task Session 后再移除兼容旁路，这样删旧版不会留下未迁移的调用面。
 
@@ -25,7 +25,7 @@ Status: ready-for-agent
 5. 作为维护者，我想登记表明确区分已实现、已验证与未完成。
 6. 作为维护者，我想旧调用方改用合法 Task Session 创建与发送。
 7. 作为维护者，我想旁路移除前验证旧调用方已完成转换。
-8. 作为维护者，我想移除无 Task 兼容旁路后，旧调用方功能不回退。
+8. 作为维护者，我想移除无 Task 旁路后，受影响的旧调用方创建/发送链路不回退；不恢复旧版全面持续回归义务。
 9. 作为用户，我想跨页面操作时权限判断一致。
 10. 作为用户，我想跨宿主（集群与独立 Worker）权限判断一致。
 11. 作为用户，我想跨 Runtime 权限判断一致。
@@ -52,6 +52,13 @@ Status: ready-for-agent
 - 本 spec 不新增产品功能，只做迁移、旁路移除与验收；旧版删除动作不在本 spec 内执行。
 - 旧版历史异常不阻断新版票据，但不得据此跳过迁移证据。
 
+## 实现计划
+
+1. 01 从路由、旧前端和 Worker local-workbench 的 createSession 反查全部调用者；以平台规格 §4 及新增需求基线建立操作登记，分开旧迁移项和新增派发/自主推进/Runtime 形态项。
+2. 02 只转换盘点证实的调用面，逐个补行为及浏览器证据后删旁路；不因旧版其他历史问题阻断，也不直接删除尚有调用者的 API。
+3. 03 在同候选验证原迁移矩阵；新增能力单列未完成与责任票，不用 NEXT-03/04 历史完成替代。已确认 D5 将派发、容量与重新分配、任务管理可替换、持续推进和单 Worker loop-out 纳入本次验收；未通过不给新版整体完成结论。
+4. 多用户/双宿主/Runtime 的权限矩阵复用真实链路，不用源码契约断言代替。
+
 ## Testing Decisions
 
 - 复用现有 seam：旧根前端入口、旧 Worker 工作台入口、新版页面与 API、宿主切换路径、现有 e2e 骨架。
@@ -75,11 +82,11 @@ Status: ready-for-agent
 | [02 调用方改造与旁路移除](issues/02-remove-bypass.md) | 03 |
 | [03 授权矩阵、全链路与签收](issues/03-authz-matrix-acceptance.md) | 04、05 |
 
-02 以 01 的旁路勘察和本地 Task Session 调用能力可用为前提；03 必须等待 01、02 及其列出的功能验收 ticket 全部完成。03 证据准备完成后转 `ready-for-human`；用户确认前不关闭该 ticket、不认定本 spec 验收通过、不勾选 NEXT-15，通过也不构成切根或删除授权。
+02 以 01 的旁路勘察和本地 Task Session 调用能力可用为前提；03 等待 01、02 及其列出的原范围功能验收，原范围证据可按交接闭环分项 A 先行；本次整体签收依已确认 D5 还需分项 B、派发/容量、任务管理可替换及运行形态票的指定范围验收，不设实施串行门。03 证据准备完成后转 `ready-for-human`；用户确认前不关闭该 ticket、不认定本 spec 验收通过、不勾选 NEXT-15，通过也不构成切根或删除授权。
 
 ## Further Notes
 
 - 依据 `docs/specs/web-next-project-agent-platform.md` §4 迁移登记表与产品方向文档。
 - 01 是只读勘察与登记，可独立推进；功能未完成时如实登记缺口，不把整份 spec 置于其他 spec 之后。
-- 03 的真实全链路验收依赖[跨 Runtime 交接闭环](../web-next-plan-handoff/issues/02-cross-runtime-loop-acceptance.md)、[协作界面验收](../web-next-collaboration-surfaces/issues/03-connector-channel-acceptance.md)和[双宿主验收](../web-next-dual-host/issues/02-local-host-enrollment-acceptance.md)。
+- 03 的真实全链路验收依赖[跨 Runtime 交接闭环分项 A](../web-next-plan-handoff/issues/02-cross-runtime-loop-acceptance.md)、[协作界面验收](../web-next-collaboration-surfaces/issues/03-connector-channel-acceptance.md)和[双宿主验收](../web-next-dual-host/issues/02-local-host-enrollment-acceptance.md)。
 - 旧版删除仍需独立的[切根 go/no-go](../web-next-cutover/issues/02-go-no-go-cutover.md)。

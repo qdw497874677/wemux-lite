@@ -1,11 +1,30 @@
 # Wemux Lite
 
-Wemux Lite 是面向个人与团队、自托管的 AI Agent 集群管理与协作平台。Server 统一管理分布式 Worker、Agent 能力、Project、Workspace 和持续 Session；Worker 执行本机 Agent 并同步标准化 Journal；Web 和其他客户端共享控制与授权入口。
+Wemux Lite 是面向个人与团队、自托管的 **AI 集群工作台**。它统一管理异构环境中的 Agent 与工具执行资源，既接入用户已有的 Agent，也提供可选的平台 Runtime，以项目和任务组织持续会话，让人与 Agent 协作完成项目。
 
-目标是完善可长期使用的产品，而不是 MVP。“Lite”表示轻量部署与必要依赖，不表示缩减可靠性或管理能力。直接对话 `Project → Workspace → Session` 与任务协作 `Task → Run → Session → Review` 均是一等路径，任务看板不是对话前置条件。
+> **愿景：汇聚异构环境中的 Agent 与工具执行资源，让 AI 自主完成任务、持续推进项目，人只做关键决策。**
+
+这里的集群资源是 Agent loop、工具进程、浏览器、代码执行、构建测试等消耗的 **CPU、内存及相关执行环境**；模型训练与推理算力是另一回事，不是本产品所指的执行集群。
+
+“Lite”表示轻量部署与必要依赖，不表示功能残缺或降低可靠性。目标是完善可长期使用的产品，而不是 MVP。上述定位与下方核心方向描述产品目标，**不代表所有能力已经实现或验收**；当前基础见文末。
 
 ## 产品与建设方向
 
+### 核心方向
+
+- **利用远程空闲资源**：将任务派发到符合权限、能力与环境条件且有可用容量的远程机器上运行 Agent，统一管理执行过程和资源状态；这里的资源利用不是模型推理算力调度。
+- **任务限定执行机器**：任务可设置候选机器范围，支持范围内符合条件的机器申领，也支持指定机器执行；分配新执行不等于迁移已有会话。
+- **支持 loop-in 与 loop-out**：loop-in 使用 Worker 本机 Agent Runtime 运行完整 loop；loop-out 使用平台 Runtime 驱动 loop，通过受控工具接口调用 Worker 执行资源。平台 Runtime 的部署位置、实现选型与实施优先级仍待设计；这两种形态是产品目标，不代表均已实现。
+- **以项目看板组织工作**：参考 Vibe Kanban 的任务工作形态，通过 `Project → Task → 多个 Session` 组织研究、实施与验证，看板呈现任务状态，任务下查看执行现场与成果。所有 Session 都有 Task 归属，协调对话和 Worker 本地对话使用相应专用或本地 Task；仍支持手工开启会话，不强制先打开看板。
+- **自主推进与人工介入共存**：具备项目管理职责的 Agent 使用与用户相同的项目管理能力，按授权组织任务、安排执行、跟踪阻塞和汇总成果。手工开启会话、调整与接手始终可用，但不要求人逐步调度每次执行。
+- **多用户团队共同使用**：团队成员和获授权的 Agent 在同一工作台管理任务、使用共享执行资源，围绕成果分工、反馈、交接与审查；共享机器不自动授予全部项目、会话、文件或凭据的访问权。
+- **以成果而非运行次数衡量推进**：执行成功不自动等于任务完成，结果依据验收要求与配置的审查策略处理。自主执行不等于无限权限或无限重试，也不意味着每个计划和工具调用都必须人工审批。
+
+产品特点是将资源管理、持续会话、项目管理与协作连接成同一条工作路径，而不是仅提供节点列表和多个聊天窗口。
+
+### 文档入口
+
+- [本轮产品方向确认与参考研究](docs/research/ai-cluster-workbench-product-alignment.md)（参考证据与方向确认；[需求基线及未决选择](docs/specs/ai-workbench-requirements-alignment.md)、[规格与票据](docs/specs/web-next-index.md)分别跟踪实施）
 - [产品定位与边界](docs/product-direction.md)
 - [当前 spec、ticket 与需求追溯](docs/specs/web-next-index.md)
 - [领域术语](CONTEXT.md)
@@ -20,7 +39,9 @@ Worker 将支持独立安装、自身 Web/API 鉴权与显式公网 HTTPS 访问
 
 项目已由 `wemux-mini` 更名为 `wemux-lite`，CLI 入口为 `wemux-lite-worker`、`wemux-lite-agent` 和 `wemux-lite-agent-mcp`。原有 Worker 升级后如需保留身份、会话和 Agent 选择，请通过 `--home` 显式指定旧数据目录；不要直接启动到新的默认目录。环境变量仍使用 `WEMUX_*`。
 
-## 架构
+## 当前架构
+
+以下描述现有 Server / Worker 执行路径，不代表平台自有 Runtime 与 loop-out 的目标架构已经落地。
 
 ```text
 apps/web         React 展示与 API adapter；不包含领域或执行逻辑
@@ -148,7 +169,8 @@ Web 侧边栏新增「集群阶段」页，集中管理集群中所有阶段性�
 ## 当前基础与验证边界
 
 - 当前以部署声明的管理员接入为主（`WEMUX_ADMIN_EMAILS`）；不能宣称已完成多用户、团队资源授权与客户端凭证的完整闭环。
-- 已有逻辑 Workspace 与 Placement 类型和相关实现；多节点生命周期与客户端一致性纳入里程碑核验，非空 Composite Workspace 不作为已交付能力。
+- 已有逻辑 Workspace 与 Placement 类型和相关实现；多节点生命周期与客户端一致性按对应 spec/ticket 核验，非空 Composite Workspace 不作为已交付能力。
 - `test` Agent 提供确定性执行验证；Pi 与 Claude Code 有本机 CLI 执行适配，需对版本、认证与真实运行分别验收。Codex、OpenCode 不因可检测就被宣称可执行。
 - Server 是缓存与控制面，Worker Journal 是会话历史权威。
-- 当前缺口不是永久产品边界。准确交付状态以路线图能力台账与可复查证据为准；构建通过不等于浏览器或真实 Agent 验收通过。
+- 平台可选 Runtime、loop-out 执行路径和自主项目推进是已确认的产品方向，不在此声明为已交付能力；异构资源统一管理不承诺自动同步文件、透明迁移会话或操作系统安全隔离。
+- 当前缺口不是永久产品边界。准确交付状态以 [spec/ticket 索引](docs/specs/web-next-index.md)、各票验收记录与可复查证据为准；构建通过不等于浏览器或真实 Agent 验收通过。

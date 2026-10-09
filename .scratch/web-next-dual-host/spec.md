@@ -4,7 +4,7 @@ Status: ready-for-agent
 
 ## Problem Statement
 
-资源管理面还不能区分配置、认证、分发与可执行状态，管理员无法确认某个 Agent/Model 究竟"配置了"还是"真能跑"。同时 Worker 必须依赖 Server 才能使用 Web/API：独立安装的 Worker 没有本地鉴权宿主，本地 Task、Session 与结果无法脱离集群使用；入群、重试与退群路径也缺少身份分离保障。
+资源管理面还不能区分配置、认证、分发与可执行状态，管理员无法确认某个 Agent/Model 究竟"配置了"还是"真能跑"。Worker 已有本地鉴权 Web/API、Session 与入退群基础，不应从零重建。缺口是本地 Task 归属、新版共用界面及身份/恢复合同的完整验证；代码存在不等于已完成验收。
 
 作为用户，我想不用 Server 就能在独立 Worker 上用本地鉴权管理本地 Task、Session 和结果；作为管理员，我想管理 Worker、Agent/Model 能力与 Skill/Preset/Provider 并看到真实可执行状态。
 
@@ -56,12 +56,19 @@ Status: ready-for-agent
 - 双宿主共用同一权限与能力校验路径，不因宿主不同而放宽。
 - 移动端遵守不安全上下文约束：随机 ID 统一走 `randomId()`，剪贴板走降级路径。
 
+## 实现计划
+
+1. 01 复用 Worker 现有发现、管理与 ResourceReconciler，补齐真实状态投影和授权管理 UI；资源分发并发不算执行容量，CPU/内存准入归[派发 spec](../web-next-task-dispatch/spec.md)。
+2. 02 从现有 local-control/server 与 local-workbench 补本地 Task，转换 createSession 为合法 Task Session；同 schema 独立库，不另造本地业务模型。
+3. 用宿主端口复用运行时/界面，检查登录、Cookie/CSRF、入群重试与退出状态机；不复制集群用户凭据。
+4. 无 Server 启动、已入群与退出后各跑桌面/手机链路；派发新增后本地/集群共享容量准入，但不上报本地会话内容。
+
 ## Testing Decisions
 
 - 复用现有 seam：Worker CLI 与管理命令、本地宿主 HTTP/API 与鉴权、运行时适配启动路径、web-next 会话界面、现有 e2e 骨架。
 - 只测外部行为：四态可区分、真实探测版本、独立宿主无 Server 可用、入群/重试/退群、身份分离、本地记录不上传、双宿主界面一致。
 - Prior art：现有 Worker 管理命令测试、本地宿主设计文档、会话界面 e2e、双宿主合同文档。
-- 真实浏览器验收覆盖桌面与移动视口。
+- 真实浏览器验收覆盖桌面与移动视口；02 负责显式公网 HTTPS 部署、认证会话保护、流式连接重连及错误配置安全失败。真实域名/证书与暴露范围需人工授权，未具备时保持未完成。
 
 ## Out of Scope
 
