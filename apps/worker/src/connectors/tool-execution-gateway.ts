@@ -22,6 +22,8 @@ export interface ConnectorApprovalPort {
 
 export interface CapabilityVerifier {
   verify(token: string): Promise<CapabilityGrantClaims> | CapabilityGrantClaims
+  verifyBinding?(token: string, snapshot: CapabilitySnapshot, turn: ToolExecutionInput['currentTurn']): Promise<boolean> | boolean
+  verifyCurrentGrant?(token: string, operation: 'mcp.list_tools' | 'mcp.call' | 'http.call'): Promise<boolean>
 }
 
 export interface ToolExecutionInput {
@@ -158,6 +160,8 @@ export class ToolExecutionGateway {
   private async authorize(token: string, snapshot: CapabilitySnapshot, turn: ToolExecutionInput['currentTurn'], connectorId: string, operation: CapabilityToolName) {
     let claims: CapabilityGrantClaims
     try { claims = await this.verifier.verify(token) } catch { throw new GatewayError('scope_denied', 'Invalid capability token') }
+    if (this.verifier.verifyBinding && !(await this.verifier.verifyBinding(token, snapshot, turn))) throw new GatewayError('scope_denied', 'Capability lease or binding changed')
+    if ((operation === 'mcp.list_tools' || operation === 'mcp.call' || operation === 'http.call') && this.verifier.verifyCurrentGrant && !(await this.verifier.verifyCurrentGrant(token, operation))) throw new GatewayError('scope_denied', 'Server grant revoked')
     if (claims.sessionId !== turn.sessionId || claims.turnId !== turn.turnId || claims.projectId !== turn.projectId || claims.workspaceId !== turn.workspaceId || snapshot.sessionId !== turn.sessionId || snapshot.projectId !== turn.projectId || snapshot.workspaceId !== turn.workspaceId || !snapshot.allowedConnectorIds.includes(connectorId) || !claims.allowedConnectorIds.includes(connectorId)) throw new GatewayError('scope_denied', 'Capability is not bound to this Turn and connector')
     if (!claims.allowedTools.includes(operation) || !snapshot.allowedTools.includes(operation)) throw new GatewayError('scope_denied', `Capability ${operation} is not allowed`)
     if (!Number.isFinite(Date.parse(claims.expiresAt)) || Date.parse(claims.expiresAt) <= Date.now()) throw new GatewayError('scope_denied', 'Capability token expired')

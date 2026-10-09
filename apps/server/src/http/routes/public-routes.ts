@@ -39,9 +39,14 @@ export const publicRoutes: readonly RouteDescriptor[] = [
       const header = request.headers.authorization
       const token = header?.startsWith('Bearer ') ? header.slice(7) : undefined
       if (!token) throw new AppError(401, 'Missing capability token')
-      const operation = params.operation as CapabilityToolName
+      const operation = params.operation
       const input = await readBody() as any
-      const claims = await capabilities.verify(token, operation)
+      if (operation === 'grant.verify') {
+        if (!['mcp.list_tools', 'mcp.call', 'http.call'].includes(input?.requiredTool)) throw new AppError(400, 'Invalid Connector grant operation')
+        await capabilities.verify(token, input.requiredTool)
+        return json(200, { valid: true })
+      }
+      const claims = await capabilities.verify(token, operation as CapabilityToolName)
       let result: unknown
       try { result = operation === 'session.info' ? await capabilities.sessionInfo(claims)
         : operation === 'project.list' ? await capabilities.listProjects(claims)

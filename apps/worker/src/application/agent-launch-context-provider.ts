@@ -1,4 +1,4 @@
-import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, realpath, rm, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, normalize, relative, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import type { AgentKey, CapabilityAsset, ProjectId, Turn } from '@wemux/domain'
@@ -10,13 +10,13 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
   private readonly capabilityEndpoint: string | null
   private readonly prepareConnectors?: (turn: Turn) => Promise<{ readonly token: string; readonly snapshot: import('@wemux/domain').CapabilitySnapshot; release(): Promise<void> }>
   private readonly resolveSkills?: (projectId: ProjectId, agentKey: AgentKey) => Promise<readonly { resourceId: string; revisionId: string; content: Uint8Array }[]>
-  private readonly sessionScope?: (turn: Turn) => Promise<{ projectId: ProjectId; agentKey: AgentKey } | null>
+  private readonly sessionScope?: (turn: Turn) => Promise<{ projectId: ProjectId; workspaceId: string; rootPath: string; agentKey: AgentKey } | null>
   constructor(
     workerDataDir: string,
     capabilityEndpoint: string | null,
     prepareConnectors?: (turn: Turn) => Promise<{ readonly token: string; readonly snapshot: import('@wemux/domain').CapabilitySnapshot; release(): Promise<void> }>,
     resolveSkills?: (projectId: ProjectId, agentKey: AgentKey) => Promise<readonly { resourceId: string; revisionId: string; content: Uint8Array }[]>,
-    sessionScope?: (turn: Turn) => Promise<{ projectId: ProjectId; agentKey: AgentKey } | null>,
+    sessionScope?: (turn: Turn) => Promise<{ projectId: ProjectId; workspaceId: string; rootPath: string; agentKey: AgentKey } | null>,
   ) {
     this.workerDataDir = workerDataDir
     this.capabilityEndpoint = capabilityEndpoint
@@ -54,7 +54,9 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
         }
       }
       const scope = this.sessionScope ? await this.sessionScope(turn) : null
-      if (scope && this.resolveSkills && snapshot.projectId === scope.projectId) {
+      if (this.sessionScope && !scope) throw new Error('agent_launch_binding_unavailable')
+      if (scope && (snapshot.projectId !== scope.projectId || snapshot.workspaceId !== scope.workspaceId || snapshot.sessionId !== turn.sessionId)) throw new Error('agent_launch_binding_mismatch')
+      if (scope && this.resolveSkills) {
         for (const skill of await this.resolveSkills(scope.projectId, scope.agentKey)) {
           const target = safePath(skillsRoot, `${skill.resourceId}/SKILL.md`)
           await mkdir(dirname(target), { recursive: true })
@@ -66,10 +68,12 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
       const instructions = promptParts.length ? promptParts.join('\n\n') : null
       if (instructions) await writeFile(join(root, 'instructions.md'), instructions, 'utf8')
       await writeFile(join(root, 'execution-spec.json'), JSON.stringify({ snapshot, turnId: turn.id }, null, 2), 'utf8')
-      const restrictedEnvironment = snapshot.projectId.startsWith('team:')
-      // Placement roots are Worker-owned and keyed by the same Workspace identity as
-      // LocalProvisioner. No absolute path from a Server command is trusted here.
-      const sessionHome = restrictedEnvironment ? join(this.workerDataDir, 'workspaces', createHash('sha256').update(snapshot.workspaceId).digest('hex'), '.wemux-agent', snapshot.sessionId) : null
+      if (!this.sessionScope && snapshot.projectId.startsWith('team:')) throw new Error('agent_launch_binding_unavailable')
+      const restrictedEnvironment = Boolean(scope?.projectId.startsWith('team:'))
+      if (restrictedEnvironment && (!scope?.workspaceId || !scope.rootPath)) throw new Error('agent_launch_placement_unavailable')
+      const expected = restrictedEnvironment ? resolve(this.workerDataDir, 'workspaces', createHash('sha256').update(scope!.workspaceId).digest('hex')) : null
+      if (restrictedEnvironment && (resolve(scope!.rootPath) !== expected || await realpath(expected!).catch(() => null) !== expected)) throw new Error('agent_launch_placement_mismatch')
+      const sessionHome = restrictedEnvironment ? join(expected!, '.wemux-agent', createHash('sha256').update(turn.sessionId).digest('hex')) : null
       if (sessionHome) await mkdir(sessionHome, { recursive: true, mode: 0o700 })
       const environment: Record<string, string> = {
         WEMUX_SESSION_ID: turn.sessionId,

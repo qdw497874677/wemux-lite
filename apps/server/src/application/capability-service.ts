@@ -223,6 +223,20 @@ export class CapabilityService {
     if (!claims.allowedTools.includes(requiredTool)) throw new CapabilityError('forbidden', `Capability ${requiredTool} is not allowed`)
     const session = await this.store.resources.getSession(claims.sessionId)
     if (!session || session.deletedAt !== null || session.projectId !== claims.projectId || session.workspaceId !== claims.workspaceId) throw new CapabilityError('forbidden', 'Capability session is no longer active')
+    // Actor revocation must fence Connector dispatch too, not only Project queries.
+    if (claims.actorUserId) {
+      const account = await this.store.identity.getUser(claims.actorUserId)
+      if (!account || account.status !== 'active' || (account.authVersion ?? 0) !== claims.actorAuthVersion) throw new CapabilityError('forbidden', 'Capability actor is no longer active')
+      if (!this.sessionQueries || !this.projectQueries) throw new CapabilityError('forbidden', 'Capability access checks are unavailable')
+      await this.sessionQueries.require(claims.actorUserId, claims.sessionId)
+      await this.projectQueries.require(claims.actorUserId, claims.projectId)
+    }
+    if (requiredTool === 'mcp.call' || requiredTool === 'mcp.list_tools' || requiredTool === 'http.call') {
+      if (!claims.actorUserId) throw new CapabilityError('forbidden', 'Connector capabilities require a trusted actor')
+      // Connector grants cannot outlive the current Session/Project/Worker authority.
+      if (!this.workerQueries) throw new CapabilityError('forbidden', 'Worker access checks are unavailable')
+      await this.workerQueries.require(claims.actorUserId, session.binding.agent.workerId)
+    }
     if (requiredTool === 'project.list' || requiredTool === 'project.get' || requiredTool === 'project.resources' || requiredTool === 'session.get' || requiredTool === 'task.list' || requiredTool === 'task.get' || requiredTool === 'task.create' || requiredTool === 'task.sessions' || requiredTool === 'session.events') {
       if (!claims.actorUserId || !Number.isSafeInteger(claims.actorAuthVersion) || !this.sessionQueries || !this.projectQueries) throw new CapabilityError('forbidden', 'Project queries require a trusted actor')
       const account = await this.store.identity.getUser(claims.actorUserId)

@@ -1,0 +1,16 @@
+# Coordination closure 01: implementation follow-up (gate closed)
+
+Ticket `.scratch/web-next-coordination-closure/issues/01-session-scoping-and-gateway-binding.md` remains **ready-for-agent**, not accepted or done. This is a code-level verification summary, not a release gate.
+
+## Verified on impl/coordination-01
+
+- The Worker derives restricted coordination scope from its persisted Session → Workspace → Worker binding, not from a capability snapshot supplied by the caller. A mismatched or unavailable binding refuses launch. Restricted homes use a hashed Session key under the verified Worker-owned Workspace Placement root; the root must match the expected hash path and resolve without a root symlink. Runtime cwd remains the bound Workspace root. An ordinary local-directory Workspace is not forced into that Worker-owned root.
+- Fake *public CLI* executables for Pi, Claude and OpenCode observed their actual spawned cwd, HOME, Pi/Claude config directories, PATH and absence of an ambient host credential marker. Ordinary Claude launch retained its ambient marker. These assert process configuration, **not** filesystem confinement.
+- The Connector gateway reauthorizes before cached-result replay, on pending-result return and after approval waits, including token expiry, current persisted Turn/Session binding, connector revision and current Server grant. The Server grant-check endpoint validates the signed token and current actor/Session/Project/Worker access; failure to reach the Server fails closed for cluster Connector dispatch. Unit tests cover revoked grant replay and approval wait without external HTTP calls, plus expired grants; Server endpoint test covers expiry and Project grant revocation.
+- Logs (local raw evidence, not committed): `/tmp/wemux-coord-worker-final2.log` (`452` tests, `447` pass, `5` skipped, `0` fail); `/tmp/wemux-coord-server-grant-final.log` (isolated Server grant test pass); `/tmp/wemux-coord-type-final.log` (workspace typecheck pass); `/tmp/wemux-coord-packages-final.log`, `/tmp/wemux-coord-server-build-final.log`, `/tmp/wemux-coord-worker-build-final.log` (package and downstream builds pass). Full Worker run had a 480-second command timeout and completed in ~38 seconds.
+
+## Remaining acceptance and boundary
+
+- **L1 only:** HOME/env/cwd do not prevent absolute paths, `..`, symlink access, child-process escape, inherited file descriptors or direct network access. The root realpath check verifies the Placement root itself, not every descendant. No isolation claim or coordination entry gate follows from these assertions.
+- Grant recheck fences Connector dispatch at the Worker gateway, but a revocation can race between the last check and the upstream side effect; there is no atomic cross-process grant lease or cancellation of already-sent calls. Worker-local Connector tokens have no Server issuer and rely on persisted local binding checks. A Server lookup outage blocks new cluster Connector dispatch.
+- The tested grant revocation is a Project grant removal. Broader end-to-end permission matrix, public running cluster replay/approval exercise and write-channel probe after this follow-up are still outstanding; keep the ticket and coordination gate open for further verification. Tests that bypass the Agent runtime or directly invoke an external process cannot claim sandboxing.

@@ -205,3 +205,21 @@ test('Revoked, unprivileged, cross-Project and expired capability tokens cannot 
     assert.ok(!JSON.stringify(revoked.data).includes('Guarded work'))
   } finally { await f.close() }
 })
+
+test('Server current Connector grant verification fences cached Turn tokens on expiry and revocation', async () => {
+  const f = await fixture()
+  try {
+    const task = await f.createTask('Connector access fixture')
+    const { bearer } = await f.openSession(task.id, contributor)
+    const first = await f.ask('grant.verify', { requiredTool: 'http.call' }, bearer)
+    assert.equal(first.status, 200, JSON.stringify(first.data))
+    const invalid = await f.ask('grant.verify', { requiredTool: 'task.create' }, bearer)
+    assert.equal(invalid.status, 400)
+    const claims = new CapabilityTokenService(capabilitySecret, () => at).verify(bearer)
+    const expired = new CapabilityTokenService(capabilitySecret, () => at).issue({ grantId: 'expired-connector', sessionId: claims.sessionId, turnId: claims.turnId, actorAgentId: claims.actorAgentId, actorUserId: claims.actorUserId, actorAuthVersion: claims.actorAuthVersion, projectId: claims.projectId, workspaceId: claims.workspaceId, allowedTools: claims.allowedTools, allowedConnectorIds: claims.allowedConnectorIds, ttlMs: -1 })
+    assert.equal((await f.ask('grant.verify', { requiredTool: 'http.call' }, expired.token)).status, 401)
+    await f.app.store.transaction(tx => tx.identity.removeProjectGrant(f.project.id, contributor))
+    const revoked = await f.ask('grant.verify', { requiredTool: 'http.call' }, bearer)
+    assert.ok([403, 404].includes(revoked.status), JSON.stringify(revoked.data))
+  } finally { await f.close() }
+})

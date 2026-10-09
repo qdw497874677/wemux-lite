@@ -79,19 +79,19 @@ test('MCP exposes the minimal tool surface', async () => {
 test('coordination launch context assigns session home under Placement and filters host credentials at child launch', async t => {
   const home = await mkdtemp(join(tmpdir(), 'wemux-coordination-launch-'))
   t.after(() => rm(home, { recursive: true, force: true }))
-  const provider = new FilesystemAgentLaunchContextProvider(home, null)
+  const cwd = join(home, 'workspaces', createHash('sha256').update('workspace-1').digest('hex'))
+  await import('node:fs/promises').then(fs => fs.mkdir(cwd, { recursive: true }))
+  const provider = new FilesystemAgentLaunchContextProvider(home, null, undefined, undefined, async () => ({ projectId: 'team:team-1' as never, workspaceId: 'workspace-1', rootPath: cwd, agentKey: 'pi' as never }))
   const prepared = await provider.prepare({ id: 'coord-turn', sessionId: 'coord-session', capabilitySnapshot: { id: 'coord', projectId: 'team:team-1', workspaceId: 'workspace-1', sessionId: 'coord-session', version: 1, assets: [], allowedTools: ['project.list'], allowedConnectorIds: [], createdAt: '2026-01-01T00:00:00.000Z' } } as any)
   t.after(() => prepared.cleanup())
   const context = prepared.context!
   assert.equal(context.restrictedEnvironment, true)
-  assert.match(context.environment.HOME, /\/workspaces\/[^/]+\/\.wemux-agent\/coord-session$/)
+  assert.equal(context.environment.HOME, join(cwd, '.wemux-agent', createHash('sha256').update('coord-session').digest('hex')))
   const previous = process.env.WEMUX_HOST_CREDENTIAL_MARKER
   process.env.WEMUX_HOST_CREDENTIAL_MARKER = 'host-private-marker'
   t.after(() => { if (previous === undefined) delete process.env.WEMUX_HOST_CREDENTIAL_MARKER; else process.env.WEMUX_HOST_CREDENTIAL_MARKER = previous })
   const { spawnSync } = await import('node:child_process')
   const { agentEnvironment } = await import('../src/agents/launch-environment.js')
-  const cwd = join(home, 'workspaces', createHash('sha256').update('workspace-1').digest('hex'))
-  await import('node:fs/promises').then(fs => fs.mkdir(cwd, { recursive: true }))
   const child = spawnSync(process.execPath, ['-e', 'process.stdout.write(JSON.stringify({cwd:process.cwd(),home:process.env.HOME,marker:process.env.WEMUX_HOST_CREDENTIAL_MARKER||null,path:!!process.env.PATH}))'], { cwd, env: agentEnvironment(context), encoding: 'utf8' })
   assert.equal(child.status, 0, child.stderr)
   assert.deepEqual(JSON.parse(child.stdout), { cwd, home: context.environment.HOME, marker: null, path: true })

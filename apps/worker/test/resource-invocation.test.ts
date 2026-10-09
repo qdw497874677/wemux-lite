@@ -52,7 +52,7 @@ test('真实 WorkerRuntime 的 Invocation 固定已授权 Skill，撤权后新�
   const provider = new FilesystemAgentLaunchContextProvider(home, null, undefined, (project, agent) => reconciler.skillsForLaunch(project, agent), async (turn: Turn) => {
     const session = await store.sessions.get(turn.sessionId)
     const workspace = session ? await store.workspaces.get(session.binding.workspaceId) : null
-    return session && workspace ? { projectId: workspace.projectId, agentKey: session.binding.agent.agentKey } : null
+    return session && workspace ? { projectId: workspace.projectId, workspaceId: workspace.id, rootPath: workspace.rootPath, agentKey: session.binding.agent.agentKey } : null
   })
   const runtime = new WorkerRuntime(store, { async provision() { return { rootPath: home, checkouts: [] } } }, [new TestAgent()], { send() {} }, workerId, 'invocation-worker', provider, undefined, new Map([[agentKey, adapter]]))
   try {
