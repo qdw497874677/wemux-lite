@@ -53,7 +53,7 @@ export class WorkerConnectorRuntime {
     const connectorIds = intersect(existing?.allowedConnectorIds ?? installed.map(item => item.id), installed.map(item => item.id))
     const connectors = pinned.filter(item => connectorIds.includes(item.id as never))
     const snapshot: CapabilitySnapshot = existing ? { ...existing, allowedConnectorIds: connectorIds, connectors } : {
-      id: `local-${turn.id}`, projectId: 'local' as never, workspaceId: 'local' as never, sessionId: turn.sessionId, version: 1, assets: [], allowedTools: ['mcp.list_tools', 'mcp.call', 'http.call'], allowedConnectorIds: connectorIds, connectors, createdAt: new Date().toISOString(),
+      id: `local-${turn.id}`, projectId: (connectors[0]?.projectId ?? 'local') as never, workspaceId: 'local' as never, sessionId: turn.sessionId, version: 1, assets: [], allowedTools: ['mcp.list_tools', 'mcp.call', 'http.call'], allowedConnectorIds: connectorIds, connectors, createdAt: new Date().toISOString(),
     }
     const token = turn.capabilityToken ?? randomBytes(32).toString('base64url')
     const claims: CapabilityGrantClaims = { id: `worker-${turn.id}`, sessionId: turn.sessionId, turnId: turn.id, actorAgentId: turn.sessionId, projectId: snapshot.projectId, workspaceId: snapshot.workspaceId, allowedTools: snapshot.allowedTools, allowedConnectorIds: snapshot.allowedConnectorIds, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 60_000).toISOString() }

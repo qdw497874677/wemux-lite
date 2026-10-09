@@ -53,6 +53,7 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
         CREATE INDEX IF NOT EXISTS connector_execution_session ON connector_executions(session_id, created_at);
         PRAGMA user_version=4; COMMIT;`)
     }
+    this.db.exec('CREATE TABLE IF NOT EXISTS connector_denials (id INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at TEXT NOT NULL, body TEXT NOT NULL)')
     if (version !== 5 && version !== 6 && version !== 7) {
       this.db.exec(`BEGIN IMMEDIATE;
         CREATE TABLE provider_credentials (id TEXT PRIMARY KEY, owner_kind TEXT NOT NULL CHECK(owner_kind='model-provider'), variable_names_json TEXT NOT NULL, ciphertext TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -219,6 +220,14 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
     const current = JSON.parse(String(row.body)) as ConnectorExecutionRecord
     const record: ConnectorExecutionRecord = { ...current, state: 'completed', result, journalSummary, completedAt: result.completedAt }
     this.db.prepare('UPDATE connector_executions SET state=?,body=?,journal_summary=?,completed_at=? WHERE request_id=?').run('completed', JSON.stringify(record), JSON.stringify(journalSummary), result.completedAt, requestId)
+  }
+  async recordConnectorDenial(event: { actor: string; operation: string; projectId: string; workspaceId: string; workerId: string; connectorId: string; toolName: string; reasonCode: string }): Promise<void> {
+    await this.tail
+    this.db.prepare('INSERT INTO connector_denials (occurred_at, body) VALUES (?, ?)').run(new Date().toISOString(), JSON.stringify(event))
+  }
+  async listConnectorDenials(): Promise<readonly { actor: string; operation: string; projectId: string; workspaceId: string; workerId: string; connectorId: string; toolName: string; reasonCode: string }[]> {
+    await this.tail
+    return (this.db.prepare('SELECT body FROM connector_denials ORDER BY id').all() as { body: string }[]).map(row => JSON.parse(row.body))
   }
   async listConnectorJournal(sessionId: string): Promise<readonly ConnectorExecutionRecord[]> {
     await this.tail

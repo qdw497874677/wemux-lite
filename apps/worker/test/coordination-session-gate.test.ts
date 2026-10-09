@@ -26,7 +26,7 @@ const coordinationSnapshot = (sessionId: string): CapabilitySnapshot => ({
 })
 const ordinarySnapshot = (sessionId: string, connectorId: string): CapabilitySnapshot => ({
   id: `ordinary-${sessionId}`, projectId: 'project-1' as never, workspaceId: 'workspace-1' as never, sessionId: sessionId as never, version: 1, assets: [],
-  allowedTools: ['mcp.list_tools', 'mcp.call', 'http.call'], allowedConnectorIds: [connectorId], connectors: [], createdAt: timestamp,
+  allowedTools: ['mcp.list_tools', 'mcp.call', 'http.call'], allowedConnectorIds: [connectorId], connectors: [mcp()], createdAt: timestamp,
 })
 
 test('协调 Session 绑定被接受：受限快照可注册且不授予连接器', async t => {

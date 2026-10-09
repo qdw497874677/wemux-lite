@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { agentEnvironment } from './launch-environment.js'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -128,6 +129,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
       capabilityToken: context.capabilityToken,
       instructions: context.instructions,
       skillsRoot: context.skillsRoot,
+      environment: context.environment,
     }) : this.launchKey
     if (this.child && !this.child.killed && !this.exitInfo && nextLaunchKey === this.launchKey) return this.child
     if (this.child && !this.child.killed && !this.exitInfo) await this.close()
@@ -144,7 +146,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
       if (this.input.modelId !== `openai-compatible::${provider.definition.modelIds[0]}`) throw new Error('pi_provider_model_mismatch')
       const names = Object.keys(provider.environment)
       if (names.length !== 1 || names[0] !== 'OPENAI_API_KEY' || !provider.environment.OPENAI_API_KEY?.trim()) throw new Error('pi_provider_credential_unavailable')
-      if (context?.environment && Object.keys(context.environment).some(key => !key.startsWith('WEMUX_'))) throw new Error('pi_provider_environment_conflict')
+      if (context?.environment && Object.keys(context.environment).some(key => !key.startsWith('WEMUX_') && !(context.restrictedEnvironment && ['HOME', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'PI_CODING_AGENT_DIR', 'CLAUDE_CONFIG_DIR'].includes(key)))) throw new Error('pi_provider_environment_conflict')
     }
     const args = ['--mode', 'rpc']
     if (this.input.modelId) args.push('--model', piModelArgument(this.input.modelId))
@@ -160,7 +162,8 @@ class PiRuntimeSession implements AgentRuntimeSession {
         await writeFile(extensionPath, piCapabilityExtension(this.capabilityReadyPath), { mode: 0o600 })
         args.push('--extension', extensionPath)
       }
-      if (provider) this.providerDirectory = await preparePiProviderDirectory(provider.definition)
+      if (provider && context?.restrictedEnvironment) await import('node:fs/promises').then(fs => fs.mkdir(context.environment.PI_CODING_AGENT_DIR, { recursive: true, mode: 0o700 }))
+      if (provider) this.providerDirectory = await preparePiProviderDirectory(provider.definition, context?.restrictedEnvironment ? context.environment.PI_CODING_AGENT_DIR : undefined)
     } catch (error) {
       await this.cleanupExtension()
       throw error
@@ -182,7 +185,7 @@ class PiRuntimeSession implements AgentRuntimeSession {
     try {
       child = spawn(this.executable, args, {
         cwd: this.input.cwd,
-        env: { ...environment, ...context?.environment, WEMUX_PI_CAPABILITY_ENDPOINT: context?.capabilityEndpoint ?? '', WEMUX_PI_CAPABILITY_TOKEN: context?.capabilityToken ?? '' },
+        env: { ...provider && !context?.restrictedEnvironment ? { ...environment, ...context?.environment } : agentEnvironment(context, provider ? { OPENAI_API_KEY: provider.environment.OPENAI_API_KEY, PI_CODING_AGENT_DIR: this.providerDirectory!.directory } : {}), WEMUX_PI_CAPABILITY_ENDPOINT: context?.capabilityEndpoint ?? '', WEMUX_PI_CAPABILITY_TOKEN: context?.capabilityToken ?? '' },
         stdio: ['pipe', 'pipe', 'pipe'],
       })
       if (!child.stdin || !child.stdout || !child.stderr) throw new Error('Pi runtime streams unavailable')

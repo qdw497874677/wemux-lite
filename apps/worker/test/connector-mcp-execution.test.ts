@@ -22,7 +22,7 @@ function definition(overrides: Partial<McpConnectorDefinition> = {}): McpConnect
   return { id: 'connector-1' as never, projectId: ids.projectId as never, name: 'fixture', description: null, revision: 1, enabled: true, allowedWorkerIds: [], credentialRef: null, credentialAvailability: 'not_required', riskDefaults: { requireApprovalForRead: false, allowMcpReadOnlyHint: true }, createdAt: timestamp as never, updatedAt: timestamp as never, kind: 'mcp', config: { transport: 'stdio', command: process.execPath, args: [fixture], cwd: null, publicEnvironment: {}, secretEnvironmentNames: [] }, ...overrides }
 }
 function auth(connectorIds = ['connector-1']) {
-  const snapshot: CapabilitySnapshot = { id: 'snapshot-1', projectId: ids.projectId as never, workspaceId: ids.workspaceId as never, sessionId: ids.sessionId as never, version: 1, assets: [], allowedTools: ['mcp.call' as never], allowedConnectorIds: connectorIds, createdAt: timestamp }
+  const snapshot: CapabilitySnapshot = { id: 'snapshot-1', projectId: ids.projectId as never, workspaceId: ids.workspaceId as never, sessionId: ids.sessionId as never, version: 1, assets: [], allowedTools: ['mcp.call', 'mcp.list_tools'], allowedConnectorIds: connectorIds, connectors: connectorIds.map(id => definition({ id: id as never })), createdAt: timestamp }
   const claims: CapabilityGrantClaims = { id: 'grant-1', ...ids, actorAgentId: ids.sessionId as never, sessionId: ids.sessionId as never, turnId: ids.turnId as never, projectId: ids.projectId as never, workspaceId: ids.workspaceId as never, allowedTools: snapshot.allowedTools, allowedConnectorIds: connectorIds, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() }
   return { snapshot, claims }
 }

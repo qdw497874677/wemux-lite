@@ -66,10 +66,23 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
       const instructions = promptParts.length ? promptParts.join('\n\n') : null
       if (instructions) await writeFile(join(root, 'instructions.md'), instructions, 'utf8')
       await writeFile(join(root, 'execution-spec.json'), JSON.stringify({ snapshot, turnId: turn.id }, null, 2), 'utf8')
+      const restrictedEnvironment = snapshot.projectId.startsWith('team:')
+      // Placement roots are Worker-owned and keyed by the same Workspace identity as
+      // LocalProvisioner. No absolute path from a Server command is trusted here.
+      const sessionHome = restrictedEnvironment ? join(this.workerDataDir, 'workspaces', createHash('sha256').update(snapshot.workspaceId).digest('hex'), '.wemux-agent', snapshot.sessionId) : null
+      if (sessionHome) await mkdir(sessionHome, { recursive: true, mode: 0o700 })
       const environment: Record<string, string> = {
         WEMUX_SESSION_ID: turn.sessionId,
         WEMUX_TURN_ID: turn.id,
         WEMUX_ASSETS_ROOT: root,
+      }
+      if (sessionHome) {
+        environment.HOME = sessionHome
+        environment.XDG_CONFIG_HOME = join(sessionHome, '.config')
+        environment.XDG_DATA_HOME = join(sessionHome, '.local', 'share')
+        environment.XDG_CACHE_HOME = join(sessionHome, '.cache')
+        environment.PI_CODING_AGENT_DIR = join(sessionHome, '.pi', 'agent')
+        environment.CLAUDE_CONFIG_DIR = join(sessionHome, '.claude')
       }
       const capabilityToken = connectorContext?.token ?? turn.capabilityToken
       if (this.capabilityEndpoint && capabilityToken) {
@@ -79,6 +92,7 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
       return {
         context: {
           assetsRoot: root,
+          restrictedEnvironment,
           instructions,
           skillsRoot: hasSkills ? skillsRoot : null,
           capabilityEndpoint: this.capabilityEndpoint,
