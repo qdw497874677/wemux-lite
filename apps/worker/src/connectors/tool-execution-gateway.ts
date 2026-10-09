@@ -184,7 +184,11 @@ export class ToolExecutionGateway {
     // authorization result or prevent finalization of an already-started call.
     try {
       await this.store.recordConnectorDenial?.({ actor: input.currentTurn.sessionId, operation, projectId: input.currentTurn.projectId, workspaceId: input.currentTurn.workspaceId, workerId: input.currentTurn.workerId, connectorId: input.connectorId, toolName: input.toolName, reasonCode: result.error.code })
-    } catch { /* denial remains authoritative even when audit storage is unavailable */ }
+    } catch (error) {
+      // Do not report a durable audit when the store is unavailable. Authorization
+      // stays denied, while operators receive an explicit audit-loss signal.
+      console.error('Connector denial audit could not be persisted', error)
+    }
   }
 
   private async definition(id: string, kind: 'mcp' | 'http' = 'mcp'): Promise<ConnectorDefinition> {
