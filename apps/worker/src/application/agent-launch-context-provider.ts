@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, normalize, relative, resolve } from 'node:pa
 import { createHash } from 'node:crypto'
 import type { AgentKey, CapabilityAsset, ProjectId, Turn } from '@wemux/domain'
 import type { AgentLaunchContextProvider, PreparedAgentLaunchContext } from './ports/agent-launch-context.js'
+import { secureSessionDirectory } from './secure-session-directory.js'
 
 export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextProvider {
   private readonly active = new Set<string>()
@@ -77,7 +78,7 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
       if (instructions) await writeFile(join(root, 'instructions.md'), instructions, 'utf8')
       await writeFile(join(root, 'execution-spec.json'), JSON.stringify({ snapshot, turnId: turn.id }, null, 2), 'utf8')
       const sessionHome = restrictedEnvironment ? join(expected!, '.wemux-agent', createHash('sha256').update(turn.sessionId).digest('hex')) : null
-      if (sessionHome) await mkdir(sessionHome, { recursive: true, mode: 0o700 })
+      if (sessionHome) await secureSessionDirectory(expected!, sessionHome)
       const environment: Record<string, string> = {
         WEMUX_SESSION_ID: turn.sessionId,
         WEMUX_TURN_ID: turn.id,
