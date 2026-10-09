@@ -180,7 +180,11 @@ export class ToolExecutionGateway {
 
   private async auditDenial(input: Pick<ToolExecutionInput, 'currentTurn' | 'connectorId' | 'toolName'>, operation: string, result: ExecutionResult) {
     if (result.ok) return
-    await this.store.recordConnectorDenial?.({ actor: input.currentTurn.sessionId, operation, projectId: input.currentTurn.projectId, workspaceId: input.currentTurn.workspaceId, workerId: input.currentTurn.workerId, connectorId: input.connectorId, toolName: input.toolName, reasonCode: result.error.code })
+    // Audit storage is best effort: a failed journal must never replace the
+    // authorization result or prevent finalization of an already-started call.
+    try {
+      await this.store.recordConnectorDenial?.({ actor: input.currentTurn.sessionId, operation, projectId: input.currentTurn.projectId, workspaceId: input.currentTurn.workspaceId, workerId: input.currentTurn.workerId, connectorId: input.connectorId, toolName: input.toolName, reasonCode: result.error.code })
+    } catch { /* denial remains authoritative even when audit storage is unavailable */ }
   }
 
   private async definition(id: string, kind: 'mcp' | 'http' = 'mcp'): Promise<ConnectorDefinition> {

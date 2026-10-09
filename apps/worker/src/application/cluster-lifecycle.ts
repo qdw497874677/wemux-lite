@@ -87,8 +87,9 @@ export class ClusterLifecycle {
     const persisted = await this.store.sessions.getTurn(turn.id)
     return workspace && workspace.workerId === workerId && session?.binding.agent.workerId === workerId && persisted?.sessionId === turn.sessionId && persisted.state === 'running'
       ? { projectId: workspace.projectId, workspaceId: workspace.id } : null
-  }, verifyServerGrant: async (token, operation) => {
-    if (!this.clusterGrantUrl) return true
+  }, verifyServerGrant: async (token, operation, local) => {
+    if (local) return true
+    if (!this.clusterGrantUrl) return false
     try {
       const result = await fetch(new URL('/agent-capabilities/grant.verify', httpOrigin(this.clusterGrantUrl)), { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ requiredTool: operation }), signal: AbortSignal.timeout(5_000) })
       return result.ok
@@ -252,7 +253,7 @@ export class ClusterLifecycle {
     this.state = { phase: 'connecting', retryAt: null, failure: null }
     try {
       const identity = this.requireIdentity()
-      this.clusterGrantUrl = identity.serverUrl
+      this.clusterGrantUrl = null
       if (this.options.transport === 'nc') {
         const cli = await probeCli(defaultProbe)
         if (!cli.available) throw new Error(`WEMUX_TRANSPORT=nc 需要本机 tailscale CLI（${cli.error}）`)
@@ -269,6 +270,8 @@ export class ClusterLifecycle {
       const originals = usable.concat(deferred)
       const pool = this.options.transport === 'nc' ? await openTunnels(originals) : null
       const urls = pool?.localUrls ?? originals
+      // Transport binds only urls[0]; preflight ordering is not runtime failover.
+      this.clusterGrantUrl = urls[0] ?? null
       this.tunnelPool = pool
       const credential = await readFile(join(this.options.home, identity.credentialRef), 'utf8')
       const selected = await readAgentSettings(this.options.home)
@@ -318,6 +321,7 @@ export class ClusterLifecycle {
             // 终态失败：释放这条连接，让重新注册后的 resume()/connect() 能重新建立，
             // 而不是留一个再也不会重连的 transport 把后续连接请求静默挡掉。
             this.transport = null
+            this.clusterGrantUrl = null
             transport.stop()
           }
           this.options.onStateChange?.(change)
@@ -414,6 +418,7 @@ export class ClusterLifecycle {
     const transport = this.transport
     this.runtime?.providerDisconnected()
     this.transport = null
+    this.clusterGrantUrl = null
     transport?.stop()
     const runtime = this.runtime
     this.runtime = null

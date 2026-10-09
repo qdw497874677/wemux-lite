@@ -37,6 +37,21 @@ async function harness(t: test.TestContext, options: { approval?: 'approve' | 'd
   return { gateway, store, connector, snapshot, claims, calls: () => calls, common: { token: 'token', snapshot, currentTurn: ids, connectorId: connector.id, connectorRevision: connector.revision, agentSupportsApproval: true, operationId: 'create', input: { body: { title: 'created by Pi' } }, requestId: 'request-http', toolCallId: 'tool-http' as never } }
 }
 
+test('audit write failure cannot override denial or strand an already started execution', async t => {
+  const h = await harness(t, { approvalRequest: async () => { throw new Error('approval unavailable') } })
+  h.store.recordConnectorDenial = async () => { throw new Error('audit unavailable') }
+  const denied = await h.gateway.executeHttp({ ...h.common, snapshot: { ...h.snapshot, allowedTools: [] }, requestId: 'audit-denied' })
+  assert.equal(denied.ok, false)
+  if (!denied.ok) assert.equal(denied.error.code, 'scope_denied')
+  assert.equal(h.calls(), 0)
+  const failed = await h.gateway.executeHttp(h.common)
+  assert.equal(failed.ok, false)
+  if (!failed.ok) assert.equal(failed.error.code, 'upstream_error')
+  const replay = await h.gateway.executeHttp(h.common)
+  assert.deepEqual(replay, failed)
+  assert.equal(h.calls(), 0)
+})
+
 test('http_call executes through ToolExecutionGateway and replays an idempotent result', async t => {
   const h = await harness(t, { approval: 'approve' })
   const first = await h.gateway.executeHttp(h.common)

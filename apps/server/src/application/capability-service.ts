@@ -35,6 +35,7 @@ import type { ConnectorRepository } from './ports/connector-repository.ts'
 import { CapabilityTokenService } from './capability-token-service.ts'
 import type { DelegationApplicationService } from './delegation-service.ts'
 import type { Delegation } from '@wemux/server-domain'
+import { coordinationQueryOperations } from './team-coordination-task.ts'
 
 export class CapabilityError extends Error {
     readonly code: 'forbidden' | 'not-found' | 'invalid-input'
@@ -130,17 +131,20 @@ export class CapabilityService {
     readonly turnId: CapabilityGrantClaims['turnId']
     readonly actorId?: import('@wemux/domain').UserId
     readonly allowedTools?: readonly CapabilityToolName[]
-  }, readers: Pick<ServerStore, 'identity' | 'resources'> = this.store): Promise<{ readonly runtime: CapabilityRuntimePayload; readonly token: string }> {
+  }, readers: Pick<ServerStore, 'identity' | 'resources' | 'tasks'> = this.store): Promise<{ readonly runtime: CapabilityRuntimePayload; readonly token: string }> {
     const { identity, resources } = readers
     const session = await this.requireSession(input.sessionId, resources)
     const workspace = await resources.getWorkspace(session.workspaceId)
     if (!workspace) throw new CapabilityError('not-found', 'Workspace not found')
     const actorAccount = input.actorId ? await identity.getUser(input.actorId) : null
     if (input.actorId && (!actorAccount || actorAccount.status !== 'active')) throw new CapabilityError('forbidden', 'Capability actor is not active')
+    const task = session.taskId ? await readers.tasks.get(session.taskId) : null
+    if (session.taskId && (!task || task.deletedAt != null)) throw new CapabilityError('forbidden', 'Capability Task is unavailable')
+    const coordination = Boolean(task?.teamCoordination) || session.projectId.startsWith('team:')
     const assets = await resources.listCapabilityAssets(session.projectId)
-    const connectors = await this.resolveConnectors(session, input, identity, resources)
+    const connectors = coordination ? [] : await this.resolveConnectors(session, input, identity, resources)
     const allowedConnectorIds = connectors.map(connector => connector.id)
-    const allowedTools = input.allowedTools ?? [
+    const ordinaryTools: readonly CapabilityToolName[] = [
       'session.info',
       ...(input.actorId ? ['project.list', 'project.get', 'project.resources', 'task.list', 'task.get', 'task.create', 'task.sessions', 'session.get', 'session.events'] as const : []),
       'agent.list',
@@ -154,6 +158,8 @@ export class CapabilityService {
       'mcp.call',
       'http.call',
     ]
+    const policy: readonly CapabilityToolName[] = coordination ? coordinationQueryOperations : ordinaryTools
+    const allowedTools = input.allowedTools ? input.allowedTools.filter(tool => policy.includes(tool)) : policy
     const now = this.now()
     const sessions = await resources.listSessions()
     const roster = sessions
@@ -223,6 +229,9 @@ export class CapabilityService {
     if (!claims.allowedTools.includes(requiredTool)) throw new CapabilityError('forbidden', `Capability ${requiredTool} is not allowed`)
     const session = await this.store.resources.getSession(claims.sessionId)
     if (!session || session.deletedAt !== null || session.projectId !== claims.projectId || session.workspaceId !== claims.workspaceId) throw new CapabilityError('forbidden', 'Capability session is no longer active')
+    const task = session.taskId ? await this.store.tasks.get(session.taskId) : null
+    if (session.taskId && (!task || task.deletedAt != null)) throw new CapabilityError('forbidden', 'Capability Task is unavailable')
+    if ((task?.teamCoordination || session.projectId.startsWith('team:')) && !(coordinationQueryOperations as readonly string[]).includes(requiredTool)) throw new CapabilityError('forbidden', 'Coordination capability is read-only')
     // Actor revocation must fence Connector dispatch too, not only Project queries.
     if (claims.actorUserId) {
       const account = await this.store.identity.getUser(claims.actorUserId)

@@ -54,6 +54,16 @@ async function waitFor(predicate: () => boolean | Promise<boolean>) {
   throw new Error('condition timed out')
 }
 
+test('cluster grant verification fails closed without a bound server, local provenance remains independent', async () => {
+  const f = await fixture()
+  try {
+    // Exercise the injected verifier: a cluster grant cannot be accepted
+    // merely because the local runtime has no server URL.
+    const lifecycle = f.lifecycle as unknown as { connectors: { gateway: { verifier: { verifyCurrentGrant: (token: string, operation: 'http.call') => Promise<boolean> } } } }
+    assert.equal(await lifecycle.connectors.gateway.verifier.verifyCurrentGrant('retained-token', 'http.call'), false)
+  } finally { await f.close() }
+})
+
 for (const protocol of ['ws', 'wss']) test(`leave converts ${protocol} identity to HTTP(S) origin and bounds revocation`, async t => {
   const f = await fixture()
   try {

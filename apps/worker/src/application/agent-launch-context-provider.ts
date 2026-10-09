@@ -35,7 +35,18 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
     const skillsRoot = join(root, 'skills')
     const promptParts: string[] = []
     let hasSkills = false
+    let touchedRoot = false
     try {
+      // Validate trusted placement before touching even the temporary runtime directory.
+      const scope = this.sessionScope ? await this.sessionScope(turn) : null
+      if (this.sessionScope && !scope) throw new Error('agent_launch_binding_unavailable')
+      if (scope && (snapshot.projectId !== scope.projectId || snapshot.workspaceId !== scope.workspaceId || snapshot.sessionId !== turn.sessionId)) throw new Error('agent_launch_binding_mismatch')
+      if (!this.sessionScope && snapshot.projectId.startsWith('team:')) throw new Error('agent_launch_binding_unavailable')
+      const restrictedEnvironment = Boolean(scope?.projectId.startsWith('team:'))
+      if (restrictedEnvironment && (!scope?.workspaceId || !scope.rootPath)) throw new Error('agent_launch_placement_unavailable')
+      const expected = restrictedEnvironment ? resolve(this.workerDataDir, 'workspaces', createHash('sha256').update(scope!.workspaceId).digest('hex')) : null
+      if (restrictedEnvironment && (resolve(scope!.rootPath) !== expected || await realpath(expected!).catch(() => null) !== expected)) throw new Error('agent_launch_placement_mismatch')
+      touchedRoot = true
       await rm(root, { recursive: true, force: true })
       await mkdir(root, { recursive: true, mode: 0o700 })
       for (const asset of snapshot.assets) {
@@ -53,9 +64,6 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
           await writeFile(target, asset.content, 'utf8')
         }
       }
-      const scope = this.sessionScope ? await this.sessionScope(turn) : null
-      if (this.sessionScope && !scope) throw new Error('agent_launch_binding_unavailable')
-      if (scope && (snapshot.projectId !== scope.projectId || snapshot.workspaceId !== scope.workspaceId || snapshot.sessionId !== turn.sessionId)) throw new Error('agent_launch_binding_mismatch')
       if (scope && this.resolveSkills) {
         for (const skill of await this.resolveSkills(scope.projectId, scope.agentKey)) {
           const target = safePath(skillsRoot, `${skill.resourceId}/SKILL.md`)
@@ -68,11 +76,6 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
       const instructions = promptParts.length ? promptParts.join('\n\n') : null
       if (instructions) await writeFile(join(root, 'instructions.md'), instructions, 'utf8')
       await writeFile(join(root, 'execution-spec.json'), JSON.stringify({ snapshot, turnId: turn.id }, null, 2), 'utf8')
-      if (!this.sessionScope && snapshot.projectId.startsWith('team:')) throw new Error('agent_launch_binding_unavailable')
-      const restrictedEnvironment = Boolean(scope?.projectId.startsWith('team:'))
-      if (restrictedEnvironment && (!scope?.workspaceId || !scope.rootPath)) throw new Error('agent_launch_placement_unavailable')
-      const expected = restrictedEnvironment ? resolve(this.workerDataDir, 'workspaces', createHash('sha256').update(scope!.workspaceId).digest('hex')) : null
-      if (restrictedEnvironment && (resolve(scope!.rootPath) !== expected || await realpath(expected!).catch(() => null) !== expected)) throw new Error('agent_launch_placement_mismatch')
       const sessionHome = restrictedEnvironment ? join(expected!, '.wemux-agent', createHash('sha256').update(turn.sessionId).digest('hex')) : null
       if (sessionHome) await mkdir(sessionHome, { recursive: true, mode: 0o700 })
       const environment: Record<string, string> = {
@@ -113,7 +116,7 @@ export class FilesystemAgentLaunchContextProvider implements AgentLaunchContextP
     } catch (error) {
       this.active.delete(turn.sessionId)
       await connectorContext?.release().catch(() => undefined)
-      await rm(root, { recursive: true, force: true }).catch(() => undefined)
+      if (touchedRoot) await rm(root, { recursive: true, force: true }).catch(() => undefined)
       throw error
     }
   }

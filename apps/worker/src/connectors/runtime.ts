@@ -28,7 +28,7 @@ export class WorkerConnectorRuntime {
   private readonly verifyBinding?: (turn: Turn, workerId: string) => Promise<{ projectId: string; workspaceId: string } | null>
   private shutdownPromise: Promise<void> | null = null
 
-  constructor(store: WorkerConnectorStore, options: { readonly fetch?: typeof fetch; readonly lookup?: import('@wemux/connector').GuardedFetchDnsLookup; readonly supervisor?: McpProcessSupervisor; readonly onApproval?: (event: ConnectorApprovalEvent) => void | Promise<void>; readonly verifyBinding?: (turn: Turn, workerId: string) => Promise<{ projectId: string; workspaceId: string } | null>; readonly verifyServerGrant?: (token: string, operation: 'mcp.list_tools' | 'mcp.call' | 'http.call') => Promise<boolean> } = {}) {
+  constructor(store: WorkerConnectorStore, options: { readonly fetch?: typeof fetch; readonly lookup?: import('@wemux/connector').GuardedFetchDnsLookup; readonly supervisor?: McpProcessSupervisor; readonly onApproval?: (event: ConnectorApprovalEvent) => void | Promise<void>; readonly verifyBinding?: (turn: Turn, workerId: string) => Promise<{ projectId: string; workspaceId: string } | null>; readonly verifyServerGrant?: (token: string, operation: 'mcp.list_tools' | 'mcp.call' | 'http.call', local: boolean) => Promise<boolean> } = {}) {
     this.store = store
     this.verifyBinding = options.verifyBinding
     this.credentials = WorkerCredentialStore.fromEnvironment(store)
@@ -46,7 +46,7 @@ export class WorkerConnectorRuntime {
       if (!this.verifyBinding) return true
       const binding = await this.verifyBinding({ sessionId: turn.sessionId, id: turn.turnId } as Turn, turn.workerId)
       return !!binding && binding.projectId === turn.projectId && binding.workspaceId === turn.workspaceId
-    }, verifyCurrentGrant: options.verifyServerGrant }, approval, this.http)
+    }, verifyCurrentGrant: options.verifyServerGrant ? (token, operation) => options.verifyServerGrant!(token, operation, this.turns.get(token)?.claims.projectId === 'local' && this.turns.get(token)?.workerId.startsWith('local-') === true) : undefined }, approval, this.http)
   }
 
   async registerTurn(turn: Turn, workerId: string): Promise<{ token: string; snapshot: CapabilitySnapshot; release(): Promise<void> }> {
