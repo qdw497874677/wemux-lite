@@ -167,7 +167,7 @@ try {
   assert.equal(denied.status, 403, 'outsider must not create a coordination conversation')
   assert.equal(denied.body.error?.code, 'team_membership_required')
   assert.equal(JSON.stringify(denied.body).includes(team.id), false)
-  assert.equal((await app.store.resources.listSessions()).filter(s => s.projectId === `team:${team.id}`).length, 0, 'outsider request cannot create Team Session')
+  assert.equal((await app.store.resources.listSessions()).filter(s => s.taskId?.startsWith('coordination:')).length, 0, 'outsider request cannot create coordination Session')
   checks.push('outsider denied without Team identity disclosure or side effects')
 
   step = 'Team first-send through real Server API'
