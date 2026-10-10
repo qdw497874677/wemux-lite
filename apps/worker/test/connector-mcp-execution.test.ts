@@ -67,10 +67,14 @@ test('two discoveries in one Turn each need a fresh resolvable approval identity
   const store = new SqliteWorkerStore(join(dir, 'worker.sqlite'))
   const approvals: import('../src/connectors/tool-execution-gateway.js').ConnectorApprovalRequest[] = []
   let notify: (() => void) | undefined
-  const runtime = new WorkerConnectorRuntime(store, { onApproval: event => { if (event.kind === 'requested') { approvals.push(event.approval); notify?.() } } })
+  const runtime = new WorkerConnectorRuntime(store, {
+    onApproval: event => { if (event.kind === 'requested') { approvals.push(event.approval); notify?.() } },
+    verifyBinding: async () => ({ projectId: ids.projectId, workspaceId: ids.workspaceId }),
+    verifyLocalOrigin: async () => true,
+  })
   t.after(async () => { await runtime.shutdown(); store.close(); await rm(dir, { recursive: true, force: true }) })
   await store.saveConnectorDefinition(definition())
-  const registered = await runtime.registerTurn({ id: ids.turnId, sessionId: ids.sessionId } as Turn, ids.workerId)
+  const registered = await runtime.registerTurn({ id: ids.turnId, sessionId: ids.sessionId } as Turn, ids.workerId, 'local')
   const discover = async (index: number) => {
     const published = new Promise<void>(resolve => { notify = resolve })
     const result = runtime.handle('mcp.list_tools', registered.token, { connectorId: 'connector-1' })
