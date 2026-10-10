@@ -8,6 +8,8 @@ import { createServer } from 'node:http'
 import { once } from 'node:events'
 import type { AgentKey, CommandId, EventSeq, JournalEvent, MessageId, ModelId, SessionId, Timestamp, UserId, WorkerId } from '@wemux/domain'
 import { SqliteServerStore } from '../storage/sqlite/store.js'
+import { SharedSqliteDatabase } from '../storage/sqlite/shared-database.js'
+import { CommandSigningIdentity } from '../application/command-signing.js'
 import { migrate } from '../storage/sqlite/migrations.js'
 import { ServerService } from '../application/server-service.js'
 import { TaskService } from '../application/task-service.js'
@@ -19,9 +21,15 @@ import { SessionStreams } from '../http/sse.js'
 import { administratorDirectory, administratorToken, instanceOperatorId, seedOperator } from './fixtures/administrator.js'
 
 const context = { actor: instanceOperatorId, requestId: 'ticket06-evidence' }
+function signedStore(path: string) {
+  const database = new SharedSqliteDatabase(path)
+  const store = new SqliteServerStore(database)
+  const commandSigning = new CommandSigningIdentity(database.connection)
+  return { database, store, commandSigning }
+}
 async function fixture(path: string, cancel = true) {
-  const store = new SqliteServerStore(path), signals = new Notifications()
-  const server = new ServerService(store, signals)
+  const { database, store, commandSigning } = signedStore(path), signals = new Notifications()
+  const server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning)
   await seedOperator(store, server)
   const { worker } = await server.enroll({ token: (await server.createEnrollment({})).token, name: 'Evidence worker' })
   await store.transaction(tx => tx.resources.saveWorker({ ...worker, connectionState: 'online', capabilities: [{ agentKey: 'test' as AgentKey, displayName: 'Test', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' as ModelId, displayName: 'Model', source: 'configured' }] }] }))
@@ -34,7 +42,7 @@ async function fixture(path: string, cancel = true) {
   const { session: independent } = await tasks.createSession(task.projectId, task.id, { title: 'Independent', requestId: 'independent-session' }, context)
   const { run } = await tasks.launch(task.projectId, task.id, { requestId: 'launch', mode: 'new', reuseSessionId: null, prompt: 'Evidence', assignment }, context)
   if (cancel) await tasks.cancelRun(task.projectId, task.id, run.id, { runId: run.id, sessionId: run.sessionId, requestId: 'cancel' }, context)
-  return { store, server, tasks, signals, task, worker, run: (await store.tasks.run(run.id))!, independent }
+  return { database, store, commandSigning, server, tasks, signals, task, worker, run: (await store.tasks.run(run.id))!, independent }
 }
 
 function snapshot(db: DatabaseSync) {
@@ -46,7 +54,7 @@ test('Ticket06 direct SQLite insert/update/delete matrix, exact errors and all-t
   const dir = await mkdtemp(join(tmpdir(), 'ticket06-matrix-')), path = join(dir, 'server.db')
   const f = await fixture(path)
   const source = (await f.store.resources.getSession(f.run.sessionId as SessionId))!
-  f.store.close()
+  f.database.close()
   try {
     for (let restart = 0; restart < 2; restart++) {
       const reopened = new SqliteServerStore(path)
@@ -185,7 +193,7 @@ test('Ticket06 v7 migration preserves valid JSON and rejects invalid legacy rows
   const dir = await mkdtemp(join(tmpdir(), 'ticket06-upgrade-')), path = join(dir, 'server.db')
   const f = await fixture(path)
   const source = (await f.store.resources.getSession(f.run.sessionId as SessionId))!
-  f.store.close()
+  f.database.close()
   const db = new DatabaseSync(path)
   try {
     // Reconstruct the immediately preceding schema, without changing domain rows.
@@ -234,8 +242,9 @@ test('Ticket06 composed constructive recovery emits only first committed dispatc
       await tx.tasks.saveCancelRequest(f.run.id, 'recover', f.run.sessionId)
       await tx.tasks.saveRun({ ...f.run, status: 'cancelling', cancelRequestedAt: f.run.createdAt, cancelCommandIds: [] })
     })
-    f.store.close()
-    const store = new SqliteServerStore(path), signals = new Notifications(), server = new ServerService(store, signals)
+    f.database.close()
+    const { database, store, commandSigning } = signedStore(path), signals = new Notifications()
+    const server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning)
     const tasks = new TaskService(store, event => signals.project(event), server), workers = new WorkerService(store, signals)
     const seen: string[] = []
     signals.onCommands(f.worker.id, () => { seen.push(`commands:${f.worker.id}`) })
@@ -255,13 +264,13 @@ test('Ticket06 composed constructive recovery emits only first committed dispatc
       await Promise.all([workers.recoverRuns(), workers.recoverRuns(), cancel(), cancel()])
       assert.deepEqual(seen, [])
       assert.deepEqual(await store.tasks.run(f.run.id), recovered)
-    } finally { store.close(); await rm(dir, { recursive: true, force: true }) }
+    } finally { database.close(); await rm(dir, { recursive: true, force: true }) }
   }
 })
 
 test('Ticket06 v8 retention backfill is transactional and remains enforced after restart', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'server-retention-')), path = join(dir, 'server.db')
-  const f = await fixture(path, false); f.store.close()
+  const f = await fixture(path, false); f.database.close()
   const db = new DatabaseSync(path)
   try {
     for (const name of ['cancel_request_retention', 'session_record_retention', 'session_record_identity', 'session_tombstone_update', 'session_tombstone_insert', 'deleted_session_event_insert', 'deleted_session_event_update']) db.exec(`DROP TRIGGER ${name}`)
@@ -296,7 +305,7 @@ test('Ticket06 v8 retention backfill is transactional and remains enforced after
 test('Ticket06 exact notification recipient/type/count matrix with durable restart and HTTP zero effects', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'ticket06-notifications-')), path = join(dir, 'server.db')
   const f = await fixture(path, false)
-  let store = f.store, signals = f.signals, server = f.server, tasks = f.tasks
+  let database = f.database, store = f.store, commandSigning = f.commandSigning, signals = f.signals, server = f.server, tasks = f.tasks
   const sessionId = f.run.sessionId as SessionId, workerId = f.worker.id
   let workers = new WorkerService(store, signals)
   const seen: string[] = []
@@ -350,8 +359,9 @@ test('Ticket06 exact notification recipient/type/count matrix with durable resta
     assert.deepEqual(await store.tasks.activity(f.task.id, 0), finished)
     assert.equal(finished.filter(a => a.type === 'run.finished').length, 1)
     const beforeRestart = (await store.tasks.run(f.run.id))!
-    store.close(); store = new SqliteServerStore(path)
-    signals = new Notifications(); server = new ServerService(store, signals)
+    database.close(); ({ database, store, commandSigning } = signedStore(path))
+    assert.equal(commandSigning.keyId, f.commandSigning.keyId, 'restart retains instance signing identity')
+    signals = new Notifications(); server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning)
     tasks = new TaskService(store, event => signals.project(event), server); workers = new WorkerService(store, signals); subscribe()
     await check('restart reconciliation twice', async () => { await workers.recoverRuns(); await workers.recoverRuns() }, [])
     await check('restart terminal request replay', () => cancel('retry'), [])
@@ -389,8 +399,9 @@ test('Ticket06 exact notification recipient/type/count matrix with durable resta
     await check('delete Session', () => server.delete('sessions', sessionId), [session, command])
     await check('delete replay rejected', () => assert.rejects(server.delete('sessions', sessionId)), [])
     const deletedRun = await store.tasks.run(f.run.id), deletedActivities = await store.tasks.activity(f.task.id, 0)
-    store.close(); store = new SqliteServerStore(path)
-    signals = new Notifications(); server = new ServerService(store, signals); workers = new WorkerService(store, signals); subscribe()
+    database.close(); ({ database, store, commandSigning } = signedStore(path))
+    assert.equal(commandSigning.keyId, f.commandSigning.keyId, 'restart retains instance signing identity')
+    signals = new Notifications(); server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning); workers = new WorkerService(store, signals); subscribe()
     await check('deleted restart reconciliation', () => workers.recoverRuns(), [])
     await check('deleted late/out-of-order events', async () => { await receive(third); await receive(terminal); await receive(second) }, [])
     await check('deleted late head', () => workers.receive(workerId, { type: 'sync', kind: 'heads', complete: true, heads: [{ sessionId, lastSeq: 10 as EventSeq }] }), [])
@@ -400,6 +411,6 @@ test('Ticket06 exact notification recipient/type/count matrix with durable resta
     assert.ok((await store.resources.getSession(sessionId))!.deletedAt)
   } finally {
     if (http) { http.closeAllConnections(); await new Promise<void>((resolve, reject) => http!.close(error => error ? reject(error) : resolve())) }
-    store.close(); await rm(dir, { recursive: true, force: true })
+    database.close(); await rm(dir, { recursive: true, force: true })
   }
 })
