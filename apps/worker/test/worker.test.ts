@@ -13,6 +13,7 @@ import { randomUUID, createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { authorizationBytes, type EnqueueAuthorization } from '@wemux/wire-protocol/command-assertion'
 import { SqliteWorkerStore } from '../src/storage/sqlite-store.js'
 import { WorkerRuntime } from '../src/application/runtime.js'
+import type { WorkerAgentRunner } from '../src/application/agent-runner.js'
 import { TestAgent } from '../src/agents/test-agent.js'
 import type { AgentAdapter } from '../src/application/ports/agent-adapter.js'
 import type { RuntimeSessionAdapter } from '../src/application/ports/runtime-session.js'
@@ -89,12 +90,12 @@ async function until(predicate: () => boolean | Promise<boolean>) {
   for (let i = 0; i < 500; i++) { if (await predicate()) return; await delay(10) }
   assert.fail('Timed out waiting for condition')
 }
-async function fixture(options?: { ownership?: SessionOwnership; prepare?: () => Promise<void>; send?: (message: WorkerToServer) => void }) {
+async function fixture(options?: { ownership?: SessionOwnership; prepare?: () => Promise<void>; send?: (message: WorkerToServer) => void; authorize?: (id: CommandId) => Promise<boolean>; runtimeAdapters?: ReadonlyMap<string, RuntimeSessionAdapter> }) {
   const home = await mkdtemp(join(tmpdir(), 'wemux-lite-worker-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
   store.saveIdentity(signingIdentity)
   const events: WorkerToServer[] = []
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [new TestAgent(15)], { send: message => { options?.send?.(message); events.push(message) } }, workerId, 'test', options?.prepare ? { prepare: async () => { await options.prepare!(); return { context: null, cleanup: async () => undefined } } } : undefined, undefined, undefined, null, undefined, undefined, undefined, async () => true, options?.ownership)
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [new TestAgent(15)], { send: message => { options?.send?.(message); events.push(message) } }, workerId, 'test', options?.prepare ? { prepare: async () => { await options.prepare!(); return { context: null, cleanup: async () => undefined } } } : undefined, undefined, options?.runtimeAdapters, null, undefined, undefined, undefined, options?.authorize ?? (async () => true), options?.ownership)
   await runtime.initialize()
   const send = (id: string, command: WorkerCommand) => runtime.receive(frame(id, command))
   await send('provision', { kind: 'workspace.provision', workspace })
@@ -205,6 +206,141 @@ test('competing Runtimes cannot claim another Turn while the first owner prepare
     resume()
     await until(async () => (await f.store.sessions.listQueued(sessionId)).length === 0)
   } finally { resume(); await competitor.shutdown(); competitorStore.close(); await f.cleanup() }
+})
+
+test('cluster approval without a signed binding is rejected before journal or native resolution', async () => {
+  const f = await fixture()
+  try {
+    const target = { kind: 'runtime.approval.resolve', sessionId, turnId: 'turn' as never, approvalId: 'approval' as never, decision: 'approve' as const, decidedByAccountId: 'actor' as never }
+    const before = await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })
+    await f.runtime.receive({ type: 'command', commandId: 'unsigned-approval' as CommandId, command: target })
+    const ack = f.events.filter(event => event.type === 'ack').at(-1)
+    assert.equal(ack?.type, 'ack')
+    if (ack?.type === 'ack') assert.deepEqual(ack.receipt, { commandId: 'unsigned-approval', status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } })
+    assert.equal((await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events.length, before.events.length)
+    assert.equal(await f.store.commands.get('unsigned-approval' as CommandId), null)
+  } finally { await f.cleanup() }
+})
+
+test('cluster approval rejects forged signature, wrong audience and expired binding before online check', async () => {
+  const f = await fixture()
+  try {
+    const command: WorkerCommand = { kind: 'runtime.approval.resolve', sessionId, turnId: 'turn' as never, approvalId: 'approval' as never, decision: 'approve', decidedByAccountId: 'actor' as never }
+    const signFrame = (id: string) => {
+      const commandId = id as CommandId
+      const claims: EnqueueAuthorization = { version: 2, kind: 'runtime.approval.resolve', keyId: signingKeyId, commandId, workerId, sessionId, projectId: 'project' as never, workspaceId: workspace.workspace.id, taskId: null, actorId: 'actor' as never, actorAuthVersion: 0, commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
+      return { type: 'command' as const, commandId, command, authorization: { claims, signature: sign(null, authorizationBytes(claims), signingKeys.privateKey).toString('base64url') } }
+    }
+    for (const [id, change] of [
+      ['forged', (frame: ReturnType<typeof signFrame>) => ({ ...frame, authorization: { ...frame.authorization, signature: 'forged' } })],
+      ['audience', (frame: ReturnType<typeof signFrame>) => ({ ...frame, authorization: { ...frame.authorization, claims: { ...frame.authorization.claims, workerId: 'other' as WorkerId } } })],
+      ['expired', (frame: ReturnType<typeof signFrame>) => ({ ...frame, authorization: { ...frame.authorization, claims: { ...frame.authorization.claims, expiresAt: new Date(Date.now() - 1000).toISOString() } } })],
+    ] as const) {
+      await f.runtime.receive(change(signFrame(id)))
+      const ack = f.events.filter(event => event.type === 'ack').at(-1)
+      assert.equal(ack?.type, 'ack')
+      if (ack?.type === 'ack') assert.equal(ack.receipt.status, 'rejected')
+      assert.equal(await f.store.commands.get(id as CommandId), null)
+    }
+    await f.runtime.receive(signFrame('signed'))
+    const ack = f.events.filter(event => event.type === 'ack').at(-1)
+    assert.equal(ack?.type, 'ack')
+    if (ack?.type === 'ack' && ack.receipt.status === 'rejected') assert.match(ack.receipt.error.message, /Turn is not active/)
+  } finally { await f.cleanup() }
+})
+
+test('approval revoked during asynchronous validation never reaches native resolution', async () => {
+  let checks = 0
+  const f = await fixture({ authorize: async () => ++checks === 1 })
+  const journalRead = f.store.journal.read.bind(f.store.journal)
+  let reached!: () => void, resume!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const gate = new Promise<void>(resolve => { resume = resolve })
+  const commandId = 'revoked-during-validation' as CommandId
+  try {
+    await f.store.transaction(async tx => {
+      await tx.sessions.enqueue({ sessionId, submissionCommandId: 'test-active' as CommandId, message: { messageId: 'test-active' as never, content: 'test' }, queuedAt: new Date().toISOString() as Timestamp })
+      await tx.sessions.claimNext(sessionId)
+    })
+    const turnId = (await f.store.sessions.get(sessionId))!.activeTurnId!
+    const command: WorkerCommand = { kind: 'runtime.approval.resolve', sessionId, turnId, approvalId: 'approval' as never, decision: 'approve', decidedByAccountId: 'actor' as never }
+    await f.store.transaction(tx => tx.appendJournal(sessionId, [{ occurredAt: new Date().toISOString() as Timestamp, payload: { kind: 'approval.requested', turnId, approvalId: 'approval' as never, action: { tool: 'test' } } }]))
+    const claims: EnqueueAuthorization = { version: 2, kind: 'runtime.approval.resolve', keyId: signingKeyId, commandId, workerId, sessionId, projectId: 'project' as never, workspaceId: workspace.workspace.id, taskId: null, actorId: 'actor' as never, actorAuthVersion: 0, commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
+    f.store.journal.read = async input => { reached(); await gate; return journalRead(input) }
+    const delivery = f.runtime.receive({ type: 'command', commandId, command, authorization: { claims, signature: sign(null, authorizationBytes(claims), signingKeys.privateKey).toString('base64url') } })
+    await entered
+    // Authorization callback revokes while the first online check has passed,
+    // but the actual approval validation still awaits the journal reader.
+    resume()
+    await delivery
+    assert.equal(checks, 2, `receipt=${JSON.stringify(f.events.filter(e => e.type === 'ack' && e.receipt.commandId === commandId))}`)
+    assert.equal(await f.store.commands.get(commandId), null)
+    assert.equal((await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events.filter(e => e.payload.kind === 'approval.resolved').length, 0)
+    assert.equal(f.events.some(e => e.type === 'ack' && e.receipt.commandId === commandId), false)
+  } finally { resume(); f.store.journal.read = journalRead; await f.cleanup() }
+})
+
+for (const denial of ['false', 'throws'] as const) test(`cluster approval reauthorizes after native session lock queue (${denial})`, async () => {
+  let checks = 0, revoked = false, nativeCalls = 0
+  let commandEntered!: () => void, releaseCommand!: () => void, releaseTurn!: () => void
+  const entered = new Promise<void>(resolve => { commandEntered = resolve })
+  const commandGate = new Promise<void>(resolve => { releaseCommand = resolve })
+  const turnGate = new Promise<void>(resolve => { releaseTurn = resolve })
+  const adapter: RuntimeSessionAdapter = { async openSession() { return {
+    async execute() { return { signals: (async function* () { await turnGate; yield { kind: 'finished' as const, outcome: { status: 'completed' as const } } })(), async stop() { releaseTurn() } } },
+    async command() { commandEntered(); await commandGate },
+    async resolveApproval() { nativeCalls++ },
+    async close() {},
+  } } }
+  const f = await fixture({ runtimeAdapters: new Map([['test', adapter]]), authorize: async () => { checks++; if (revoked && denial === 'throws') throw new Error('authorization service unavailable'); return !revoked } })
+  const commandId = 'queued-revocation' as CommandId
+  try {
+    await f.send('active-turn', enqueue('active-turn'))
+    await until(async () => Boolean((await f.store.sessions.get(sessionId))?.activeTurnId))
+    const turnId = (await f.store.sessions.get(sessionId))!.activeTurnId!
+    await f.store.transaction(tx => tx.appendJournal(sessionId, [{ occurredAt: new Date().toISOString() as Timestamp, payload: { kind: 'approval.requested', turnId, approvalId: 'approval' as never, action: { tool: 'test' } } }]))
+    const runner = (f.runtime as unknown as { agentRunner: WorkerAgentRunner }).agentRunner
+    let approvalQueued!: () => void
+    const queued = new Promise<void>(resolve => { approvalQueued = resolve })
+    const originalResolve = runner.resolveApproval.bind(runner)
+    runner.resolveApproval = async (...args) => { const result = originalResolve(...args); approvalQueued(); return result }
+    const blocked = runner.command({ sessionId, invocationId: turnId, name: 'blocked', arguments: {} })
+    await entered
+    checks = 0
+    const command: WorkerCommand = { kind: 'runtime.approval.resolve', sessionId, turnId, approvalId: 'approval' as never, decision: 'approve', decidedByAccountId: 'actor' as never }
+    const claims: EnqueueAuthorization = { version: 2, kind: 'runtime.approval.resolve', keyId: signingKeyId, commandId, workerId, sessionId, projectId: 'project' as never, workspaceId: workspace.workspace.id, taskId: null, actorId: 'actor' as never, actorAuthVersion: 0, commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
+    const delivery = f.runtime.receive({ type: 'command', commandId, command, authorization: { claims, signature: sign(null, authorizationBytes(claims), signingKeys.privateKey).toString('base64url') } })
+    await queued
+    assert.equal(checks, 2, 'queued native resolution has not passed its inside-lock authorization')
+    assert.equal(nativeCalls, 0, 'approval waits for the manager lock')
+    revoked = true
+    releaseCommand()
+    await blocked
+    await delivery
+    assert.equal(checks, 3, 'authorization must run inside the lock after the queued command')
+    assert.equal(nativeCalls, 0)
+    assert.equal(await f.store.commands.get(commandId), null, 'temporary denial has no settled receipt')
+    assert.equal(f.events.some(event => event.type === 'ack' && event.receipt.commandId === commandId), false)
+    assert.equal((await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events.filter(event => event.payload.kind === 'approval.resolved').length, 0)
+  } finally { releaseCommand(); releaseTurn(); await f.cleanup() }
+})
+
+test('signed cluster approval cannot resolve while online reauthorization is unavailable', async () => {
+  const f = await fixture()
+  try {
+    const command: WorkerCommand = { kind: 'runtime.approval.resolve', sessionId, turnId: 'turn' as never, approvalId: 'approval' as never, decision: 'approve', decidedByAccountId: 'actor' as never }
+    const commandId = 'offline-approval' as CommandId
+    const claims: EnqueueAuthorization = { version: 2, kind: 'runtime.approval.resolve', keyId: signingKeyId, commandId, workerId, sessionId, projectId: 'project' as never, workspaceId: workspace.workspace.id, taskId: null, actorId: 'actor' as never, actorAuthVersion: 0, commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
+    const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })
+    // No active approval is available, so a successful online check would reach validation.
+    // This test exercises a runtime lacking a fresh authorization callback.
+    const offline = new WorkerRuntime(f.store, new LocalProvisioner(join(f.home, 'workspaces')), [new TestAgent(1)], { send: message => f.events.push(message) }, workerId, 'offline')
+    await offline.receive({ type: 'command', commandId, command, authorization: { claims, signature: sign(null, authorizationBytes(claims), signingKeys.privateKey).toString('base64url') } })
+    assert.equal(f.events.filter(event => event.type === 'ack' && event.receipt.commandId === commandId).length, 0, 'temporary online denial cannot issue a terminal application receipt')
+    assert.equal(await f.store.commands.get(commandId), null)
+    assert.equal((await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events.length, journal.events.length)
+    await offline.shutdown()
+  } finally { await f.cleanup() }
 })
 
 test('FIFO, durable ACK, idempotency conflict, cancellation, stop and stream/tool events', async () => {

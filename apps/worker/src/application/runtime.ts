@@ -1,6 +1,6 @@
 import { parseVerifiedServerFileWriteFrame } from '@wemux/wire-protocol/file-admission-node'
 import { WorkerFileWriteExecutor } from './file-write-executor.js'
-import { verifyEnqueueAuthorization } from './command-authorization.js'
+import { verifyCommandAuthorization } from './command-authorization.js'
 import type { FileWriteIngress } from '../transport/types.js'
 import { createHash } from 'node:crypto'
 import { projectAgentEventToSessionPayload, type AgentEvent } from '@wemux/agent-interchange'
@@ -44,6 +44,7 @@ async function boundedAgentCleanup(work: () => Promise<unknown>, timeoutMs: numb
 }
 class AgentTimeoutError extends Error {}
 class LaunchAuthorizationDeniedError extends Error {}
+class ApprovalAuthorizationUnavailable extends Error { constructor() { super('Command authorization unavailable') } }
 class TurnStoppedBeforeLaunchError extends Error {}
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
@@ -288,19 +289,33 @@ export class WorkerRuntime {
     const previous = await this.store.commands.get(commandId)
     let receipt: CommandReceipt = { commandId, status: 'accepted' }
     // Never let an unsigned cluster frame replace a previously accepted command.
-    if (source === 'cluster' && command.kind === 'session.enqueue' && !verifyEnqueueAuthorization(this.store.identity(), this.workerId, commandId, command, authorization, Boolean(previous?.authorization))) {
+    if (source === 'cluster' && (command.kind === 'session.enqueue' || command.kind === 'runtime.approval.resolve') && !verifyCommandAuthorization(this.store.identity(), this.workerId, commandId, command, authorization, Boolean(previous?.authorization) || command.kind === 'runtime.approval.resolve')) {
       receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } }
-      // Do not poison a commandId: the Server can retry it with its original signed frame.
-      if (acknowledge) this.send({ type: 'ack', receipt })
+      // Expiry alone is a recoverable delivery failure: the Server must first
+      // receive the transport ACK and then reissue a newly signed envelope.
+      // A malformed/tampered assertion remains a terminal rejection.
+      const expiredApproval = command.kind === 'runtime.approval.resolve' && authorization &&
+        Date.parse(authorization.claims.expiresAt) <= Date.now() &&
+        verifyCommandAuthorization(this.store.identity(), this.workerId, commandId, command, authorization, true)
+      if (acknowledge && !expiredApproval) this.send({ type: 'ack', receipt })
       return receipt
     }
     // An unsigned historical queue cannot be replayed as a signed command ID.
-    if (source === 'cluster' && command.kind === 'session.enqueue' && previous && !previous.authorization) {
+    if (source === 'cluster' && (command.kind === 'session.enqueue' || command.kind === 'runtime.approval.resolve') && previous && !previous.authorization) {
       receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } }
       if (acknowledge) this.send({ type: 'ack', receipt })
       return receipt
     }
     if (previous) {
+      // A persisted receipt is safe to replay without repeating the native effect,
+      // but only after current Server authority is checked again. Expired signing
+      // windows are acceptable for this exact recorded identity, not fresh intents.
+      if (source === 'cluster' && command.kind === 'runtime.approval.resolve' && previous.payloadFingerprint === payloadFingerprint && !(await this.authorizeLaunch?.(commandId))) {
+        receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: true } }
+        // Do not persist a terminal Server receipt for a transient access/projection
+        // denial. No native effect is repeated; a future delivery can recheck.
+        return receipt
+      }
       if (command.kind === 'runtime.approval.resolve' && (!(await this.store.sessions.get(command.sessionId)) || (await this.isLocalSession(command.sessionId)) !== (source === 'local'))) {
         receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Session host scope mismatch', retryable: false } }
       }
@@ -310,7 +325,13 @@ export class WorkerRuntime {
       return receipt
     }
     try {
-      await this.validate(command, source)
+      // Approval resolution unblocks native execution. Verify current access before any journal or adapter effect.
+      if (source === 'cluster' && command.kind === 'runtime.approval.resolve' && !(await this.authorizeLaunch?.(commandId))) {
+        // A stale Server projection or temporary denial must not settle the
+        // command: retry on a later bounded notification/reconnect.
+        return { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: true } }
+      }
+      await this.validate(command, source, commandId)
       let connectorReport: Omit<ConnectorRevisionReport, 'requestId' | 'connectorId' | 'projectId' | 'workerId' | 'revision' | 'errorCode' | 'occurredAt'> | null = null
       if (command.kind === 'connector.definition.sync') connectorReport = await this.connectorControl!.syncClusterDefinition(command.definition, this.workerId)
       if (command.kind === 'connector.test') connectorReport = await this.connectorControl!.testClusterDefinition(command.connectorId, command.connectorRevision)
@@ -341,6 +362,7 @@ export class WorkerRuntime {
       })
       if (connectorReport && (command.kind === 'connector.definition.sync' || command.kind === 'connector.test')) this.send({ type: 'event', scope: 'connector', report: { requestId: command.requestId, connectorId: command.kind === 'connector.definition.sync' ? command.definition.id : command.connectorId, projectId: command.kind === 'connector.definition.sync' ? command.definition.projectId : command.projectId, workerId: this.workerId, revision: command.kind === 'connector.definition.sync' ? command.definition.revision : command.connectorRevision, ...connectorReport, errorCode: connectorReport.status === 'test_failed' || connectorReport.status === 'unavailable' ? 'connector_unavailable' : null, occurredAt: now() } })
     } catch (error) {
+      if (error instanceof ApprovalAuthorizationUnavailable) return { commandId, status: 'rejected', error: { code: 'invalid-input', message: error.message, retryable: true } }
       receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: error instanceof Error ? error.message : 'Invalid command', retryable: false } }
       await this.store.transaction(tx => tx.commands.record({ commandId, command, payloadFingerprint }, receipt))
     }
@@ -376,7 +398,7 @@ export class WorkerRuntime {
     const ownsWorker = binding.agent.workerId === this.workerId || (localId && binding.agent.workerId === `local-${localId}`)
     return Boolean(ownsWorker) && this.store.capabilities().some(c => c.agentKey === binding.agent.agentKey && c.mode === 'execution' && c.availability.status === 'available' && c.models.some(m => m.modelId === binding.modelId))
   }
-  private async validate(command: WorkerCommand, source: 'cluster' | 'local') {
+  private async validate(command: WorkerCommand, source: 'cluster' | 'local', commandId: CommandId) {
     if (command.kind === 'connector.definition.sync' || command.kind === 'connector.test') {
       if (source !== 'cluster' || !this.connectorControl) throw new Error('Connector cluster command is unavailable')
       if (command.kind === 'connector.definition.sync' && command.definition.allowedWorkerIds.length && !command.definition.allowedWorkerIds.includes(this.workerId)) throw new Error('Connector is outside this Worker scope')
@@ -426,12 +448,23 @@ export class WorkerRuntime {
     }
     if (command.kind === 'runtime.approval.resolve') {
       const connectorApproval = await this.requirePendingApproval(command, this.store)
+      // The native adapter may wait behind its per-session lock. Recheck Server
+      // authority inside that lock, immediately before resolving the approval.
+      const authorize = async () => {
+        try {
+          if (await this.authorizeLaunch?.(commandId)) return
+        } catch { /* A failed online check cannot authorize a native decision. */ }
+        throw new ApprovalAuthorizationUnavailable()
+      }
+      // Also reject revocation during the pending-journal read before entering
+      // the runner; the locked check below covers the subsequent queue wait.
+      if (source === 'cluster') await authorize()
       const identity = { sessionId: command.sessionId, turnId: command.turnId, approvalId: command.approvalId, decision: command.decision }
       if (connectorApproval) {
         if (!this.connectorControl?.resolveApproval?.(identity)) throw new Error('Connector approval is no longer pending')
         return
       }
-      await this.agentRunner.resolveApproval({ sessionId: command.sessionId, invocationId: command.turnId, approvalId: command.approvalId, decision: command.decision })
+      await this.agentRunner.resolveApproval({ sessionId: command.sessionId, invocationId: command.turnId, approvalId: command.approvalId, decision: command.decision }, source === 'cluster' ? authorize : undefined)
       return
     }
   }
@@ -574,7 +607,7 @@ export class WorkerRuntime {
       const localSession = await this.isLocalSession(id)
       if (queued && !localSession) {
         const record = await this.store.commands.get(queued.submissionCommandId)
-        if (!record?.authorization || !verifyEnqueueAuthorization(this.store.identity(), this.workerId, queued.submissionCommandId, record.command, record.authorization, true)) return
+        if (!record?.authorization || !verifyCommandAuthorization(this.store.identity(), this.workerId, queued.submissionCommandId, record.command, record.authorization, true)) return
         // A failed HTTP check cannot launch; bounded retries recover transient failures
         // without a WebSocket reconnect. A new command or connection can wake it again.
         let allowed = false

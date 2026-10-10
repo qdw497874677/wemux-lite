@@ -322,7 +322,7 @@ test('receiver is restricted to internal gateway embedding, without production o
     if (path.includes('/http/') || /\/(main|server)\.ts$/.test(path)) {
       assert.doesNotMatch(source, /fileWrites\.getResult|fs-write-admission-v1|fs\.write\.result\.ack|ServerFileResultIngress/)
     }
-    if (path.endsWith('/server.ts')) assert.ok(source.includes("new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))"))
+    if (path.endsWith('/server.ts')) assert.ok(source.includes("new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`), undefined, service)"))
     if (path.endsWith('/worker-ws/gateway.ts')) assert.doesNotMatch(source, /admitFileWrite|enqueueFileWriteAdmission/)
 
   }

@@ -176,12 +176,12 @@ export class WorkerAgentRunner implements AgentRunner {
     })
   }
 
-  async resolveApproval(request: ApprovalDecision): Promise<void> {
+  async resolveApproval(request: ApprovalDecision, authorize?: () => Promise<void>): Promise<void> {
     const active = this.active.get(request.sessionId)
     if (!active || (request.invocationId && active.invocationId !== request.invocationId)) throw new Error('Agent invocation is not active')
     await this.managerForSession(request.sessionId).resolveApproval(request.sessionId, request.approvalId, request.decision, () => {
       if (this.active.get(request.sessionId) !== active || active.invocationId !== request.invocationId) throw new Error('Approval invocation is no longer active')
-    })
+    }, authorize)
   }
 
   /** A resolved stop only requests termination; inactive means the invocation's finally ran. */

@@ -257,7 +257,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
     artifacts,
     resources,
   }))
-  gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))
+  gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`), undefined, service)
   let closed = false
   return {
     server,

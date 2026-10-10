@@ -1,4 +1,4 @@
-import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { createHash, createPublicKey, generateKeyPairSync, sign, verify } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import { authorizationBytes, type EnqueueAuthorization, type SignedEnqueueAuthorization } from '@wemux/wire-protocol/command-assertion'
 
@@ -23,6 +23,11 @@ export class CommandSigningIdentity {
       db.exec('COMMIT')
     } catch (error) { db.exec('ROLLBACK'); throw error }
     this.keyId = createHash('sha256').update(this.publicKey).digest('hex')
+  }
+  verify(assertion: SignedEnqueueAuthorization): boolean {
+    try {
+      return assertion.claims.keyId === this.keyId && verify(null, authorizationBytes(assertion.claims), createPublicKey(this.publicKey), Buffer.from(assertion.signature, 'base64url'))
+    } catch { return false }
   }
   sign(claims: EnqueueAuthorization): SignedEnqueueAuthorization {
     if (claims.keyId !== this.keyId) throw new Error('Signing key mismatch')

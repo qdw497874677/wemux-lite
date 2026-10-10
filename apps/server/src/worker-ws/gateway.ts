@@ -13,6 +13,7 @@ import { Notifications } from '../application/notifications.ts'
 import { workerMessage } from '../application/validation.ts'
 import { WorkerService } from '../application/worker-service.ts'
 import { ServerTransportStore } from './transport-store.ts'
+import type { ServerService } from '../application/server-service.ts'
 
 interface ActiveConnection { readonly epoch: symbol; readonly socket: WebSocket; readonly fileResults: boolean }
 
@@ -28,7 +29,7 @@ export class WorkerGateway {
   private readonly service: WorkerService
   private readonly notifications: Notifications
   private readonly transport: ServerTransportStore
-  constructor(server: Server, auth: AuthenticationService, service: WorkerService, notifications: Notifications, transport: ServerTransportStore, private readonly fileResults?: ServerFileResultIngress) { this.server = server; this.auth = auth; this.service = service; this.notifications = notifications; this.transport = transport; server.on('upgrade', this.upgrade) }
+  constructor(server: Server, auth: AuthenticationService, service: WorkerService, notifications: Notifications, transport: ServerTransportStore, private readonly fileResults?: ServerFileResultIngress, private readonly approvals?: ServerService) { this.server = server; this.auth = auth; this.service = service; this.notifications = notifications; this.transport = transport; server.on('upgrade', this.upgrade) }
   private track(task: Promise<unknown>): void { this.tasks.add(task); void task.finally(() => this.tasks.delete(task)).catch(() => undefined) }
   private serializeLifecycle<T>(workerId: WorkerId, operation: () => Promise<T>): Promise<T> {
     const previous = this.lifecycle.get(workerId) ?? Promise.resolve()
@@ -53,6 +54,22 @@ export class WorkerGateway {
   private connected(workerId: WorkerId, ws: WebSocket): void {
     const epoch = Symbol('worker-connection')
     let hello: WorkerHelloFrame | null = null, lastSeen = Date.now(), chain = Promise.resolve(), flushing = false
+    const approvalRetries = new Map<string, { timer: NodeJS.Timeout; delay: number }>()
+    const retryApproval = (commandId: import('@wemux/domain').CommandId, delay = 2_000) => {
+      if (!this.approvals || approvalRetries.has(commandId) || !current()) return
+      const timer = setTimeout(() => {
+        approvalRetries.delete(commandId)
+        if (!current()) return
+        this.track((async () => {
+          const pending = await this.approvals!.getCommand(commandId).catch(() => null)
+          if (!pending || pending.status !== 'pending') return
+          if (await this.approvals!.refreshPendingApproval(workerId, commandId)) await flush(true)
+          retryApproval(commandId, Math.min(delay * 2, 30_000))
+        })().catch(() => { retryApproval(commandId, Math.min(delay * 2, 30_000)) }))
+      }, delay)
+      timer.unref()
+      approvalRetries.set(commandId, { timer, delay })
+    }
     const current = () => !this.closing && this.connections.get(workerId)?.epoch === epoch && ws.readyState === WebSocket.OPEN
     const fileNegotiated = () => supportsFileWriteAdmission(this.fileResults ? [FS_WRITE_ADMISSION_V1] : [], hello?.features)
     const send = (frame: ServerToWorkerFrame) => {
@@ -67,10 +84,56 @@ export class WorkerGateway {
       if (!hello || this.connections.get(workerId)?.epoch !== epoch || flushing || ws.readyState !== WebSocket.OPEN) return
       flushing = true
       try {
-        if (enqueueDeliverable) for (const command of await this.service.deliverable(workerId)) this.transport.enqueue(workerId, command)
+        if (enqueueDeliverable) for (const command of await this.service.deliverable(workerId)) {
+          if (command.type === 'command' && command.command.kind === 'runtime.approval.resolve') {
+            if (!this.approvals || !(await this.approvals.refreshPendingApproval(workerId, command.commandId))) { retryApproval(command.commandId); continue }
+            const updated = (await this.service.deliverable(workerId)).find(item => item.type === 'command' && item.commandId === command.commandId)
+            if (updated) this.transport.enqueue(workerId, updated)
+            retryApproval(command.commandId)
+          } else this.transport.enqueue(workerId, command)
+        }
         if (!current()) return
         if (!fileNegotiated() && this.transport.hasFileEnvelopes(workerId)) throw new Error('File result ingress needs attention: retained envelopes require negotiation')
-        for (const frame of this.transport.pending(workerId, 64)) { send(frame); this.transport.sent(workerId, frame) }
+        for (const frame of this.transport.pending(workerId, 64, true)) {
+          if (frame.payload.type === 'command' && frame.payload.command.kind === 'runtime.approval.resolve') {
+            const approvalId = frame.payload.commandId
+            if (!this.approvals) break
+            const projection = await this.approvals.getCommand(approvalId).catch(() => null)
+            // An application receipt can commit before the transport ACK reaches us.
+            // Replay ONLY an already-sent immutable frame to repair its sequence;
+            // a settled decision must never be admitted or signed again.
+            if (projection?.status === 'accepted' || projection?.status === 'rejected') {
+              if (this.transport.sentApproval(workerId, frame) && frame.payload.authorization &&
+                  await this.approvals.authorizeSettledApprovalReplay(workerId, approvalId, frame.payload.authorization)) {
+                send(frame)
+                continue
+              }
+              break
+            }
+            if (projection?.status !== 'pending' || !(await this.approvals.refreshPendingApproval(workerId, approvalId))) { retryApproval(approvalId); break }
+            const updated = (await this.service.deliverable(workerId)).find(item => item.type === 'command' && item.commandId === approvalId)
+            if (!updated) break
+            if (JSON.stringify(updated) !== JSON.stringify(frame.payload)) {
+              if (this.transport.refreshUnsentApproval(workerId, frame, updated)) {
+                send({ ...frame, payload: updated }); this.transport.sent(workerId, frame)
+                retryApproval(approvalId)
+                continue
+              }
+              // A sent frame is immutable. Replay its original bytes to recover
+              // a lost transport ACK; only the next sequence may carry fresh claims.
+              if (this.transport.sentApproval(workerId, frame) && frame.payload.authorization && await this.approvals.authorizeApprovalReplay(workerId, approvalId, frame.payload.authorization)) send(frame)
+              retryApproval(approvalId)
+              break
+            }
+            const expires = Date.parse(frame.payload.authorization?.claims.expiresAt ?? '')
+            if (!Number.isFinite(expires) || expires <= Date.now()) {
+              if (this.transport.sentApproval(workerId, frame) && frame.payload.authorization && await this.approvals.authorizeApprovalReplay(workerId, approvalId, frame.payload.authorization)) send(frame)
+              break
+            }
+            retryApproval(approvalId)
+          }
+          send(frame); this.transport.sent(workerId, frame)
+        }
       } catch { ws.terminate() }
       finally { flushing = false }
     }
@@ -135,8 +198,8 @@ export class WorkerGateway {
             if (accepted.isNew) {
               // 收据是应用层完成信号：收到后该 Command 不再需要传输重投，未重发的待发行随之清掉。
               const receipt = frame.payload.type === 'ack' ? frame.payload.receipt : null
-              if (receipt) this.transport.discardCommand(workerId, receipt.commandId)
               for (const reply of await this.service.receive(workerId, workerMessage(frame.payload))) this.transport.enqueue(workerId, reply)
+              if (receipt) { this.transport.discardCommand(workerId, receipt.commandId); const retry = approvalRetries.get(receipt.commandId); if (retry) clearTimeout(retry.timer); approvalRetries.delete(receipt.commandId) }
             }
             send({ frameType: 'transport.ack', deliveryEpoch: frame.deliveryEpoch, ackThrough: accepted.ackThrough })
             await flush(true)
@@ -153,6 +216,8 @@ export class WorkerGateway {
       this.track(chain)
     })
     ws.on('close', () => {
+      for (const { timer } of approvalRetries.values()) clearTimeout(timer)
+      approvalRetries.clear()
       clearInterval(timer); unsubscribe()
       this.track(chain.then(() => this.serializeLifecycle(workerId, async () => {
         if (this.connections.get(workerId)?.epoch !== epoch) return
@@ -165,9 +230,11 @@ export class WorkerGateway {
     if (isFileWriteAdmissionType(payload)) throw new Error('File traffic requires internal result ingress')
     const connection = this.connections.get(workerId)
     if (connection && !connection.fileResults && this.transport.hasFileEnvelopes(workerId)) throw new Error('File result ingress needs attention: retained envelopes require negotiation')
+    if (payload.type === 'command' && payload.command.kind === 'runtime.approval.resolve') throw new Error('Approval commands require checked delivery')
     this.transport.enqueue(workerId, payload)
     if (!connection || connection.socket.readyState !== WebSocket.OPEN) return
     for (const frame of this.transport.pending(workerId, 64)) {
+      if (frame.payload.type === 'command' && frame.payload.command.kind === 'runtime.approval.resolve') break
       connection.socket.send(JSON.stringify(frame), error => { if (error) connection.socket.terminate() })
       this.transport.sent(workerId, frame)
     }

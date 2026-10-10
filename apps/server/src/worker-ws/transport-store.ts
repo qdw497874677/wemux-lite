@@ -135,16 +135,35 @@ export class ServerTransportStore {
     }
   }
 
-  pending(workerId: WorkerId, limit: number): readonly Extract<ServerDataFrame, { readonly durability: 'durable' }>[] {
+  /** An unsent envelope may adopt a refreshed signature without changing its sequence.
+   * A sent envelope is immutable; wait for its transport ACK before issuing a new one. */
+  refreshUnsentApproval(workerId: WorkerId, frame: Extract<ServerDataFrame, { readonly durability: 'durable' }>, payload: ServerPayload): boolean {
+    if (payload.type !== 'command' || payload.command.kind !== 'runtime.approval.resolve' || frame.payload.type !== 'command' || frame.payload.commandId !== payload.commandId) return false
+    const result = this.db.prepare('UPDATE transport_outbox SET payload_json=? WHERE worker_id=? AND delivery_epoch=? AND seq=? AND last_sent_at IS NULL AND payload_json=?').run(JSON.stringify(payload), workerId, frame.deliveryEpoch, frame.directionSeq, JSON.stringify(frame.payload))
+    return result.changes === 1
+  }
+
+  /** A sent frame may be replayed byte-identically to recover a lost transport ACK.
+   * The Worker ACKs an expired, otherwise valid signed approval without executing it. */
+  sentApproval(workerId: WorkerId, frame: Extract<ServerDataFrame, { readonly durability: 'durable' }>): boolean {
+    if (frame.payload.type !== 'command' || frame.payload.command.kind !== 'runtime.approval.resolve' || !frame.payload.authorization) return false
+    return this.db.prepare('SELECT 1 FROM transport_outbox WHERE worker_id=? AND delivery_epoch=? AND seq=? AND last_sent_at IS NOT NULL AND payload_json=?').get(workerId, frame.deliveryEpoch, frame.directionSeq, JSON.stringify(frame.payload)) !== undefined
+  }
+
+  /** A pending approval is never replayable when its signed window has expired.
+   * Retain the row as a sequence barrier; only the receiver's ACK can clear it. */
+  pending(workerId: WorkerId, limit: number, includeExpiredApprovals = false): readonly Extract<ServerDataFrame, { readonly durability: 'durable' }>[] {
     const epoch = this.meta(workerId, 'outbound_epoch') ?? this.setMeta(workerId, 'outbound_epoch', randomUUID())
     const ack = this.outboundAckThrough(workerId, epoch)
     const rows = this.db.prepare('SELECT seq,message_id,payload_json FROM transport_outbox WHERE worker_id=? AND delivery_epoch=? AND seq>? ORDER BY seq LIMIT ?').all(workerId, epoch, ack, limit) as Array<{seq:number;message_id:string;payload_json:string}>
-    // A retained pre-authorization enqueue must never be sent from the old transport outbox.
-    // Keep its sequence as a barrier: skipping it would leave receiver cursors with a hole.
+    // Retained pre-authorization enqueue/approval commands must never be replayed.
+    // Keep their sequence as a barrier: skipping it would leave receiver cursors with a hole.
+    // An operator must explicitly clean up the legacy outbox; do not delete rows here.
     const frames: Extract<ServerDataFrame, { readonly durability: 'durable' }>[] = []
     for (const row of rows) {
       const payload = JSON.parse(row.payload_json) as ServerPayload
-      if (payload.type === 'command' && payload.command.kind === 'session.enqueue' && !payload.authorization) break
+      if (payload.type === 'command' && (payload.command.kind === 'session.enqueue' || payload.command.kind === 'runtime.approval.resolve') && !payload.authorization) break
+      if (!includeExpiredApprovals && payload.type === 'command' && payload.command.kind === 'runtime.approval.resolve' && (!Number.isFinite(Date.parse(payload.authorization!.claims.expiresAt)) || Date.parse(payload.authorization!.claims.expiresAt) <= Date.now())) break
       frames.push({ frameType: 'data', durability: 'durable', deliveryEpoch: epoch, directionSeq: row.seq, messageId: row.message_id as MessageId, lane: 'command', payloadVersion: 'wemux.server.payload.v1', expiresAt: null, payload })
     }
     return frames
