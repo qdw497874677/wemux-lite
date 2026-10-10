@@ -20,6 +20,9 @@ export interface ConnectorApprovalPort {
   request(input: ConnectorApprovalRequest, signal?: AbortSignal): Promise<'approve' | 'deny'>
 }
 
+// Direct gateway callers without these optional checks do not acquire
+// cluster-grade Turn binding or Server revocation guarantees. Production
+// WorkerConnectorRuntime supplies both checks; standalone usage must opt in.
 export interface CapabilityVerifier {
   verify(token: string): Promise<CapabilityGrantClaims> | CapabilityGrantClaims
   verifyBinding?(token: string, snapshot: CapabilitySnapshot, turn: ToolExecutionInput['currentTurn']): Promise<boolean> | boolean
@@ -73,6 +76,15 @@ export class ToolExecutionGateway {
       await this.authorize(input.token, input.snapshot, input.currentTurn, input.connectorId, 'mcp.list_tools')
       const connector = await this.definition(input.connectorId) as McpConnectorDefinition
       this.assertConnector(input.snapshot, input.currentTurn, connector)
+      // MCP discovery can start a stdio process and is not inherently read-only.
+      // There is no trusted side-effect-free catalogue in the Connector definition.
+      // Treat discovery itself as an approval-gated side effect.
+      if (!input.agentSupportsApproval || input.channelDeliveryId || !this.approval) throw new GatewayError('approval_denied', 'Interactive approval is unavailable')
+      const decision = await this.approval.request({ approvalId: requestId, sessionId: input.currentTurn.sessionId, turnId: input.currentTurn.turnId, toolCallId: requestId, requestId, fingerprint: requestId, connectorRevision: connector.revision, operationType: 'write' }, input.signal)
+      if (decision !== 'approve') throw new GatewayError('approval_denied', 'Connector discovery was denied')
+      await this.authorize(input.token, input.snapshot, input.currentTurn, input.connectorId, 'mcp.list_tools')
+      this.assertConnector(input.snapshot, input.currentTurn, await this.definition(input.connectorId), connector.revision)
+      if (input.signal?.aborted) throw new GatewayError('cancelled', 'Connector discovery was cancelled')
       const secret = await this.resolveSecret(connector)
       const catalog = await this.mcp.listTools(input.currentTurn.sessionId, connector, secret, input.signal)
       return success(summarizeAgentResult({ connectorId: connector.id, connectorRevision: connector.revision, catalogRevision: catalog.revision, tools: catalog.tools }), requestId, connector.revision)
@@ -124,10 +136,21 @@ export class ToolExecutionGateway {
       const provisionalCall: ToolCall = { requestId: input.requestId, fingerprint, projectId: input.currentTurn.projectId as never, workspaceId: input.currentTurn.workspaceId as never, sessionId: input.currentTurn.sessionId as never, turnId: input.currentTurn.turnId as never, toolCallId: input.toolCallId, connectorId: connector.id, connectorRevision: connector.revision, action: kind === 'http' ? { kind: 'http', operationId: input.toolName } : { kind: 'mcp', toolName: input.toolName }, operationType, input: input.input, actor: { kind: 'agent', agentId: claims.actorAgentId, requestedByAccountId: (input.requestedByAccountId ?? null) as never, channelDeliveryId: input.channelDeliveryId ?? null }, createdAt: new Date().toISOString() as never }
       const started = await this.store.beginConnectorExecution({ requestId: input.requestId, fingerprint, state: 'running', toolCall: provisionalCall, result: null, journalSummary: null, createdAt: provisionalCall.createdAt, completedAt: null })
       if (started === 'exists') return this.denied(input, kind, failure('connector_unavailable', input.requestId, connector.revision, 'Connector execution is already running', true))
+      // A tool's MCP annotations are only available by starting the connector.
+      // Approve the conservative write risk BEFORE discovery; never trust a
+      // read-only hint to skip this preflight for MCP calls.
+      if (kind === 'mcp' && (!input.agentSupportsApproval || input.channelDeliveryId || !this.approval)) return this.denied(input, kind, await this.persist(provisionalCall, failure('approval_denied', input.requestId, connector.revision, 'Interactive approval is unavailable')))
+      if (kind === 'mcp') {
+        const decision = await this.approval!.request({ approvalId: provisionalCall.toolCallId, sessionId: provisionalCall.sessionId, turnId: provisionalCall.turnId, toolCallId: provisionalCall.toolCallId, requestId: provisionalCall.requestId, fingerprint, connectorRevision: provisionalCall.connectorRevision, operationType: 'write' }, input.signal)
+        if (decision !== 'approve') return this.denied(input, kind, await this.persist(provisionalCall, failure('approval_denied', input.requestId, connector.revision, 'Connector call was denied')))
+        await this.authorize(input.token, input.snapshot, input.currentTurn, input.connectorId, 'mcp.call')
+        this.assertConnector(input.snapshot, input.currentTurn, await this.definition(input.connectorId), input.connectorRevision)
+        if (input.signal?.aborted) return await this.persist(provisionalCall, failure('cancelled', input.requestId, connector.revision, 'Connector call was cancelled'))
+      }
       const call: ToolCall = kind === 'mcp'
         ? await this.resolveMcpCall(input, connector as McpConnectorDefinition, provisionalCall)
         : provisionalCall
-      if (requiresApproval(call.operationType, connector)) {
+      if (kind === 'http' && requiresApproval(call.operationType, connector)) {
         if (!input.agentSupportsApproval || input.channelDeliveryId || !this.approval) return this.denied(input, kind, await this.persist(call, failure('approval_denied', input.requestId, connector.revision, 'Interactive approval is unavailable')))
         const decision = await this.approval.request({ approvalId: call.toolCallId, sessionId: call.sessionId, turnId: call.turnId, toolCallId: call.toolCallId, requestId: call.requestId, fingerprint, connectorRevision: call.connectorRevision, operationType: call.operationType }, input.signal)
         if (decision !== 'approve') return this.denied(input, kind, await this.persist(call, failure('approval_denied', input.requestId, connector.revision, 'Connector call was denied')))

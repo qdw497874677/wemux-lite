@@ -34,7 +34,7 @@ async function harness(t: test.TestContext, connector = definition(), options: {
   const credentials = new WorkerCredentialStore(store, { key: options.key })
   const { snapshot, claims } = auth()
   await store.saveConnectorDefinition(connector)
-  const gateway = new ToolExecutionGateway(store, credentials, mcp, { verify: token => { assert.equal(token, 'token'); return claims } }, options.approval ? { request: async () => options.approval! } : undefined)
+  const gateway = new ToolExecutionGateway(store, credentials, mcp, { verify: token => { assert.equal(token, 'token'); return claims }, verifyBinding: () => true, verifyCurrentGrant: async () => true }, options.approval ? { request: async () => options.approval! } : undefined)
   t.after(async () => { await mcp.shutdown(); store.close(); await rm(dir, { recursive: true, force: true }) })
   const common = { token: 'token', snapshot, currentTurn: ids, connectorId: connector.id, agentSupportsApproval: options.agentSupportsApproval ?? true }
   return { store, supervisor, mcp, credentials, gateway, common }
@@ -75,7 +75,7 @@ test('streamable_http MCP uses guarded fetch and calls a fixture without externa
   const credentials = new WorkerCredentialStore(store)
   const { snapshot, claims } = auth()
   await store.saveConnectorDefinition(connector)
-  const gateway = new ToolExecutionGateway(store, credentials, mcp, { verify: () => claims }, { request: async () => 'approve' })
+  const gateway = new ToolExecutionGateway(store, credentials, mcp, { verify: () => claims, verifyBinding: () => true, verifyCurrentGrant: async () => true }, { request: async () => 'approve' })
   t.after(async () => { await mcp.shutdown(); store.close(); await rm(storeDir, { recursive: true, force: true }) })
   const result = await gateway.execute({ token: 'token', snapshot, currentTurn: ids, connectorId: connector.id, agentSupportsApproval: true, requestId: 'http-1', toolCallId: 'call-http' as never, connectorRevision: 1, toolName: 'echo', input: { value: 'http' } })
   assert.equal(result.ok, true, JSON.stringify(result))
@@ -99,6 +99,54 @@ test('write-risk MCP annotations fail closed without approval support and denial
   assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, 'approval_denied')
   const journal = await h.store.listConnectorJournal(ids.sessionId)
   assert.equal(journal.length, 1)
+})
+
+test('MCP call denied before discovery never starts a connector, and a revoked grant cannot replay a cached result', async t => {
+  const h = await harness(t, definition(), { approval: 'deny' })
+  const listTools = h.mcp.listTools.bind(h.mcp)
+  let discoveryAttempts = 0
+  h.mcp.listTools = async (...args) => { discoveryAttempts++; return listTools(...args) }
+  const input = { ...h.common, requestId: 'preflight-deny', toolCallId: 'preflight-call' as never, connectorRevision: 1, toolName: 'echo', input: {} }
+  const denied = await h.gateway.execute(input)
+  assert.equal(denied.ok, false); if (!denied.ok) assert.equal(denied.error.code, 'approval_denied')
+  assert.deepEqual(h.supervisor.activePids(), [])
+  const deniedCatalog = await h.gateway.listTools(h.common)
+  assert.equal(deniedCatalog.ok, false); if (!deniedCatalog.ok) assert.equal(deniedCatalog.error.code, 'approval_denied')
+  assert.deepEqual(h.supervisor.activePids(), [])
+  const unavailable = await h.gateway.execute({ ...input, requestId: 'unsupported', toolCallId: 'unsupported-call' as never, toolName: 'unknown', agentSupportsApproval: false })
+  assert.equal(unavailable.ok, false); if (!unavailable.ok) assert.equal(unavailable.error.code, 'approval_denied')
+  const channel = await h.gateway.execute({ ...input, requestId: 'channel', toolCallId: 'channel-call' as never, channelDeliveryId: 'delivery-1' })
+  assert.equal(channel.ok, false); if (!channel.ok) assert.equal(channel.error.code, 'approval_denied')
+  const unavailableCatalog = await h.gateway.listTools({ ...h.common, agentSupportsApproval: false })
+  assert.equal(unavailableCatalog.ok, false); if (!unavailableCatalog.ok) assert.equal(unavailableCatalog.error.code, 'approval_denied')
+  assert.deepEqual(h.supervisor.activePids(), [])
+  assert.equal(discoveryAttempts, 0)
+
+  let current = true
+  const guarded = new ToolExecutionGateway(h.store, h.credentials, h.mcp, { verify: () => auth().claims, verifyBinding: () => true, verifyCurrentGrant: async () => current }, { request: async () => 'approve' })
+  const allowed = { ...input, requestId: 'cached', toolCallId: 'cached-call' as never }
+  assert.equal((await guarded.execute(allowed)).ok, true)
+  current = false
+  const replay = await guarded.execute(allowed)
+  assert.equal(replay.ok, false); if (!replay.ok) assert.equal(replay.error.code, 'scope_denied')
+  const before = h.supervisor.activePids().length
+  const revoked = await guarded.execute({ ...allowed, requestId: 'revoked', toolCallId: 'revoked-call' as never })
+  assert.equal(revoked.ok, false); if (!revoked.ok) assert.equal(revoked.error.code, 'scope_denied')
+  assert.equal(h.supervisor.activePids().length, before)
+})
+
+test('MCP grant revoked during approval is checked before discovery starts a process', async t => {
+  const h = await harness(t)
+  const { claims } = auth()
+  let live = true
+  const gateway = new ToolExecutionGateway(h.store, h.credentials, h.mcp, { verify: () => claims, verifyBinding: () => true, verifyCurrentGrant: async () => live }, { request: async () => { live = false; return 'approve' } })
+  const result = await gateway.execute({ ...h.common, requestId: 'revoked-in-wait', toolCallId: 'revoked-in-wait-call' as never, connectorRevision: 1, toolName: 'echo', input: {} })
+  assert.equal(result.ok, false); if (!result.ok) assert.equal(result.error.code, 'scope_denied')
+  assert.deepEqual(h.supervisor.activePids(), [])
+  live = true
+  const listed = await gateway.listTools(h.common)
+  assert.equal(listed.ok, false); if (!listed.ok) assert.equal(listed.error.code, 'scope_denied')
+  assert.deepEqual(h.supervisor.activePids(), [])
 })
 
 test('credential capability degrades unavailable and journal never contains plaintext secret', async t => {
