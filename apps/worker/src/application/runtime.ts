@@ -163,13 +163,20 @@ export class WorkerRuntime {
     this.store.saveCapabilities(await Promise.all(this.agents.map(agent => agent.detect())))
     for (const session of await this.store.listSessions()) {
       if (session.activeTurnId) {
-        // Another Runtime in this home may still own the running child. Startup
-        // recovery is only valid for an unowned slot left by a previous process.
-        if (this.ownership.occupied(session.sessionId)) { this.waitForOwnership(session.sessionId); continue }
-        const turn = await this.store.sessions.getTurn(session.activeTurnId)
-        await this.store.transaction(tx => tx.sessions.finishTurn(turn?.state === 'stopping'
-          ? { turnId: session.activeTurnId!, outcome: 'cancelled', finishedAt: now() }
-          : { turnId: session.activeTurnId!, outcome: 'failed', failure: { code: 'interrupted', message: 'Worker restarted during turn' }, finishedAt: now() }))
+        // Reserve before the first asynchronous read. Recovery and live execution
+        // must use the same fence, including across transaction retries.
+        const token = this.ownership.acquire(session.sessionId)
+        if (!token) { this.waitForOwnership(session.sessionId); continue }
+        await this.finishClaimed(session.sessionId, token, async () => {
+          await this.store.transaction(async tx => {
+            const current = await tx.sessions.get(session.sessionId)
+            if (!current?.activeTurnId) return
+            const turn = await tx.sessions.getTurn(current.activeTurnId)
+            await tx.sessions.finishTurn(turn?.state === 'stopping'
+              ? { turnId: current.activeTurnId, outcome: 'cancelled', finishedAt: now() }
+              : { turnId: current.activeTurnId, outcome: 'failed', failure: { code: 'interrupted', message: 'Worker restarted during turn' }, finishedAt: now() })
+          })
+        })
       }
     }
     for (const record of await this.store.commands.listRecoverable(100000)) {
@@ -796,13 +803,14 @@ export class WorkerRuntime {
         console.error('Claimed Turn finalization failed; retaining Session ownership:', error)
         // No timer can prove child exit. Only the already-proven-safe owner is
         // released after the durable slot is cleared; uncertain children stay fenced.
-        if (!this.closing) {
-          const timer = setTimeout(() => { if (!this.closing) void retry(Math.min(attempt + 1, 4)) }, Math.min(250 * 2 ** attempt, 2000))
-          timer.unref()
-        }
+        // The finalizer belongs to the process-lifetime reservation, not to the
+        // Runtime lifecycle. Shutdown may replace this Runtime in the same process;
+        // cancelling its retry would strand the durable active slot forever.
+        const timer = setTimeout(() => { void retry(Math.min(attempt + 1, 4)) }, Math.min(250 * 2 ** attempt, 2000))
+        timer.unref()
         return
       }
-      try { await this.publish() } catch { /* Durable Journal replays on the next publication. */ }
+      if (!this.closing) try { await this.publish() } catch { /* Durable Journal replays on the next publication. */ }
       if (!this.unsafeSessions.has(id)) {
         this.ownership.release(id, token)
         if (this.tasks.has(id)) this.releaseWakes.add(id)
