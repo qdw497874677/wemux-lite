@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { SqliteServerStore } from './storage/sqlite/store.ts'
+import { CommandSigningIdentity } from './application/command-signing.ts'
 import { SharedSqliteDatabase } from './storage/sqlite/shared-database.ts'
 import { AuthenticationService } from './application/auth.ts'
 import { AdministratorDirectory, parseAdministratorEmails } from './application/administrator-directory.ts'
@@ -118,6 +119,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   // 主库仓储共用单连接与 FIFO；presenceReset 仍只由真正拥有 Worker 连接的 Server 启动入口触发。
   const database = new SharedSqliteDatabase(options.databasePath)
   const store = new SqliteServerStore(database, { presenceReset: true })
+  const commandSigning = new CommandSigningIdentity(database.connection)
   const administrators = new AdministratorDirectory(store.identity, parseAdministratorEmails(options.administratorEmails ?? process.env.WEMUX_ADMIN_EMAILS))
   const auth = new AuthenticationService(store, administrators)
   // 浏览器会话策略只有一份：账号安全里的强认证窗口与撤销语义必须和登录态完全一致。
@@ -152,7 +154,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const capabilitySecret = options.capabilitySecret ?? process.env.WEMUX_CAPABILITY_SECRET ?? randomCapabilitySecret()
   const connectorRepository = new SqliteConnectorRepository(database)
   const capabilities = new CapabilityService(store, now, new CapabilityTokenService(capabilitySecret, now), connectorRepository)
-  const service = new ServerService(store, notifications, capabilities, workerAccess, projects, sessionAccess)
+  const service = new ServerService(store, notifications, capabilities, workerAccess, projects, sessionAccess, commandSigning)
   const delegationRepository = new SqliteDelegationRepository(database)
   const delegations = new DelegationApplicationService(
     delegationRepository,

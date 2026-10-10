@@ -1,5 +1,6 @@
 import { parseVerifiedServerFileWriteFrame } from '@wemux/wire-protocol/file-admission-node'
 import { WorkerFileWriteExecutor } from './file-write-executor.js'
+import { verifyEnqueueAuthorization } from './command-authorization.js'
 import type { FileWriteIngress } from '../transport/types.js'
 import { createHash } from 'node:crypto'
 import { projectAgentEventToSessionPayload, type AgentEvent } from '@wemux/agent-interchange'
@@ -36,6 +37,7 @@ function canonical(value: unknown): string {
 
 export class WorkerRuntime {
   private readonly tasks = new Map<SessionId, Promise<void>>()
+  private readonly launchRetries = new Map<SessionId, { commandId: CommandId; attempts: number; timer: NodeJS.Timeout | null }>()
   private readonly sent = new Map<SessionId, number>()
   private readonly provisions = new Map<import('@wemux/domain').WorkspaceId, Promise<void>>()
   private readonly agentRunner: WorkerAgentRunner
@@ -65,7 +67,8 @@ export class WorkerRuntime {
     },
     private readonly piProviderResolver?: PiProviderResolver,
     /** Internal embedding only. Absent in all production constructors. */
-    fileWrites?: { readonly write?: typeof writeWorkspaceFile }) {
+    fileWrites?: { readonly write?: typeof writeWorkspaceFile },
+    private readonly authorizeLaunch?: (commandId: CommandId) => Promise<boolean>) {
     if (fileWrites) {
       this.fileWriteExecutor = new WorkerFileWriteExecutor(store, workerId, fileWrites)
       const publishPending = async (result: import('@wemux/wire-protocol').FileWriteResultPayload, publish: Parameters<FileWriteIngress['replay']>[0]) => {
@@ -159,12 +162,13 @@ export class WorkerRuntime {
     this.headRefresh = setInterval(() => { void this.sendHeads() }, 1_000)
     this.headRefresh.unref()
     for (const workspace of await this.store.listWorkspaces()) if (!this.isLocalWorkspace(workspace)) await this.report(workspace.id)
+    for (const session of await this.store.listSessions()) this.schedule(session.sessionId)
   }
   receive(message: ServerToWorker): Promise<void> {
     if (message.type === 'command' && message.command.kind === 'runtime.approval.resolve') message = structuredClone(message)
     const next = this.commands.then(async () => {
       if (this.closing) return
-      if (message.type === 'command') await this.command(message.commandId, message.command, true, 'cluster')
+      if (message.type === 'command') await this.command(message.commandId, message.command, true, 'cluster', message.authorization)
       if (message.type === 'fs.request') await this.files(message)
       if (message.type === 'terminal.request') await this.terminal(message)
       if (message.type === 'sync') {
@@ -240,10 +244,23 @@ export class WorkerRuntime {
     const installationId = this.store.localInstallation()?.installationId
     return Boolean(installationId) && workspace.projectId === ('local' as import('@wemux/domain').ProjectId) && workspace.workerId === `local-${installationId}`
   }
-  private async command(commandId: CommandId, command: WorkerCommand, acknowledge = true, source: 'cluster' | 'local' = 'cluster'): Promise<CommandReceipt> {
+  private async command(commandId: CommandId, command: WorkerCommand, acknowledge = true, source: 'cluster' | 'local' = 'cluster', authorization?: import('@wemux/wire-protocol/command-assertion').SignedEnqueueAuthorization): Promise<CommandReceipt> {
     const payloadFingerprint = createHash('sha256').update(canonical(command.kind === 'session.enqueue' ? { kind: command.kind, sessionId: command.sessionId, message: { messageId: command.message.messageId, content: command.message.content } } : command)).digest('hex')
     const previous = await this.store.commands.get(commandId)
     let receipt: CommandReceipt = { commandId, status: 'accepted' }
+    // Never let an unsigned cluster frame replace a previously accepted command.
+    if (source === 'cluster' && command.kind === 'session.enqueue' && !verifyEnqueueAuthorization(this.store.identity(), this.workerId, commandId, command, authorization, Boolean(previous?.authorization))) {
+      receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } }
+      // Do not poison a commandId: the Server can retry it with its original signed frame.
+      if (acknowledge) this.send({ type: 'ack', receipt })
+      return receipt
+    }
+    // An unsigned historical queue cannot be replayed as a signed command ID.
+    if (source === 'cluster' && command.kind === 'session.enqueue' && previous && !previous.authorization) {
+      receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } }
+      if (acknowledge) this.send({ type: 'ack', receipt })
+      return receipt
+    }
     if (previous) {
       if (command.kind === 'runtime.approval.resolve' && (!(await this.store.sessions.get(command.sessionId)) || (await this.isLocalSession(command.sessionId)) !== (source === 'local'))) {
         receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Session host scope mismatch', retryable: false } }
@@ -267,7 +284,7 @@ export class WorkerRuntime {
             return
           }
         }
-        await tx.commands.record({ commandId, command, payloadFingerprint }, receipt)
+        await tx.commands.record({ commandId, command, payloadFingerprint, ...(authorization && source === 'cluster' ? { authorization } : {}) }, receipt)
         switch (command.kind) {
           case 'session.create': await tx.sessions.createSession(command.session.sessionId, command.session.binding, command.session.storageMode); break
           case 'session.enqueue': await tx.sessions.enqueue({ sessionId: command.sessionId, submissionCommandId: commandId, message: command.message, capabilities: command.capabilities, queuedAt: now() }); break
@@ -446,7 +463,13 @@ export class WorkerRuntime {
       location: workspace.status === 'ready' ? { workspaceId: id, workerId: this.workerId, rootPath: workspace.rootPath, checkouts: await this.store.workspaces.listRepositoryCheckouts(id) } : null } })
   }
   private schedule(id: SessionId) {
-    if (this.closing || this.tasks.has(id)) return
+    if (this.closing) return
+    const retry = this.launchRetries.get(id)
+    if (retry?.timer) {
+      clearTimeout(retry.timer)
+      this.launchRetries.delete(id)
+    }
+    if (this.tasks.has(id)) return
     const task = this.run(id).catch(error => { console.error('Session execution failed:', error) }).finally(() => { this.tasks.delete(id) })
     this.tasks.set(id, task)
   }
@@ -458,11 +481,47 @@ export class WorkerRuntime {
         await this.store.transaction(tx => tx.sessions.setRuntimeState(id, 'unavailable'))
         await this.publish(); return
       }
+      const queued = (await this.store.sessions.listQueued(id))[0]
+      if (queued && !(await this.isLocalSession(id))) {
+        const record = await this.store.commands.get(queued.submissionCommandId)
+        if (!record?.authorization || !verifyEnqueueAuthorization(this.store.identity(), this.workerId, queued.submissionCommandId, record.command, record.authorization, true)) return
+        // A failed HTTP check cannot launch; bounded retries recover transient failures
+        // without a WebSocket reconnect. A new command or connection can wake it again.
+        let allowed = false
+        try { allowed = await this.authorizeLaunch?.(queued.submissionCommandId) === true }
+        catch { /* HTTP failures are fail-closed and retryable. */ }
+        if (!allowed) {
+          this.retryLaunch(id, queued.submissionCommandId)
+          return
+        }
+        this.launchRetries.delete(id)
+        if ((await this.store.sessions.listQueued(id))[0]?.submissionCommandId !== queued.submissionCommandId) continue
+      }
       const turn = await this.store.transaction(tx => tx.sessions.claimNext(id))
       if (!turn) return
       await this.publish()
       await this.execute(turn)
     }
+  }
+  private retryLaunch(id: SessionId, commandId: CommandId) {
+    const prior = this.launchRetries.get(id)
+    const attempts = prior?.commandId === commandId ? prior.attempts + 1 : 1
+    if (attempts > 4 || this.closing) {
+      this.launchRetries.set(id, { commandId, attempts, timer: null })
+      return
+    }
+    const timer = setTimeout(() => {
+      const pending = this.launchRetries.get(id)
+      if (pending?.timer !== timer || this.closing) return
+      this.launchRetries.set(id, { ...pending, timer: null })
+      this.schedule(id)
+    }, Math.min(250 * 2 ** (attempts - 1), 2000))
+    timer.unref()
+    this.launchRetries.set(id, { commandId, attempts, timer })
+  }
+  private clearLaunchRetries() {
+    for (const retry of this.launchRetries.values()) if (retry.timer) clearTimeout(retry.timer)
+    this.launchRetries.clear()
   }
   private async execute(turn: Turn) {
     let outcome: AgentTurnOutcome = { status: 'failed', failure: { code: 'agent-error', message: 'Agent ended without a terminal event' } }
@@ -604,6 +663,7 @@ export class WorkerRuntime {
   }
   async shutdown() {
     this.closing = true
+    this.clearLaunchRetries()
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = null
     await this.agentRunner.close()
@@ -621,6 +681,7 @@ export class WorkerRuntime {
     if (this.aborted) return
     this.aborted = true
     this.closing = true
+    this.clearLaunchRetries()
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = null
     try { this.agentRunner.abort() } catch {}

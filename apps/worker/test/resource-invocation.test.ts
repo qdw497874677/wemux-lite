@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { authorizationBytes, type EnqueueAuthorization } from '@wemux/wire-protocol/command-assertion'
 import type { AgentKey, CommandId, ProjectId, ResourceSetSnapshot, SessionId, Turn, WorkerId, WorkspaceId } from '@wemux/domain'
 import type { RuntimeOperationInput, RuntimeSessionAdapter } from '../src/application/ports/runtime-session.js'
 import { TestAgent } from '../src/agents/test-agent.ts'
@@ -37,6 +38,10 @@ async function until(predicate: () => Promise<boolean>) {
 test('真实 WorkerRuntime 的 Invocation 固定已授权 Skill，撤权后新调用不注入', async () => {
   const home = await mkdtemp(join(tmpdir(), 'wemux-resource-invocation-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
+  const keys = generateKeyPairSync('ed25519')
+  const publicKey = keys.publicKey.export({ format: 'pem', type: 'spki' }).toString()
+  const keyId = hash(publicKey)
+  store.saveIdentity({ workerId, serverUrl: 'ws://localhost/ws', credentialRef: 'credential', enrolledAt: new Date().toISOString() as never, commandSigningKey: { keyId, publicKey } })
   let reconciler!: ResourceReconciler
   const resources = { send: async (message: import('@wemux/wire-protocol').WorkerPayload) => {
     if (message.type === 'resource.blob.fetch') queueMicrotask(() => reconciler.receive({ type: 'resource.blob.fetch', action: 'response', requestId: message.requestId, sha256: message.sha256, mediaType: 'text/markdown', size: Buffer.byteLength(content), base64Content: Buffer.from(content).toString('base64') }))
@@ -54,7 +59,7 @@ test('真实 WorkerRuntime 的 Invocation 固定已授权 Skill，撤权后新�
     const workspace = session ? await store.workspaces.get(session.binding.workspaceId) : null
     return session && workspace ? { projectId: workspace.projectId, workspaceId: workspace.id, rootPath: workspace.rootPath, agentKey: session.binding.agent.agentKey } : null
   })
-  const runtime = new WorkerRuntime(store, { async provision() { return { rootPath: home, checkouts: [] } } }, [new TestAgent()], { send() {} }, workerId, 'invocation-worker', provider, undefined, new Map([[agentKey, adapter]]))
+  const runtime = new WorkerRuntime(store, { async provision() { return { rootPath: home, checkouts: [] } } }, [new TestAgent()], { send() {} }, workerId, 'invocation-worker', provider, undefined, new Map([[agentKey, adapter]]), null, undefined, undefined, undefined, async () => true)
   try {
     await store.transaction(async tx => {
       await tx.workspaces.save({ id: workspaceId, workerId, projectId, name: 'fixture', spec: { kind: 'composite', memberWorkspaceIds: [] }, rootPath: home, status: 'ready', failureReason: null, updatedAt: new Date().toISOString() as never })
@@ -64,7 +69,9 @@ test('真实 WorkerRuntime 的 Invocation 固定已授权 Skill，撤权后新�
     await runtime.initialize()
     const invoke = async (index: number) => {
       const commandId = `invoke-${index}` as CommandId
-      await runtime.receive({ type: 'command', commandId, command: { kind: 'session.enqueue', sessionId, message: { messageId: `message-${index}` as never, content: `step ${index}` }, capabilities: { snapshot: { id: `snapshot-${index}`, sessionId, projectId, workspaceId, version: 1, assets: [], allowedTools: [], allowedConnectorIds: [], createdAt: new Date().toISOString() as never }, token: 'test-token', grant: { turnId: `turn-${index}` as never } } as never } })
+      const command = { kind: 'session.enqueue', sessionId, message: { messageId: `message-${index}` as never, content: `step ${index}`, sentByAccountId: 'actor' as never }, capabilities: { snapshot: { id: `snapshot-${index}`, sessionId, projectId, workspaceId, version: 1, assets: [], allowedTools: [], allowedConnectorIds: [], createdAt: new Date().toISOString() as never }, token: 'test-token', grant: { turnId: `turn-${index}` as never } } } as const
+      const claims: EnqueueAuthorization = { version: 1, keyId, commandId, workerId, sessionId, projectId, workspaceId, taskId: null, actorId: 'actor' as never, actorAuthVersion: 0, commandDigest: hash(JSON.stringify(command)), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
+      await runtime.receive({ type: 'command', commandId, command: command as never, authorization: { claims, signature: sign(null, authorizationBytes(claims), keys.privateKey).toString('base64url') } })
       await until(async () => observed.length >= index && (await store.sessions.get(sessionId))?.runtimeState === 'idle')
     }
     await invoke(1)
