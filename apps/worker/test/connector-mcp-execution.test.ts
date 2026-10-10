@@ -11,6 +11,9 @@ import { WorkerCredentialStore } from '../src/connectors/credential-store.js'
 import { WorkerMcpClient } from '../src/connectors/mcp-client.js'
 import { McpProcessSupervisor } from '../src/connectors/mcp-process-supervisor.js'
 import { ToolExecutionGateway } from '../src/connectors/tool-execution-gateway.js'
+import { WorkerConnectorRuntime } from '../src/connectors/runtime.js'
+import { stableFingerprint } from '@wemux/connector'
+import type { Turn } from '@wemux/domain'
 import type { CapabilityGrantClaims, CapabilitySnapshot } from '@wemux/domain'
 import type { McpConnectorDefinition } from '@wemux/connector'
 
@@ -57,6 +60,71 @@ test('stdio MCP lists and calls tools, then replays an idempotent terminal resul
   assert.equal(first.ok, true)
   assert.deepEqual(replay, first)
   assert.equal(h.supervisor.activePids().length, 1)
+})
+
+test('two discoveries in one Turn each need a fresh resolvable approval identity', { timeout: 5000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'wemux-mcp-approval-'))
+  const store = new SqliteWorkerStore(join(dir, 'worker.sqlite'))
+  const approvals: import('../src/connectors/tool-execution-gateway.js').ConnectorApprovalRequest[] = []
+  let notify: (() => void) | undefined
+  const runtime = new WorkerConnectorRuntime(store, { onApproval: event => { if (event.kind === 'requested') { approvals.push(event.approval); notify?.() } } })
+  t.after(async () => { await runtime.shutdown(); store.close(); await rm(dir, { recursive: true, force: true }) })
+  await store.saveConnectorDefinition(definition())
+  const registered = await runtime.registerTurn({ id: ids.turnId, sessionId: ids.sessionId } as Turn, ids.workerId)
+  const discover = async (index: number) => {
+    const published = new Promise<void>(resolve => { notify = resolve })
+    const result = runtime.handle('mcp.list_tools', registered.token, { connectorId: 'connector-1' })
+    await published
+    const approval = approvals[index]!
+    assert.equal(approval.operationType, 'write')
+    assert.equal(approval.approvalId, approval.toolCallId)
+    assert.equal(approval.approvalId, approval.requestId)
+    assert.equal(approval.connectorRevision, 1)
+    assert.equal(runtime.resolveApproval({ sessionId: ids.sessionId, turnId: ids.turnId, approvalId: approval.approvalId, decision: 'approve' }), true)
+    const completed = await result
+    assert.equal((completed?.body as { ok: boolean }).ok, true, JSON.stringify(completed?.body))
+    return approval
+  }
+  const first = await discover(0)
+  const second = await discover(1)
+  assert.notEqual(first.approvalId, second.approvalId)
+  assert.notEqual(first.fingerprint, second.fingerprint)
+  assert.equal(runtime.resolveApproval({ sessionId: ids.sessionId, turnId: ids.turnId, approvalId: first.approvalId, decision: 'approve' }), false)
+  await registered.release()
+})
+
+test('discovery approval binds attempt, connector revision and Turn; changed revision or binding cannot discover', async t => {
+  const h = await harness(t)
+  let bound = true
+  let current = true
+  let calls = 0
+  let discovery = 0
+  const original = h.mcp.listTools.bind(h.mcp)
+  h.mcp.listTools = async (...args) => { discovery++; return original(...args) }
+  const requests: import('../src/connectors/tool-execution-gateway.js').ConnectorApprovalRequest[] = []
+  const gateway = new ToolExecutionGateway(h.store, h.credentials, h.mcp, {
+    verify: () => auth().claims, verifyBinding: () => bound, verifyCurrentGrant: async () => current,
+  }, { request: async request => {
+    requests.push(request)
+    assert.equal(request.fingerprint, stableFingerprint({ projectId: ids.projectId, workspaceId: ids.workspaceId, sessionId: ids.sessionId, turnId: ids.turnId, workerId: ids.workerId, connectorId: 'connector-1', connectorRevision: request.connectorRevision, operation: 'mcp.list_tools', attempt: request.requestId }))
+    if (++calls === 1) {
+      await h.store.saveConnectorDefinition(definition({ revision: 2 }))
+    } else if (calls === 2) bound = false
+    else current = false
+    return 'approve'
+  } })
+  const changed = await gateway.listTools(h.common)
+  assert.equal(changed.ok, false); if (!changed.ok) assert.equal(changed.error.code, 'scope_denied')
+  assert.equal(discovery, 0)
+  await h.store.saveConnectorDefinition(definition())
+  const moved = await gateway.listTools(h.common)
+  assert.equal(moved.ok, false); if (!moved.ok) assert.equal(moved.error.code, 'scope_denied')
+  bound = true
+  const revoked = await gateway.listTools(h.common)
+  assert.equal(revoked.ok, false); if (!revoked.ok) assert.equal(revoked.error.code, 'scope_denied')
+  assert.equal(discovery, 0)
+  assert.deepEqual(h.supervisor.activePids(), [])
+  assert.equal(new Set(requests.map(request => request.approvalId)).size, 3)
 })
 
 test('streamable_http MCP uses guarded fetch and calls a fixture without external network', async t => {

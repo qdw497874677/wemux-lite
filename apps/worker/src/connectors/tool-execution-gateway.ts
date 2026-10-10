@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { stableFingerprint, summarizeAgentResult, summarizeJournal, type ConnectorDefinition, type ConnectorExecutionErrorCode, type ExecutionResult, type HttpConnectorDefinition, type McpConnectorDefinition, type OperationType, type ToolCall } from '@wemux/connector'
 import type { CapabilityGrantClaims, CapabilitySnapshot, CapabilityToolName, ToolCallId } from '@wemux/domain'
 import { ConnectorCredentialError, WorkerCredentialStore } from './credential-store.ts'
@@ -71,7 +72,10 @@ export class ToolExecutionGateway {
   }
 
   async listTools(input: Omit<ToolExecutionInput, 'requestId' | 'toolCallId' | 'toolName' | 'input' | 'connectorRevision'>): Promise<ExecutionResult> {
-    const requestId = `list:${input.currentTurn.turnId}:${input.connectorId}`
+    // Discovery is a fresh approval-gated attempt, not an idempotent tool call.
+    // Reusing an approval identity within a Turn would replay the resolved
+    // approval command instead of allowing the next discovery to complete.
+    const requestId = `list:${randomUUID()}`
     try {
       await this.authorize(input.token, input.snapshot, input.currentTurn, input.connectorId, 'mcp.list_tools')
       const connector = await this.definition(input.connectorId) as McpConnectorDefinition
@@ -80,7 +84,8 @@ export class ToolExecutionGateway {
       // There is no trusted side-effect-free catalogue in the Connector definition.
       // Treat discovery itself as an approval-gated side effect.
       if (!input.agentSupportsApproval || input.channelDeliveryId || !this.approval) throw new GatewayError('approval_denied', 'Interactive approval is unavailable')
-      const decision = await this.approval.request({ approvalId: requestId, sessionId: input.currentTurn.sessionId, turnId: input.currentTurn.turnId, toolCallId: requestId, requestId, fingerprint: requestId, connectorRevision: connector.revision, operationType: 'write' }, input.signal)
+      const fingerprint = stableFingerprint({ projectId: input.currentTurn.projectId, workspaceId: input.currentTurn.workspaceId, sessionId: input.currentTurn.sessionId, turnId: input.currentTurn.turnId, workerId: input.currentTurn.workerId, connectorId: connector.id, connectorRevision: connector.revision, operation: 'mcp.list_tools', attempt: requestId })
+      const decision = await this.approval.request({ approvalId: requestId, sessionId: input.currentTurn.sessionId, turnId: input.currentTurn.turnId, toolCallId: requestId, requestId, fingerprint, connectorRevision: connector.revision, operationType: 'write' }, input.signal)
       if (decision !== 'approve') throw new GatewayError('approval_denied', 'Connector discovery was denied')
       await this.authorize(input.token, input.snapshot, input.currentTurn, input.connectorId, 'mcp.list_tools')
       this.assertConnector(input.snapshot, input.currentTurn, await this.definition(input.connectorId), connector.revision)
