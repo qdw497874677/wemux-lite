@@ -36,7 +36,10 @@ export class SessionOwnership {
     this.owners.delete(sessionId)
     const listeners = this.listeners.get(sessionId)
     this.listeners.delete(sessionId)
-    for (const notify of listeners ?? []) notify()
+    for (const notify of listeners ?? []) {
+      try { notify() }
+      catch (error) { console.error('Session ownership release listener failed:', error) }
+    }
   }
 }
 

@@ -89,12 +89,12 @@ async function until(predicate: () => boolean | Promise<boolean>) {
   for (let i = 0; i < 500; i++) { if (await predicate()) return; await delay(10) }
   assert.fail('Timed out waiting for condition')
 }
-async function fixture(options?: { ownership: SessionOwnership; prepare: () => Promise<void> }) {
+async function fixture(options?: { ownership?: SessionOwnership; prepare?: () => Promise<void>; send?: (message: WorkerToServer) => void }) {
   const home = await mkdtemp(join(tmpdir(), 'wemux-lite-worker-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
   store.saveIdentity(signingIdentity)
   const events: WorkerToServer[] = []
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [new TestAgent(15)], { send: message => events.push(message) }, workerId, 'test', options ? { prepare: async () => { await options.prepare(); return { context: null, cleanup: async () => undefined } } } : undefined, undefined, undefined, null, undefined, undefined, undefined, async () => true, options?.ownership)
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [new TestAgent(15)], { send: message => { options?.send?.(message); events.push(message) } }, workerId, 'test', options?.prepare ? { prepare: async () => { await options.prepare!(); return { context: null, cleanup: async () => undefined } } } : undefined, undefined, undefined, null, undefined, undefined, undefined, async () => true, options?.ownership)
   await runtime.initialize()
   const send = (id: string, command: WorkerCommand) => runtime.receive(frame(id, command))
   await send('provision', { kind: 'workspace.provision', workspace })
@@ -102,6 +102,69 @@ async function fixture(options?: { ownership: SessionOwnership; prepare: () => P
   await send('create', create)
   return { home, store, runtime, events, send, cleanup: async () => { await runtime.shutdown(); store.close(); await rm(home, { recursive: true, force: true }) } }
 }
+
+test('publication failure and failed terminal transaction retain ownership until durable recovery, then wake same-home competitor', async () => {
+  const ownership = new SessionOwnership()
+  let failPublication = true
+  const f = await fixture({ ownership, send: message => {
+    if (failPublication && message.type === 'event' && message.scope === 'session' && message.event.payload.kind === 'turn.started') {
+      failPublication = false
+      throw new Error('publication fault')
+    }
+  } })
+  const competitorStore = new SqliteWorkerStore(join(f.home, 'worker.sqlite'))
+  const competitor = new WorkerRuntime(competitorStore, new LocalProvisioner(join(f.home, 'workspaces')), [new TestAgent(15)], { send() {} }, workerId, 'competitor', undefined, undefined, undefined, null, undefined, undefined, undefined, async () => true, ownership)
+  const transaction = f.store.transaction.bind(f.store)
+  let release!: () => void
+  const blocked = new Promise<void>(resolve => { release = resolve })
+  let failed = false
+  f.store.transaction = work => transaction(async tx => work({ ...tx, sessions: { ...tx.sessions, finishTurn: async result => {
+    if (!failed) { failed = true; throw new Error('finalization fault') }
+    await blocked
+    return tx.sessions.finishTurn(result)
+  } } }))
+  try {
+    await f.send('fault-first', enqueue('fault-first'))
+    await until(() => failed)
+    assert.equal(ownership.occupied(sessionId), true)
+    assert.ok((await f.store.sessions.get(sessionId))?.activeTurnId)
+    await f.send('fault-second', enqueue('fault-second'))
+    await competitor.connected()
+    assert.equal((await f.store.sessions.listQueued(sessionId)).length, 1)
+    release()
+    await until(async () => (await f.store.sessions.listQueued(sessionId)).length === 0)
+    await until(() => !ownership.occupied(sessionId))
+    const turns = await f.store.listSessions()
+    assert.equal(turns[0]?.activeTurnId, null)
+  } finally { release(); f.store.transaction = transaction; await competitor.shutdown(); competitorStore.close(); await f.cleanup() }
+})
+
+test('execution finalization transaction failure never reexecutes an active Turn', async () => {
+  const ownership = new SessionOwnership()
+  const f = await fixture({ ownership })
+  const transaction = f.store.transaction.bind(f.store)
+  let release!: () => void
+  const blocked = new Promise<void>(resolve => { release = resolve })
+  let failed = false
+  f.store.transaction = work => transaction(async tx => work({ ...tx, sessions: { ...tx.sessions, finishTurn: async result => {
+    if (!failed) { failed = true; throw new Error('finalization fault') }
+    await blocked
+    return tx.sessions.finishTurn(result)
+  } } }))
+  try {
+    await f.send('execution-first', enqueue('execution-first'))
+    await until(() => failed)
+    assert.equal(ownership.occupied(sessionId), true)
+    assert.ok((await f.store.sessions.get(sessionId))?.activeTurnId)
+    await f.send('execution-second', enqueue('execution-second'))
+    assert.equal((await f.store.sessions.listQueued(sessionId)).length, 1)
+    release()
+    await until(async () => (await f.store.sessions.listQueued(sessionId)).length === 0)
+    await until(async () => !(await f.store.sessions.get(sessionId))?.activeTurnId)
+    const first = (await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events
+    assert.equal(first.filter(event => event.payload.kind === 'turn.started').length, 2)
+  } finally { release(); f.store.transaction = transaction; await f.cleanup() }
+})
 
 test('competing Runtimes cannot claim another Turn while the first owner prepares a claimed Turn', async () => {
   const ownership = new SessionOwnership()

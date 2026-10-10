@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { mkdtemp, mkdir, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
-import { ownershipForHome } from '../src/application/session-ownership.js'
+import { ownershipForHome, SessionOwnership } from '../src/application/session-ownership.js'
 
 test('one Worker home has one ownership fence across lexical and symlink aliases', async t => {
   const root = await mkdtemp(join(tmpdir(), 'wemux-ownership-'))
@@ -32,6 +32,22 @@ test('one Worker home has one ownership fence across lexical and symlink aliases
   assert.equal(wakes, 1)
   cancel()
   assert.ok(ownershipForHome(join(root, 'alias')).acquire('session' as never))
+})
+
+test('throwing release listener cannot prevent later same-home waiters from waking', () => {
+  const owner = new SessionOwnership()
+  const session = 'listeners' as never
+  const token = owner.acquire(session)!
+  let wakes = 0
+  const original = console.error
+  console.error = () => {}
+  try {
+    owner.onRelease(session, () => { throw new Error('broken waiter') })
+    owner.onRelease(session, () => { wakes++ })
+    assert.doesNotThrow(() => owner.release(session, token))
+    assert.equal(wakes, 1)
+    assert.equal(owner.occupied(session), false)
+  } finally { console.error = original }
 })
 
 test('nonexistent Worker home fails closed rather than creating an aliasable lexical fence', async t => {
