@@ -37,6 +37,7 @@ function canonical(value: unknown): string {
 
 export class WorkerRuntime {
   private readonly tasks = new Map<SessionId, Promise<void>>()
+  private readonly launchRetries = new Map<SessionId, { commandId: CommandId; attempts: number; timer: NodeJS.Timeout | null }>()
   private readonly sent = new Map<SessionId, number>()
   private readonly provisions = new Map<import('@wemux/domain').WorkspaceId, Promise<void>>()
   private readonly agentRunner: WorkerAgentRunner
@@ -462,7 +463,13 @@ export class WorkerRuntime {
       location: workspace.status === 'ready' ? { workspaceId: id, workerId: this.workerId, rootPath: workspace.rootPath, checkouts: await this.store.workspaces.listRepositoryCheckouts(id) } : null } })
   }
   private schedule(id: SessionId) {
-    if (this.closing || this.tasks.has(id)) return
+    if (this.closing) return
+    const retry = this.launchRetries.get(id)
+    if (retry?.timer) {
+      clearTimeout(retry.timer)
+      this.launchRetries.delete(id)
+    }
+    if (this.tasks.has(id)) return
     const task = this.run(id).catch(error => { console.error('Session execution failed:', error) }).finally(() => { this.tasks.delete(id) })
     this.tasks.set(id, task)
   }
@@ -478,7 +485,16 @@ export class WorkerRuntime {
       if (queued && !(await this.isLocalSession(id))) {
         const record = await this.store.commands.get(queued.submissionCommandId)
         if (!record?.authorization || !verifyEnqueueAuthorization(this.store.identity(), this.workerId, queued.submissionCommandId, record.command, record.authorization, true)) return
-        if (!this.authorizeLaunch || !await this.authorizeLaunch(queued.submissionCommandId)) return
+        // A failed HTTP check cannot launch; bounded retries recover transient failures
+        // without a WebSocket reconnect. A new command or connection can wake it again.
+        let allowed = false
+        try { allowed = await this.authorizeLaunch?.(queued.submissionCommandId) === true }
+        catch { /* HTTP failures are fail-closed and retryable. */ }
+        if (!allowed) {
+          this.retryLaunch(id, queued.submissionCommandId)
+          return
+        }
+        this.launchRetries.delete(id)
         if ((await this.store.sessions.listQueued(id))[0]?.submissionCommandId !== queued.submissionCommandId) continue
       }
       const turn = await this.store.transaction(tx => tx.sessions.claimNext(id))
@@ -486,6 +502,26 @@ export class WorkerRuntime {
       await this.publish()
       await this.execute(turn)
     }
+  }
+  private retryLaunch(id: SessionId, commandId: CommandId) {
+    const prior = this.launchRetries.get(id)
+    const attempts = prior?.commandId === commandId ? prior.attempts + 1 : 1
+    if (attempts > 4 || this.closing) {
+      this.launchRetries.set(id, { commandId, attempts, timer: null })
+      return
+    }
+    const timer = setTimeout(() => {
+      const pending = this.launchRetries.get(id)
+      if (pending?.timer !== timer || this.closing) return
+      this.launchRetries.set(id, { ...pending, timer: null })
+      this.schedule(id)
+    }, Math.min(250 * 2 ** (attempts - 1), 2000))
+    timer.unref()
+    this.launchRetries.set(id, { commandId, attempts, timer })
+  }
+  private clearLaunchRetries() {
+    for (const retry of this.launchRetries.values()) if (retry.timer) clearTimeout(retry.timer)
+    this.launchRetries.clear()
   }
   private async execute(turn: Turn) {
     let outcome: AgentTurnOutcome = { status: 'failed', failure: { code: 'agent-error', message: 'Agent ended without a terminal event' } }
@@ -627,6 +663,7 @@ export class WorkerRuntime {
   }
   async shutdown() {
     this.closing = true
+    this.clearLaunchRetries()
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = null
     await this.agentRunner.close()
@@ -644,6 +681,7 @@ export class WorkerRuntime {
     if (this.aborted) return
     this.aborted = true
     this.closing = true
+    this.clearLaunchRetries()
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = null
     try { this.agentRunner.abort() } catch {}

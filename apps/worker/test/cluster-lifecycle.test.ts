@@ -1,3 +1,4 @@
+import { createHash, generateKeyPairSync } from 'node:crypto'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -193,13 +194,16 @@ test('concurrent initialization and connect calls have one runtime and connectio
   }
 })
 
+const signingPublicKey = generateKeyPairSync('ed25519').publicKey.export({ format: 'pem', type: 'spki' }).toString()
+const enrollmentSigningKey = { publicKey: signingPublicKey, keyId: createHash('sha256').update(signingPublicKey).digest('hex') }
+
 test('concurrent enroll and connect serialize identity exchange and reject duplicate enrollment', async t => {
   const f = await fixture()
   let requests = 0
   t.mock.method(globalThis, 'fetch', async () => {
     requests++
     await new Promise(resolve => setTimeout(resolve, 20))
-    return Response.json({ workerId: 'cluster-worker', credential: 'secret' })
+    return Response.json({ workerId: 'cluster-worker', credential: 'secret', commandSigningKey: enrollmentSigningKey })
   })
   try {
     const input = { serverUrl: 'http://127.0.0.1:1', token: 'token' }
@@ -429,7 +433,7 @@ test('register refuses to silently no-op on an existing identity and --force rep
   const args = ['register', '--home', f.home, '--server', 'http://127.0.0.1:1', '--token', 'enrollment-token']
   try {
     await assert.rejects(() => main(args), /--force/)
-    t.mock.method(globalThis, 'fetch', async () => Response.json({ workerId: 'replacement-worker', credential: 'fresh-credential' }))
+    t.mock.method(globalThis, 'fetch', async () => Response.json({ workerId: 'replacement-worker', credential: 'fresh-credential', commandSigningKey: enrollmentSigningKey }))
     await main([...args, '--force'])
     const store = new SqliteWorkerStore(join(f.home, 'worker.sqlite'))
     try {

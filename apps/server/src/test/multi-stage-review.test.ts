@@ -1,6 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
+import { SharedSqliteDatabase } from '../storage/sqlite/shared-database.ts'
+import { CommandSigningIdentity } from '../application/command-signing.ts'
 import { SqliteServerStore } from '../storage/sqlite/store.ts'
 import { ServerService } from '../application/server-service.ts'
 import { Notifications } from '../application/notifications.ts'
@@ -17,8 +19,9 @@ import type { Timestamp, UserId, AgentKey, ModelId } from '@wemux/domain'
 const context = { actor: instanceOperatorId, requestId: 'trace' }
 
 async function fixture() {
-  const store = new SqliteServerStore(':memory:')
-  const server = new ServerService(store, new Notifications())
+  const database = new SharedSqliteDatabase(':memory:')
+  const store = new SqliteServerStore(database)
+  const server = new ServerService(store, new Notifications(), undefined, undefined, undefined, undefined, new CommandSigningIdentity(database.connection))
   await seedOperator(store, server)
   const enrollment = await server.createEnrollment({})
   const { worker } = await server.enroll({ token: enrollment.token, name: 'Stage worker' })

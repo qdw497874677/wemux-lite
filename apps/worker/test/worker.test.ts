@@ -9,7 +9,8 @@ import { createServer } from 'node:http'
 import { WebSocketServer, type WebSocket } from 'ws'
 import type { CommandId, EventSeq, SessionId, Timestamp, WorkerId, WorkspaceProvisionSpec } from '@wemux/domain'
 import { WEMUX_ADK_PROFILE_V1, parseWorkerTransportFrame, type ServerToWorkerFrame, type WorkerCommand, type WorkerPayload, type WorkerTransportHello } from '@wemux/wire-protocol'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { authorizationBytes, type EnqueueAuthorization } from '@wemux/wire-protocol/command-assertion'
 import { SqliteWorkerStore } from '../src/storage/sqlite-store.js'
 import { WorkerRuntime } from '../src/application/runtime.js'
 import { TestAgent } from '../src/agents/test-agent.js'
@@ -26,7 +27,18 @@ const workerId = 'worker' as WorkerId
 const sessionId = 'session' as SessionId
 const workspace = JSON.parse(JSON.stringify({ workspace: { id: '../workspace', workerId, projectId: 'project', name: 'empty', spec: { kind: 'composite', memberWorkspaceIds: [] }, status: 'pending', failureReason: null }, repositories: [] })) as WorkspaceProvisionSpec
 const create = JSON.parse(JSON.stringify({ kind: 'session.create', session: { sessionId, binding: { workspaceId: workspace.workspace.id, agent: { workerId, agentKey: 'test' }, modelId: 'test' } } })) as WorkerCommand
-const enqueue = (id: string): WorkerCommand => JSON.parse(JSON.stringify({ kind: 'session.enqueue', sessionId, message: { messageId: id, content: id } })) as WorkerCommand
+const enqueue = (id: string): WorkerCommand => JSON.parse(JSON.stringify({ kind: 'session.enqueue', sessionId, message: { messageId: id, content: id, sentByAccountId: 'actor' } })) as WorkerCommand
+const signingKeys = generateKeyPairSync('ed25519')
+const signingPublicKey = signingKeys.publicKey.export({ format: 'pem', type: 'spki' }).toString()
+const signingKeyId = createHash('sha256').update(signingPublicKey).digest('hex')
+const signingIdentity = { workerId, serverUrl: 'ws://localhost/ws', credentialRef: 'credential' as const, enrolledAt: new Date().toISOString() as Timestamp, commandSigningKey: { keyId: signingKeyId, publicKey: signingPublicKey } }
+function frame(id: string, command: WorkerCommand): { type: 'command'; commandId: CommandId; command: WorkerCommand; authorization?: { claims: EnqueueAuthorization; signature: string } } {
+  const commandId = id as CommandId
+  if (command.kind !== 'session.enqueue') return { type: 'command', commandId, command }
+  const claims: EnqueueAuthorization = { version: 1, keyId: signingKeyId, commandId, workerId, sessionId: command.sessionId, projectId: 'project' as never, workspaceId: workspace.workspace.id, taskId: null, actorId: 'actor' as never, actorAuthVersion: 0, commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
+  return { type: 'command', commandId, command, authorization: { claims, signature: sign(null, authorizationBytes(claims), signingKeys.privateKey).toString('base64url') } }
+}
+
 
 test('Session cleanup protects queued work, deletes Journal and survives restart without resurrection', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'session-cleanup-'))
@@ -79,10 +91,11 @@ async function until(predicate: () => boolean | Promise<boolean>) {
 async function fixture() {
   const home = await mkdtemp(join(tmpdir(), 'wemux-lite-worker-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
+  store.saveIdentity(signingIdentity)
   const events: WorkerToServer[] = []
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [new TestAgent(15)], { send: message => events.push(message) }, workerId, 'test')
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [new TestAgent(15)], { send: message => events.push(message) }, workerId, 'test', undefined, undefined, undefined, null, undefined, undefined, undefined, async () => true)
   await runtime.initialize()
-  const send = (id: string, command: WorkerCommand) => runtime.receive({ type: 'command', commandId: id as CommandId, command })
+  const send = (id: string, command: WorkerCommand) => runtime.receive(frame(id, command))
   await send('provision', { kind: 'workspace.provision', workspace })
   await until(async () => (await store.workspaces.get(workspace.workspace.id))?.status === 'ready')
   await send('create', create)
@@ -123,7 +136,7 @@ test('cancel versus claim ordering, duplicate commands and late stop keep the ne
   const f = await fixture()
   try {
     // Hold execution of the first Turn so the two orderings are observable.
-    await f.send('hold', { kind: 'session.enqueue', sessionId, message: { messageId: 'hold' as never, content: '[test-agent:pause-ms=60000] hold' } })
+    await f.send('hold', { kind: 'session.enqueue', sessionId, message: { messageId: 'hold' as never, content: '[test-agent:pause-ms=60000] hold', sentByAccountId: 'actor' as never } })
     await until(async () => Boolean((await f.store.sessions.get(sessionId))?.activeTurnId))
     const holdId = (await f.store.sessions.get(sessionId))!.activeTurnId!
     await f.send('before', enqueue('before'))
@@ -155,6 +168,7 @@ test('cancel versus claim ordering, duplicate commands and late stop keep the ne
 test('a silent agent turn fails durably instead of leaving the session running forever', async () => {
   const home = await mkdtemp(join(tmpdir(), 'wemux-silent-agent-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
+  store.saveIdentity(signingIdentity)
   const silentAgent: AgentAdapter = {
     agentKey: 'test' as any,
     mode: 'execution',
@@ -167,8 +181,8 @@ test('a silent agent turn fails durably instead of leaving the session running f
       }
     },
   }
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [silentAgent], { send() {} }, workerId, 'silent', undefined, { idleMs: 30, maxMs: 100 })
-  const send = (id: string, command: WorkerCommand) => runtime.receive({ type: 'command', commandId: id as CommandId, command })
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [silentAgent], { send() {} }, workerId, 'silent', undefined, { idleMs: 30, maxMs: 100 }, undefined, null, undefined, undefined, undefined, async () => true)
+  const send = (id: string, command: WorkerCommand) => runtime.receive(frame(id, command))
   try {
     await runtime.initialize()
     await send('provision', { kind: 'workspace.provision', workspace })
@@ -187,6 +201,7 @@ test('a silent agent turn fails durably instead of leaving the session running f
 test('max runtime deadline after a published event does not request a second iterator result', async t => {
   const home = await mkdtemp(join(tmpdir(), 'wemux-max-deadline-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
+  store.saveIdentity(signingIdentity)
   let sawFirst = false, secondNext = 0
   const agent: AgentAdapter = {
     agentKey: 'test' as any, mode: 'execution',
@@ -205,8 +220,8 @@ test('max runtime deadline after a published event does not request a second ite
     if (sawFirst) await delay(80)
     return transaction(...args)
   })
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send() {} }, workerId, 'deadline', undefined, { idleMs: 1000, maxMs: 40 }, new Map([[agent.agentKey, adapter]]))
-  const send = (id: string, command: WorkerCommand) => runtime.receive({ type: 'command', commandId: id as CommandId, command })
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send() {} }, workerId, 'deadline', undefined, { idleMs: 1000, maxMs: 40 }, new Map([[agent.agentKey, adapter]]), null, undefined, undefined, undefined, async () => true)
+  const send = (id: string, command: WorkerCommand) => runtime.receive(frame(id, command))
   try {
     await runtime.initialize()
     await send('provision', { kind: 'workspace.provision', workspace })
@@ -232,6 +247,7 @@ test('max runtime deadline after a published event does not request a second ite
 test('explicit stop does not convert a non-Pi adapter abort into cancelled', async () => {
   const home = await mkdtemp(join(tmpdir(), 'wemux-abort-stop-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
+  store.saveIdentity(signingIdentity)
   let fail!: (error: Error) => void
   let started!: () => void
   const executing = new Promise<void>(resolve => { started = resolve })
@@ -245,8 +261,8 @@ test('explicit stop does not convert a non-Pi adapter abort into cancelled', asy
     async execute() { return { signals: { async *[Symbol.asyncIterator]() { started(); await gate } }, async stop() { fail(new Error('This operation was aborted')) } } },
     async command() {}, async resolveApproval() {}, async close() {},
   } } }
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send() {} }, workerId, 'abort-stop', undefined, undefined, new Map([[agent.agentKey, adapter]]))
-  const send = (id: string, command: WorkerCommand) => runtime.receive({ type: 'command', commandId: id as CommandId, command })
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send() {} }, workerId, 'abort-stop', undefined, undefined, new Map([[agent.agentKey, adapter]]), null, undefined, undefined, undefined, async () => true)
+  const send = (id: string, command: WorkerCommand) => runtime.receive(frame(id, command))
   try {
     await runtime.initialize()
     await send('provision', { kind: 'workspace.provision', workspace })
@@ -284,18 +300,22 @@ test('SQLite rollback, restart interruption, queued recovery and persistent iden
   const path = join(home, 'db')
   let store = new SqliteWorkerStore(path)
   try {
-    store.saveIdentity({ workerId, serverUrl: 'ws://localhost', credentialRef: 'credential', enrolledAt: new Date().toISOString() as Timestamp })
+    store.saveIdentity(signingIdentity)
     await assert.rejects(store.transaction(async tx => { await tx.sessions.createSession(sessionId, (create as Extract<WorkerCommand,{kind:'session.create'}>).session.binding); throw new Error('rollback') }))
     assert.equal(await store.sessions.get(sessionId), null)
     await store.transaction(async tx => {
       await tx.workspaces.save({ ...workspace.workspace, rootPath: home, updatedAt: new Date().toISOString() as Timestamp, status: 'ready' })
       await tx.sessions.createSession(sessionId, (create as Extract<WorkerCommand,{kind:'session.create'}>).session.binding)
-      for (const id of ['one', 'two']) await tx.sessions.enqueue({ sessionId, submissionCommandId: id as CommandId, message: (enqueue(id) as Extract<WorkerCommand,{kind:'session.enqueue'}>).message, queuedAt: new Date().toISOString() as Timestamp })
+      for (const id of ['one', 'two']) {
+        const signed = frame(id, enqueue(id))
+        await tx.commands.record({ commandId: signed.commandId, command: signed.command, payloadFingerprint: id, authorization: signed.authorization }, { commandId: signed.commandId, status: 'accepted' })
+        await tx.sessions.enqueue({ sessionId, submissionCommandId: id as CommandId, message: (enqueue(id) as Extract<WorkerCommand,{kind:'session.enqueue'}>).message, queuedAt: new Date().toISOString() as Timestamp })
+      }
       await tx.sessions.claimNext(sessionId)
     })
     store.close(); store = new SqliteWorkerStore(path)
     assert.equal(store.identity()?.workerId, workerId)
-    const runtime = new WorkerRuntime(store, new LocalProvisioner(home), [new TestAgent(1)], { send() {} }, workerId, 'recovery')
+    const runtime = new WorkerRuntime(store, new LocalProvisioner(home), [new TestAgent(1)], { send() {} }, workerId, 'recovery', undefined, undefined, undefined, null, undefined, undefined, undefined, async () => true)
     await runtime.initialize()
     await until(async () => (await store.sessions.get(sessionId))?.runtimeState === 'idle')
     const page = await store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 1000 })
@@ -341,7 +361,7 @@ test('real transport-v2 ws connection authenticates, handshakes, delivers comman
       }
     })
   })
-  const runtime = new WorkerRuntime(f.store, new LocalProvisioner(join(f.home, 'workspaces')), [new TestAgent(1)], { send: message => transport.send(message) }, workerId, 'network')
+  const runtime = new WorkerRuntime(f.store, new LocalProvisioner(join(f.home, 'workspaces')), [new TestAgent(1)], { send: message => transport.send(message) }, workerId, 'network', undefined, undefined, undefined, null, undefined, undefined, undefined, async () => true)
   const transport = new WebSocketTransport({
     url: `ws://127.0.0.1:${address.port}`, authToken: 'secret', workerId, workerVersion: 'test', name: 'network', platform: 'linux', architecture: 'x64',
     store: new WorkerTransportStore(join(f.home, 'transport.sqlite')), onMessage: message => { void runtime.receive(message) }, onConnected: () => { void runtime.connected() }, random: () => 0,
@@ -356,7 +376,7 @@ test('real transport-v2 ws connection authenticates, handshakes, delivers comman
   try {
     await runtime.initialize(); transport.start()
     await until(() => messages.some(m => m.type === 'capability'))
-    await send({ type: 'command', commandId: 'network' as CommandId, command: enqueue('network') })
+    await send(frame('network', enqueue('network')))
     await until(() => messages.some(m => m.type === 'event' && m.scope === 'session' && m.event.payload.kind === 'turn.finished'))
     peer!.terminate()
     await until(() => connections === 2 && messages.filter(m => m.type === 'sync' && m.kind === 'heads').length === 2)
@@ -411,7 +431,8 @@ test('enrollment exchanges token without persisting or reusing it as credential'
     assert.equal(request.url, '/api/worker-enrollments')
     assert.equal(request.headers.authorization, 'Bearer once')
     response.setHeader('Content-Type', 'application/json')
-    response.end(JSON.stringify({ workerId, credential: 'long-lived' }))
+    const publicKey = generateKeyPairSync('ed25519').publicKey.export({ format: 'pem', type: 'spki' }).toString()
+    response.end(JSON.stringify({ workerId, credential: 'long-lived', commandSigningKey: { publicKey, keyId: createHash('sha256').update(publicKey).digest('hex') } }))
   })
   server.listen(0, '127.0.0.1')
   await new Promise<void>(resolve => server.once('listening', resolve))

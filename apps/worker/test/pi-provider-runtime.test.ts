@@ -3,6 +3,8 @@ import { test } from 'node:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { authorizationBytes, type EnqueueAuthorization } from '@wemux/wire-protocol/command-assertion'
 import type { AgentKey, ModelId, ProjectId, SessionId, WorkerId } from '@wemux/domain'
 import type { AgentAdapter } from '../src/application/ports/agent-adapter.ts'
 import type { RuntimeSessionAdapter } from '../src/application/ports/runtime-session.ts'
@@ -22,6 +24,10 @@ const until = async (predicate: () => Promise<boolean>) => { for (let i = 0; i <
 async function fixture(resolver?: PiProviderResolver) {
   const home = await mkdtemp(join(tmpdir(), 'wemux-provider-runtime-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
+  const keys = generateKeyPairSync('ed25519')
+  const publicKey = keys.publicKey.export({ format: 'pem', type: 'spki' }).toString()
+  const keyId = createHash('sha256').update(publicKey).digest('hex')
+  store.saveIdentity({ workerId, serverUrl: 'ws://localhost/ws', credentialRef: 'credential', enrolledAt: new Date().toISOString() as never, commandSigningKey: { keyId, publicKey } })
   const opened: string[] = []
   const adapter: RuntimeSessionAdapter = { async openSession(input) {
     opened.push(input.piProvider?.environment.OPENAI_API_KEY ?? 'missing')
@@ -30,13 +36,19 @@ async function fixture(resolver?: PiProviderResolver) {
       async command() {}, async resolveApproval() {}, async close() {},
     }
   } }
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send() {} }, workerId, 'fixture', undefined, undefined, new Map([[agentKey, adapter]]), null, undefined, resolver)
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send() {} }, workerId, 'fixture', undefined, undefined, new Map([[agentKey, adapter]]), null, undefined, resolver, undefined, async () => true)
   await runtime.initialize()
   if (resolver) runtime.providerConnected()
   const workspaceId = 'provider-workspace' as never
   const projectId = 'provider-project' as ProjectId
   const workspace = { workspace: { id: workspaceId, workerId, projectId, name: 'empty', spec: { kind: 'empty' as const }, status: 'pending' as const, failureReason: null }, repositories: [] }
-  const send = (id: string, command: Parameters<typeof runtime.receive>[0]['command']) => runtime.receive({ type: 'command', commandId: id as never, command })
+  const send = (id: string, command: Parameters<typeof runtime.receive>[0]['command']) => {
+    const assertion = command.kind === 'session.enqueue' ? (() => {
+      const claims: EnqueueAuthorization = { version: 1, keyId, commandId: id as never, workerId, sessionId, projectId, workspaceId, taskId: null, actorId: 'actor' as never, actorAuthVersion: 0, commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
+      return { claims, signature: sign(null, authorizationBytes(claims), keys.privateKey).toString('base64url') }
+    })() : undefined
+    return runtime.receive({ type: 'command', commandId: id as never, command, ...(assertion ? { authorization: assertion } : {}) })
+  }
   await send('provision-provider', { kind: 'workspace.provision', workspace } as never)
   await until(async () => (await store.workspaces.get(workspaceId))?.status === 'ready')
   await send('create-provider-session', { kind: 'session.create', session: { sessionId, binding: { workspaceId, agent: { workerId, agentKey }, modelId } } })
@@ -47,7 +59,7 @@ test('cluster Pi Provider Turn uses Worker-only resolver and persists no Secret 
   const calls: string[] = []
   const f = await fixture(async (projectId, selected) => { calls.push(`${projectId}/${selected}`); return { definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'opaque', bindingId: 'provider-binding' } })
   try {
-    await f.send('send-1', { kind: 'session.enqueue', sessionId, message: { messageId: 'message-1' as never, content: 'offline prompt' } })
+    await f.send('send-1', { kind: 'session.enqueue', sessionId, message: { messageId: 'message-1' as never, content: 'offline prompt', sentByAccountId: 'actor' as never } })
     await until(async () => (await f.store.sessions.get(sessionId))?.runtimeState === 'idle')
     assert.deepEqual(calls, [`${f.projectId}/${modelId}`])
     assert.deepEqual(f.opened, [secret])
@@ -74,15 +86,15 @@ test('cluster Pi Provider Turn halts during disconnect and never reuses a creden
   let credential = secret
   const f = await fixture(async () => ({ definition, environment: { OPENAI_API_KEY: credential }, credentialStamp: credential, bindingId: 'provider-binding' }))
   try {
-    await f.send('first-disconnect', { kind: 'session.enqueue', sessionId, message: { messageId: 'before-disconnect' as never, content: 'before' } })
+    await f.send('first-disconnect', { kind: 'session.enqueue', sessionId, message: { messageId: 'before-disconnect' as never, content: 'before', sentByAccountId: 'actor' as never } })
     await until(async () => (await f.store.sessions.get(sessionId))?.runtimeState === 'idle')
     f.runtime.providerDisconnected()
     credential = 'rotated-after-disconnect'
-    await f.send('second-disconnect', { kind: 'session.enqueue', sessionId, message: { messageId: 'after-disconnect' as never, content: 'after' } })
+    await f.send('second-disconnect', { kind: 'session.enqueue', sessionId, message: { messageId: 'after-disconnect' as never, content: 'after', sentByAccountId: 'actor' as never } })
     await until(async () => (await f.store.sessions.get(sessionId))?.runtimeState === 'failed')
     assert.deepEqual(f.opened, [secret])
     f.runtime.providerConnected()
-    await f.send('third-reconnect', { kind: 'session.enqueue', sessionId, message: { messageId: 'after-reconnect' as never, content: 'after reconnection' } })
+    await f.send('third-reconnect', { kind: 'session.enqueue', sessionId, message: { messageId: 'after-reconnect' as never, content: 'after reconnection', sentByAccountId: 'actor' as never } })
     await until(async () => (await f.store.sessions.get(sessionId))?.runtimeState === 'idle' && f.opened.length === 2)
     assert.deepEqual(f.opened, [secret, 'rotated-after-disconnect'])
   } finally { await f.cleanup() }
@@ -93,7 +105,7 @@ test('cluster Pi Provider Turn rejects a persisted native session before reading
   const f = await fixture(async () => { resolved = true; return { definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'opaque', bindingId: 'provider-binding' } })
   try {
     await f.store.transaction(tx => tx.sessions.bindNativeSession({ sessionId, nativeSession: 'legacy-native' as never }))
-    await f.send('send-resume', { kind: 'session.enqueue', sessionId, message: { messageId: 'resume-message' as never, content: 'offline prompt' } })
+    await f.send('send-resume', { kind: 'session.enqueue', sessionId, message: { messageId: 'resume-message' as never, content: 'offline prompt', sentByAccountId: 'actor' as never } })
     await until(async () => (await f.store.sessions.get(sessionId))?.runtimeState === 'failed')
     assert.equal(resolved, false)
     assert.deepEqual(f.opened, [])
@@ -104,7 +116,7 @@ test('cluster Pi Provider Turn fails closed if resolver unavailable without leak
   for (const resolver of [undefined, (async () => { throw new Error(secret) }) as PiProviderResolver]) {
     const f = await fixture(resolver)
     try {
-      await f.send('send-2', { kind: 'session.enqueue', sessionId, message: { messageId: 'message-2' as never, content: 'offline prompt' } })
+      await f.send('send-2', { kind: 'session.enqueue', sessionId, message: { messageId: 'message-2' as never, content: 'offline prompt', sentByAccountId: 'actor' as never } })
       await until(async () => (await f.store.sessions.get(sessionId))?.runtimeState === 'failed')
       assert.deepEqual(f.opened, [])
       const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })

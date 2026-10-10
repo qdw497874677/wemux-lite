@@ -671,7 +671,12 @@ export class ServerService {
     const prepared = this.capabilities ? await this.capabilities.prepareTurn({ sessionId: id, turnId: newId<'TurnId'>(), actorId: capabilityActor }, tx) : null
     const command: WorkerCommand = { kind: 'session.enqueue', sessionId: id, message: { messageId, content, ...(actor ? { sentByAccountId: actor } : {}) }, ...(prepared ? { capabilities: prepared.runtime } : {}) }
     if (new TextEncoder().encode(JSON.stringify({ type: 'command', commandId, command })).byteLength > 900 * 1024) throw new AppError(413, 'Message and capability assets exceed the worker transport limit')
+    // A production Server with a signing identity must never commit an unsigned
+    // cluster enqueue, including internal composition calls without an actor.
+    if ((this.commandSigning || actor) && !actor) throw new AppError(403, 'Cluster enqueue requires an authenticated actor', 'enqueue_actor_required')
+    if (actor && !this.commandSigning) throw new AppError(503, 'Cluster enqueue signing is unavailable', 'enqueue_signing_unavailable')
     const user = actor ? await tx.identity.getUser(actor) : null
+    if (actor && (!user || (user.status ?? 'active') !== 'active')) throw new AppError(403, 'Cluster enqueue actor is unavailable', 'enqueue_actor_unavailable')
     const claims = actor && user && this.commandSigning ? {
       version: 1 as const, keyId: this.commandSigning.keyId, commandId, workerId: session.binding.agent.workerId,
       sessionId: id, projectId: session.projectId, workspaceId: session.workspaceId, taskId: session.taskId ?? null,

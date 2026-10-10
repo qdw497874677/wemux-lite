@@ -9,6 +9,8 @@ import { CapabilityService } from '../application/capability-service.js'
 import { CapabilityTokenService } from '../application/capability-token-service.js'
 import { ServerService, now } from '../application/server-service.js'
 import { Notifications } from '../application/notifications.js'
+import { SharedSqliteDatabase } from '../storage/sqlite/shared-database.js'
+import { CommandSigningIdentity } from '../application/command-signing.js'
 import { SqliteServerStore } from '../storage/sqlite/store.js'
 import { seedOperator } from './fixtures/administrator.js'
 
@@ -20,8 +22,9 @@ function connector(projectId: string, overrides: Partial<HttpConnectorDefinition
 
 async function fixture(t: test.TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'wemux-capability-connectors-'))
-  const store = new SqliteServerStore(join(directory, 'server.sqlite'))
-  t.after(() => { store.close(); return rm(directory, { recursive: true, force: true }) })
+  const database = new SharedSqliteDatabase(join(directory, 'server.sqlite'))
+  const store = new SqliteServerStore(database)
+  t.after(() => { database.close(); return rm(directory, { recursive: true, force: true }) })
   const baseCapabilities = new CapabilityService(store, now, new CapabilityTokenService('seed-secret'.repeat(4), now))
   const service = new ServerService(store, new Notifications(), baseCapabilities)
   const { project, user } = await seedOperator(store, service)
@@ -30,8 +33,18 @@ async function fixture(t: test.TestContext) {
   const { workspace } = await service.createWorkspace({ projectId: project!.id, workerId: enrolled.workerId, name: 'workspace', repository: { gitUrl: 'https://example.test/repository.git' } })
   await store.transaction(tx => tx.resources.saveWorkspace({ ...workspace, status: 'ready' }))
   const { session } = await service.createSession({ requestId: 'capability-session', workspaceId: workspace.id, title: 'session', agentKey: 'pi', modelId: 'test' })
-  return { store, project: project!, user: user!, workerId: enrolled.workerId, session }
+  return { store, signing: new CommandSigningIdentity(database.connection), project: project!, user: user!, workerId: enrolled.workerId, session }
 }
+
+test('signed cluster enqueue rejects missing actor and missing signer before persistence', async t => {
+  const f = await fixture(t)
+  const signed = new ServerService(f.store, new Notifications(), undefined, undefined, undefined, undefined, f.signing)
+  const unsigned = new ServerService(f.store, new Notifications())
+  const before = (await f.store.commands.list({ limit: 100 })).length
+  await assert.rejects(signed.enqueue(f.session.id, { content: 'missing actor' }), { code: 'enqueue_actor_required' })
+  await assert.rejects(unsigned.enqueue(f.session.id, { content: 'missing signer' }, f.user.id), { code: 'enqueue_signing_unavailable' })
+  assert.equal((await f.store.commands.list({ limit: 100 })).length, before)
+})
 
 test('capability grant resolves enabled Project connectors visible to the actor and Worker', async t => {
   const f = await fixture(t)
@@ -67,7 +80,7 @@ test('session enqueue resolves connectors through transaction readers', async t 
   const f = await fixture(t)
   const visible = connector(f.project.id, { allowedWorkerIds: [f.workerId] })
   const capabilities = new CapabilityService(f.store, () => timestamp, new CapabilityTokenService('transaction-secret'.repeat(4), () => timestamp), { list: async () => [visible] })
-  const service = new ServerService(f.store, new Notifications(), capabilities)
+  const service = new ServerService(f.store, new Notifications(), capabilities, undefined, undefined, undefined, f.signing)
   const result = await service.enqueue(f.session.id, { content: '使用连接器' }, f.user.id)
   const pending = await f.store.commands.getPendingCommand(result.commandId)
   assert.equal(pending?.command.kind, 'session.enqueue')
