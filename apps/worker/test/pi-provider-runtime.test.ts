@@ -79,7 +79,7 @@ test('claimed cluster Turn revoked during delayed preparation never opens a priv
     assert.equal((await f.store.sessions.listQueued(sessionId)).length, 0)
     assert.equal((await f.store.sessions.get(sessionId))?.activeTurnId, null)
     const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })
-    assert.ok(journal.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'failed'))
+    assert.ok(journal.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'failed' && event.payload.failure?.code === 'agent-unavailable' && event.payload.failure?.abortReason === 'authorization_unavailable' && event.payload.failure?.retryable === false))
     assert.ok(!journal.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'completed'))
     assert.doesNotMatch(JSON.stringify(journal), /runtime-private-secret-8415/)
   } finally { release(); await f.cleanup() }
@@ -105,7 +105,56 @@ test('revocation while private Provider resolution is pending prevents first ite
     assert.equal((await f.store.sessions.get(sessionId))?.activeTurnId, null)
     const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })
     assert.doesNotMatch(JSON.stringify(journal), /runtime-private-secret-8415/)
-    assert.ok(journal.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'failed'))
+    assert.ok(journal.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'failed' && event.payload.failure?.code === 'agent-unavailable' && event.payload.failure?.abortReason === 'authorization_unavailable'))
+  } finally { release(); await f.cleanup() }
+})
+
+test('final launch authorization denial fails claimed Turn with stable non-provider reason', async () => {
+  let release!: () => void
+  let entered!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const checking = new Promise<void>(resolve => { entered = resolve })
+  let checks = 0
+  const f = await fixture(async () => ({ definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'opaque', bindingId: 'binding' }), {
+    async authorize() { if (++checks === 5) { entered(); await gate; return false } return true },
+  })
+  try {
+    await f.send('deny-final-check', { kind: 'session.enqueue', sessionId, message: { messageId: 'deny-before-read' as never, content: 'never run', sentByAccountId: 'actor' as never } })
+    await checking
+    release()
+    await until(async () => (await f.store.sessions.get(sessionId))?.runtimeState === 'failed')
+    assert.equal(checks, 5)
+    assert.deepEqual(f.opened, [])
+    const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })
+    assert.ok(journal.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'failed' && event.payload.failure?.code === 'agent-unavailable' && event.payload.failure?.abortReason === 'authorization_unavailable' && event.payload.failure?.retryable === false))
+    assert.doesNotMatch(JSON.stringify(journal), /runtime-private-secret-8415/)
+  } finally { release(); await f.cleanup() }
+})
+
+test('turn.stop during final launch authorization cancels without starting Agent work', async () => {
+  let release!: () => void
+  let entered!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const checking = new Promise<void>(resolve => { entered = resolve })
+  let checks = 0
+  const f = await fixture(async () => ({ definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'opaque', bindingId: 'binding' }), {
+    async authorize() { if (++checks === 5) { entered(); await gate } return true },
+  })
+  try {
+    await f.send('stop-during-final-check', { kind: 'session.enqueue', sessionId, message: { messageId: 'stop-before-read' as never, content: 'never run', sentByAccountId: 'actor' as never } })
+    await checking
+    const turnId = (await f.store.sessions.get(sessionId))?.activeTurnId
+    assert.ok(turnId)
+    await f.send('stop-while-checking', { kind: 'turn.stop', sessionId, turnId })
+    assert.equal((await f.store.sessions.getTurn(turnId))?.state, 'stopping')
+    release()
+    await until(async () => (await f.store.sessions.getTurn(turnId))?.state === 'cancelled')
+    assert.equal(checks, 5)
+    assert.deepEqual(f.opened, [], 'an already stopped Turn must not read its Agent iterator')
+    assert.equal((await f.store.sessions.get(sessionId))?.activeTurnId, null)
+    const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })
+    assert.ok(journal.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'cancelled' && event.payload.failure === null))
+    assert.doesNotMatch(JSON.stringify(journal), /runtime-private-secret-8415/)
   } finally { release(); await f.cleanup() }
 })
 

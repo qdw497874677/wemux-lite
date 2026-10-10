@@ -30,6 +30,7 @@ const DEFAULT_AGENT_IDLE_TIMEOUT_MS = 30_000
 const DEFAULT_AGENT_MAX_TIMEOUT_MS = 10 * 60_000
 class AgentTimeoutError extends Error {}
 class LaunchAuthorizationDeniedError extends Error {}
+class TurnStoppedBeforeLaunchError extends Error {}
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
   if (value && typeof value === 'object') return `{${Object.entries(value).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(',')}}`
@@ -583,11 +584,14 @@ export class WorkerRuntime {
         iterator = (privateProvider && provider
           ? this.agentRunner.runWithPiProvider({ ...runRequest, resume: null }, provider, `${provider.bindingId}:${provider.credentialStamp ?? ''}`)
           : this.agentRunner.run(runRequest))[Symbol.asyncIterator]()
-        const stoppingBeforeRun = (await this.store.sessions.getTurn(turn.id))?.state === 'stopping'
-        const stopBeforeFirstRead = this.closing || stoppingBeforeRun || (privateProvider && (!this.providerConnectionOpen || this.providerGeneration !== launchGeneration))
         // The last asynchronous admission check sits immediately before the
         // first read (the point where an async generator can start a process).
         await recheckLaunch()
+        // turn.stop can arrive while the HTTP check is pending. Never start an
+        // already-stopped Turn: stop() before the first next() cannot stop an
+        // async generator that has not registered its invocation yet.
+        if ((await this.store.sessions.getTurn(turn.id))?.state === 'stopping') throw new TurnStoppedBeforeLaunchError()
+        const stopBeforeFirstRead = this.closing || (privateProvider && (!this.providerConnectionOpen || this.providerGeneration !== launchGeneration))
         const startedAt = Date.now()
         let firstRead = true
         while (true) {
@@ -649,16 +653,20 @@ export class WorkerRuntime {
         await prepared.cleanup()
       }
     } catch (error) {
-      const message = error instanceof LaunchAuthorizationDeniedError
-        ? '启动授权已失效或暂时无法验证，智能体未启动'
-        : privateProvider
-        ? 'Pi Provider 不可用或执行失败，请检查 Worker 本地配置'
-        : error instanceof Error ? error.message : 'Agent failed'
-      outcome = { status: 'failed', failure: {
-        code: 'agent-error',
-        message,
-        abortReason: error instanceof AgentTimeoutError ? 'timeout' : this.closing ? 'executor_disconnected' : 'provider_error',
-      } }
+      if (error instanceof TurnStoppedBeforeLaunchError) outcome = { status: 'cancelled' }
+      else {
+        const message = error instanceof LaunchAuthorizationDeniedError
+          ? '启动授权已失效或暂时无法验证，智能体未启动'
+          : privateProvider
+          ? 'Pi Provider 不可用或执行失败，请检查 Worker 本地配置'
+          : error instanceof Error ? error.message : 'Agent failed'
+        outcome = { status: 'failed', failure: {
+          code: error instanceof LaunchAuthorizationDeniedError ? 'agent-unavailable' : 'agent-error',
+          message,
+          abortReason: error instanceof LaunchAuthorizationDeniedError ? 'authorization_unavailable' : error instanceof AgentTimeoutError ? 'timeout' : this.closing ? 'executor_disconnected' : 'provider_error',
+          ...(error instanceof LaunchAuthorizationDeniedError ? { retryable: false } : {}),
+        } }
+      }
     }
     await this.store.transaction(tx => tx.sessions.finishTurn(outcome.status === 'failed'
       ? { turnId: turn.id, outcome: 'failed', failure: outcome.failure, finishedAt: now() }

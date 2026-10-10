@@ -95,15 +95,16 @@ test('stop during preparation targets only the claimed Turn; queued successor ex
   assert.deepEqual(await f.runtime.executeLocal('stop-preparation' as never, command), stop)
   assert.equal((await f.store.sessions.getTurn(firstId))?.state, 'stopping')
   proceed.release()
-  await until(async () => f.turns.length === 2)
-  const secondId = f.turns[1].id
   await until(async () => (await f.store.sessions.getTurn(firstId))?.state === 'cancelled')
+  await until(async () => f.turns.length === 1)
+  const secondId = f.turns[0].id
   const late = await f.runtime.executeLocal('stop-after-successor-started' as never, command)
   assert.equal(late.status, 'accepted')
   assert.equal((await f.store.sessions.getTurn(secondId))?.state, 'running')
-  f.turns[1].finish.release()
+  f.turns[0].finish.release()
   await until(async () => (await f.store.sessions.getTurn(secondId))?.state === 'completed')
   const events = (await f.store.journal.read({ sessionId: f.sessionId, fromSeq: 1 as never, limit: 100 })).events
+  assert.deepEqual(f.turns.map(turn => turn.id), [secondId], 'stopped preparation never starts Agent work for the first Turn')
   assert.deepEqual(events.filter(event => event.payload.kind === 'turn.started').map(event => event.payload.turnId), [firstId, secondId])
   assert.equal(events.filter(event => event.payload.kind === 'turn.finished' && event.payload.turnId === firstId && event.payload.outcome === 'cancelled').length, 1)
   assert.equal(events.filter(event => event.payload.kind === 'turn.finished' && event.payload.turnId === secondId && event.payload.outcome === 'completed').length, 1)
