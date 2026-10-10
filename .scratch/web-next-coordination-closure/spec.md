@@ -49,4 +49,4 @@ Team 成员在 Web 选择获权 Worker/Agent/Workspace，从首次发送自动�
 | [03 协调 Task/Session 创建与发送](issues/03-gate-standard-reprobe.md) | Server API + Worker 真实对话 + 权限测试，不冒开门 | 无 |
 | [04 Web 协调聊天与功能验收](issues/04-coordination-acceptance.md) | Web 发送/恢复/重开 + 浏览器验收 + NEXT-05 逐项签收 | 03 |
 
-票号 01/02 为历史索引，不等于“隔离达标”。旧报告引用的 FAIL 是历史候选事实；当前代码仍禁用且可能尚有 501，变更以新行为测试为准。
+票号 01/02 为历史索引，不等于“隔离达标”。旧报告引用的 FAIL 是历史候选事实；当前代码已开放真实首发/对话，功能未整票验收，变更以新行为测试为准。
