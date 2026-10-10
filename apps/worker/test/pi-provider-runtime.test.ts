@@ -109,13 +109,62 @@ test('revocation while private Provider resolution is pending prevents first ite
   } finally { release(); await f.cleanup() }
 })
 
+for (const check of [2, 3, 4] as const) for (const result of ['denied', 'thrown'] as const) {
+  test(`turn.stop wins over ${result} authorization at post-claim check ${check}`, async () => {
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const checking = new Promise<void>(resolve => { entered = resolve })
+    let checks = 0, prepared = 0, cleaned = 0, resolved = 0
+    const f = await fixture(async () => { resolved++; return { definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'opaque', bindingId: 'binding' } }, {
+      prepare: { async prepare() { prepared++; return { context: null, async cleanup() { cleaned++ } } } },
+      async authorize() {
+        if (++checks === check) {
+          entered()
+          await gate
+          if (result === 'thrown') throw new Error('authorization backend unavailable')
+          return false
+        }
+        return true
+      },
+    })
+    try {
+      await f.send(`stop-${check}-${result}`, { kind: 'session.enqueue', sessionId, message: { messageId: `stop-${check}-${result}` as never, content: 'never run', sentByAccountId: 'actor' as never } })
+      await checking
+      const turnId = (await f.store.sessions.get(sessionId))?.activeTurnId
+      assert.ok(turnId)
+      await f.send(`stop-command-${check}-${result}`, { kind: 'turn.stop', sessionId, turnId })
+      assert.equal((await f.store.sessions.getTurn(turnId))?.state, 'stopping')
+      release()
+      await until(async () => (await f.store.sessions.getTurn(turnId))?.state === 'cancelled')
+      assert.equal(checks, check)
+      assert.equal(prepared, check === 2 ? 0 : 1)
+      assert.equal(cleaned, prepared, 'prepared launch resources are released on cancellation')
+      assert.equal(resolved, check === 4 ? 1 : 0)
+      assert.deepEqual(f.opened, [])
+      assert.equal((await f.store.sessions.listQueued(sessionId)).length, 0)
+      assert.equal((await f.store.sessions.get(sessionId))?.activeTurnId, null)
+      const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })
+      const finished = journal.events.filter(event => event.payload.kind === 'turn.finished')
+      assert.equal(finished.length, 1)
+      assert.equal(finished[0]?.payload.kind, 'turn.finished')
+      if (finished[0]?.payload.kind === 'turn.finished') {
+        assert.equal(finished[0].payload.outcome, 'cancelled')
+        assert.equal(finished[0].payload.failure, null)
+      }
+      assert.doesNotMatch(JSON.stringify(journal), /runtime-private-secret-8415|authorization backend unavailable/)
+    } finally { release(); await f.cleanup() }
+  })
+}
+
 test('final launch authorization denial fails claimed Turn with stable non-provider reason', async () => {
   let release!: () => void
   let entered!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
   const checking = new Promise<void>(resolve => { entered = resolve })
-  let checks = 0
+  let checks = 0, cleaned = 0
   const f = await fixture(async () => ({ definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'opaque', bindingId: 'binding' }), {
+    prepare: { async prepare() { return { context: null, async cleanup() { cleaned++ } } } },
     async authorize() { if (++checks === 5) { entered(); await gate; return false } return true },
   })
   try {
@@ -124,7 +173,10 @@ test('final launch authorization denial fails claimed Turn with stable non-provi
     release()
     await until(async () => (await f.store.sessions.get(sessionId))?.runtimeState === 'failed')
     assert.equal(checks, 5)
+    assert.equal(cleaned, 1)
     assert.deepEqual(f.opened, [])
+    assert.equal((await f.store.sessions.listQueued(sessionId)).length, 0)
+    assert.equal((await f.store.sessions.get(sessionId))?.activeTurnId, null)
     const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })
     assert.ok(journal.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'failed' && event.payload.failure?.code === 'agent-unavailable' && event.payload.failure?.abortReason === 'authorization_unavailable' && event.payload.failure?.retryable === false))
     assert.doesNotMatch(JSON.stringify(journal), /runtime-private-secret-8415/)
@@ -137,8 +189,9 @@ for (const failure of ['denied', 'thrown'] as const) {
     let entered!: () => void
     const gate = new Promise<void>(resolve => { release = resolve })
     const checking = new Promise<void>(resolve => { entered = resolve })
-    let checks = 0
+    let checks = 0, cleaned = 0
     const f = await fixture(async () => ({ definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'opaque', bindingId: 'binding' }), {
+      prepare: { async prepare() { return { context: null, async cleanup() { cleaned++ } } } },
       async authorize() {
         if (++checks === 5) {
           entered()
@@ -159,6 +212,7 @@ for (const failure of ['denied', 'thrown'] as const) {
       release()
       await until(async () => (await f.store.sessions.getTurn(turnId))?.state === 'cancelled')
       assert.equal(checks, 5, 'no additional authorization or duplicate launch')
+      assert.equal(cleaned, 1)
       assert.deepEqual(f.opened, [])
       assert.equal((await f.store.sessions.get(sessionId))?.activeTurnId, null)
       assert.equal((await f.store.sessions.listQueued(sessionId)).length, 0)
@@ -180,8 +234,9 @@ test('turn.stop during final launch authorization cancels without starting Agent
   let entered!: () => void
   const gate = new Promise<void>(resolve => { release = resolve })
   const checking = new Promise<void>(resolve => { entered = resolve })
-  let checks = 0
+  let checks = 0, cleaned = 0
   const f = await fixture(async () => ({ definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'opaque', bindingId: 'binding' }), {
+    prepare: { async prepare() { return { context: null, async cleanup() { cleaned++ } } } },
     async authorize() { if (++checks === 5) { entered(); await gate } return true },
   })
   try {
@@ -194,10 +249,14 @@ test('turn.stop during final launch authorization cancels without starting Agent
     release()
     await until(async () => (await f.store.sessions.getTurn(turnId))?.state === 'cancelled')
     assert.equal(checks, 5)
+    assert.equal(cleaned, 1)
     assert.deepEqual(f.opened, [], 'an already stopped Turn must not read its Agent iterator')
     assert.equal((await f.store.sessions.get(sessionId))?.activeTurnId, null)
+    assert.equal((await f.store.sessions.listQueued(sessionId)).length, 0)
     const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })
-    assert.ok(journal.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'cancelled' && event.payload.failure === null))
+    const finished = journal.events.filter(event => event.payload.kind === 'turn.finished')
+    assert.equal(finished.length, 1)
+    assert.ok(finished[0]?.payload.kind === 'turn.finished' && finished[0].payload.outcome === 'cancelled' && finished[0].payload.failure === null)
     assert.doesNotMatch(JSON.stringify(journal), /runtime-private-secret-8415/)
   } finally { release(); await f.cleanup() }
 })

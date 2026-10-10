@@ -536,10 +536,14 @@ export class WorkerRuntime {
     // active slot; subsequent queued Turns remain subject to their own checks.
     const recheckLaunch = async () => {
       if (clusterCommandId === undefined) return
-      if (clusterCommandId === null) throw new LaunchAuthorizationDeniedError()
       let allowed = false
-      try { allowed = await this.authorizeLaunch?.(clusterCommandId) === true }
-      catch { /* Offline or failed HTTP checks must fail closed. */ }
+      if (clusterCommandId !== null) {
+        try { allowed = await this.authorizeLaunch?.(clusterCommandId) === true }
+        catch { /* Offline or failed HTTP checks must fail closed. */ }
+      }
+      // Every post-claim check is an admission boundary, not just the last
+      // one. A stop while authorization is pending wins over either result.
+      if ((await this.store.sessions.getTurn(turn.id))?.state === 'stopping') throw new TurnStoppedBeforeLaunchError()
       if (!allowed) throw new LaunchAuthorizationDeniedError()
     }
     try {
@@ -586,13 +590,9 @@ export class WorkerRuntime {
           : this.agentRunner.run(runRequest))[Symbol.asyncIterator]()
         // The last asynchronous admission check sits immediately before the
         // first read (the point where an async generator can start a process).
-        // An explicit stop during this pending check wins even if the check
-        // fails closed. Do not start the iterator in either case.
-        try { await recheckLaunch() }
-        catch (error) {
-          if (error instanceof LaunchAuthorizationDeniedError && (await this.store.sessions.getTurn(turn.id))?.state === 'stopping') throw new TurnStoppedBeforeLaunchError()
-          throw error
-        }
+        // Every post-claim admission check gives an explicit stop precedence
+        // over a failed HTTP check. Do not start the iterator in either case.
+        await recheckLaunch()
         // turn.stop can arrive while the HTTP check is pending. Never start an
         // already-stopped Turn: stop() before the first next() cannot stop an
         // async generator that has not registered its invocation yet.
