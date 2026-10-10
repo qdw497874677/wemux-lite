@@ -22,9 +22,11 @@ const { chromium } = await import(process.env.PLAYWRIGHT_CORE_PATH)
 const dir = await mkdtemp(join(tmpdir(), 'wemux-team-browser-'))
 const database = join(dir, 'server.sqlite'), home = join(dir, 'worker')
 const email = 'team-browser-owner@example.test', password = 'team-browser-test-only-password'
+const outsiderEmail = 'team-browser-outsider@example.test', outsiderPassword = 'team-browser-outsider-test-only-password'
 const app = createWemuxServer({ databasePath: database, administratorEmails: [email], mail: {}, google: {}, webNextStaticPath: resolve(process.env.WEMUX_NEXT_TEST_DIST) })
 let worker, browser, step = 'setup'
 const contexts = [], checks = [], errors = []
+let sessionIdForNegative = ''
 const eventually = async (read, accept, label) => {
   const deadline = Date.now() + 30000
   while (Date.now() < deadline) {
@@ -47,6 +49,7 @@ function launch(args, origin) {
 try {
   const origin = await app.listen(0)
   await seedLocalAccount(app.store, { username: email, email, password, administrator: true })
+  await seedLocalAccount(app.store, { username: outsiderEmail, email: outsiderEmail, password: outsiderPassword, administrator: false })
   const owner = await login(origin, email, password), api = owner.api
   await api('/bootstrap', 'POST', {})
   const token = await api('/enrollment-tokens', 'POST', {})
@@ -81,6 +84,7 @@ try {
     await conversation.getByText(/Turn 已完成/).waitFor()
     const sessionId = await conversation.getAttribute('data-conversation-session')
     assert.ok(sessionId)
+    if (name === 'desktop') sessionIdForNegative = sessionId
     checks.push(`${name}: actual Team first send and Test Agent result in conversation`)
     step = `${name} reload and restore`
     await page.reload()
@@ -119,6 +123,46 @@ try {
     await page.locator(`[data-conversation-session="${sessionId}"]`).getByText(text).last().waitFor()
     checks.push(`${name}: explicit reopen keeps Team Task and original Session history`)
   }
+  step = 'nonmember cannot discover or create Team conversation'
+  const outsider = await browser.newContext()
+  contexts.push(outsider)
+  assert.equal((await outsider.request.post(`${origin}/api/auth/login`, { data: { login: outsiderEmail, password: outsiderPassword } })).status(), 200)
+  for (const path of ['availability', 'sessions']) {
+    const result = await outsider.request.get(`${origin}/api/teams/default-team/coordination/${path}`)
+    assert.equal(result.status(), 403, `nonmember cannot read ${path}`)
+    assert.equal((await result.text()).includes(sessionIdForNegative), false, 'denial cannot reveal another account Session')
+  }
+  const denied = await outsider.request.post(`${origin}/api/teams/default-team/coordination/sessions`, {
+    data: { requestId: randomUUID(), commandId: randomUUID(), workspaceId: placed.workspace.id, workerId, agentKey: 'test', modelId: 'test', content: 'Denied' },
+  })
+  assert.equal(denied.status(), 403)
+  checks.push('nonmember cannot discover availability, history or create a Team Session')
+  step = 'Worker offline and reconnect on existing Team page'
+  const desktop = contexts[0].pages()[0]
+  if (worker.child.exitCode === null && worker.child.signalCode === null) worker.child.kill('SIGTERM')
+  const stopTimer = setTimeout(() => worker.child.kill('SIGKILL'), 10000)
+  try { assert.equal((await worker.done).code, 0, 'owned Worker graceful disconnect') }
+  finally { clearTimeout(stopTimer) }
+  worker = null
+  await eventually(() => api('/workers'), value => value.items.find(item => item.id === workerId)?.connectionState === 'offline', 'Worker disconnect projection')
+  await desktop.getByRole('button', { name: '刷新协调环境与会话' }).click()
+  await eventually(() => desktop.getByRole('combobox', { name: '协调执行环境' }).locator('option').count(), count => count === 1, 'offline Worker removed from ready choices')
+  await desktop.getByRole('textbox', { name: '协调首条消息' }).fill('must-not-run-while-offline')
+  assert.equal(await desktop.getByRole('button', { name: '发送并创建会话' }).isDisabled(), true, 'offline Worker cannot be selected for first send')
+  await desktop.locator(`[data-conversation-session="${sessionIdForNegative}"]`).getByText('browser-desktop-coordination-echo').last().waitFor()
+  checks.push('offline Worker is not selectable but existing Team history remains readable')
+  step = 'Worker transport reconnect'
+  worker = launch(['start', '--home', home, '--name', 'Team Browser Worker'], origin)
+  await eventually(() => api('/workers'), value => value.items.find(item => item.id === workerId)?.connectionState === 'online', 'Worker reconnect')
+  step = 'refreshed placement after reconnect'
+  await desktop.getByRole('button', { name: '刷新协调环境与会话' }).click()
+  await eventually(() => desktop.getByRole('combobox', { name: '协调执行环境' }).locator('option').count(), count => count > 1, 'Worker restored to choices')
+  await desktop.getByRole('combobox', { name: '协调执行环境' }).selectOption({ index: 1 })
+  await desktop.getByRole('textbox', { name: '协调首条消息' }).fill('after-browser-worker-reconnect')
+  await desktop.getByRole('button', { name: '发送并创建会话' }).click()
+  await desktop.getByRole('region', { name: '任务会话对话' }).getByText('after-browser-worker-reconnect').last().waitFor()
+  await desktop.getByRole('region', { name: '任务会话对话' }).getByText(/Turn 已完成/).waitFor()
+  checks.push('reconnected Worker completes another Team Task-bound conversation')
   assert.deepEqual(errors, [], 'browser page errors')
   console.log(JSON.stringify({ status: 'pass', checks }))
 } catch (error) {
