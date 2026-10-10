@@ -35,7 +35,6 @@ import type { ConnectorRepository } from './ports/connector-repository.ts'
 import { CapabilityTokenService } from './capability-token-service.ts'
 import type { DelegationApplicationService } from './delegation-service.ts'
 import type { Delegation } from '@wemux/server-domain'
-import { coordinationQueryOperations } from './team-coordination-task.ts'
 
 export class CapabilityError extends Error {
     readonly code: 'forbidden' | 'not-found' | 'invalid-input'
@@ -140,10 +139,9 @@ export class CapabilityService {
     if (input.actorId && (!actorAccount || actorAccount.status !== 'active')) throw new CapabilityError('forbidden', 'Capability actor is not active')
     const task = session.taskId ? await readers.tasks.get(session.taskId) : null
     if (session.taskId && (!task || task.deletedAt != null)) throw new CapabilityError('forbidden', 'Capability Task is unavailable')
-    if (task && (Boolean(task.teamCoordination) !== session.projectId.startsWith('team:') || task.projectId !== session.projectId || (task.teamCoordination && `team:${task.teamCoordination.teamId}` !== session.projectId))) throw new CapabilityError('forbidden', 'Capability Task and Session coordination binding disagree')
-    const coordination = session.projectId.startsWith('team:')
+    if (task && (task.teamCoordination ? (task.projectId !== `team:${task.teamCoordination.teamId}` || task.teamCoordination.ownerId !== session.ownerId || task.teamCoordination.workerId !== session.binding.agent.workerId || task.teamCoordination.agentKey !== session.binding.agent.agentKey || (await resources.getProject(session.projectId))?.teamId !== task.teamCoordination.teamId) : task.projectId !== session.projectId)) throw new CapabilityError('forbidden', 'Capability Task and Session coordination binding disagree')
     const assets = await resources.listCapabilityAssets(session.projectId)
-    const connectors = coordination ? [] : await this.resolveConnectors(session, input, identity, resources)
+    const connectors = await this.resolveConnectors(session, input, identity, resources)
     const allowedConnectorIds = connectors.map(connector => connector.id)
     const ordinaryTools: readonly CapabilityToolName[] = [
       'session.info',
@@ -159,8 +157,7 @@ export class CapabilityService {
       'mcp.call',
       'http.call',
     ]
-    const policy: readonly CapabilityToolName[] = coordination ? coordinationQueryOperations : ordinaryTools
-    const allowedTools = input.allowedTools ? input.allowedTools.filter(tool => policy.includes(tool)) : policy
+    const allowedTools = input.allowedTools ? input.allowedTools.filter(tool => ordinaryTools.includes(tool)) : ordinaryTools
     const now = this.now()
     const sessions = await resources.listSessions()
     const roster = sessions
@@ -239,8 +236,7 @@ export class CapabilityService {
     if (!session || session.deletedAt !== null || session.projectId !== claims.projectId || session.workspaceId !== claims.workspaceId) throw new CapabilityError('forbidden', 'Capability session is no longer active')
     const task = session.taskId ? await this.store.tasks.get(session.taskId) : null
     if (session.taskId && (!task || task.deletedAt != null)) throw new CapabilityError('forbidden', 'Capability Task is unavailable')
-    if (task && (Boolean(task.teamCoordination) !== session.projectId.startsWith('team:') || task.projectId !== session.projectId || (task.teamCoordination && `team:${task.teamCoordination.teamId}` !== session.projectId))) throw new CapabilityError('forbidden', 'Capability Task and Session coordination binding disagree')
-    if (session.projectId.startsWith('team:') && !(coordinationQueryOperations as readonly string[]).includes(requiredTool)) throw new CapabilityError('forbidden', 'Coordination capability is read-only')
+    if (task && (task.teamCoordination ? (task.projectId !== `team:${task.teamCoordination.teamId}` || task.teamCoordination.ownerId !== session.ownerId || task.teamCoordination.workerId !== session.binding.agent.workerId || task.teamCoordination.agentKey !== session.binding.agent.agentKey || (await this.store.resources.getProject(session.projectId))?.teamId !== task.teamCoordination.teamId) : task.projectId !== session.projectId)) throw new CapabilityError('forbidden', 'Capability Task and Session coordination binding disagree')
     // Actor revocation must fence Connector dispatch too, not only Project queries.
     if (claims.actorUserId) {
       const account = await this.store.identity.getUser(claims.actorUserId)

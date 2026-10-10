@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { runInvariants } from './run-invariants.ts'
+import { teamCoordinationSourceMigration } from './team-coordination-source.ts'
 import { attentionPageIndexesMigration, attentionHumanReviewIndexMigration } from './attention-page-indexes.ts'
 import { commandRejectionsMigration } from './command-rejections.ts'
 import { sessionModelSelectionMigration } from './session-model-selection.ts'
@@ -675,7 +676,7 @@ const workspaceAccountVisibilityMigration = `CREATE TABLE IF NOT EXISTS workspac
   PRIMARY KEY(account_id,workspace_id));
 CREATE INDEX IF NOT EXISTS workspace_account_visibility_actor_hidden ON workspace_account_visibility(account_id,hidden);`
 
-const migrations = [...legacyMigrations, ...accountMigrations, fileWriteAdmissionMigration, fileWriteReplacementMigration, fileWriteResultsMigration, sessionModelSelectionMigration, legacyModelSelectionMigration, legacyModelChainMigration, commandRejectionsMigration, attentionPageIndexesMigration, attentionHumanReviewIndexMigration, workspaceAccountVisibilityMigration]
+const migrations = [...legacyMigrations, ...accountMigrations, fileWriteAdmissionMigration, fileWriteReplacementMigration, fileWriteResultsMigration, sessionModelSelectionMigration, legacyModelSelectionMigration, legacyModelChainMigration, commandRejectionsMigration, attentionPageIndexesMigration, attentionHumanReviewIndexMigration, workspaceAccountVisibilityMigration, teamCoordinationSourceMigration]
 
 /** 迁移条目数：升级测试用它验证重放不重复插入版本行，避免硬编码数字后静默失效。 */
 export const migrationCount = migrations.length

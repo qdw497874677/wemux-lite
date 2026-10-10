@@ -11,7 +11,7 @@ import { OpenCodeRuntimeSessionAdapter } from '../src/agents/opencode-runtime-se
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 
-test('public Pi, Claude and OpenCode CLI launch boundaries scope coordination and preserve ordinary ambient env', async t => {
+test('public Pi, Claude and OpenCode CLI launch coordination with ordinary ambient env', async t => {
   const home = await mkdtemp(join(tmpdir(), 'wemux-cli-scope-'))
   t.after(() => rm(home, { recursive: true, force: true }))
   const workspaceId = 'workspace-fixture'
@@ -42,10 +42,10 @@ else process.stdout.write(JSON.stringify({type:'assistant',message:{content:[{ty
       for await (const _ of handle.signals) { /* consume public CLI output */ }
       const observed = JSON.parse(await readFile(output, 'utf8'))
       assert.equal(observed.cwd, cwd)
-      assert.equal(observed.home, prepared.context!.environment.HOME)
-      assert.equal(observed.pi, prepared.context!.environment.PI_CODING_AGENT_DIR)
-      assert.equal(observed.claude, prepared.context!.environment.CLAUDE_CONFIG_DIR)
-      assert.equal(observed.marker, null)
+      assert.equal(observed.home, process.env.HOME)
+      assert.equal(observed.pi, process.env.PI_CODING_AGENT_DIR)
+      assert.equal(observed.claude, process.env.CLAUDE_CONFIG_DIR)
+      assert.equal(observed.marker, 'host-secret')
       assert.equal(observed.path, true)
     } finally { await session.close(); await prepared.cleanup() }
   }
@@ -55,20 +55,4 @@ else process.stdout.write(JSON.stringify({type:'assistant',message:{content:[{ty
     for await (const _ of handle.signals) { /* consume */ }
     assert.equal(JSON.parse(await readFile(output, 'utf8')).marker, 'host-secret')
   } finally { await ordinary.close() }
-})
-
-test('restricted session home refuses symlink components outside verified workspace', async t => {
-  const { symlink } = await import('node:fs/promises')
-  const home = await mkdtemp(join(tmpdir(), 'wemux-home-symlink-'))
-  t.after(() => rm(home, { recursive: true, force: true }))
-  const workspaceId = 'symlink-fixture'
-  const cwd = join(home, 'workspaces', hash(workspaceId))
-  const outside = join(home, 'outside')
-  await mkdir(cwd, { recursive: true })
-  await mkdir(outside)
-  await symlink(outside, join(cwd, '.wemux-agent'))
-  const sessionId = 'symlink-session'
-  const provider = new FilesystemAgentLaunchContextProvider(home, null, undefined, undefined, async () => ({ projectId: 'team:team-1' as never, workspaceId, rootPath: cwd, agentKey: 'pi' as never }))
-  await assert.rejects(provider.prepare({ id: 'symlink-turn', sessionId, capabilitySnapshot: { id: 'scope', projectId: 'team:team-1', workspaceId, sessionId, assets: [], allowedTools: [], allowedConnectorIds: [] } } as never), /agent_launch_home_mismatch/)
-  await assert.rejects(readFile(join(outside, hash(sessionId), 'models.json')), { code: 'ENOENT' })
 })

@@ -60,6 +60,13 @@ export class SessionAccessService {
     const project = readers === this.store
       ? await this.projects.require(actor, session.projectId)
       : await this.projects.requireInTx(readers as ServerStoreTx, actor, session.projectId)
+    const task = session.taskId ? await ('tasks' in readers ? readers.tasks : this.store.tasks).get(session.taskId) : null
+    if (session.taskId?.startsWith('coordination:') && (!task?.teamCoordination || task.deletedAt)) throw notFound()
+    if (task?.teamCoordination) {
+      const identity = task.teamCoordination
+      if (task.projectId !== `team:${project.teamId}` || identity.teamId !== project.teamId || identity.ownerId !== session.ownerId || identity.workerId !== session.binding.agent.workerId || identity.agentKey !== session.binding.agent.agentKey || session.ownerId !== actor || projectRank[project.accessRole] < projectRank.contributor) throw notFound()
+      return { canRead: true, canWrite: true, canControl: true, projectRole: project.accessRole }
+    }
     const projectRole = project.accessRole
     const owner = session.ownerId === actor
     const grant = owner ? null : (await readers.identity.getIdentityRecords({ userId: actor, teamId: project.teamId, projectId: project.id, sessionId: session.id })).sessionGrant
@@ -76,6 +83,7 @@ export class SessionAccessService {
   async updateShareScope(actor: UserId, sessionId: SessionId, input: unknown) {
     const session = await this.require(actor, sessionId, 'control')
     const shareScope = parseScope(input)
+    if (session.taskId?.startsWith('coordination:') && shareScope !== 'owner-only') throw new AppError(409, 'Team coordination Session remains owner-only', 'coordination_owner_only')
     const project = await this.store.resources.getProject(session.projectId)
     const affected = new Set(project ? (await this.store.identity.listTeamMemberships(project.teamId)).map(value => value.userId) : [])
     for (const grant of await this.store.identity.listSessionGrants(sessionId)) affected.add(grant.userId)
@@ -97,6 +105,7 @@ export class SessionAccessService {
 
   async grant(actor: UserId, sessionId: SessionId, input: unknown): Promise<SessionGrant> {
     const session = await this.require(actor, sessionId, 'control')
+    if (session.taskId?.startsWith('coordination:')) throw new AppError(409, 'Team coordination Session remains owner-only', 'coordination_owner_only')
     const userId = parseUserId(input)
     const project = await this.projects.require(actor, session.projectId, 'manager')
     if (userId === session.ownerId) throw new AppError(409, 'Session owner 不需要额外 Grant', 'session_owner_grant')
