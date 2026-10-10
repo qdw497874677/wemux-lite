@@ -32,7 +32,7 @@ const ordinarySnapshot = (sessionId: string, connectorId: string): CapabilitySna
 test('协调 Session 绑定被接受：受限快照可注册且不授予连接器', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'wemux-coordination-gate-'))
   const store = new SqliteWorkerStore(join(directory, 'worker.sqlite'))
-  const runtime = new WorkerConnectorRuntime(store)
+  const runtime = new WorkerConnectorRuntime(store, { verifyBinding: async (turn) => turn.capabilitySnapshot ? { projectId: turn.capabilitySnapshot.projectId, workspaceId: turn.capabilitySnapshot.workspaceId } : null, verifyServerGrant: async () => true })
   t.after(async () => { await runtime.shutdown(); store.close(); await rm(directory, { recursive: true, force: true }) })
   const registered = await runtime.registerTurn(turn('turn-coord-1', coordinationSnapshot('session-coord-1'), 'coordination-token'), 'worker-1', 'cluster')
   assert.deepEqual(registered.snapshot.allowedConnectorIds, [])
@@ -43,7 +43,7 @@ test('协调 Session 绑定被接受：受限快照可注册且不授予连接�
 test('写类 operation 不属于协调身份 allowedTools：连接器调用被拒', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'wemux-coordination-write-'))
   const store = new SqliteWorkerStore(join(directory, 'worker.sqlite'))
-  const runtime = new WorkerConnectorRuntime(store)
+  const runtime = new WorkerConnectorRuntime(store, { verifyBinding: async (turn) => turn.capabilitySnapshot ? { projectId: turn.capabilitySnapshot.projectId, workspaceId: turn.capabilitySnapshot.workspaceId } : null, verifyServerGrant: async () => true })
   t.after(async () => { await runtime.shutdown(); store.close(); await rm(directory, { recursive: true, force: true }) })
   const definition = mcp()
   await store.saveConnectorDefinition(definition)
@@ -62,7 +62,7 @@ test('写类 operation 不属于协调身份 allowedTools：连接器调用被�
 test('只读查询 operation 直通上游且不落入本地写面', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'wemux-coordination-read-'))
   const store = new SqliteWorkerStore(join(directory, 'worker.sqlite'))
-  const runtime = new WorkerConnectorRuntime(store)
+  const runtime = new WorkerConnectorRuntime(store, { verifyBinding: async (turn) => turn.capabilitySnapshot ? { projectId: turn.capabilitySnapshot.projectId, workspaceId: turn.capabilitySnapshot.workspaceId } : null, verifyServerGrant: async () => true })
   t.after(async () => { await runtime.shutdown(); store.close(); await rm(directory, { recursive: true, force: true }) })
   const registered = await runtime.registerTurn(turn('turn-coord-3', coordinationSnapshot('session-coord-3'), 'coordination-token-3'), 'worker-1', 'cluster')
   for (const operation of coordinationAllowedTools) {
@@ -75,7 +75,7 @@ test('只读查询 operation 直通上游且不落入本地写面', async t => {
 test('协调身份与普通 Project 身份的 allowedTools 集合互不串用', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'wemux-coordination-mix-'))
   const store = new SqliteWorkerStore(join(directory, 'worker.sqlite'))
-  const runtime = new WorkerConnectorRuntime(store)
+  const runtime = new WorkerConnectorRuntime(store, { verifyBinding: async (turn) => turn.capabilitySnapshot ? { projectId: turn.capabilitySnapshot.projectId, workspaceId: turn.capabilitySnapshot.workspaceId } : null, verifyServerGrant: async () => true })
   t.after(async () => { await runtime.shutdown(); store.close(); await rm(directory, { recursive: true, force: true }) })
   const definition = mcp()
   await store.saveConnectorDefinition(definition)

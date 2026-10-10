@@ -101,12 +101,15 @@ export class ClusterLifecycle {
     const persisted = await this.store.sessions.getTurn(turn.id)
     return workspace && workspace.workerId === workerId && session?.binding.agent.workerId === workerId && persisted?.sessionId === turn.sessionId && persisted.state === 'running'
       ? { projectId: workspace.projectId, workspaceId: workspace.id } : null
-  }, verifyServerGrant: async (token, operation, local) => {
+  }, verifyServerGrant: async (token, operation, local, expected) => {
     if (local) return true
     if (!this.clusterGrantUrl) return false
     try {
-      const result = await fetch(new URL('/agent-capabilities/grant.verify', httpOrigin(this.clusterGrantUrl)), { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ requiredTool: operation }), signal: AbortSignal.timeout(5_000) })
-      return result.ok
+      const result = await fetch(new URL(operation === 'session.info' ? '/agent-capabilities/session.info' : '/agent-capabilities/grant.verify', httpOrigin(this.clusterGrantUrl)), { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(operation === 'session.info' ? {} : { requiredTool: operation }), signal: AbortSignal.timeout(5_000) })
+      if (!result.ok) return false
+      if (operation !== 'session.info') return true
+      const info = await result.json() as { projectId?: string; workspaceId?: string; sessionId?: string; turnId?: string }
+      return !!expected && info.projectId === expected.projectId && info.workspaceId === expected.workspaceId && info.sessionId === expected.sessionId && info.turnId === expected.turnId
     } catch { return false }
   } }) }
 
@@ -355,10 +358,23 @@ export class ClusterLifecycle {
         ])
       }
       resources = new ResourceReconciler({ workerId: identity.workerId, home: this.options.home, databasePath: join(this.options.home, 'resources.sqlite'), transport, concurrency: Number(process.env.WEMUX_RESOURCE_CONCURRENCY ?? '2'), providerCredentials: WorkerProviderCredentialStore.fromEnvironment(this.store) })
-      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint, turn => this.connectors.registerTurn(turn, identity.workerId, 'cluster'), (projectId, agentKey) => resources!.skillsForLaunch(projectId, agentKey), async turn => {
+      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint, async turn => {
+        // Provenance is the persisted Session/Workspace/Turn binding, never the
+        // presence (or absence) of a capability token on the supplied Turn.
+        const installation = this.store.localInstallation()
+        const session = await this.store.sessions.get(turn.sessionId)
+        const workspace = session && await this.store.workspaces.get(session.binding.workspaceId)
+        const persisted = await this.store.sessions.getTurn(turn.id)
+        const localId = installation && `local-${installation.installationId}`
+        const local = !!localId && session?.storageMode === 'local'
+          && session.binding.agent.workerId === localId && workspace?.workerId === localId
+          && workspace.projectId === 'local' && session.activeTurnId === turn.id
+          && persisted?.sessionId === turn.sessionId && persisted.state === 'running'
+        return this.connectors.registerTurn(turn, local ? localId! : identity.workerId, local ? 'local' : 'cluster')
+      }, (projectId, agentKey) => resources!.skillsForLaunch(projectId, agentKey), async turn => {
         const session = await this.store.sessions.get(turn.sessionId)
         const workspace = session ? await this.store.workspaces.get(session.binding.workspaceId) : null
-        return session && workspace && workspace.workerId === identity.workerId ? { projectId: workspace.projectId, workspaceId: workspace.id, rootPath: workspace.rootPath, agentKey: session.binding.agent.agentKey } : null
+        return session && workspace && workspace.workerId === session.binding.agent.workerId && (workspace.workerId === identity.workerId || workspace.workerId === `local-${this.store.localInstallation()?.installationId}`) ? { projectId: workspace.projectId, workspaceId: workspace.id, rootPath: workspace.rootPath, agentKey: session.binding.agent.agentKey } : null
       }), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), await loadNodePty(), this.connectors, (projectId, modelId) => resources!.piProviderForLaunch(projectId, modelId), undefined, async commandId => {
         if (this.transport !== transport || this.state.phase !== 'online') return false
         const base = serverUrl(urls[0])

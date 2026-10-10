@@ -26,13 +26,15 @@ export class WorkerConnectorRuntime {
   private readonly finalizing = new Map<string, { sessionId: string; turnId: string; done: Promise<void> }>()
   private closing = false
   private readonly verifyLocalOrigin?: (turn: Turn, workerId: string) => Promise<boolean>
+  private readonly verifyServerGrant?: (token: string, operation: 'session.info' | 'mcp.list_tools' | 'mcp.call' | 'http.call', local: boolean, expected?: { sessionId: string; turnId: string; projectId: string; workspaceId: string }) => Promise<boolean>
   private readonly verifyBinding?: (turn: Turn, workerId: string) => Promise<{ projectId: string; workspaceId: string } | null>
   private shutdownPromise: Promise<void> | null = null
 
-  constructor(store: WorkerConnectorStore, options: { readonly fetch?: typeof fetch; readonly lookup?: import('@wemux/connector').GuardedFetchDnsLookup; readonly supervisor?: McpProcessSupervisor; readonly onApproval?: (event: ConnectorApprovalEvent) => void | Promise<void>; readonly verifyLocalOrigin?: (turn: Turn, workerId: string) => Promise<boolean>; readonly verifyBinding?: (turn: Turn, workerId: string) => Promise<{ projectId: string; workspaceId: string } | null>; readonly verifyServerGrant?: (token: string, operation: 'mcp.list_tools' | 'mcp.call' | 'http.call', local: boolean) => Promise<boolean> } = {}) {
+  constructor(store: WorkerConnectorStore, options: { readonly fetch?: typeof fetch; readonly lookup?: import('@wemux/connector').GuardedFetchDnsLookup; readonly supervisor?: McpProcessSupervisor; readonly onApproval?: (event: ConnectorApprovalEvent) => void | Promise<void>; readonly verifyLocalOrigin?: (turn: Turn, workerId: string) => Promise<boolean>; readonly verifyBinding?: (turn: Turn, workerId: string) => Promise<{ projectId: string; workspaceId: string } | null>; readonly verifyServerGrant?: (token: string, operation: 'session.info' | 'mcp.list_tools' | 'mcp.call' | 'http.call', local: boolean, expected?: { sessionId: string; turnId: string; projectId: string; workspaceId: string }) => Promise<boolean> } = {}) {
     this.store = store
     this.verifyBinding = options.verifyBinding
     this.verifyLocalOrigin = options.verifyLocalOrigin
+    this.verifyServerGrant = options.verifyServerGrant
     this.credentials = WorkerCredentialStore.fromEnvironment(store)
     this.supervisor = options.supervisor ?? new McpProcessSupervisor()
     this.mcp = new WorkerMcpClient({ supervisor: this.supervisor, fetch: options.fetch, lookup: options.lookup, deploymentAllowsPrivateNetwork: process.env.WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK === 'true' })
@@ -65,7 +67,17 @@ export class WorkerConnectorRuntime {
       if (turn.capabilityToken) throw new Error('local Turn cannot supply a capability token')
       if (turn.capabilitySnapshot) throw new Error('local Turn cannot supply a capability snapshot')
       if (!this.verifyBinding || !this.verifyLocalOrigin || !await this.verifyLocalOrigin(turn, workerId)) throw new Error('connector_local_origin_unverified')
-    } else if (origin !== 'cluster' || !turn.capabilityToken) throw new Error('cluster Turn requires an explicit origin and Server capability token')
+    } else {
+      if (origin !== 'cluster' || !turn.capabilityToken) throw new Error('cluster Turn requires an explicit origin and Server capability token')
+      // Admission must precede every persisted Connector definition/snapshot write.
+      // A current Server grant and matching persisted placement are both required.
+      const binding = this.verifyBinding ? await this.verifyBinding(turn, workerId) : null
+      if (!binding || !turn.capabilitySnapshot || turn.capabilitySnapshot.projectId !== binding.projectId || turn.capabilitySnapshot.workspaceId !== binding.workspaceId || turn.capabilitySnapshot.sessionId !== turn.sessionId || !this.verifyServerGrant) throw new Error('connector_cluster_grant_unverified')
+      try {
+        const operations = turn.capabilitySnapshot.allowedTools.filter((tool): tool is 'mcp.list_tools' | 'mcp.call' | 'http.call' => tool === 'mcp.list_tools' || tool === 'mcp.call' || tool === 'http.call')
+        if (!(await this.verifyServerGrant(turn.capabilityToken, 'session.info', false, { sessionId: turn.sessionId, turnId: turn.id, projectId: binding.projectId, workspaceId: binding.workspaceId })) || !(await Promise.all(operations.map(tool => this.verifyServerGrant!(turn.capabilityToken!, tool, false)))).every(Boolean)) throw new Error('connector_cluster_grant_unverified')
+      } catch { throw new Error('connector_cluster_grant_unverified') }
+    }
     const installed = (await this.store.listConnectorDefinitions()).filter(definition => definition.enabled && (!definition.allowedWorkerIds.length || definition.allowedWorkerIds.includes(workerId as never)))
     const binding = this.verifyBinding ? await this.verifyBinding(turn, workerId) : null
     if (this.verifyBinding && !binding) throw new Error('connector_turn_binding_mismatch')

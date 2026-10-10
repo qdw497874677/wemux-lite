@@ -32,7 +32,7 @@ test('cluster Connector definition writes serialize behind an active Worker tran
 test('turn registration retains HTTP and MCP definitions in the non-secret snapshot', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'wemux-turn-connectors-'))
   const store = new SqliteWorkerStore(join(directory, 'worker.sqlite'))
-  const runtime = new WorkerConnectorRuntime(store)
+  const runtime = new WorkerConnectorRuntime(store, { verifyBinding: async () => ({ projectId: 'project-1', workspaceId: 'workspace-1' }), verifyServerGrant: async () => true })
   t.after(async () => { await runtime.shutdown(); store.close(); await rm(directory, { recursive: true, force: true }) })
   const httpDefinition = http(), mcpDefinition = mcp()
   await store.saveConnectorDefinition(httpDefinition)
@@ -77,7 +77,7 @@ for (const mode of ['pending', 'timeout', 'cancelled', 'shutdown', 'already-abor
   await store.saveConnectorDefinition({ ...definition, credentialRef: null, credentialAvailability: 'not_required', config: { ...definition.config, authentication: 'none' } })
   const turn = { id: 'release-turn', sessionId: 'release-session' } as Turn
   const registration = await runtime.registerTurn(turn, 'worker', 'local')
-  const unrelated = await runtime.registerTurn({ id: 'other-turn', sessionId: 'other-session', capabilityToken: 'unrelated-token' } as Turn, 'worker', 'cluster')
+  const unrelated = await runtime.registerTurn({ id: 'other-turn', sessionId: 'other-session' } as Turn, 'worker', 'local')
   const abort = new AbortController()
   if (mode === 'already-aborted') abort.abort()
   if (mode === 'timeout') t.mock.timers.enable({ apis: ['setTimeout'] })
@@ -152,6 +152,7 @@ test('Connector turn binding rejects moved Worker and ended Turn before outbound
   let owner = 'worker-1', running = true, outbound = 0
   const runtime = new WorkerConnectorRuntime(store, {
     verifyBinding: async (_turn, workerId) => running && workerId === owner ? { projectId: 'project-1', workspaceId: 'workspace-1' } : null,
+    verifyServerGrant: async () => true,
     lookup: async () => [{ address: '8.8.8.8', family: 4 }],
     fetch: (async () => { outbound++; return new Response('{}') }) as typeof fetch,
   })

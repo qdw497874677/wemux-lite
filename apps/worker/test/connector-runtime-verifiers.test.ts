@@ -24,17 +24,18 @@ for (const missing of ['both', 'binding', 'grant'] as const) test(`cluster token
   await store.saveConnectorDefinition({ id: 'mcp' as never, projectId: 'local' as never, kind: 'mcp', name: 'MCP', description: null, revision: 1, enabled: true, allowedWorkerIds: [], credentialRef: null, credentialAvailability: 'not_required', riskDefaults: { requireApprovalForRead: false, allowMcpReadOnlyHint: true }, config: { transport: 'stdio', command: process.execPath, args: ['--version'], cwd: null, publicEnvironment: {}, secretEnvironmentNames: [] }, createdAt: now, updatedAt: now })
   t.mock.method(runtime.mcp, 'listTools', async () => { mcpCalls++; throw new Error('MCP external execution forbidden') })
   const token = 'server-issued-capability-token'
-  // A local-looking Project and Worker must not launder a supplied cluster token.
-  const registration = await runtime.registerTurn({ id: 'turn', sessionId: 'session', capabilityToken: token } as Turn, 'local-worker', 'cluster')
-  const result = await runtime.handle('http.call', token, { connectorId: 'http', connectorRevision: 1, operationId: 'read', requestId: 'req', toolCallId: 'call', input: {} })
-  assert.equal((result?.body as { error?: { code?: string } }).error?.code, 'scope_denied', JSON.stringify(result))
-  const mcpResult = await runtime.handle('mcp.list_tools', token, { connectorId: 'mcp' })
-  assert.equal((mcpResult?.body as { error?: { code?: string } }).error?.code, 'scope_denied')
+  // Missing authority must reject before the registration's credential-availability
+  // update; a local-looking Project and Worker cannot launder a cluster token.
+  const definitionBefore = await store.getConnectorDefinition('http')
+  await assert.rejects(runtime.registerTurn({ id: 'turn', sessionId: 'session', capabilityToken: token, capabilitySnapshot: {
+    id: 'snapshot', sessionId: 'session', projectId: 'local', workspaceId: 'local', version: 1,
+    assets: [], allowedTools: ['http.call'], allowedConnectorIds: ['http'], connectors: [{ ...definitionBefore!, credentialAvailability: 'available' }], createdAt: now,
+  } } as Turn, 'local-worker', 'cluster'), /connector_cluster_grant_unverified/)
+  assert.deepEqual(await store.getConnectorDefinition('http'), definitionBefore)
   assert.equal(outbound, 0)
   assert.equal(mcpCalls, 0)
-  assert.equal(grantChecks, 0, 'missing verifier must deny before checking a different grant')
-  assert.deepEqual((await store.listConnectorDenials()).map(item => item.reasonCode), ['scope_denied', 'scope_denied'])
-  await registration.release()
+  assert.equal(grantChecks, 0)
+  assert.deepEqual(await store.listConnectorDenials(), [])
   if (missing === 'both') {
     await assert.rejects(runtime.registerTurn({ id: 'local-turn', sessionId: 'local-session' } as Turn, 'local-worker', 'local'), /local_origin_unverified/)
     assert.equal(outbound, 0)

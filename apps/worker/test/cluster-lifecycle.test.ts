@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { WebSocketServer, type WebSocket } from 'ws'
-import type { Timestamp, WorkerId } from '@wemux/domain'
+import type { Timestamp, WorkerId, ProjectId, WorkspaceId, SessionId, CommandId, MessageId, CapabilitySnapshot } from '@wemux/domain'
 import { SqliteWorkerStore } from '../src/storage/sqlite-store.js'
 import { ensureLocalInstallation } from '../src/application/local-installation.js'
 import { createLocalWorkbenchService } from '../src/application/local-workbench.js'
@@ -54,6 +54,43 @@ async function waitFor(predicate: () => boolean | Promise<boolean>) {
   }
   throw new Error('condition timed out')
 }
+
+test('production cluster verifier denies registration before Connector writes when Server rejects the grant', async t => {
+  const f = await fixture()
+  try {
+    const workerId = 'cluster-worker' as WorkerId
+    const projectId = 'cluster-project' as ProjectId
+    const workspaceId = 'cluster-workspace' as WorkspaceId
+    const sessionId = 'cluster-session' as SessionId
+    const timestamp = new Date().toISOString() as Timestamp
+    const definition = { id: 'fixture-connector' as never, projectId, kind: 'mcp' as const, name: 'Fixture', description: null, revision: 1, enabled: true, allowedWorkerIds: [], credentialRef: null, credentialAvailability: 'unconfigured' as const, riskDefaults: { requireApprovalForRead: false, allowMcpReadOnlyHint: true }, config: { transport: 'stdio' as const, command: process.execPath, args: ['--version'], cwd: null, publicEnvironment: {}, secretEnvironmentNames: [] }, createdAt: timestamp, updatedAt: timestamp }
+    await f.store.saveConnectorDefinition(definition)
+    const snapshot: CapabilitySnapshot = { id: 'snapshot', sessionId, projectId, workspaceId, version: 1, assets: [], allowedTools: ['mcp.call'], allowedConnectorIds: [definition.id], connectors: [{ ...definition, credentialAvailability: 'available' }], createdAt: timestamp }
+    await f.store.transaction(async tx => {
+      await tx.workspaces.save({ id: workspaceId, workerId, projectId, spec: { kind: 'composite', memberWorkspaceIds: [] }, rootPath: f.home, status: 'ready', failureReason: null, updatedAt: timestamp })
+      await tx.sessions.createSession(sessionId, { workspaceId, agent: { workerId, agentKey: 'test' }, modelId: null })
+      await tx.sessions.enqueue({ sessionId, submissionCommandId: 'cluster-command' as CommandId, message: { messageId: 'cluster-message' as MessageId, content: 'hello' }, queuedAt: timestamp, capabilities: { snapshot, token: 'server-token', grant: { turnId: 'fixture-turn' } } } as Parameters<typeof tx.sessions.enqueue>[0])
+    })
+    const turn = await f.store.transaction(tx => tx.sessions.claimNext(sessionId))
+    assert.ok(turn)
+    f.identity('ws://127.0.0.1:1/ws/worker')
+    // Exercise the production verifier with a rejected Server response, not
+    // an injected verifyServerGrant:true stub.
+    const lifecycle = f.lifecycle as unknown as { clusterGrantUrl: string | null; connectors: import('../src/connectors/runtime.js').WorkerConnectorRuntime }
+    lifecycle.clusterGrantUrl = 'ws://127.0.0.1:1/ws/worker'
+    let checks = 0
+    t.mock.method(globalThis, 'fetch', async (input: URL | string, init: RequestInit) => {
+      checks++
+      assert.equal(String(input), 'http://127.0.0.1:1/agent-capabilities/session.info')
+      assert.equal(init.headers && (init.headers as Record<string, string>).authorization, 'Bearer server-token')
+      assert.deepEqual(JSON.parse(String(init.body)), {})
+      return new Response('{}', { status: 403 })
+    })
+    await assert.rejects(lifecycle.connectors.registerTurn(turn, workerId, 'cluster'), /connector_cluster_grant_unverified/)
+    assert.equal(checks, 1)
+    assert.deepEqual(await f.store.getConnectorDefinition(definition.id), definition)
+  } finally { await f.close() }
+})
 
 test('cluster grant verification fails closed without a bound server, local provenance remains independent', async () => {
   const f = await fixture()
@@ -165,6 +202,33 @@ test('failed cluster runtime initialization is cleaned up and restores local run
     const directory = await workbench.addDirectory(f.home)
     assert.ok(await workbench.createSession({ workspaceId: directory.workspaceId, agentKey: 'test', modelId: 'test' }))
   } finally { await f.close() }
+})
+
+test('connected local workbench Turn mints a verified local Connector context without a Server token', async () => {
+  const f = await fixture()
+  const server = createServer()
+  const sockets = new WebSocketServer({ server })
+  sockets.on('connection', acceptTransportV2)
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    f.identity(`ws://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/ws/worker`)
+    await writeFile(join(f.home, 'credential'), 'secret')
+    await f.lifecycle.connect()
+    const workbench = createLocalWorkbenchService(f.store, f.lifecycle)
+    const directory = await workbench.addDirectory(f.home)
+    const session = await workbench.createSession({ workspaceId: directory.workspaceId, agentKey: 'test', modelId: 'test' })
+    await workbench.enqueue(session.sessionId, 'connected local turn')
+    await waitFor(async () => (await workbench.journal(session.sessionId, 1, 200)).events.some(event => event.payload.kind === 'turn.finished'))
+    const events = (await workbench.journal(session.sessionId, 1, 200)).events
+    assert.ok(events.some(event => event.payload.kind === 'assistant.text.delta'))
+    assert.ok(events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'completed'), JSON.stringify(events))
+    assert.equal((await f.store.sessions.getTurn((await f.store.sessions.get(session.sessionId))!.activeTurnId!))?.capabilityToken ?? null, null)
+  } finally {
+    await f.close()
+    for (const socket of sockets.clients) socket.terminate()
+    await new Promise<void>(resolve => sockets.close(() => resolve()))
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
 })
 
 test('concurrent initialization and connect calls have one runtime and connection owner', async t => {
