@@ -17,6 +17,7 @@ import { TestAgent } from '../src/agents/test-agent.js'
 import type { AgentAdapter } from '../src/application/ports/agent-adapter.js'
 import type { RuntimeSessionAdapter } from '../src/application/ports/runtime-session.js'
 import { LocalProvisioner } from '../src/workspaces/local-provisioner.js'
+import { SessionOwnership } from '../src/application/session-ownership.js'
 import { WebSocketTransport } from '../src/transport/websocket.js'
 import { WorkerTransportStore } from '../src/transport/transport-store.js'
 import { parseServerMessage } from '../src/transport/validation.js'
@@ -88,12 +89,12 @@ async function until(predicate: () => boolean | Promise<boolean>) {
   for (let i = 0; i < 500; i++) { if (await predicate()) return; await delay(10) }
   assert.fail('Timed out waiting for condition')
 }
-async function fixture() {
+async function fixture(options?: { ownership: SessionOwnership; prepare: () => Promise<void> }) {
   const home = await mkdtemp(join(tmpdir(), 'wemux-lite-worker-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
   store.saveIdentity(signingIdentity)
   const events: WorkerToServer[] = []
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [new TestAgent(15)], { send: message => events.push(message) }, workerId, 'test', undefined, undefined, undefined, null, undefined, undefined, undefined, async () => true)
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [new TestAgent(15)], { send: message => events.push(message) }, workerId, 'test', options ? { prepare: async () => { await options.prepare(); return { context: null, cleanup: async () => undefined } } } : undefined, undefined, undefined, null, undefined, undefined, undefined, async () => true, options?.ownership)
   await runtime.initialize()
   const send = (id: string, command: WorkerCommand) => runtime.receive(frame(id, command))
   await send('provision', { kind: 'workspace.provision', workspace })
@@ -101,6 +102,27 @@ async function fixture() {
   await send('create', create)
   return { home, store, runtime, events, send, cleanup: async () => { await runtime.shutdown(); store.close(); await rm(home, { recursive: true, force: true }) } }
 }
+
+test('competing Runtimes cannot claim another Turn while the first owner prepares a claimed Turn', async () => {
+  const ownership = new SessionOwnership()
+  let resume!: () => void
+  const gate = new Promise<void>(resolve => { resume = resolve })
+  const f = await fixture({ ownership, prepare: () => gate })
+  const competitorStore = new SqliteWorkerStore(join(f.home, 'worker.sqlite'))
+  const competitor = new WorkerRuntime(competitorStore, new LocalProvisioner(join(f.home, 'workspaces')), [new TestAgent(15)], { send() {} }, workerId, 'competitor', undefined, undefined, undefined, null, undefined, undefined, undefined, async () => true, ownership)
+  try {
+    await f.send('first', enqueue('first'))
+    await until(async () => Boolean((await f.store.sessions.get(sessionId))?.activeTurnId))
+    const first = (await f.store.sessions.get(sessionId))?.activeTurnId
+    assert.equal(ownership.occupied(sessionId), true, 'reservation must precede adapter preparation and first iterator read')
+    await f.send('second', enqueue('second'))
+    await competitor.connected()
+    assert.equal((await f.store.sessions.listQueued(sessionId)).length, 1, 'loser must leave queued Turn unclaimed')
+    assert.equal((await f.store.sessions.get(sessionId))?.activeTurnId, first)
+    resume()
+    await until(async () => (await f.store.sessions.listQueued(sessionId)).length === 0)
+  } finally { resume(); await competitor.shutdown(); competitorStore.close(); await f.cleanup() }
+})
 
 test('FIFO, durable ACK, idempotency conflict, cancellation, stop and stream/tool events', async () => {
   const f = await fixture()

@@ -1,4 +1,6 @@
 import type { SessionId } from '@wemux/domain'
+import { realpathSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 /** Process-lifetime fence shared by every Runtime using one Worker home.
  * An abort, resolved stop/return, or bounded shutdown is not proof of child exit.
@@ -23,7 +25,11 @@ export class SessionOwnership {
 
 const homes = new Map<string, SessionOwnership>()
 export function ownershipForHome(home: string): SessionOwnership {
-  let ownership = homes.get(home)
-  if (!ownership) { ownership = new SessionOwnership(); homes.set(home, ownership) }
+  // Resolve the existing home before looking up process ownership. Lexical paths
+  // alone cannot fence symlink aliases of the same SQLite database. A missing
+  // home fails closed rather than acquiring an identity that may change later.
+  const canonicalHome = realpathSync(resolve(home))
+  let ownership = homes.get(canonicalHome)
+  if (!ownership) { ownership = new SessionOwnership(); homes.set(canonicalHome, ownership) }
   return ownership
 }

@@ -523,19 +523,27 @@ export class WorkerRuntime {
         this.launchRetries.delete(id)
         if ((await this.store.sessions.listQueued(id))[0]?.submissionCommandId !== queued.submissionCommandId) continue
       }
-      const turn = await this.store.transaction(tx => tx.sessions.claimNext(id))
-      if (!turn) return
+      // Reserve before the durable claim. A competing Runtime must not claim
+      // the next Turn while this owner is still preparing or running a child.
+      const ownershipToken = this.ownership.acquire(id)
+      if (!ownershipToken) return
+      let turn: Turn | null
+      try { turn = await this.store.transaction(tx => tx.sessions.claimNext(id)) }
+      catch (error) { this.ownership.release(id, ownershipToken); throw error }
+      if (!turn) { this.ownership.release(id, ownershipToken); return }
       // The claim is durable even if publication fails. Fail this invocation
       // without launching it; the next queued Turn can still be scheduled.
       try { await this.publish() }
       catch {
-        await this.store.transaction(async tx => tx.sessions.finishTurn((await tx.sessions.getTurn(turn.id))?.state === 'stopping'
-          ? { turnId: turn.id, outcome: 'cancelled', finishedAt: now() }
-          : { turnId: turn.id, outcome: 'failed', failure: { code: 'agent-error', message: '无法发布启动事件' }, finishedAt: now() }))
-        try { await this.publish() } catch { /* Replay on the next publication. */ }
+        try {
+          await this.store.transaction(async tx => tx.sessions.finishTurn((await tx.sessions.getTurn(turn.id))?.state === 'stopping'
+            ? { turnId: turn.id, outcome: 'cancelled', finishedAt: now() }
+            : { turnId: turn.id, outcome: 'failed', failure: { code: 'agent-error', message: '无法发布启动事件' }, finishedAt: now() }))
+          try { await this.publish() } catch { /* Replay on the next publication. */ }
+        } finally { this.ownership.release(id, ownershipToken) }
         continue
       }
-      await this.execute(turn, localSession ? undefined : queued?.submissionCommandId ?? null)
+      await this.execute(turn, localSession ? undefined : queued?.submissionCommandId ?? null, ownershipToken)
     }
   }
   private retryLaunch(id: SessionId, commandId: CommandId) {
@@ -558,13 +566,12 @@ export class WorkerRuntime {
     for (const retry of this.launchRetries.values()) if (retry.timer) clearTimeout(retry.timer)
     this.launchRetries.clear()
   }
-  private async execute(turn: Turn, clusterCommandId: CommandId | null | undefined) {
+  private async execute(turn: Turn, clusterCommandId: CommandId | null | undefined, ownershipToken: symbol) {
     let outcome: AgentTurnOutcome = { status: 'failed', failure: { code: 'agent-error', message: 'Agent ended without a terminal event' } }
     let iterator: AsyncIterator<AgentEvent> | null = null
     let privateProvider = false
     let childMayHaveStarted = false
     let nextOutstanding = false
-    let ownershipToken: symbol | null = null
     const launchGeneration = this.providerGeneration
     // Claimed Turns cannot safely return to the queue: a retry could launch the
     // same invocation twice. Denial finishes this Turn as failed and releases the
@@ -644,10 +651,6 @@ export class WorkerRuntime {
           // Check the max deadline before requesting another result. Observe
           // any later rejection immediately, before optional callbacks run.
           if (this.closing || this.aborted) throw new TurnStoppedBeforeLaunchError()
-          if (!ownershipToken) {
-            ownershipToken = this.ownership.acquire(turn.sessionId)
-            if (!ownershipToken) throw new Error('Agent session ownership is uncertain')
-          }
           childMayHaveStarted = true
           nextOutstanding = true
           const next = iterator.next()
@@ -722,7 +725,7 @@ export class WorkerRuntime {
         // the runner's finally released the handle. return()/stop() alone do not.
         if (childMayHaveStarted && !cleanupError && !nextOutstanding && !this.agentRunner.isActive(turn.sessionId, turn.id)) {
           this.unsafeSessions.delete(turn.sessionId)
-          if (ownershipToken) this.ownership.release(turn.sessionId, ownershipToken)
+          this.ownership.release(turn.sessionId, ownershipToken)
         }
         // Prelaunch stop cannot have started a child; retain its cancellation.
         if (stopError && childMayHaveStarted) throw stopError
@@ -745,10 +748,17 @@ export class WorkerRuntime {
         } }
       }
     }
-    await this.store.transaction(tx => tx.sessions.finishTurn(outcome.status === 'failed'
-      ? { turnId: turn.id, outcome: 'failed', failure: outcome.failure, finishedAt: now() }
-      : { turnId: turn.id, outcome: outcome.status, finishedAt: now() }))
-    await this.publish()
+    // No child was started: release the reservation even if finalization or
+    // publication fails. Once a child may have started only proven cleanup
+    // above may release it; unknown ownership remains quarantined.
+    try {
+      await this.store.transaction(tx => tx.sessions.finishTurn(outcome.status === 'failed'
+        ? { turnId: turn.id, outcome: 'failed', failure: outcome.failure, finishedAt: now() }
+        : { turnId: turn.id, outcome: outcome.status, finishedAt: now() }))
+      await this.publish()
+    } finally {
+      if (!childMayHaveStarted) this.ownership.release(turn.sessionId, ownershipToken)
+    }
   }
   private publish(): Promise<void> {
     const work = this.publishing.then(async () => {
