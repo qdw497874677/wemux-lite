@@ -66,7 +66,7 @@ try {
     assert.equal((await context.request.post(`${origin}/api/auth/login`, { data: { login: email, password } })).status(), 200, 'browser login')
     const page = await context.newPage()
     page.setDefaultTimeout(30000)
-    page.on('pageerror', error => errors.push({ viewport: name, message: error.message }))
+    page.on('pageerror', () => errors.push({ viewport: name }))
     await page.goto(`${origin}/next/teams`)
     const select = page.getByRole('combobox', { name: '协调执行环境' })
     await select.waitFor()
@@ -89,6 +89,8 @@ try {
     const list = (await listResponse.json()).items
     const index = list.findIndex(item => item.id === sessionId)
     assert.ok(index >= 0, 'the same Session must be present after reload')
+    const originalTaskId = list[index].taskId
+    assert.ok(originalTaskId?.startsWith('coordination:'), 'original Session must be bound to a Team coordination Task')
     await page.getByRole('button', { name: /团队协调（test）/ }).nth(index).click()
     await page.locator(`[data-conversation-session="${sessionId}"]`).waitFor()
     await page.getByText(text).last().waitFor()
@@ -110,8 +112,10 @@ try {
     const allSessions = (await afterReopen.json()).items
     const pair = allSessions.filter(item => item.id === sessionId || item.id === reopenedId)
     assert.equal(pair.length, 2, 'both Session histories retained')
-    assert.equal(pair[0].taskId, pair[1].taskId, 'reopened Session uses the original Team Task')
-    await page.getByRole('button', { name: /团队协调（test）/ }).nth(allSessions.findIndex(item => item.id === sessionId)).click()
+    assert.equal(allSessions.find(item => item.id === reopenedId)?.taskId, originalTaskId, 'reopened Session uses the selected original Team Task')
+    const originalIndex = allSessions.findIndex(item => item.id === sessionId)
+    assert.ok(originalIndex >= 0)
+    await page.getByRole('button', { name: /团队协调（test）/ }).nth(originalIndex).click()
     await page.locator(`[data-conversation-session="${sessionId}"]`).getByText(text).last().waitFor()
     checks.push(`${name}: explicit reopen keeps Team Task and original Session history`)
   }
@@ -119,7 +123,7 @@ try {
   console.log(JSON.stringify({ status: 'pass', checks }))
 } catch (error) {
   // Never print login, registration token or Worker stdout/stderr.
-  console.error(JSON.stringify({ status: 'fail', step, message: error.message, checks, errors }))
+  console.error(JSON.stringify({ status: 'fail', step, errorName: error?.name ?? 'Error', checks, pageErrorCount: errors.length }))
   process.exitCode = 1
 } finally {
   for (const context of contexts) await context.close().catch(() => {})
