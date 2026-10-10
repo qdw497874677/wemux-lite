@@ -64,6 +64,7 @@ test('coordination first send binds a reusable Team Task and Project Workspace, 
     assert.equal(task?.projectId, 'team:default-team')
     assert.equal(task?.teamCoordination?.ownerId, contributor)
     assert.equal(initial.data.messageCommandId, body.commandId)
+    assert.equal(initial.data.messageId, body.commandId)
     const command = await f.app.store.commands.getPendingCommand(body.commandId as never)
     assert.equal(command?.command.kind, 'session.enqueue')
     if (command?.command.kind !== 'session.enqueue') throw Error('Missing first enqueue')
@@ -88,6 +89,8 @@ test('coordination first send binds a reusable Team Task and Project Workspace, 
     const replay = await f.call(path, body, contributor)
     assert.equal(replay.status, 201, JSON.stringify(replay.data))
     assert.equal(replay.data.session.id, initial.data.session.id)
+    assert.equal(replay.data.messageId, initial.data.messageId, 'reopen replay preserves the first accepted message identity')
+    assert.equal(replay.data.messageCommandId, initial.data.messageCommandId)
   } finally { await f.close() }
 })
 

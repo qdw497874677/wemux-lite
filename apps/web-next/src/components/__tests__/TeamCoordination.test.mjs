@@ -14,11 +14,19 @@ test('Team coordination browser selects authorized placement, sends once, reopen
       const project = { id: 'project-1', teamId: 'team-1', accessRole: 'contributor' };
       const worker = { id: 'worker-1', teamId: 'team-1', name: 'Test Worker', connectionState: 'online', capabilities: [{ agentKey: 'test', displayName: 'Test Agent', mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'test-model', displayName: 'Test Model' }] }] };
       const workspace = { id: 'workspace-1', projectId: 'project-1', name: 'Test Workspace', deletedAt: null, placements: [{ workerId: 'worker-1', status: 'ready' }] };
-      window.attempts = []; window.failOnce = true; window.failRefresh = false; window.refreshCalls = 0; window.pauseSend = false; window.releaseSend = null;
+      window.attempts = []; window.failOnce = true; window.failRefresh = false; window.refreshCalls = 0; window.completedLists = 0; window.pauseSend = false; window.releaseSend = null;
+      window.staleList = false; window.pauseListTeam = null; window.releaseList = null;
       let sessions = [];
       const api = {
         projects: async () => [project], workers: async () => [worker], workspaces: async () => [workspace],
-        teamCoordinationSessions: async () => { window.refreshCalls++; if (window.failRefresh) throw Error('refresh offline'); return sessions; },
+        teamCoordinationSessions: async team => {
+          window.refreshCalls++;
+          const snapshot = window.staleList ? [] : sessions.filter(item => team === 'team-1');
+          if (window.pauseListTeam === team) await new Promise(resolve => { window.releaseList = resolve });
+          if (window.failRefresh) throw Error('refresh offline');
+          window.completedLists++;
+          return snapshot;
+        },
         createTeamCoordinationSession: async (team, body) => {
           window.attempts.push({ team, body });
           if (window.pauseSend) await new Promise(resolve => { window.releaseSend = resolve });
@@ -59,6 +67,7 @@ test('Team coordination browser selects authorized placement, sends once, reopen
     await page.getByRole('combobox', { name: '协调执行环境' }).selectOption({ index: 1 })
     await page.getByRole('textbox', { name: '协调首条消息' }).fill('Test handoff')
     await page.getByRole('button', { name: '发送并创建会话' }).click()
+    await page.waitForFunction(() => window.attempts.length > 0)
     await page.getByRole('alert').waitFor()
     await page.getByRole('button', { name: '重试原首条消息' }).click()
     await page.locator('[data-conversation-session="session-1"]').waitFor()
@@ -77,7 +86,27 @@ test('Team coordination browser selects authorized placement, sends once, reopen
     await page.getByRole('button', { name: '发送并创建会话' }).click()
     await page.getByText('refresh offline').waitFor()
     assert.equal(await page.getByRole('button', { name: '重试原首条消息' }).count(), 0, 'refresh failure must not resurrect an accepted first-send')
-    await page.evaluate(() => { window.failRefresh = false; window.pauseSend = true })
+    await page.evaluate(() => { window.failRefresh = false; window.staleList = true })
+    await page.getByRole('textbox', { name: '协调首条消息' }).fill('Accepted but not yet listed')
+    await page.getByRole('button', { name: '发送并创建会话' }).click()
+    await page.waitForFunction(() => window.completedLists >= 3)
+    await page.waitForTimeout(50)
+    await page.locator('[data-conversation-session="session-1"]').waitFor()
+    assert.equal(await page.getByRole('button', { name: /团队协调（test）/ }).count(), 1, 'successful stale list must retain accepted session')
+    await page.getByRole('button', { name: '刷新协调环境与会话' }).click()
+    await page.waitForFunction(() => window.completedLists >= 4)
+    await page.waitForTimeout(50)
+    assert.equal(await page.getByRole('button', { name: /团队协调（test）/ }).count(), 1, 'repeated stale lists cannot remove accepted session')
+    await page.evaluate(() => { window.staleList = false; window.pauseListTeam = 'team-1' })
+    await page.getByRole('button', { name: '刷新协调环境与会话' }).click()
+    await page.waitForFunction(() => !!window.releaseList)
+    await page.evaluate(() => window.switchTeam('team-2'))
+    await page.getByRole('textbox', { name: '协调首条消息' }).waitFor()
+    await page.evaluate(() => window.releaseList())
+    await page.waitForTimeout(100)
+    assert.equal(await page.getByRole('button', { name: /团队协调（test）/ }).count(), 0, 'delayed old Team LIST cannot replace new Team sessions')
+    await page.evaluate(() => { window.pauseListTeam = null; window.pauseSend = true; window.switchTeam('team-1') })
+    await page.getByRole('combobox', { name: '协调执行环境' }).selectOption({ index: 1 })
     await page.getByRole('textbox', { name: '协调首条消息' }).fill('In-flight stale handoff')
     await page.getByRole('button', { name: '发送并创建会话' }).click()
     await page.waitForFunction(() => !!window.releaseSend)

@@ -15,16 +15,22 @@ export function TeamCoordination({ api, teamId }: { api: ProjectClient; teamId: 
   const pending = useRef<{ body: { requestId: string; commandId: string; workspaceId: string; workerId: string; agentKey: string; modelId: string; content: string }; teamId: string } | null>(null)
   const generation = useRef(0)
   const refreshGeneration = useRef(0)
+  // A successful first-send receipt is authoritative even when a read replica returns an older list.
+  const accepted = useRef<Awaited<ReturnType<ProjectClient['teamCoordinationSessions']>>>([])
   async function refresh(team: string, ticket: number) {
     const refreshTicket = ++refreshGeneration.current
     const [projects, workers, existing] = await Promise.all([api.projects(), api.workers(), api.teamCoordinationSessions(team)])
     const eligible = projects.filter(project => project.teamId === team && project.accessRole !== 'viewer')
     const spaces = await Promise.all(eligible.map(project => api.workspaces(project.id, 'all')))
     if (generation.current !== ticket || refreshGeneration.current !== refreshTicket) return
-    setResources({ projects: eligible, workspaces: spaces.flat(), workers }); setSessions(existing)
+    const ids = new Set(existing.map(item => item.id))
+    accepted.current = accepted.current.filter(item => !ids.has(item.id))
+    setResources({ projects: eligible, workspaces: spaces.flat(), workers })
+    setSessions([...accepted.current, ...existing])
   }
   useLayoutEffect(() => {
     const ticket = ++generation.current
+    accepted.current = []
     setResources(null); setSessions([]); setSelected(''); setTarget(''); setBusy(false); pending.current = null; setError('')
     void refresh(teamId, ticket).catch(cause => { if (generation.current === ticket) setError(accountError(cause)) })
     return () => { generation.current++ }
@@ -43,6 +49,7 @@ export function TeamCoordination({ api, teamId }: { api: ProjectClient; teamId: 
       if (generation.current !== ticket) return
       // Acceptance is definitive even if the subsequent list refresh fails.
       pending.current = null; setContent(''); setSelected(result.session.id)
+      if (!accepted.current.some(item => item.id === result.session.id)) accepted.current = [result.session, ...accepted.current]
       setSessions(current => current.some(item => item.id === result.session.id) ? current : [result.session, ...current])
       try { await refresh(teamId, ticket) }
       catch (cause) { if (generation.current === ticket) setError(accountError(cause)) }
