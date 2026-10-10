@@ -80,7 +80,8 @@ test('协调身份与普通 Project 身份的 allowedTools 集合互不串用', 
   const definition = mcp()
   await store.saveConnectorDefinition(definition)
   const coordination = await runtime.registerTurn(turn('turn-mix-coord', coordinationSnapshot('session-mix-coord'), 'token-coordination'), 'worker-1')
-  const ordinary = await runtime.registerTurn(turn('turn-mix-ord', ordinarySnapshot('session-mix-ord', definition.id), 'token-ordinary'), 'worker-1')
+  // Synthetic local Turn: no Server-issued token; the runtime mints its own.
+  const ordinary = await runtime.registerTurn({ ...turn('turn-mix-ord', ordinarySnapshot('session-mix-ord', definition.id), 'token-ordinary'), capabilityToken: null }, 'worker-1')
   // 两个身份的 allowedTools 交集为空。
   assert.deepEqual(coordination.snapshot.allowedTools.filter(tool => (ordinary.snapshot.allowedTools as readonly string[]).includes(tool)), [])
   // 同一连接器、同一输入：协调令牌被 capability 快照拒绝，普通令牌走自己的授权面（不是 scope_denied）。
@@ -89,7 +90,7 @@ test('协调身份与普通 Project 身份的 allowedTools 集合互不串用', 
   const coordinationBody = denied!.body as { ok?: boolean; error?: { code?: string } }
   assert.equal(coordinationBody.ok, false)
   assert.equal(coordinationBody.error?.code, 'scope_denied')
-  const ordinaryResult = await runtime.handle('mcp.call', 'token-ordinary', input)
+  const ordinaryResult = await runtime.handle('mcp.call', ordinary.token, input)
   const ordinaryBody = ordinaryResult!.body as { ok?: boolean; error?: { code?: string } }
   assert.notEqual(ordinaryBody.error?.code, 'scope_denied', '普通身份对同一连接器有自己的授权判定，不受协调快照污染')
   assert.notEqual(ordinaryBody.error?.code, coordinationBody.error?.code)

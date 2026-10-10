@@ -9,7 +9,7 @@ import { McpProcessSupervisor } from './mcp-process-supervisor.ts'
 import { ToolExecutionGateway, type ConnectorApprovalPort, type ConnectorApprovalRequest } from './tool-execution-gateway.ts'
 import type { WorkerConnectorStore } from './store.js'
 
-interface ActiveTurn { readonly token: string; readonly snapshot: CapabilitySnapshot; readonly claims: CapabilityGrantClaims; readonly workerId: string }
+interface ActiveTurn { readonly token: string; readonly snapshot: CapabilitySnapshot; readonly claims: CapabilityGrantClaims; readonly workerId: string; readonly origin: 'local' | 'cluster' }
 type ExpiryReason = 'timeout' | 'cancelled' | 'turn_released' | 'shutdown'
 type Pending = ConnectorApprovalRequest & { readonly id: string; readonly createdAt: string; resolve(decision: 'approve' | 'deny'): void; expire(reason: ExpiryReason): Promise<void>; readonly timer: NodeJS.Timeout }
 export type ConnectorApprovalEvent = { readonly kind: 'requested'; readonly approval: Omit<Pending, 'resolve' | 'expire' | 'timer'> } | { readonly kind: 'expired'; readonly sessionId: string; readonly turnId: string; readonly approvalId: string; readonly reason: ExpiryReason; readonly occurredAt: string }
@@ -43,14 +43,23 @@ export class WorkerConnectorRuntime {
     }, verifyBinding: async (token, snapshot, turn) => {
       const active = this.turns.get(token)
       if (!active || active.snapshot !== snapshot || active.workerId !== turn.workerId || active.claims.sessionId !== turn.sessionId || active.claims.turnId !== turn.turnId || active.claims.projectId !== turn.projectId || active.claims.workspaceId !== turn.workspaceId) return false
-      if (!this.verifyBinding) return true
+      if (!this.verifyBinding) return active.origin === 'local'
       const binding = await this.verifyBinding({ sessionId: turn.sessionId, id: turn.turnId } as Turn, turn.workerId)
       return !!binding && binding.projectId === turn.projectId && binding.workspaceId === turn.workspaceId
-    }, verifyCurrentGrant: options.verifyServerGrant ? (token, operation) => options.verifyServerGrant!(token, operation, this.turns.get(token)?.claims.projectId === 'local' && this.turns.get(token)?.workerId.startsWith('local-') === true) : undefined }, approval, this.http)
+    }, verifyCurrentGrant: async (token, operation) => {
+      const active = this.turns.get(token)
+      if (!active) return false
+      if (active.origin === 'local') return true
+      // A cluster grant must have both a current binding and a Server verifier.
+      // Neither a local-looking Project nor a Worker name is proof of provenance.
+      if (!this.verifyBinding || !options.verifyServerGrant) return false
+      try { return await options.verifyServerGrant(token, operation, false) } catch { return false }
+    } }, approval, this.http)
   }
 
-  async registerTurn(turn: Turn, workerId: string): Promise<{ token: string; snapshot: CapabilitySnapshot; release(): Promise<void> }> {
+  async registerTurn(turn: Turn, workerId: string, origin: 'local' | 'cluster' = turn.capabilityToken ? 'cluster' : 'local'): Promise<{ token: string; snapshot: CapabilitySnapshot; release(): Promise<void> }> {
     if (this.closing) throw new Error('Connector runtime is shutting down')
+    if (origin === 'local' && turn.capabilityToken) throw new Error('local Turn cannot supply a capability token')
     const installed = (await this.store.listConnectorDefinitions()).filter(definition => definition.enabled && (!definition.allowedWorkerIds.length || definition.allowedWorkerIds.includes(workerId as never)))
     const binding = this.verifyBinding ? await this.verifyBinding(turn, workerId) : null
     if (this.verifyBinding && !binding) throw new Error('connector_turn_binding_mismatch')
@@ -69,7 +78,7 @@ export class WorkerConnectorRuntime {
     const token = turn.capabilityToken ?? randomBytes(32).toString('base64url')
     const claims: CapabilityGrantClaims = { id: `worker-${turn.id}`, sessionId: turn.sessionId, turnId: turn.id, actorAgentId: turn.sessionId, projectId: snapshot.projectId, workspaceId: snapshot.workspaceId, allowedTools: snapshot.allowedTools, allowedConnectorIds: snapshot.allowedConnectorIds, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 30 * 60_000).toISOString() }
     if (this.closing) throw new Error('Connector runtime is shutting down')
-    this.turns.set(token, { token, snapshot, claims, workerId })
+    this.turns.set(token, { token, snapshot, claims, workerId, origin })
     return { token, snapshot, release: async () => {
       this.turns.delete(token)
       await Promise.all([...this.pending.values()].filter(pending => pending.sessionId === turn.sessionId && pending.turnId === turn.id).map(pending => pending.expire('turn_released')))

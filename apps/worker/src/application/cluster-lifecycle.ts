@@ -230,7 +230,7 @@ export class ClusterLifecycle {
     const gateway = this.gateway ?? new CapabilityGateway(null, this.connectors)
     const endpoint = await gateway.listen()
     this.gateway = gateway
-    const runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, { send: () => {} }, workerId, installation.name, new FilesystemAgentLaunchContextProvider(this.options.home, endpoint, turn => this.connectors.registerTurn(turn, workerId), undefined, async turn => {
+    const runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, { send: () => {} }, workerId, installation.name, new FilesystemAgentLaunchContextProvider(this.options.home, endpoint, turn => this.connectors.registerTurn(turn, workerId, 'local'), undefined, async turn => {
       const session = await this.store.sessions.get(turn.sessionId)
       const workspace = session && await this.store.workspaces.get(session.binding.workspaceId)
       return workspace && workspace.workerId === workerId ? { projectId: workspace.projectId, workspaceId: workspace.id, rootPath: workspace.rootPath, agentKey: session!.binding.agent.agentKey } : null
@@ -343,7 +343,7 @@ export class ClusterLifecycle {
         ])
       }
       resources = new ResourceReconciler({ workerId: identity.workerId, home: this.options.home, databasePath: join(this.options.home, 'resources.sqlite'), transport, concurrency: Number(process.env.WEMUX_RESOURCE_CONCURRENCY ?? '2'), providerCredentials: WorkerProviderCredentialStore.fromEnvironment(this.store) })
-      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint, turn => this.connectors.registerTurn(turn, identity.workerId), (projectId, agentKey) => resources!.skillsForLaunch(projectId, agentKey), async turn => {
+      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint, turn => this.connectors.registerTurn(turn, identity.workerId, 'cluster'), (projectId, agentKey) => resources!.skillsForLaunch(projectId, agentKey), async turn => {
         const session = await this.store.sessions.get(turn.sessionId)
         const workspace = session ? await this.store.workspaces.get(session.binding.workspaceId) : null
         return session && workspace && workspace.workerId === identity.workerId ? { projectId: workspace.projectId, workspaceId: workspace.id, rootPath: workspace.rootPath, agentKey: session.binding.agent.agentKey } : null
