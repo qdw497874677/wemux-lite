@@ -39,6 +39,7 @@ function canonical(value: unknown): string {
 
 export class WorkerRuntime {
   private readonly tasks = new Map<SessionId, Promise<void>>()
+  private readonly unsafeSessions = new Set<SessionId>()
   private readonly launchRetries = new Map<SessionId, { commandId: CommandId; attempts: number; timer: NodeJS.Timeout | null }>()
   private readonly sent = new Map<SessionId, number>()
   private readonly provisions = new Map<import('@wemux/domain').WorkspaceId, Promise<void>>()
@@ -465,7 +466,7 @@ export class WorkerRuntime {
       location: workspace.status === 'ready' ? { workspaceId: id, workerId: this.workerId, rootPath: workspace.rootPath, checkouts: await this.store.workspaces.listRepositoryCheckouts(id) } : null } })
   }
   private schedule(id: SessionId) {
-    if (this.closing) return
+    if (this.closing || this.unsafeSessions.has(id)) return
     const retry = this.launchRetries.get(id)
     if (retry?.timer) {
       clearTimeout(retry.timer)
@@ -476,7 +477,7 @@ export class WorkerRuntime {
     this.tasks.set(id, task)
   }
   private async run(id: SessionId) {
-    while (!this.closing) {
+    while (!this.closing && !this.unsafeSessions.has(id)) {
       const session = await this.store.sessions.get(id)
       if (!session) return
       if (!this.available(session.binding)) {
@@ -502,7 +503,16 @@ export class WorkerRuntime {
       }
       const turn = await this.store.transaction(tx => tx.sessions.claimNext(id))
       if (!turn) return
-      await this.publish()
+      // The claim is durable even if publication fails. Fail this invocation
+      // without launching it; the next queued Turn can still be scheduled.
+      try { await this.publish() }
+      catch {
+        await this.store.transaction(async tx => tx.sessions.finishTurn((await tx.sessions.getTurn(turn.id))?.state === 'stopping'
+          ? { turnId: turn.id, outcome: 'cancelled', finishedAt: now() }
+          : { turnId: turn.id, outcome: 'failed', failure: { code: 'agent-error', message: '无法发布启动事件' }, finishedAt: now() }))
+        try { await this.publish() } catch { /* Replay on the next publication. */ }
+        continue
+      }
       await this.execute(turn, localSession ? undefined : queued?.submissionCommandId ?? null)
     }
   }
@@ -530,6 +540,7 @@ export class WorkerRuntime {
     let outcome: AgentTurnOutcome = { status: 'failed', failure: { code: 'agent-error', message: 'Agent ended without a terminal event' } }
     let iterator: AsyncIterator<AgentEvent> | null = null
     let privateProvider = false
+    let childMayHaveStarted = false
     const launchGeneration = this.providerGeneration
     // Claimed Turns cannot safely return to the queue: a retry could launch the
     // same invocation twice. Denial finishes this Turn as failed and releases the
@@ -553,6 +564,7 @@ export class WorkerRuntime {
       // Only pre-upgrade Turns lack a snapshot. Null explicitly selects Agent default.
       const modelId = Object.hasOwn(turn, 'modelId') ? turn.modelId! : session.binding.modelId
       const prepared = await this.launchContexts.prepare(turn)
+      let launchError: unknown = null
       try {
         await recheckLaunch()
         const fingerprint = createHash('sha256').update(canonical({ cwd: workspace.rootPath, modelId, nativeSession: session.nativeSession })).digest('hex')
@@ -606,6 +618,7 @@ export class WorkerRuntime {
           // Keep one observed iterator.next() in flight across idle ticks.
           // Check the max deadline before requesting another result. Observe
           // any later rejection immediately, before optional callbacks run.
+          childMayHaveStarted = true
           const next = iterator.next()
           void next.catch(() => {})
           // Async generators register their active invocation on first next(),
@@ -653,10 +666,26 @@ export class WorkerRuntime {
           })
           await this.publish()
         }
+      } catch (error) {
+        launchError = error
+        throw error
       } finally {
-        await this.agentRunner.stop(turn.sessionId, turn.id)
-        await iterator?.return?.()
-        await prepared.cleanup()
+        let cleanupError: unknown = null
+        let stopError: unknown = null
+        try { await this.agentRunner.stop(turn.sessionId, turn.id) }
+        catch (error) { stopError = error; cleanupError = error }
+        // Attempt all releases independently; a rejection must not skip later cleanup.
+        try { await iterator?.return?.() } catch (error) { cleanupError ??= error }
+        try { await prepared.cleanup() } catch (error) { cleanupError ??= error }
+        // Prelaunch stop cannot have started a child; retain its cancellation.
+        // A failed stop of a possibly running child must never be marked cancelled.
+        if (stopError && childMayHaveStarted) {
+          // The child may still be alive. Do not admit a second invocation in
+          // this Session until a Worker restart terminates the old process.
+          this.unsafeSessions.add(turn.sessionId)
+          throw stopError
+        }
+        if (launchError === null && cleanupError) throw cleanupError
       }
     } catch (error) {
       if (error instanceof TurnStoppedBeforeLaunchError) outcome = { status: 'cancelled' }

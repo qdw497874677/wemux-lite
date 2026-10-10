@@ -21,7 +21,7 @@ const definition = { providerKey: 'openai-compatible' as const, endpoint: 'https
 const agent: AgentAdapter = { agentKey, mode: 'execution', async detect() { return { agentKey, displayName: 'Fake Pi', version: '1', mode: 'execution' as const, executablePath: '/fake/pi', diagnostics: [], availability: { status: 'available' as const }, models: [{ modelId, displayName: 'Offline', source: 'configured' as const }] } }, async startTurn() { throw new Error('unexpected legacy adapter') } }
 const until = async (predicate: () => Promise<boolean>) => { for (let i = 0; i < 200; i++) { if (await predicate()) return; await new Promise(resolve => setTimeout(resolve, 10)) } throw new Error('Timed out waiting for provider Turn') }
 
-async function fixture(resolver?: PiProviderResolver, controls?: { prepare?: import('../src/application/ports/agent-launch-context.ts').AgentLaunchContextProvider; authorize?: (commandId: import('@wemux/domain').CommandId) => Promise<boolean> }) {
+async function fixture(resolver?: PiProviderResolver, controls?: { prepare?: import('../src/application/ports/agent-launch-context.ts').AgentLaunchContextProvider; authorize?: (commandId: import('@wemux/domain').CommandId) => Promise<boolean>; publish?: (message: unknown) => void }) {
   const home = await mkdtemp(join(tmpdir(), 'wemux-provider-runtime-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
   const keys = generateKeyPairSync('ed25519')
@@ -36,7 +36,7 @@ async function fixture(resolver?: PiProviderResolver, controls?: { prepare?: imp
       async command() {}, async resolveApproval() {}, async close() {},
     }
   } }
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send() {} }, workerId, 'fixture', controls?.prepare, undefined, new Map([[agentKey, adapter]]), null, undefined, resolver, undefined, controls?.authorize ?? (async () => true))
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send(message) { controls?.publish?.(message) } }, workerId, 'fixture', controls?.prepare, undefined, new Map([[agentKey, adapter]]), null, undefined, resolver, undefined, controls?.authorize ?? (async () => true))
   await runtime.initialize()
   if (resolver) runtime.providerConnected()
   const workspaceId = 'provider-workspace' as never
@@ -330,4 +330,69 @@ test('cluster Pi Provider Turn fails closed if resolver unavailable without leak
       assert.ok(journal.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'failed'))
     } finally { await f.cleanup() }
   }
+})
+
+for (const rejected of ['stop', 'return', 'cleanup'] as const) {
+  test(`prelaunch stop survives ${rejected} rejection and attempts every cleanup`, async () => {
+    let release!: () => void, entered!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const checking = new Promise<void>(resolve => { entered = resolve })
+    let checks = 0, stops = 0, returns = 0, cleanups = 0
+    const f = await fixture(async () => ({ definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'stamp', bindingId: 'binding' }), {
+      prepare: { async prepare() { return { context: null, async cleanup() { cleanups++; if (rejected === 'cleanup') throw new Error('cleanup rejected') } } } },
+      async authorize() { if (++checks === 5) { entered(); await gate; return false } return true },
+    })
+    const runner = (f.runtime as unknown as { agentRunner: { stop: (sessionId: SessionId, turnId: string) => Promise<void>; runWithPiProvider: (...args: unknown[]) => AsyncIterable<unknown> } }).agentRunner
+    const originalStop = runner.stop.bind(runner)
+    const originalRun = runner.runWithPiProvider.bind(runner)
+    runner.stop = async (id, turnId) => { stops++; await originalStop(id, turnId); if (rejected === 'stop' && stops > 1) throw new Error('stop rejected') }
+    runner.runWithPiProvider = (...args) => {
+      originalRun(...args) // retain private Provider argument validation
+      return { [Symbol.asyncIterator]() { return { async next() { throw new Error('must not launch') }, async return() { returns++; if (rejected === 'return') throw new Error('return rejected'); return { done: true, value: undefined } } } } }
+    }
+    try {
+      await f.send(`cleanup-${rejected}`, { kind: 'session.enqueue', sessionId, message: { messageId: `cleanup-${rejected}` as never, content: 'never launch', sentByAccountId: 'actor' as never } })
+      await checking
+      const turnId = (await f.store.sessions.get(sessionId))?.activeTurnId
+      assert.ok(turnId)
+      await f.send(`stop-cleanup-${rejected}`, { kind: 'turn.stop', sessionId, turnId })
+      release()
+      await until(async () => (await f.store.sessions.getTurn(turnId))?.state === 'cancelled')
+      assert.equal(stops >= 1, true)
+      assert.equal(returns, 1)
+      assert.equal(cleanups, 1)
+      assert.deepEqual(f.opened, [])
+      assert.equal((await f.store.sessions.get(sessionId))?.activeTurnId, null)
+      const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })
+      const finished = journal.events.filter(event => event.payload.kind === 'turn.finished')
+      assert.equal(finished.length, 1)
+      assert.equal(finished[0]?.payload.kind === 'turn.finished' && finished[0].payload.outcome, 'cancelled')
+    } finally { release(); await f.cleanup() }
+  })
+}
+
+test('publication rejection after claim still finalizes and allows the next queued Turn', async () => {
+  let rejectClaim = false, rejected = false
+  const f = await fixture(async () => ({ definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'stamp', bindingId: 'binding' }), {
+    publish(message) {
+      if (rejectClaim && !rejected && typeof message === 'object' && message && 'type' in message && message.type === 'event' && 'event' in message && message.event && typeof message.event === 'object' && 'payload' in message.event && message.event.payload && typeof message.event.payload === 'object' && 'kind' in message.event.payload && message.event.payload.kind === 'turn.started') {
+        rejected = true
+        throw new Error('publication rejected')
+      }
+    },
+  })
+  try {
+    rejectClaim = true
+    await f.send('publish-failure-first', { kind: 'session.enqueue', sessionId, message: { messageId: 'first' as never, content: 'first', sentByAccountId: 'actor' as never } })
+    await until(async () => rejected && (await f.store.sessions.get(sessionId))?.activeTurnId === null)
+    assert.equal((await f.store.sessions.listQueued(sessionId)).length, 0)
+    await f.send('publish-failure-next', { kind: 'session.enqueue', sessionId, message: { messageId: 'next' as never, content: 'next', sentByAccountId: 'actor' as never } })
+    await until(async () => (await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })).events.filter(event => event.payload.kind === 'turn.finished').length === 2)
+    assert.equal((await f.store.sessions.get(sessionId))?.activeTurnId, null)
+    assert.deepEqual(f.opened, [secret], 'failed publication never launched the first Turn')
+    const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })
+    const finished = journal.events.filter(event => event.payload.kind === 'turn.finished')
+    assert.equal(finished.length, 2)
+    assert.equal(finished[0]?.payload.kind === 'turn.finished' && finished[0].payload.outcome, 'failed')
+  } finally { await f.cleanup() }
 })
