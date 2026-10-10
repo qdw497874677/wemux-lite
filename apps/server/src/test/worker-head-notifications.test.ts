@@ -3,14 +3,18 @@ import assert from 'node:assert/strict'
 import type { AgentKey, EventSeq, ModelId } from '@wemux/domain'
 import { Notifications } from '../application/notifications.ts'
 import { ServerService, now } from '../application/server-service.ts'
+import { CommandSigningIdentity } from '../application/command-signing.ts'
 import { WorkerService } from '../application/worker-service.ts'
 import { TaskService } from '../application/task-service.ts'
 import { SqliteServerStore } from '../storage/sqlite/store.ts'
+import { SharedSqliteDatabase } from '../storage/sqlite/shared-database.ts'
 import { instanceOperatorId, seedOperator } from './fixtures/administrator.ts'
 
 test('unchanged Worker heads do not invalidate conversation or redeliver commands; recovery and gaps still do', async t => {
-  const store = new SqliteServerStore(':memory:'); t.after(() => store.close())
-  const signals = new Notifications(), server = new ServerService(store, signals)
+  const database = new SharedSqliteDatabase(':memory:')
+  const store = new SqliteServerStore(database); t.after(() => store.close())
+  const commandSigning = new CommandSigningIdentity(database.connection)
+  const signals = new Notifications(), server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning)
   await seedOperator(store, server)
   const { worker } = await server.enroll({ token: (await server.createEnrollment({})).token, name: 'Head fixture' })
   await store.transaction(tx => tx.resources.saveWorker({ ...worker, connectionState: 'online', capabilities: [{ agentKey: 'test' as AgentKey, displayName: 'Test', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' as ModelId, displayName: 'Model', source: 'configured' }] }] }))
