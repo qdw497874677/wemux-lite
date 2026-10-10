@@ -53,6 +53,10 @@ function canonical(value: unknown): string {
 
 export class WorkerRuntime {
   private readonly tasks = new Map<SessionId, Promise<void>>()
+  private readonly releaseWaiters = new Map<SessionId, () => void>()
+  private readonly finalizationWaiters = new Map<SessionId, () => void>()
+  private readonly releaseWakes = new Set<SessionId>()
+  private readonly finalizationRetries = new Map<SessionId, NodeJS.Timeout>()
   private readonly unsafeSessions = new Set<SessionId>()
   private readonly launchRetries = new Map<SessionId, { commandId: CommandId; attempts: number; timer: NodeJS.Timeout | null }>()
   private readonly sent = new Map<SessionId, number>()
@@ -160,11 +164,28 @@ export class WorkerRuntime {
   async initialize() {
     this.store.saveCapabilities(await Promise.all(this.agents.map(agent => agent.detect())))
     for (const session of await this.store.listSessions()) {
+      // A prior commit may have succeeded even when its caller saw an error.
+      // Resume retained results before recovery, including an already-cleared slot.
+      if (this.ownership.hasFinalization(session.sessionId)) {
+        await this.resumeFinalization(session.sessionId)
+        if (this.ownership.occupied(session.sessionId)) this.waitForOwnership(session.sessionId)
+        continue
+      }
       if (session.activeTurnId) {
-        const turn = await this.store.sessions.getTurn(session.activeTurnId)
-        await this.store.transaction(tx => tx.sessions.finishTurn(turn?.state === 'stopping'
-          ? { turnId: session.activeTurnId!, outcome: 'cancelled', finishedAt: now() }
-          : { turnId: session.activeTurnId!, outcome: 'failed', failure: { code: 'interrupted', message: 'Worker restarted during turn' }, finishedAt: now() }))
+        // Reserve before the first asynchronous read. Recovery and live execution
+        // must use the same fence, including across transaction retries.
+        const token = this.ownership.acquire(session.sessionId)
+        if (!token) { this.waitForOwnership(session.sessionId); continue }
+        await this.finishClaimed(session.sessionId, token, async store => {
+          await store.transaction(async tx => {
+            const current = await tx.sessions.get(session.sessionId)
+            if (!current?.activeTurnId) return
+            const turn = await tx.sessions.getTurn(current.activeTurnId)
+            await tx.sessions.finishTurn(turn?.state === 'stopping'
+              ? { turnId: current.activeTurnId, outcome: 'cancelled', finishedAt: now() }
+              : { turnId: current.activeTurnId, outcome: 'failed', failure: { code: 'interrupted', message: 'Worker restarted during turn' }, finishedAt: now() })
+          })
+        })
       }
     }
     for (const record of await this.store.commands.listRecoverable(100000)) {
@@ -487,20 +508,63 @@ export class WorkerRuntime {
     this.send({ type: 'event', scope: 'workspace', report: { ...(workspace.provisionCommandId ? { commandId: workspace.provisionCommandId } : {}), workspaceId: id, status: workspace.status, reason: workspace.failureReason, occurredAt: workspace.updatedAt,
       location: workspace.status === 'ready' ? { workspaceId: id, workerId: this.workerId, rootPath: workspace.rootPath, checkouts: await this.store.workspaces.listRepositoryCheckouts(id) } : null } })
   }
+  private waitForOwnership(id: SessionId) {
+    if (this.closing || this.unsafeSessions.has(id) || this.releaseWaiters.has(id)) return
+    // A predecessor may finish after initialize observed an occupied slot. This
+    // notification only retries its terminal write; it must not schedule a claim.
+    const stopFinalization = this.ownership.onFinalizationAvailable(id, () => {
+      if (!this.closing) void this.resumeFinalization(id)
+    })
+    this.finalizationWaiters.set(id, stopFinalization)
+    const unsubscribe = this.ownership.onRelease(id, () => {
+      stopFinalization()
+      this.finalizationWaiters.delete(id)
+      this.releaseWaiters.delete(id)
+      if (this.closing) return
+      if (this.tasks.has(id)) this.releaseWakes.add(id)
+      else this.schedule(id)
+    })
+    this.releaseWaiters.set(id, unsubscribe)
+    // Do not lose retention or release between observing occupation and registering.
+    if (this.ownership.hasFinalization(id)) void this.resumeFinalization(id)
+    if (!this.ownership.occupied(id)) {
+      unsubscribe()
+      stopFinalization()
+      this.finalizationWaiters.delete(id)
+      this.releaseWaiters.delete(id)
+      if (this.tasks.has(id)) this.releaseWakes.add(id)
+      else this.schedule(id)
+    }
+  }
+  private clearReleaseWaiters() {
+    for (const unsubscribe of this.releaseWaiters.values()) unsubscribe()
+    for (const unsubscribe of this.finalizationWaiters.values()) unsubscribe()
+    this.finalizationWaiters.clear()
+    this.releaseWaiters.clear()
+    this.releaseWakes.clear()
+  }
   private schedule(id: SessionId) {
-    if (this.closing || this.unsafeSessions.has(id) || this.ownership.occupied(id)) return
+    if (this.closing || this.unsafeSessions.has(id)) return
+    if (this.ownership.occupied(id)) { this.waitForOwnership(id); return }
     const retry = this.launchRetries.get(id)
     if (retry?.timer) {
       clearTimeout(retry.timer)
       this.launchRetries.delete(id)
     }
     if (this.tasks.has(id)) return
-    const task = this.run(id).catch(error => { console.error('Session execution failed:', error) }).finally(() => { this.tasks.delete(id) })
+    const task = this.run(id).catch(error => { console.error('Session execution failed:', error) }).finally(() => {
+      this.tasks.delete(id)
+      if (this.releaseWakes.delete(id)) this.schedule(id)
+    })
     this.tasks.set(id, task)
   }
   private async run(id: SessionId) {
-    while (!this.closing && !this.unsafeSessions.has(id) && !this.ownership.occupied(id)) {
+    while (!this.closing && !this.unsafeSessions.has(id)) {
+      if (this.ownership.occupied(id)) { this.waitForOwnership(id); return }
       const session = await this.store.sessions.get(id)
+      // Never spin or claim through an unresolved durable active slot. A live
+      // owner finalizes it; an unowned slot needs explicit startup recovery.
+      if (session?.activeTurnId) return
       if (!session) return
       if (!this.available(session.binding)) {
         await this.store.transaction(tx => tx.sessions.setRuntimeState(id, 'unavailable'))
@@ -523,19 +587,26 @@ export class WorkerRuntime {
         this.launchRetries.delete(id)
         if ((await this.store.sessions.listQueued(id))[0]?.submissionCommandId !== queued.submissionCommandId) continue
       }
-      const turn = await this.store.transaction(tx => tx.sessions.claimNext(id))
-      if (!turn) return
+      // Reserve before the durable claim. A competing Runtime must not claim
+      // the next Turn while this owner is still preparing or running a child.
+      const ownershipToken = this.ownership.acquire(id)
+      if (!ownershipToken) { this.waitForOwnership(id); return }
+      let turn: Turn | null
+      try { turn = await this.store.transaction(tx => tx.sessions.claimNext(id)) }
+      catch (error) { this.ownership.release(id, ownershipToken); throw error }
+      if (!turn) { this.ownership.release(id, ownershipToken); return }
       // The claim is durable even if publication fails. Fail this invocation
       // without launching it; the next queued Turn can still be scheduled.
       try { await this.publish() }
       catch {
-        await this.store.transaction(async tx => tx.sessions.finishTurn((await tx.sessions.getTurn(turn.id))?.state === 'stopping'
-          ? { turnId: turn.id, outcome: 'cancelled', finishedAt: now() }
-          : { turnId: turn.id, outcome: 'failed', failure: { code: 'agent-error', message: '无法发布启动事件' }, finishedAt: now() }))
-        try { await this.publish() } catch { /* Replay on the next publication. */ }
-        continue
+        await this.finishClaimed(id, ownershipToken, async store => {
+          await store.transaction(async tx => tx.sessions.finishTurn((await tx.sessions.getTurn(turn.id))?.state === 'stopping'
+            ? { turnId: turn.id, outcome: 'cancelled', finishedAt: now() }
+            : { turnId: turn.id, outcome: 'failed', failure: { code: 'agent-error', message: '无法发布启动事件' }, finishedAt: now() }))
+        })
+        return
       }
-      await this.execute(turn, localSession ? undefined : queued?.submissionCommandId ?? null)
+      await this.execute(turn, localSession ? undefined : queued?.submissionCommandId ?? null, ownershipToken)
     }
   }
   private retryLaunch(id: SessionId, commandId: CommandId) {
@@ -558,13 +629,12 @@ export class WorkerRuntime {
     for (const retry of this.launchRetries.values()) if (retry.timer) clearTimeout(retry.timer)
     this.launchRetries.clear()
   }
-  private async execute(turn: Turn, clusterCommandId: CommandId | null | undefined) {
+  private async execute(turn: Turn, clusterCommandId: CommandId | null | undefined, ownershipToken: symbol) {
     let outcome: AgentTurnOutcome = { status: 'failed', failure: { code: 'agent-error', message: 'Agent ended without a terminal event' } }
     let iterator: AsyncIterator<AgentEvent> | null = null
     let privateProvider = false
     let childMayHaveStarted = false
     let nextOutstanding = false
-    let ownershipToken: symbol | null = null
     const launchGeneration = this.providerGeneration
     // Claimed Turns cannot safely return to the queue: a retry could launch the
     // same invocation twice. Denial finishes this Turn as failed and releases the
@@ -644,10 +714,6 @@ export class WorkerRuntime {
           // Check the max deadline before requesting another result. Observe
           // any later rejection immediately, before optional callbacks run.
           if (this.closing || this.aborted) throw new TurnStoppedBeforeLaunchError()
-          if (!ownershipToken) {
-            ownershipToken = this.ownership.acquire(turn.sessionId)
-            if (!ownershipToken) throw new Error('Agent session ownership is uncertain')
-          }
           childMayHaveStarted = true
           nextOutstanding = true
           const next = iterator.next()
@@ -722,7 +788,6 @@ export class WorkerRuntime {
         // the runner's finally released the handle. return()/stop() alone do not.
         if (childMayHaveStarted && !cleanupError && !nextOutstanding && !this.agentRunner.isActive(turn.sessionId, turn.id)) {
           this.unsafeSessions.delete(turn.sessionId)
-          if (ownershipToken) this.ownership.release(turn.sessionId, ownershipToken)
         }
         // Prelaunch stop cannot have started a child; retain its cancellation.
         if (stopError && childMayHaveStarted) throw stopError
@@ -745,10 +810,40 @@ export class WorkerRuntime {
         } }
       }
     }
-    await this.store.transaction(tx => tx.sessions.finishTurn(outcome.status === 'failed'
-      ? { turnId: turn.id, outcome: 'failed', failure: outcome.failure, finishedAt: now() }
-      : { turnId: turn.id, outcome: outcome.status, finishedAt: now() }))
-    await this.publish()
+    // A failed transaction leaves the durable active slot occupied. Retain the
+    // reservation and retry ONLY this terminal write, never the Agent invocation.
+    const result = outcome.status === 'failed'
+      ? { turnId: turn.id, outcome: 'failed' as const, failure: outcome.failure, finishedAt: now() }
+      : { turnId: turn.id, outcome: outcome.status, finishedAt: now() }
+    await this.finishClaimed(turn.sessionId, ownershipToken, store =>
+      store.transaction(tx => tx.sessions.finishTurn(result)))
+  }
+  private async finishClaimed(id: SessionId, token: symbol, finish: (store: WorkerStore) => Promise<void>): Promise<void> {
+    this.ownership.retainFinalization(id, token, finish, () => !this.unsafeSessions.has(id))
+    await this.resumeFinalization(id, 0, true)
+  }
+  private async resumeFinalization(id: SessionId, attempt = 0, initial = false): Promise<void> {
+    if (this.closing && !initial) return
+    const status = await this.ownership.finalize(id, this.store)
+    if (status === 'failed' || status === 'busy') {
+      if (this.closing || this.finalizationRetries.has(id)) return
+      const timer = setTimeout(() => {
+        this.finalizationRetries.delete(id)
+        void this.resumeFinalization(id, Math.min(attempt + 1, 4))
+      }, Math.min(250 * 2 ** attempt, 2000))
+      timer.unref()
+      this.finalizationRetries.set(id, timer)
+      return
+    }
+    if (status === 'finished') {
+      if (!this.closing) try { await this.publish() } catch { /* Journal replays later. */ }
+      if (this.tasks.has(id)) this.releaseWakes.add(id)
+      else this.schedule(id)
+    }
+  }
+  private clearFinalizationRetries() {
+    for (const timer of this.finalizationRetries.values()) clearTimeout(timer)
+    this.finalizationRetries.clear()
   }
   private publish(): Promise<void> {
     const work = this.publishing.then(async () => {
@@ -770,6 +865,8 @@ export class WorkerRuntime {
   async shutdown() {
     this.closing = true
     this.clearLaunchRetries()
+    this.clearFinalizationRetries()
+    this.clearReleaseWaiters()
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = null
     const timeoutMs = Math.max(1, Math.min(this.agentTimeouts.idleMs, MAX_AGENT_CLEANUP_TIMEOUT_MS))
@@ -795,6 +892,8 @@ export class WorkerRuntime {
     this.aborted = true
     this.closing = true
     this.clearLaunchRetries()
+    this.clearFinalizationRetries()
+    this.clearReleaseWaiters()
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = null
     try { this.agentRunner.abort() } catch {}
