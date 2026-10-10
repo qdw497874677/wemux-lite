@@ -172,13 +172,13 @@ try {
 
   step = 'Team first-send through real Server API'
   const first = await api(endpoint, 'POST', firstInput)
-  assert.ok(first.session?.id && first.commandId && first.messageId, 'first-send must return Session, commandId and messageId')
+  assert.ok(first.session?.id && first.messageCommandId && first.messageId, 'first-send must return Session, messageCommandId and messageId')
   const sessionId = first.session.id, taskId = first.session.taskId
   assert.ok(taskId?.startsWith('coordination:'), 'Team Task ID is required')
   const task = await app.store.tasks.get(taskId)
   assert.equal(task?.projectId, `team:${team.id}`, 'Task must be anchored to Team, not Workspace Project')
   assert.deepEqual(task.teamCoordination, { teamId: team.id, ownerId: owner.id, workerId, agentKey: 'test' })
-  assert.equal(first.session.projectId, `team:${team.id}`)
+  assert.equal(first.session.projectId, project.id, 'Session executes in the authorized Project Workspace; only Task is Team-anchored')
   assert.equal(first.session.workspaceId, workspaceId)
   assert.equal(first.session.binding.agent.workerId, workerId)
   assert.equal(first.session.binding.agent.agentKey, 'test')
@@ -188,17 +188,17 @@ try {
     const started = events.find(e => e.payload.kind === 'turn.started' && e.payload.messageId === messageId)
     return Boolean(started && events.some(e => e.payload.kind === 'turn.finished' && e.payload.turnId === started.payload.turnId && e.payload.outcome === 'completed')) && events.filter(e => e.payload.kind === 'assistant.text.delta').map(e => e.payload.text).join('').includes(text)
   }
-  await eventually(() => api(`/commands/${first.commandId}`), c => c.status === 'accepted', 'first signed enqueue receipt')
+  await eventually(() => api(`/commands/${first.messageCommandId}`), c => c.status === 'accepted', 'first signed enqueue receipt')
   await eventually(journal, j => completed(j.events, first.messageId, firstInput.content), 'actual Test Agent first echo + completed Turn')
   assert.ok(workerDocument('sessions', sessionId), 'Worker must have persisted real Session')
-  assert.ok(proxy.seen.some(f => f.commandId === first.commandId && f.kind === 'session.enqueue' && f.signed), 'first enqueue must traverse authenticated WS with signed authorization')
+  await eventually(() => Promise.resolve(proxy.seen.some(f => f.commandId === first.messageCommandId && f.kind === 'session.enqueue' && f.signed)), Boolean, 'first enqueue signed WS observation')
   checks.push('Team Task anchoring, Project Workspace placement, signed WS first-send, real Test Agent echo and turn.finished')
 
   step = 'idempotent replay and continuation'
   const replay = await api(endpoint, 'POST', firstInput)
   assert.equal(replay.session?.id, sessionId)
   assert.equal(replay.messageId, first.messageId)
-  assert.equal(replay.commandId, first.commandId)
+  assert.equal(replay.messageCommandId, first.messageCommandId)
   await delay(400)
   const eventsAfterReplay = (await journal()).events
   assert.equal(eventsAfterReplay.filter(e => e.payload.kind === 'message.queued' && e.payload.messageId === first.messageId).length, 1, 'replay must not queue twice')
@@ -208,7 +208,7 @@ try {
   const second = await api(`/sessions/${sessionId}/messages`, 'POST', { content: 'coordination-second-echo', commandId: 'coordination-second-command' })
   await eventually(() => api(`/commands/${second.commandId}`), c => c.status === 'accepted', 'second signed enqueue receipt')
   await eventually(journal, j => completed(j.events, second.messageId, 'coordination-second-echo'), 'second Test Agent echo + completed Turn')
-  assert.ok(proxy.seen.some(f => f.commandId === second.commandId && f.kind === 'session.enqueue' && f.signed), 'continuation must also be signed over real WS')
+  await eventually(() => Promise.resolve(proxy.seen.some(f => f.commandId === second.commandId && f.kind === 'session.enqueue' && f.signed)), Boolean, 'continuation signed WS observation')
   checks.push('first-send replay idempotent; second send completed')
 
   step = 'same-home Worker restart and restore'
