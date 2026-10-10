@@ -127,11 +127,19 @@ test('expired approval refresh preserves identity and requires current authority
   const fresh = (await f.store.commands.getPendingCommand(id))!.authorization!
   assert.deepEqual(Object.fromEntries(Object.entries(fresh.claims).filter(([key]) => key !== 'issuedAt' && key !== 'expiresAt')), Object.fromEntries(Object.entries(original.claims).filter(([key]) => key !== 'issuedAt' && key !== 'expiresAt')))
   assert.ok(Date.parse(fresh.claims.expiresAt) > Date.now())
+  assert.equal(await service.authorizeApprovalReplay(f.worker.id, id, expired), true, 'signed original can recover lost transport ACK')
+  assert.equal(await service.authorizeApprovalReplay(f.worker.id, id, { ...expired, signature: 'invalid' }), false, 'invalid original must never replay')
+  const tampered = { ...expired, claims: { ...expired.claims, expiresAt: new Date(Date.now() + 60_000).toISOString() } }
+  await f.store.transaction(tx => tx.commands.refreshApprovalAuthorization(id, tampered))
+  assert.equal(await service.refreshPendingApproval(f.worker.id, id), false, 'tampered persisted signature must not be laundered into a valid window')
+  assert.deepEqual((await f.store.commands.getPendingCommand(id))!.authorization, tampered)
+  await f.store.transaction(tx => tx.commands.refreshApprovalAuthorization(id, expired))
   const actor = (await f.store.identity.getUser(instanceOperatorId))!
   await f.store.transaction(tx => tx.identity.saveUser({ ...actor, authVersion: (actor.authVersion ?? 0) + 1 }))
   await f.store.transaction(tx => tx.commands.refreshApprovalAuthorization(id, expired))
   assert.equal(await service.refreshPendingApproval(f.worker.id, id), false)
   assert.deepEqual((await f.store.commands.getPendingCommand(id))!.authorization, expired)
+  assert.equal(await service.authorizeApprovalReplay(f.worker.id, id, expired), false, 'revoked actor version must block sent original')
 })
 
 test('unsigned backlog does not starve later signed approvals', async t => {

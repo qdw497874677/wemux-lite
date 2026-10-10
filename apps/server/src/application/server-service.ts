@@ -92,6 +92,16 @@ export class ServerService {
       })
     } catch { return { allowed: false } }
   }
+  /** Replaying sent bytes recovers transport sequence only; it still requires the
+   * original signature and current actor authority before reaching the Worker. */
+  async authorizeApprovalReplay(workerId: WorkerId, commandId: CommandId, authorization: import('@wemux/wire-protocol/command-assertion').SignedEnqueueAuthorization): Promise<boolean> {
+    if (!this.commandSigning?.verify(authorization) || !(await this.authorizeEnqueueLaunch(workerId, commandId)).allowed) return false
+    const pending = await this.store.commands.getPendingCommand(commandId)
+    if (pending?.command.kind !== 'runtime.approval.resolve' || !pending.authorization || !this.commandSigning.verify(pending.authorization)) return false
+    const { issuedAt: _issued, expiresAt: _expires, ...original } = authorization.claims
+    const { issuedAt: _currentIssued, expiresAt: _currentExpires, ...current } = pending.authorization.claims
+    return JSON.stringify(original) === JSON.stringify(current)
+  }
   /** Called at a bounded delivery wakeup. Expired windows are replaced only for the
    * original actor/version and only while current access still permits execution. */
   async refreshPendingApproval(workerId: WorkerId, commandId: CommandId): Promise<boolean> {
@@ -99,6 +109,7 @@ export class ServerService {
     return this.store.transaction(async tx => {
       const pending = await tx.commands.getPendingCommand(commandId)
       if (!pending?.authorization || pending.workerId !== workerId || pending.command.kind !== 'runtime.approval.resolve' || (await tx.commands.get(commandId))?.status !== 'pending') return false
+      if (!this.commandSigning!.verify(pending.authorization)) return false
       const old = pending.authorization.claims
       if (old.version !== 2 || old.kind !== pending.command.kind || old.keyId !== this.commandSigning!.keyId || old.commandId !== commandId || old.workerId !== workerId || old.actorId !== pending.command.decidedByAccountId || old.commandDigest !== createHash('sha256').update(JSON.stringify(pending.command)).digest('hex')) return false
       const actor = await tx.identity.getUser(old.actorId)

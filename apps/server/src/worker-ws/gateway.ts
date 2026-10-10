@@ -86,7 +86,7 @@ export class WorkerGateway {
       try {
         if (enqueueDeliverable) for (const command of await this.service.deliverable(workerId)) {
           if (command.type === 'command' && command.command.kind === 'runtime.approval.resolve') {
-            if (!this.approvals || !(await this.approvals.refreshPendingApproval(workerId, command.commandId))) continue
+            if (!this.approvals || !(await this.approvals.refreshPendingApproval(workerId, command.commandId))) { retryApproval(command.commandId); continue }
             const updated = (await this.service.deliverable(workerId)).find(item => item.type === 'command' && item.commandId === command.commandId)
             if (updated) this.transport.enqueue(workerId, updated)
             retryApproval(command.commandId)
@@ -96,7 +96,7 @@ export class WorkerGateway {
         if (!fileNegotiated() && this.transport.hasFileEnvelopes(workerId)) throw new Error('File result ingress needs attention: retained envelopes require negotiation')
         for (const frame of this.transport.pending(workerId, 64, true)) {
           if (frame.payload.type === 'command' && frame.payload.command.kind === 'runtime.approval.resolve') {
-            if (!this.approvals || !(await this.approvals.refreshPendingApproval(workerId, frame.payload.commandId))) break
+            if (!this.approvals || !(await this.approvals.refreshPendingApproval(workerId, frame.payload.commandId))) { retryApproval(frame.payload.commandId); break }
             const approvalId = frame.payload.commandId
             const updated = (await this.service.deliverable(workerId)).find(item => item.type === 'command' && item.commandId === approvalId)
             if (!updated) break
@@ -108,13 +108,13 @@ export class WorkerGateway {
               }
               // A sent frame is immutable. Replay its original bytes to recover
               // a lost transport ACK; only the next sequence may carry fresh claims.
-              if (this.transport.sentApproval(workerId, frame)) send(frame)
+              if (this.transport.sentApproval(workerId, frame) && frame.payload.authorization && await this.approvals.authorizeApprovalReplay(workerId, approvalId, frame.payload.authorization)) send(frame)
               retryApproval(approvalId)
               break
             }
             const expires = Date.parse(frame.payload.authorization?.claims.expiresAt ?? '')
             if (!Number.isFinite(expires) || expires <= Date.now()) {
-              if (this.transport.sentApproval(workerId, frame)) send(frame)
+              if (this.transport.sentApproval(workerId, frame) && frame.payload.authorization && await this.approvals.authorizeApprovalReplay(workerId, approvalId, frame.payload.authorization)) send(frame)
               break
             }
             retryApproval(approvalId)

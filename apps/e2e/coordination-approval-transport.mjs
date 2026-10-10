@@ -233,7 +233,13 @@ try {
     const assertion = variant === 'tampered' ? { ...expired, claims: { ...expired.claims, expiresAt: new Date(Date.now() + 60_000).toISOString() } } : expired
     const injected = proxy.inject(forgedId, forgedCommand, assertion)
     await eventually(() => Promise.resolve(proxy.transportAcks.some(a => a.epoch === injected.epoch && a.through >= injected.seq)), Boolean, `${variant} transport ACK`)
-    await delay(150)
+    if (variant === 'tampered') {
+      const receipt = await eventually(() => Promise.resolve(proxy.receipts.find(r => r?.commandId === forgedId)), Boolean, 'tampered terminal receipt')
+      assert.equal(receipt.status, 'rejected', 'tampered signature must produce a terminal rejection')
+    } else {
+      await delay(150)
+      assert.equal(proxy.receipts.some(r => r?.commandId === forgedId), false, 'expired valid signature is ACKed without terminal application receipt')
+    }
     assert.equal(workerDocument('commands', forgedId), null, `${variant} approval never persisted`)
   }
   assert.equal((await journal()).events.filter(e => e.payload.kind === 'approval.resolved' && e.payload.approvalId === approvalId).length, 1)
