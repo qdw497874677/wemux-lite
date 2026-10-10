@@ -131,6 +131,50 @@ test('final launch authorization denial fails claimed Turn with stable non-provi
   } finally { release(); await f.cleanup() }
 })
 
+for (const failure of ['denied', 'thrown'] as const) {
+  test(`turn.stop wins over ${failure} final authorization without opening Agent work`, async () => {
+    let release!: () => void
+    let entered!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const checking = new Promise<void>(resolve => { entered = resolve })
+    let checks = 0
+    const f = await fixture(async () => ({ definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'opaque', bindingId: 'binding' }), {
+      async authorize() {
+        if (++checks === 5) {
+          entered()
+          await gate
+          if (failure === 'thrown') throw new Error('authorization backend unavailable')
+          return false
+        }
+        return true
+      },
+    })
+    try {
+      await f.send(`stop-final-${failure}`, { kind: 'session.enqueue', sessionId, message: { messageId: `stop-final-${failure}` as never, content: 'never run', sentByAccountId: 'actor' as never } })
+      await checking
+      const turnId = (await f.store.sessions.get(sessionId))?.activeTurnId
+      assert.ok(turnId)
+      await f.send(`stop-check-${failure}`, { kind: 'turn.stop', sessionId, turnId })
+      assert.equal((await f.store.sessions.getTurn(turnId))?.state, 'stopping')
+      release()
+      await until(async () => (await f.store.sessions.getTurn(turnId))?.state === 'cancelled')
+      assert.equal(checks, 5, 'no additional authorization or duplicate launch')
+      assert.deepEqual(f.opened, [])
+      assert.equal((await f.store.sessions.get(sessionId))?.activeTurnId, null)
+      assert.equal((await f.store.sessions.listQueued(sessionId)).length, 0)
+      const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })
+      const finished = journal.events.filter(event => event.payload.kind === 'turn.finished')
+      assert.equal(finished.length, 1)
+      assert.equal(finished[0]?.payload.kind, 'turn.finished')
+      if (finished[0]?.payload.kind === 'turn.finished') {
+        assert.equal(finished[0].payload.outcome, 'cancelled')
+        assert.equal(finished[0].payload.failure, null)
+      }
+      assert.doesNotMatch(JSON.stringify(journal), /runtime-private-secret-8415|authorization backend unavailable/)
+    } finally { release(); await f.cleanup() }
+  })
+}
+
 test('turn.stop during final launch authorization cancels without starting Agent work', async () => {
   let release!: () => void
   let entered!: () => void

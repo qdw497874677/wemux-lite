@@ -586,7 +586,13 @@ export class WorkerRuntime {
           : this.agentRunner.run(runRequest))[Symbol.asyncIterator]()
         // The last asynchronous admission check sits immediately before the
         // first read (the point where an async generator can start a process).
-        await recheckLaunch()
+        // An explicit stop during this pending check wins even if the check
+        // fails closed. Do not start the iterator in either case.
+        try { await recheckLaunch() }
+        catch (error) {
+          if (error instanceof LaunchAuthorizationDeniedError && (await this.store.sessions.getTurn(turn.id))?.state === 'stopping') throw new TurnStoppedBeforeLaunchError()
+          throw error
+        }
         // turn.stop can arrive while the HTTP check is pending. Never start an
         // already-stopped Turn: stop() before the first next() cannot stop an
         // async generator that has not registered its invocation yet.
