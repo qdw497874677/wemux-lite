@@ -29,12 +29,18 @@ WEMUX_NEXT_TEST_DIST="$DIST" TMPDIR=/home/qdw/.cache/wemux-test-tmp \
   node --import tsx apps/e2e/team-coordination-real-browser.mjs
 ```
 
-上述 Playwright 依赖路径为本机临时安装，运行时可换为等价环境变量；脚本只使用非付费 Test Agent，所有数据库/Worker home 由测试创建并在关闭后清理。没有调用付费 Runtime、外部投递或删除用户数据。
+上述 Playwright 依赖路径为本机临时安装，运行时可换为等价环境变量；浏览器脚本只使用非付费 Test Agent，所有数据库/Worker home 由测试创建并在关闭后清理。浏览器测试没有付费调用、外部投递或删除用户数据；另见下方单次付费 Pi 验收。
+
+## 单次真实付费 Pi Runtime 补充验收
+
+用户明确允许付费测试后，在本机已认证 Pi CLI 1.0.4 上运行 `apps/e2e/team-coordination-paid-pi.mjs`：`WEMUX_REAL_PAID_PI_E2E=1`、`WEMUX_REAL_PI_EXECUTABLE=$(command -v pi)`、`WEMUX_REAL_PI_MODEL=zai-coding-cn::glm-5.3-flash`、磁盘 `TMPDIR`。退出码 **0**，报告 `paidTurns: 1`：真实 Server、注册 Worker、就绪 Workspace、真实 Pi 模型能力 → Team 协调首发自动绑定 Task/Session → Journal `turn.finished: completed` 且回复包含预设标记。预检 `pi auth check --no-refresh` 不输出凭据；脚本最多提交一次请求，不对未知结果重试。只使用临时 Server/Worker 数据，未清理用户数据。此为外部付费模型真实链路，而非本地假模型；不记录令牌、响应正文或费用数值，未获得计费平台的精确扣费收据。
+
+这项证据证明 **一个 Pi 模型的一次普通协调对话**，不代替其它 Runtime/模型、工具调用、审批、停止、恢复或完整票据签收。旧 `apps/e2e/pi-provider-https-offline.test.ts` 的独立回归仍然失败，不能因付费链路通过而抹去。
 
 ## 仍未验证/交付
 
 - 上传与其进度/恢复；显式重开目前已通过 Test Agent 桌面/手机浏览器验证，尚未覆盖 Worker 断线时的重开拒绝。模型从 Worker 清单消失时，UI 可选择同一 Agent 当前可用的模型，尚未进行独立真实浏览器负例验收。
-- 普通有效非付费 Runtime 的真实协调对话；Test Agent 不能代替 Pi/Claude/OpenCode 的验收。
+- 真实 Pi 付费模型单次协调对话已通过；Pi 的工具调用、其它模型/Runtime 及旧离线 Pi 用例的签名队列适配尚未完成。Test Agent 仍只作为可重复集成证据。
 - 会话审批、停止、模型切换、失败重试及断网重连的 Team 页真实浏览器逐项验收；跨 Team/Project/Worker 授权矩阵、迁移负例与完整 Server 套件。
 - Team Session 持久来源升级测试 `apps/server/src/test/team-coordination-source-migration.test.ts`：既有普通 Session 保留、迁移可重放，Team Task 绑定的 owner/Worker/Agent/Project Team/Run 越界被数据库拒绝（2/2）；`apps/server/src/test/capability-task-projection.test.ts` 覆盖 Team 成员移除后既有 Turn grant 和 Session 读取失效。定向合跑 `team-coordination-functional`、`team-coordination-entry`、`team-coordination-source-migration`、`capability-task-projection` 四文件 15/15 通过；不代表全套 Server 通过。
 - 旧的 `apps/e2e/pi-provider-https-offline.test.ts` 在本机 Pi 1.0.4 + 自有 HTTPS 假模型下重跑为 **0/1**：断言 `WorkerRuntime turn completed` 失败（第 91 行）；该用例的 WorkerRuntime 部分仍直接发送无签名的集群 `session.enqueue`，与当前签名命令合同不符。直接 Pi RPC 的成功不等于 Team 协调真实 Runtime 验收；此处保留失败，尚未修复/补齐端到端证据。

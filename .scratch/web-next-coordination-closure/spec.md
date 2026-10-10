@@ -4,7 +4,7 @@ Status: ready-for-agent
 
 ## Problem Statement
 
-Team 协调 Task 的领域模型及查询能力已实现；历史上 `GET /api/teams/:id/coordination/availability` 固定禁用、`POST /api/teams/:id/coordination/sessions` 在旧安全门后为 501，Web 仅显示诊断卡。现在首发、对话与历史恢复已可用（Test Agent + 真实桌面/手机浏览器验证），显式重开新 Session 已通过 Test Agent 桌面/手机浏览器验证，但有效非付费 Runtime 及其他完整验收仍未完成。此前把正常聊天绑定到隔离资格门，导致需求无法交付。
+Team 协调 Task 的领域模型及查询能力已实现；历史上 `GET /api/teams/:id/coordination/availability` 固定禁用、`POST /api/teams/:id/coordination/sessions` 在旧安全门后为 501，Web 仅显示诊断卡。现在首发、对话与历史恢复已可用（Test Agent + 真实桌面/手机浏览器验证），显式重开新 Session 已通过 Test Agent 桌面/手机浏览器验证，用户授权的真实付费 Pi Runtime 单次协调对话已完成（见 `docs/acceptance/web-next-team-coordination-browser-partial.md`），但其它完整验收仍未完成。此前把正常聊天绑定到隔离资格门，导致需求无法交付。
 
 用户最新决定：协调 Agent 如普通 Pi Agent 一样使用，**不对协调身份额外限制文件、改代码、终端或联网**；将隔离作为以后独立的安全能力。此决定取代原 spec 的 L1 作用域、六类写通道全部拒绝、书面残余风险接受和隔离门开关要求，见 [ADR 0008](../../docs/adr/0008-coordination-chat-ordinary-runtime-permissions.md)。历史 FAIL、探针和局部实现仍是真实历史，不改写为通过。
 
@@ -37,7 +37,7 @@ Team 成员在 Web 选择获权 Worker/Agent/Workspace，从首次发送自动�
 ## Out of Scope
 
 - 新增操作系统沙箱、宿主文件或网络访问隔离，以及协调身份专属的只读/禁 Shell 策略。安全加固可另行实施，不作为本功能先决。
-- 付费真实 Runtime、外部项目管理服务、自动派发与跨 Worker Session 迁移；依各自 spec 验收。
+- 将一次获授权的真实付费 Pi 对话推广为多模型/Runtime 的持续付费测试；外部项目管理服务、自动派发与跨 Worker Session 迁移依各自 spec 验收。
 - 历史 Worker 队列/备份清理或重置；需另行确认目标，不因本决定执行删除。
 
 ## Tickets
