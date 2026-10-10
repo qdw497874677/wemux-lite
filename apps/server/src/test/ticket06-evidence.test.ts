@@ -112,6 +112,28 @@ test('signed approval reaches deliverable transport with current access despite 
   assert.ok(frames.some(frame => frame.type === 'command' && frame.commandId === commandId && frame.authorization?.claims.kind === 'runtime.approval.resolve'))
 })
 
+test('expired approval refresh preserves identity and requires current authority', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ticket02-refresh-')), path = join(dir, 'server.db')
+  const f = await fixture(path)
+  t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
+  const service = new ServerService(f.store, f.signals, undefined, undefined, undefined,
+    new SessionAccessService(f.store, new ProjectAccessService(f.store)), f.commandSigning)
+  const id = 'refresh-approval' as CommandId
+  await service.resolveRuntimeApproval(f.independent.id, 'approval' as never, { commandId: id, turnId: 'worker-turn', decision: 'approve' }, instanceOperatorId)
+  const original = (await f.store.commands.getPendingCommand(id))!.authorization!
+  const expired = f.commandSigning.sign({ ...original.claims, issuedAt: new Date(Date.now() - 360_000).toISOString(), expiresAt: new Date(Date.now() - 60_000).toISOString() })
+  await f.store.transaction(tx => tx.commands.refreshApprovalAuthorization(id, expired))
+  assert.equal(await service.refreshPendingApproval(f.worker.id, id), true)
+  const fresh = (await f.store.commands.getPendingCommand(id))!.authorization!
+  assert.deepEqual(Object.fromEntries(Object.entries(fresh.claims).filter(([key]) => key !== 'issuedAt' && key !== 'expiresAt')), Object.fromEntries(Object.entries(original.claims).filter(([key]) => key !== 'issuedAt' && key !== 'expiresAt')))
+  assert.ok(Date.parse(fresh.claims.expiresAt) > Date.now())
+  const actor = (await f.store.identity.getUser(instanceOperatorId))!
+  await f.store.transaction(tx => tx.identity.saveUser({ ...actor, authVersion: (actor.authVersion ?? 0) + 1 }))
+  await f.store.transaction(tx => tx.commands.refreshApprovalAuthorization(id, expired))
+  assert.equal(await service.refreshPendingApproval(f.worker.id, id), false)
+  assert.deepEqual((await f.store.commands.getPendingCommand(id))!.authorization, expired)
+})
+
 test('unsigned backlog does not starve later signed approvals', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'ticket02-deliverable-window-')), path = join(dir, 'server.db')
   const f = await fixture(path)

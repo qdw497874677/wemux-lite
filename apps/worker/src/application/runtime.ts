@@ -267,10 +267,15 @@ export class WorkerRuntime {
     const previous = await this.store.commands.get(commandId)
     let receipt: CommandReceipt = { commandId, status: 'accepted' }
     // Never let an unsigned cluster frame replace a previously accepted command.
-    if (source === 'cluster' && (command.kind === 'session.enqueue' || command.kind === 'runtime.approval.resolve') && !verifyCommandAuthorization(this.store.identity(), this.workerId, commandId, command, authorization, Boolean(previous?.authorization))) {
+    if (source === 'cluster' && (command.kind === 'session.enqueue' || command.kind === 'runtime.approval.resolve') && !verifyCommandAuthorization(this.store.identity(), this.workerId, commandId, command, authorization, Boolean(previous?.authorization) || command.kind === 'runtime.approval.resolve')) {
       receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } }
-      // Do not poison a commandId: the Server can retry it with its original signed frame.
-      if (acknowledge) this.send({ type: 'ack', receipt })
+      // Expiry alone is a recoverable delivery failure: the Server must first
+      // receive the transport ACK and then reissue a newly signed envelope.
+      // A malformed/tampered assertion remains a terminal rejection.
+      const expiredApproval = command.kind === 'runtime.approval.resolve' && authorization &&
+        Date.parse(authorization.claims.expiresAt) <= Date.now() &&
+        verifyCommandAuthorization(this.store.identity(), this.workerId, commandId, command, authorization, true)
+      if (acknowledge && !expiredApproval) this.send({ type: 'ack', receipt })
       return receipt
     }
     // An unsigned historical queue cannot be replayed as a signed command ID.

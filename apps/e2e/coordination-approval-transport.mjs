@@ -17,7 +17,7 @@ import { ownedWorkerLaunch, removeOwnedServerDatabases } from './owned-worker-fi
 // Source: coordination-write-channel-probes.mjs. Proxy observes the real Upgrade/hello and
 // forwards every byte unchanged; only the negative cases inject RFC 6455 server-role frames.
 function transportProxy(port) {
-  const links = [], seen = [], receipts = [], cursor = { epoch: null, next: 1 }
+  const links = [], seen = [], receipts = [], transportAcks = [], cursor = { epoch: null, next: 1 }
   const parse = buffer => {
     if (buffer.length < 2) return null
     const masked = Boolean(buffer[1] & 128)
@@ -56,6 +56,7 @@ function transportProxy(port) {
         const value = decode(link.incoming.subarray(0, frame.total), frame)
         link.incoming = link.incoming.subarray(frame.total)
         if (value?.frameType === 'data' && value.payload?.type === 'ack') receipts.push(value.payload.receipt)
+        if (value?.frameType === 'transport.ack') transportAcks.push({ epoch: value.deliveryEpoch, through: value.ackThrough })
       }
     })
     upstream.on('data', chunk => {
@@ -77,22 +78,22 @@ function transportProxy(port) {
         }
         if (value?.frameType === 'data' && value.durability === 'durable' && value.deliveryEpoch === cursor.epoch) cursor.next = Math.max(cursor.next, value.directionSeq + 1)
         // Never persist full frames: capability grants and transport credentials can be inside them.
-        if (value?.frameType === 'data' && value.payload?.type === 'command') seen.push({ direction: 'toWorker', commandId: value.payload.commandId, kind: value.payload.command?.kind, signed: Boolean(value.payload.authorization?.signature) })
+        if (value?.frameType === 'data' && value.payload?.type === 'command') seen.push({ direction: 'toWorker', commandId: value.payload.commandId, kind: value.payload.command?.kind, signed: Boolean(value.payload.authorization?.signature), epoch: value.deliveryEpoch, seq: value.directionSeq })
       }
     })
   })
-  const inject = (commandId, command) => {
+  const inject = (commandId, command, authorization) => {
     const live = links.filter(l => l.mode === 'ws' && l.upgraded && !l.client.destroyed)
     assert.equal(live.length, 1, 'exactly one authenticated Worker WebSocket required for injection')
     assert.ok(cursor.epoch, 'real transport.hello must precede durable injection')
-    const frame = { frameType: 'data', durability: 'durable', deliveryEpoch: cursor.epoch, directionSeq: cursor.next++, messageId: randomUUID(), lane: 'command', payloadVersion: '1', expiresAt: null, payload: { type: 'command', commandId, command } }
+    const frame = { frameType: 'data', durability: 'durable', deliveryEpoch: cursor.epoch, directionSeq: cursor.next++, messageId: randomUUID(), lane: 'command', payloadVersion: '1', expiresAt: null, payload: { type: 'command', commandId, command, ...(authorization ? { authorization } : {}) } }
     const bytes = Buffer.from(JSON.stringify(frame))
     assert.ok(bytes.length < 65536, 'injected frame exceeds two-byte WS length')
     const header = bytes.length < 126 ? Buffer.from([129, bytes.length]) : Buffer.from([129, 126, bytes.length >> 8, bytes.length & 255])
     live[0].client.write(Buffer.concat([header, bytes]))
     return { epoch: frame.deliveryEpoch, seq: frame.directionSeq }
   }
-  return { server, inject, seen, receipts, close: async () => { for (const link of links) { link.client.destroy(); link.upstream.destroy() } await new Promise(resolve => server.close(resolve)) } }
+  return { server, inject, seen, receipts, transportAcks, connectionCount: () => links.filter(l => l.mode === 'ws').length, close: async () => { for (const link of links) { link.client.destroy(); link.upstream.destroy() } await new Promise(resolve => server.close(resolve)) } }
 }
 const eventually = async (read, accept, label, timeout = 30000) => {
   const until = Date.now() + timeout
@@ -171,11 +172,40 @@ try {
   await assert.rejects(memberSession.api(`/sessions/${id}/runtime/approvals/${encodeURIComponent(approvalId)}`, 'POST', { commandId: revokedId, turnId, decision: 'approve' }), /401|403/)
   assert.equal(await app.store.commands.getPendingCommand(revokedId), null, 'revoked actor created no approval command')
   results.push('revoked actor denied at admission without persisted approval')
-  step = 'authorized native approval'
+  step = 'transient Worker authorization failure on a healthy WS'
   const decisionId = 'ticket02-native-approval'
-  await api(`/sessions/${id}/runtime/approvals/${encodeURIComponent(approvalId)}`, 'POST', { commandId: decisionId, turnId, decision: 'approve' })
-  await eventually(() => api(`/commands/${decisionId}`), v => v.status === 'accepted', 'real approval receipt')
-  assert.equal(proxy.seen.filter(f => f.commandId === decisionId && f.signed).length, 1, 'signed approval delivered on real WS')
+  const realAuthorize = app.service.authorizeEnqueueLaunch.bind(app.service)
+  const signer = app.service.commandSigning
+  assert.ok(signer, 'Server signing identity required')
+  const realSign = signer.sign.bind(signer)
+  let denied = 0, recovered = false
+  app.service.authorizeEnqueueLaunch = async (target, commandId) => {
+    if (commandId === decisionId && !recovered && proxy.seen.some(f => f.commandId === decisionId)) { denied++; return { allowed: false } }
+    return realAuthorize(target, commandId)
+  }
+  signer.sign = claims => realSign(claims.commandId === decisionId ? { ...claims, expiresAt: new Date(Date.now() + 1_000).toISOString() } : claims)
+  try {
+    await api(`/sessions/${id}/runtime/approvals/${encodeURIComponent(approvalId)}`, 'POST', { commandId: decisionId, turnId, decision: 'approve' })
+    signer.sign = realSign
+    const first = await eventually(() => Promise.resolve(proxy.seen.find(f => f.commandId === decisionId && f.signed)), Boolean, 'signed approval traversed real WS')
+    await eventually(() => Promise.resolve(proxy.transportAcks.some(a => a.epoch === first.epoch && a.through >= first.seq) && denied > 0), Boolean, 'transport ACK despite denied application authorization')
+    assert.equal(proxy.receipts.some(r => r?.commandId === decisionId), false, 'temporary denial cannot issue terminal application receipt')
+    assert.equal(workerDocument('commands', decisionId), null, 'temporary denial cannot persist or invoke approval')
+    assert.equal((await api(`/commands/${decisionId}`)).status, 'pending')
+    // Initial serialized assertion expires after the transport ACK. The retry must
+    // mint a fresh envelope, not replay its expired assertion or skip the sequence.
+    await delay(1_200)
+    assert.ok(Date.parse((await app.store.commands.getPendingCommand(decisionId)).authorization.claims.expiresAt) <= Date.now())
+    recovered = true
+    const connectionCount = proxy.connectionCount()
+    await eventually(() => api(`/commands/${decisionId}`), v => v.status === 'accepted', 'same-connection terminal approval receipt', 15000)
+    assert.equal(proxy.connectionCount(), connectionCount, 'same healthy WebSocket throughout retry')
+    const attempts = proxy.seen.filter(f => f.commandId === decisionId && f.signed)
+    assert.ok(attempts.length >= 2 && attempts.some(f => f.seq > first.seq && f.epoch === first.epoch), 'fresh signed envelope after transport ACK with increasing directionSeq')
+    assert.ok(Date.parse((await app.store.commands.getPendingCommand(decisionId)).authorization.claims.expiresAt) > Date.now(), 'persisted authorization was refreshed after serialized expiry')
+    assert.ok(denied >= 1, 'transient denied launch occurred before recovery')
+  } finally { signer.sign = realSign; app.service.authorizeEnqueueLaunch = realAuthorize }
+  step = 'authorized native approval after recovery'
   assert.equal((await app.store.commands.getPendingCommand(decisionId))?.authorization?.claims.kind, 'runtime.approval.resolve')
   await eventually(journal, v => v.events.some(e => e.payload.kind === 'turn.finished' && e.payload.turnId === turnId && e.payload.outcome === 'completed') && v.events.filter(e => e.payload.kind === 'assistant.text.delta').map(e => e.payload.text).join('').includes('Native approval: approve'), 'native adapter approval effect and finished Turn')
   assert.equal((await journal()).events.filter(e => e.payload.kind === 'approval.resolved' && e.payload.approvalId === approvalId).length, 1, 'native decision recorded exactly once')
@@ -183,13 +213,31 @@ try {
   await api(`/sessions/${id}/runtime/approvals/${encodeURIComponent(approvalId)}`, 'POST', { commandId: decisionId, turnId, decision: 'approve' })
   assert.equal((await journal()).events.filter(e => e.payload.kind === 'approval.resolved' && e.payload.approvalId === approvalId).length, 1)
   assert.equal((await journal()).events.filter(e => e.payload.kind === 'turn.finished' && e.payload.turnId === turnId).length, 1)
-  results.push('actor admission → signed durable WS → Worker online reauthorization → live Test Agent native approval exactly once')
+  results.push('healthy WS transient denial → transport ACK → serialized expiry → fresh signed replay → one native approval and terminal application receipt')
   step = 'unsigned approval replay'
   const forged = `ticket02-unsigned-approval-${randomUUID()}`
   proxy.inject(forged, { kind: 'runtime.approval.resolve', sessionId: id, turnId, approvalId, decision: 'approve', decidedByAccountId: owner.id })
   assert.equal((await eventually(() => Promise.resolve(proxy.receipts.find(r => r?.commandId === forged)), Boolean, 'unsigned approval ACK')).status, 'rejected')
   assert.equal(workerDocument('commands', forged), null)
   results.push('unsigned durable approval rejected without command record')
+  step = 'expired and tampered assertions rejected before native invocation'
+  const original = (await app.store.commands.getPendingCommand(decisionId)).authorization
+  const signing = app.service.commandSigning
+  assert.ok(original && signing, 'real persisted signing assertion and signer required')
+  for (const variant of ['expired', 'tampered']) {
+    const forgedId = `ticket02-${variant}-${randomUUID()}`
+    const forgedCommand = { kind: 'runtime.approval.resolve', sessionId: id, turnId, approvalId, decision: 'approve', decidedByAccountId: owner.id }
+    const { createHash } = await import('node:crypto')
+    const claims = { ...original.claims, commandId: forgedId, commandDigest: createHash('sha256').update(JSON.stringify(forgedCommand)).digest('hex'), issuedAt: new Date(Date.now() - 120_000).toISOString(), expiresAt: new Date(Date.now() - 60_000).toISOString() }
+    const expired = signing.sign(claims)
+    const assertion = variant === 'tampered' ? { ...expired, claims: { ...expired.claims, expiresAt: new Date(Date.now() + 60_000).toISOString() } } : expired
+    const injected = proxy.inject(forgedId, forgedCommand, assertion)
+    await eventually(() => Promise.resolve(proxy.transportAcks.some(a => a.epoch === injected.epoch && a.through >= injected.seq)), Boolean, `${variant} transport ACK`)
+    await delay(150)
+    assert.equal(workerDocument('commands', forgedId), null, `${variant} approval never persisted`)
+  }
+  assert.equal((await journal()).events.filter(e => e.payload.kind === 'approval.resolved' && e.payload.approvalId === approvalId).length, 1)
+  results.push('expired and tampered assertions rejected without native replay')
   console.log(JSON.stringify({ status: 'pass', checks: results }))
 } catch (error) {
   console.error(`Ticket02 ${step}: ${error.stack ?? error}; completed=${JSON.stringify(results)}; worker=${JSON.stringify(worker?.logs())}`)

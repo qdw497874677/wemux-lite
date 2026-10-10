@@ -92,6 +92,31 @@ export class ServerService {
       })
     } catch { return { allowed: false } }
   }
+  /** Called at a bounded delivery wakeup. Expired windows are replaced only for the
+   * original actor/version and only while current access still permits execution. */
+  async refreshPendingApproval(workerId: WorkerId, commandId: CommandId): Promise<boolean> {
+    if (!this.commandSigning || !(await this.authorizeEnqueueLaunch(workerId, commandId)).allowed) return false
+    return this.store.transaction(async tx => {
+      const pending = await tx.commands.getPendingCommand(commandId)
+      if (!pending?.authorization || pending.workerId !== workerId || pending.command.kind !== 'runtime.approval.resolve' || (await tx.commands.get(commandId))?.status !== 'pending') return false
+      const old = pending.authorization.claims
+      if (old.version !== 2 || old.kind !== pending.command.kind || old.keyId !== this.commandSigning!.keyId || old.commandId !== commandId || old.workerId !== workerId || old.actorId !== pending.command.decidedByAccountId || old.commandDigest !== createHash('sha256').update(JSON.stringify(pending.command)).digest('hex')) return false
+      const actor = await tx.identity.getUser(old.actorId)
+      if (!actor || (actor.status ?? 'active') !== 'active' || (actor.authVersion ?? 0) !== old.actorAuthVersion) return false
+      const session = this.sessionAccess ? await this.sessionAccess.requireInTx(tx, old.actorId, old.sessionId, 'write').catch(() => null) : null
+      if (!session || session.binding.agent.workerId !== workerId || session.projectId !== old.projectId || session.workspaceId !== old.workspaceId || (session.taskId ?? null) !== old.taskId) return false
+      try {
+        await assertSessionTaskMutable(tx, session)
+        const state = await this.executionState(tx, old.sessionId)
+        if (state.activeTurnId !== pending.command.turnId || state.activeTurnOwnerId !== old.actorId) await this.sessionAccess?.requireInTx(tx, old.actorId, old.sessionId, 'control')
+      } catch { return false }
+      if ((await tx.resources.getWorker(workerId))?.connectionState === 'revoked') return false
+      if (Date.parse(old.expiresAt) > Date.now() + 30_000) return true
+      const issuedAt = now()
+      await tx.commands.refreshApprovalAuthorization(commandId, this.commandSigning!.sign({ ...old, issuedAt, expiresAt: new Date(Date.now() + 5 * 60_000).toISOString() }))
+      return true
+    })
+  }
   async listCommands(input: { workerId?: string; status?: string; limit?: number }) {
     const statuses: readonly CommandProjection['status'][] = ['pending', 'accepted', 'rejected', 'completed', 'failed', 'cancelled']
     const status = input.status === undefined ? undefined : statuses.find(value => value === input.status)

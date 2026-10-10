@@ -154,9 +154,7 @@ test('signed cluster approval cannot resolve while online reauthorization is una
     // This test exercises a runtime lacking a fresh authorization callback.
     const offline = new WorkerRuntime(f.store, new LocalProvisioner(join(f.home, 'workspaces')), [new TestAgent(1)], { send: message => f.events.push(message) }, workerId, 'offline')
     await offline.receive({ type: 'command', commandId, command, authorization: { claims, signature: sign(null, authorizationBytes(claims), signingKeys.privateKey).toString('base64url') } })
-    const ack = f.events.filter(event => event.type === 'ack').at(-1)
-    assert.equal(ack?.type, 'ack')
-    if (ack?.type === 'ack') assert.deepEqual(ack.receipt, { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: true } })
+    assert.equal(f.events.filter(event => event.type === 'ack' && event.receipt.commandId === commandId).length, 0, 'temporary online denial cannot issue a terminal application receipt')
     assert.equal(await f.store.commands.get(commandId), null)
     assert.equal((await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events.length, journal.events.length)
     await offline.shutdown()

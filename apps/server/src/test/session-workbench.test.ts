@@ -12,6 +12,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentKey, CommandId, EventSeq, ModelId, SessionEventPayload, TurnId } from '@wemux/domain'
 import { SqliteServerStore } from '../storage/sqlite/store.js'
+import { SharedSqliteDatabase } from '../storage/sqlite/shared-database.ts'
+import { CommandSigningIdentity } from '../application/command-signing.ts'
 import { ServerService, now, canonicalCommand } from '../application/server-service.js'
 import { Notifications } from '../application/notifications.js'
 import { AuthenticationService } from '../application/auth.js'
@@ -20,8 +22,9 @@ import { SessionStreams } from '../http/sse.js'
 import { seedOperator, administratorDirectory, instanceOperatorId } from './fixtures/administrator.js'
 
 async function fixture(path = ':memory:') {
-  const store = new SqliteServerStore(path)
-  const service = new ServerService(store, new Notifications())
+  const database = new SharedSqliteDatabase(path)
+  const store = new SqliteServerStore(database)
+  const service = new ServerService(store, new Notifications(), undefined, undefined, undefined, new SessionAccessService(store, new ProjectAccessService(store)), new CommandSigningIdentity(database.connection))
   const { project, token } = await seedOperator(store, service)
   const { worker } = await service.enroll({ token: (await service.createEnrollment({})).token, name: 'test' })
   await store.transaction(tx => tx.resources.saveWorker({ ...worker, capabilities: [{ agentKey: 'pi' as AgentKey, displayName: 'Pi', version: null, mode: 'execution', availability: { status: 'available' }, modelSwap: true, models: [{ modelId: 'test' as ModelId, displayName: 'Test', source: 'detected' }, { modelId: 'test-next' as ModelId, displayName: 'Test Next', source: 'detected' }] }] }))
@@ -32,17 +35,18 @@ async function fixture(path = ':memory:') {
   let seq = 0
   const append = (...payloads: SessionEventPayload[]) => store.transaction(tx => tx.cache.applyEvents(session.id, payloads.map(payload => ({ sessionId: session.id, seq: ++seq as EventSeq, occurredAt: now(), payload }))))
   const streams = new SessionStreams(service)
-  const server = createServer(httpHandler({ service, auth: new AuthenticationService(store, administratorDirectory(store)), streams }))
+  const sessionAccess = new SessionAccessService(store, new ProjectAccessService(store))
+  const server = createServer(httpHandler({ service, auth: new AuthenticationService(store, administratorDirectory(store)), streams, sessionAccess }))
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
   assert.ok(address && typeof address !== 'string')
   const request = (path: string, method = 'GET', body?: unknown) => fetch(`http://127.0.0.1:${address.port}/api${path}`, { method, headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
-  return { store, service, session, create, append, request, async close() { streams.close(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); store.close() } }
+  return { store, service, session, create, append, request, async close() { streams.close(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); store.close(); database.close() } }
 }
 
 test('queued cancellation uses submission identity, rejects other Sessions and is idempotent', async t => {
   const f = await fixture(); t.after(() => f.close())
-  const queued = await f.service.enqueue(f.session.id, { commandId: 'submit', messageId: 'message', content: 'hello' })
+  const queued = await f.service.enqueue(f.session.id, { commandId: 'submit', messageId: 'message', content: 'hello' }, instanceOperatorId)
   const path = `/sessions/${f.session.id}/messages/${queued.commandId}/cancel`
   assert.equal((await f.request(path, 'POST', { commandId: 'cancel' })).status, 202)
   assert.equal((await f.request(path, 'POST', { commandId: 'cancel' })).status, 202)
@@ -51,22 +55,22 @@ test('queued cancellation uses submission identity, rejects other Sessions and i
   const other = (await f.create('other')).session
   assert.equal((await f.request(`/sessions/${other.id}/messages/submit/cancel`, 'POST', {})).status, 404)
   assert.equal((await f.request(`/sessions/${f.session.id}/messages/message/cancel`, 'POST', {})).status, 404)
-  const another = await f.service.enqueue(f.session.id, { content: 'another' })
+  const another = await f.service.enqueue(f.session.id, { content: 'another' }, instanceOperatorId)
   assert.equal((await f.request(`/sessions/${f.session.id}/messages/${another.commandId}/cancel`, 'POST', { commandId: 'cancel' })).status, 409)
   assert.equal((await f.service.listCommands({})).filter(c => c.commandId === 'cancel').length, 1)
 })
 
 test('execution view merges paginated journal and unsettled deliveries without resurrecting consumed messages; stop retry retains target', async t => {
   const f = await fixture(); t.after(() => f.close())
-  const a = await f.service.enqueue(f.session.id, { commandId: 'a', content: 'first' })
-  const b = await f.service.enqueue(f.session.id, { commandId: 'b', content: 'second' })
-  const c = await f.service.enqueue(f.session.id, { commandId: 'c', content: 'in transit' })
+  const a = await f.service.enqueue(f.session.id, { commandId: 'a', content: 'first' }, instanceOperatorId)
+  const b = await f.service.enqueue(f.session.id, { commandId: 'b', content: 'second' }, instanceOperatorId)
+  const c = await f.service.enqueue(f.session.id, { commandId: 'c', content: 'in transit' }, instanceOperatorId)
   const turnId = 'turn-one' as TurnId
   await f.append({ kind: 'message.queued', ...a, content: 'first', position: 0 }, { kind: 'message.queued', ...b, content: 'second', position: 1 }, { kind: 'turn.started', turnId, messageId: a.messageId })
   await f.append(...Array.from({ length: 501 }, (): SessionEventPayload => ({ kind: 'assistant.text.delta', turnId, text: 'x' })))
   const view = await (await f.request(`/sessions/${f.session.id}`)).json()
   assert.equal(view.activeTurnId, turnId)
-  assert.deepEqual(view.queuedMessages, [{ commandId: 'b', messageId: 'b', content: 'second', position: 1 }, { commandId: 'c', messageId: 'c', content: 'in transit', position: null }])
+  assert.deepEqual(view.queuedMessages, [{ commandId: 'b', messageId: 'b', content: 'second', position: 1 }, { commandId: 'c', messageId: 'c', content: 'in transit', sentByAccountId: instanceOperatorId, position: null }])
   assert.ok(view.freshness)
   const stop = `/sessions/${f.session.id}/turn/stop`
   assert.equal((await f.request(stop, 'POST', { commandId: 'wrong-turn', turnId: 'other' })).status, 409)
@@ -293,7 +297,7 @@ test('direct approval HTTP requires explicit Turn and preserves it across receip
   }
   const body = { commandId: 'explicit-turn', decision: 'approve', turnId: 'original-turn' }
   assert.equal((await f.request(path, 'POST', body)).status, 202)
-  assert.deepEqual((await f.store.commands.getPendingCommand(body.commandId as CommandId))!.command, { kind: 'runtime.approval.resolve', sessionId: f.session.id, turnId: body.turnId, approvalId: 'identity', decision: 'approve' })
+  assert.deepEqual((await f.store.commands.getPendingCommand(body.commandId as CommandId))!.command, { kind: 'runtime.approval.resolve', sessionId: f.session.id, turnId: body.turnId, approvalId: 'identity', decision: 'approve', decidedByAccountId: instanceOperatorId })
   assert.equal((await f.request(path, 'POST', body)).status, 202)
   assert.equal((await f.request(path, 'POST', { ...body, turnId: 'new-turn' })).status, 409)
 })

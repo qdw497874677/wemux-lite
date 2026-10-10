@@ -645,6 +645,15 @@ export class SqliteServerStore implements ServerStore {
         const projection: CommandProjection = { commandId: r.commandId, workerId: r.workerId, payloadFingerprint: r.payloadFingerprint, status: 'pending', createdAt: r.createdAt, updatedAt: r.createdAt }
         this.db.prepare('INSERT INTO commands VALUES(?,?,?,?,?)').run(r.commandId, r.workerId, 'pending', JSON.stringify(r), JSON.stringify(projection))
       },
+      refreshApprovalAuthorization: async (id, authorization) => {
+        const row = this.db.prepare("SELECT data FROM commands WHERE id=? AND status='pending'").get(id)
+        if (!row) throw new AppError(409, 'Approval command is no longer pending')
+        const pending = JSON.parse(String(row.data)) as PendingCommand
+        if (pending.command.kind !== 'runtime.approval.resolve' || !pending.authorization) throw new AppError(409, 'Cannot refresh unsigned or non-approval command')
+        const original = pending.authorization.claims, refreshed = authorization.claims
+        if (original.version !== 2 || refreshed.version !== 2 || original.kind !== refreshed.kind || original.keyId !== refreshed.keyId || original.commandId !== refreshed.commandId || original.workerId !== refreshed.workerId || original.sessionId !== refreshed.sessionId || original.projectId !== refreshed.projectId || original.workspaceId !== refreshed.workspaceId || original.taskId !== refreshed.taskId || original.actorId !== refreshed.actorId || original.actorAuthVersion !== refreshed.actorAuthVersion || original.commandDigest !== refreshed.commandDigest) throw new AppError(409, 'Approval authorization identity changed')
+        this.db.prepare("UPDATE commands SET data=? WHERE id=? AND status='pending'").run(JSON.stringify({ ...pending, authorization }), id)
+      },
       recordReceipt: async (receipt, at) => {
         const p = this.commandProjection(receipt.commandId)
         if (!p) throw new AppError(404, 'Unknown command')
