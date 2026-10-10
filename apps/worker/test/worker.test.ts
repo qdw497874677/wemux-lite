@@ -118,8 +118,15 @@ test('publication failure and failed terminal transaction retain ownership until
   let release!: () => void
   const blocked = new Promise<void>(resolve => { release = resolve })
   let failed = false
+  let activeAtFailure = false
+  let finalizationBlocked = false
   f.store.transaction = work => transaction(async tx => work({ ...tx, sessions: { ...tx.sessions, finishTurn: async result => {
-    if (!failed) { failed = true; throw new Error('finalization fault') }
+    if (!failed) {
+      activeAtFailure = Boolean((await tx.sessions.get(sessionId))?.activeTurnId)
+      failed = true
+      throw new Error('finalization fault')
+    }
+    finalizationBlocked = true
     await blocked
     return tx.sessions.finishTurn(result)
   } } }))
@@ -127,11 +134,14 @@ test('publication failure and failed terminal transaction retain ownership until
     await f.send('fault-first', enqueue('fault-first'))
     await until(() => failed)
     assert.equal(ownership.occupied(sessionId), true)
-    assert.ok((await f.store.sessions.get(sessionId))?.activeTurnId)
-    await f.send('fault-second', enqueue('fault-second'))
+    assert.equal(activeAtFailure, true)
+    const secondSend = f.send('fault-second', enqueue('fault-second'))
+    await until(() => finalizationBlocked)
+    assert.equal(ownership.occupied(sessionId), true)
+    release()
+    await secondSend
     await competitor.connected()
     assert.equal((await f.store.sessions.listQueued(sessionId)).length, 1)
-    release()
     await until(async () => (await f.store.sessions.listQueued(sessionId)).length === 0)
     await until(() => !ownership.occupied(sessionId))
     const turns = await f.store.listSessions()
@@ -146,8 +156,15 @@ test('execution finalization transaction failure never reexecutes an active Turn
   let release!: () => void
   const blocked = new Promise<void>(resolve => { release = resolve })
   let failed = false
+  let activeAtFailure = false
+  let finalizationBlocked = false
   f.store.transaction = work => transaction(async tx => work({ ...tx, sessions: { ...tx.sessions, finishTurn: async result => {
-    if (!failed) { failed = true; throw new Error('finalization fault') }
+    if (!failed) {
+      activeAtFailure = Boolean((await tx.sessions.get(sessionId))?.activeTurnId)
+      failed = true
+      throw new Error('finalization fault')
+    }
+    finalizationBlocked = true
     await blocked
     return tx.sessions.finishTurn(result)
   } } }))
@@ -155,10 +172,13 @@ test('execution finalization transaction failure never reexecutes an active Turn
     await f.send('execution-first', enqueue('execution-first'))
     await until(() => failed)
     assert.equal(ownership.occupied(sessionId), true)
-    assert.ok((await f.store.sessions.get(sessionId))?.activeTurnId)
-    await f.send('execution-second', enqueue('execution-second'))
-    assert.equal((await f.store.sessions.listQueued(sessionId)).length, 1)
+    assert.equal(activeAtFailure, true)
+    const secondSend = f.send('execution-second', enqueue('execution-second'))
+    await until(() => finalizationBlocked)
+    assert.equal(ownership.occupied(sessionId), true)
     release()
+    await secondSend
+    assert.equal((await f.store.commands.get('execution-second' as CommandId))?.state, 'completed')
     await until(async () => (await f.store.sessions.listQueued(sessionId)).length === 0)
     await until(async () => !(await f.store.sessions.get(sessionId))?.activeTurnId)
     const first = (await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events
