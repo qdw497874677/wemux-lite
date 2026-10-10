@@ -36,4 +36,6 @@ WEMUX_NEXT_TEST_DIST="$DIST" TMPDIR=/home/qdw/.cache/wemux-test-tmp \
 - 上传与其进度/恢复；显式重开目前已通过 Test Agent 桌面/手机浏览器验证，尚未覆盖 Worker 断线时的重开拒绝。模型从 Worker 清单消失时，UI 可选择同一 Agent 当前可用的模型，尚未进行独立真实浏览器负例验收。
 - 普通有效非付费 Runtime 的真实协调对话；Test Agent 不能代替 Pi/Claude/OpenCode 的验收。
 - 会话审批、停止、模型切换、失败重试及断网重连的 Team 页真实浏览器逐项验收；跨 Team/Project/Worker 授权矩阵、迁移负例与完整 Server 套件。
+- Team Session 持久来源升级测试 `apps/server/src/test/team-coordination-source-migration.test.ts`：既有普通 Session 保留、迁移可重放，Team Task 绑定的 owner/Worker/Agent/Project Team/Run 越界被数据库拒绝（2/2）；`apps/server/src/test/capability-task-projection.test.ts` 覆盖 Team 成员移除后既有 Turn grant 和 Session 读取失效。均为定向测试，不代表全套 Server 通过。
+- 旧的 `apps/e2e/pi-provider-https-offline.test.ts` 在本机 Pi 1.0.4 + 自有 HTTPS 假模型下重跑为 **0/1**：断言 `WorkerRuntime turn completed` 失败（第 91 行）；该用例的 WorkerRuntime 部分仍直接发送无签名的集群 `session.enqueue`，与当前签名命令合同不符。直接 Pi RPC 的成功不等于 Team 协调真实 Runtime 验收；此处保留失败，尚未修复/补齐端到端证据。
 - 通用 Connector grant 与命令帧安全加固票 01/02 未完成；并非用户决定的协调专属隔离开门前置，仍须独立跟踪。
