@@ -21,7 +21,7 @@ const definition = { providerKey: 'openai-compatible' as const, endpoint: 'https
 const agent: AgentAdapter = { agentKey, mode: 'execution', async detect() { return { agentKey, displayName: 'Fake Pi', version: '1', mode: 'execution' as const, executablePath: '/fake/pi', diagnostics: [], availability: { status: 'available' as const }, models: [{ modelId, displayName: 'Offline', source: 'configured' as const }] } }, async startTurn() { throw new Error('unexpected legacy adapter') } }
 const until = async (predicate: () => Promise<boolean>) => { for (let i = 0; i < 200; i++) { if (await predicate()) return; await new Promise(resolve => setTimeout(resolve, 10)) } throw new Error('Timed out waiting for provider Turn') }
 
-async function fixture(resolver?: PiProviderResolver) {
+async function fixture(resolver?: PiProviderResolver, controls?: { prepare?: import('../src/application/ports/agent-launch-context.ts').AgentLaunchContextProvider; authorize?: (commandId: import('@wemux/domain').CommandId) => Promise<boolean> }) {
   const home = await mkdtemp(join(tmpdir(), 'wemux-provider-runtime-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
   const keys = generateKeyPairSync('ed25519')
@@ -36,7 +36,7 @@ async function fixture(resolver?: PiProviderResolver) {
       async command() {}, async resolveApproval() {}, async close() {},
     }
   } }
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send() {} }, workerId, 'fixture', undefined, undefined, new Map([[agentKey, adapter]]), null, undefined, resolver, undefined, async () => true)
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send() {} }, workerId, 'fixture', controls?.prepare, undefined, new Map([[agentKey, adapter]]), null, undefined, resolver, undefined, controls?.authorize ?? (async () => true))
   await runtime.initialize()
   if (resolver) runtime.providerConnected()
   const workspaceId = 'provider-workspace' as never
@@ -54,6 +54,60 @@ async function fixture(resolver?: PiProviderResolver) {
   await send('create-provider-session', { kind: 'session.create', session: { sessionId, binding: { workspaceId, agent: { workerId, agentKey }, modelId } } })
   return { home, store, runtime, opened, send, projectId, cleanup: async () => { await runtime.shutdown(); store.close(); await rm(home, { recursive: true, force: true }) } }
 }
+
+test('claimed cluster Turn revoked during delayed preparation never opens a private Agent', async () => {
+  let release!: () => void
+  let entered!: () => void
+  const waiting = new Promise<void>(resolve => { release = resolve })
+  const preparing = new Promise<void>(resolve => { entered = resolve })
+  let allowed = true, checks = 0, cleaned = 0, resolved = 0
+  const f = await fixture(async () => { resolved++; return { definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'opaque', bindingId: 'binding' } }, {
+    prepare: { async prepare() { entered(); await waiting; return { context: null, async cleanup() { cleaned++ } } } },
+    async authorize() { checks++; return allowed },
+  })
+  try {
+    await f.send('revoked-during-prepare', { kind: 'session.enqueue', sessionId, message: { messageId: 'revoked-preparation' as never, content: 'never run', sentByAccountId: 'actor' as never } })
+    await preparing
+    assert.equal((await f.store.sessions.get(sessionId))?.runtimeState, 'running')
+    allowed = false
+    release()
+    await until(async () => (await f.store.sessions.get(sessionId))?.runtimeState === 'failed')
+    assert.ok(checks >= 2)
+    assert.equal(resolved, 0)
+    assert.equal(cleaned, 1)
+    assert.deepEqual(f.opened, [])
+    assert.equal((await f.store.sessions.listQueued(sessionId)).length, 0)
+    assert.equal((await f.store.sessions.get(sessionId))?.activeTurnId, null)
+    const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })
+    assert.ok(journal.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'failed'))
+    assert.ok(!journal.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'completed'))
+    assert.doesNotMatch(JSON.stringify(journal), /runtime-private-secret-8415/)
+  } finally { release(); await f.cleanup() }
+})
+
+test('revocation while private Provider resolution is pending prevents first iterator read', async () => {
+  let release!: () => void
+  let entered!: () => void
+  const waiting = new Promise<void>(resolve => { release = resolve })
+  const resolving = new Promise<void>(resolve => { entered = resolve })
+  let allowed = true, checks = 0
+  const f = await fixture(async () => { entered(); await waiting; return { definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'opaque', bindingId: 'binding' } }, {
+    async authorize() { checks++; return allowed },
+  })
+  try {
+    await f.send('revoked-during-provider', { kind: 'session.enqueue', sessionId, message: { messageId: 'revoked-provider' as never, content: 'never run', sentByAccountId: 'actor' as never } })
+    await resolving
+    allowed = false
+    release()
+    await until(async () => (await f.store.sessions.get(sessionId))?.runtimeState === 'failed')
+    assert.ok(checks >= 3)
+    assert.deepEqual(f.opened, [], 'no first iterator.next can open a private child')
+    assert.equal((await f.store.sessions.get(sessionId))?.activeTurnId, null)
+    const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })
+    assert.doesNotMatch(JSON.stringify(journal), /runtime-private-secret-8415/)
+    assert.ok(journal.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'failed'))
+  } finally { release(); await f.cleanup() }
+})
 
 test('cluster Pi Provider Turn uses Worker-only resolver and persists no Secret or native session', async () => {
   const calls: string[] = []

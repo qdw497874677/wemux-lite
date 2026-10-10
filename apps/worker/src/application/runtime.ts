@@ -29,6 +29,7 @@ const WRITE_CHANNEL_CLOSED = 'write_channel_closed: 平台当前未开放文件�
 const DEFAULT_AGENT_IDLE_TIMEOUT_MS = 30_000
 const DEFAULT_AGENT_MAX_TIMEOUT_MS = 10 * 60_000
 class AgentTimeoutError extends Error {}
+class LaunchAuthorizationDeniedError extends Error {}
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
   if (value && typeof value === 'object') return `{${Object.entries(value).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(',')}}`
@@ -482,7 +483,8 @@ export class WorkerRuntime {
         await this.publish(); return
       }
       const queued = (await this.store.sessions.listQueued(id))[0]
-      if (queued && !(await this.isLocalSession(id))) {
+      const localSession = await this.isLocalSession(id)
+      if (queued && !localSession) {
         const record = await this.store.commands.get(queued.submissionCommandId)
         if (!record?.authorization || !verifyEnqueueAuthorization(this.store.identity(), this.workerId, queued.submissionCommandId, record.command, record.authorization, true)) return
         // A failed HTTP check cannot launch; bounded retries recover transient failures
@@ -500,7 +502,7 @@ export class WorkerRuntime {
       const turn = await this.store.transaction(tx => tx.sessions.claimNext(id))
       if (!turn) return
       await this.publish()
-      await this.execute(turn)
+      await this.execute(turn, localSession ? undefined : queued?.submissionCommandId ?? null)
     }
   }
   private retryLaunch(id: SessionId, commandId: CommandId) {
@@ -523,18 +525,31 @@ export class WorkerRuntime {
     for (const retry of this.launchRetries.values()) if (retry.timer) clearTimeout(retry.timer)
     this.launchRetries.clear()
   }
-  private async execute(turn: Turn) {
+  private async execute(turn: Turn, clusterCommandId: CommandId | null | undefined) {
     let outcome: AgentTurnOutcome = { status: 'failed', failure: { code: 'agent-error', message: 'Agent ended without a terminal event' } }
     let iterator: AsyncIterator<AgentEvent> | null = null
     let privateProvider = false
     const launchGeneration = this.providerGeneration
+    // Claimed Turns cannot safely return to the queue: a retry could launch the
+    // same invocation twice. Denial finishes this Turn as failed and releases the
+    // active slot; subsequent queued Turns remain subject to their own checks.
+    const recheckLaunch = async () => {
+      if (clusterCommandId === undefined) return
+      if (clusterCommandId === null) throw new LaunchAuthorizationDeniedError()
+      let allowed = false
+      try { allowed = await this.authorizeLaunch?.(clusterCommandId) === true }
+      catch { /* Offline or failed HTTP checks must fail closed. */ }
+      if (!allowed) throw new LaunchAuthorizationDeniedError()
+    }
     try {
+      await recheckLaunch()
       const session = (await this.store.sessions.get(turn.sessionId))!
       const workspace = (await this.store.workspaces.get(session.binding.workspaceId))!
       // Only pre-upgrade Turns lack a snapshot. Null explicitly selects Agent default.
       const modelId = Object.hasOwn(turn, 'modelId') ? turn.modelId! : session.binding.modelId
       const prepared = await this.launchContexts.prepare(turn)
       try {
+        await recheckLaunch()
         const fingerprint = createHash('sha256').update(canonical({ cwd: workspace.rootPath, modelId, nativeSession: session.nativeSession })).digest('hex')
         const customPi = session.binding.agent.agentKey === 'pi' && modelId?.startsWith('openai-compatible::')
         // This branch is intentionally cluster-only; local Web Sessions never
@@ -549,6 +564,7 @@ export class WorkerRuntime {
           catch { throw new Error('pi_provider_unavailable') }
           if (!provider || !this.providerConnectionOpen || this.providerGeneration !== launchGeneration) throw new Error('pi_provider_unavailable')
         }
+        await recheckLaunch()
         const runRequest = {
           appName: 'wemux-worker',
           userId: this.workerId,
@@ -569,6 +585,9 @@ export class WorkerRuntime {
           : this.agentRunner.run(runRequest))[Symbol.asyncIterator]()
         const stoppingBeforeRun = (await this.store.sessions.getTurn(turn.id))?.state === 'stopping'
         const stopBeforeFirstRead = this.closing || stoppingBeforeRun || (privateProvider && (!this.providerConnectionOpen || this.providerGeneration !== launchGeneration))
+        // The last asynchronous admission check sits immediately before the
+        // first read (the point where an async generator can start a process).
+        await recheckLaunch()
         const startedAt = Date.now()
         let firstRead = true
         while (true) {
@@ -630,7 +649,9 @@ export class WorkerRuntime {
         await prepared.cleanup()
       }
     } catch (error) {
-      const message = privateProvider
+      const message = error instanceof LaunchAuthorizationDeniedError
+        ? '启动授权已失效或暂时无法验证，智能体未启动'
+        : privateProvider
         ? 'Pi Provider 不可用或执行失败，请检查 Worker 本地配置'
         : error instanceof Error ? error.message : 'Agent failed'
       outcome = { status: 'failed', failure: {
