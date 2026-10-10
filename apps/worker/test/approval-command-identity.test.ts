@@ -232,7 +232,7 @@ test('approval queued body is snapshotted; receipt replay still checks host', as
   await f.runtime.receive({ type: 'command', commandId: 'snapshot' as never, command: f.body(target) })
   assert.equal(f.calls.length, 1)
   const ack = f.sent.findLast(message => message.type === 'ack')
-  assert.ok(ack?.type === 'ack'); rejected(ack.receipt, /host scope mismatch/)
+  assert.ok(ack?.type === 'ack'); rejected(ack.receipt, /Command authorization unavailable/)
   assert.equal((await f.store.commands.get('snapshot' as never))?.command.kind, 'runtime.approval.resolve')
 })
 

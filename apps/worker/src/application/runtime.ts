@@ -1,6 +1,6 @@
 import { parseVerifiedServerFileWriteFrame } from '@wemux/wire-protocol/file-admission-node'
 import { WorkerFileWriteExecutor } from './file-write-executor.js'
-import { verifyEnqueueAuthorization } from './command-authorization.js'
+import { verifyCommandAuthorization } from './command-authorization.js'
 import type { FileWriteIngress } from '../transport/types.js'
 import { createHash } from 'node:crypto'
 import { projectAgentEventToSessionPayload, type AgentEvent } from '@wemux/agent-interchange'
@@ -267,14 +267,14 @@ export class WorkerRuntime {
     const previous = await this.store.commands.get(commandId)
     let receipt: CommandReceipt = { commandId, status: 'accepted' }
     // Never let an unsigned cluster frame replace a previously accepted command.
-    if (source === 'cluster' && command.kind === 'session.enqueue' && !verifyEnqueueAuthorization(this.store.identity(), this.workerId, commandId, command, authorization, Boolean(previous?.authorization))) {
+    if (source === 'cluster' && (command.kind === 'session.enqueue' || command.kind === 'runtime.approval.resolve') && !verifyCommandAuthorization(this.store.identity(), this.workerId, commandId, command, authorization, Boolean(previous?.authorization))) {
       receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } }
       // Do not poison a commandId: the Server can retry it with its original signed frame.
       if (acknowledge) this.send({ type: 'ack', receipt })
       return receipt
     }
     // An unsigned historical queue cannot be replayed as a signed command ID.
-    if (source === 'cluster' && command.kind === 'session.enqueue' && previous && !previous.authorization) {
+    if (source === 'cluster' && (command.kind === 'session.enqueue' || command.kind === 'runtime.approval.resolve') && previous && !previous.authorization) {
       receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } }
       if (acknowledge) this.send({ type: 'ack', receipt })
       return receipt
@@ -289,6 +289,11 @@ export class WorkerRuntime {
       return receipt
     }
     try {
+      // Approval resolution unblocks native execution. Verify current access before any journal or adapter effect.
+      if (source === 'cluster' && command.kind === 'runtime.approval.resolve' && !(await this.authorizeLaunch?.(commandId))) {
+        if (acknowledge) this.send({ type: 'ack', receipt: { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: true } } })
+        return { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: true } }
+      }
       await this.validate(command, source)
       let connectorReport: Omit<ConnectorRevisionReport, 'requestId' | 'connectorId' | 'projectId' | 'workerId' | 'revision' | 'errorCode' | 'occurredAt'> | null = null
       if (command.kind === 'connector.definition.sync') connectorReport = await this.connectorControl!.syncClusterDefinition(command.definition, this.workerId)
@@ -510,7 +515,7 @@ export class WorkerRuntime {
       const localSession = await this.isLocalSession(id)
       if (queued && !localSession) {
         const record = await this.store.commands.get(queued.submissionCommandId)
-        if (!record?.authorization || !verifyEnqueueAuthorization(this.store.identity(), this.workerId, queued.submissionCommandId, record.command, record.authorization, true)) return
+        if (!record?.authorization || !verifyCommandAuthorization(this.store.identity(), this.workerId, queued.submissionCommandId, record.command, record.authorization, true)) return
         // A failed HTTP check cannot launch; bounded retries recover transient failures
         // without a WebSocket reconnect. A new command or connection can wake it again.
         let allowed = false

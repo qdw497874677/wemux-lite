@@ -49,6 +49,26 @@ function snapshot(db: DatabaseSync) {
   return db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => ({ name: row.name, rows: db.prepare(`SELECT * FROM "${String(row.name).replaceAll('"', '""')}" ORDER BY rowid`).all() }))
 }
 
+test('cluster approval decision is signed and bound to issuer, target and worker before dispatch', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ticket02-approval-')), path = join(dir, 'server.db')
+  const f = await fixture(path)
+  t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
+  const sessionId = f.independent.id
+  const commandId = 'ticket02-approval' as CommandId
+  await f.server.resolveRuntimeApproval(sessionId, 'approval' as never, { commandId, turnId: 'turn', decision: 'approve' }, instanceOperatorId)
+  const pending = await f.store.commands.getPendingCommand(commandId)
+  assert.equal(pending?.command.kind, 'runtime.approval.resolve')
+  assert.equal(pending?.authorization?.claims.version, 2)
+  assert.equal(pending?.authorization?.claims.kind, 'runtime.approval.resolve')
+  assert.equal(pending?.authorization?.claims.actorId, instanceOperatorId)
+  assert.equal(pending?.authorization?.claims.workerId, f.worker.id)
+  assert.equal(pending?.authorization?.claims.sessionId, sessionId)
+  assert.equal((await f.store.commands.listDeliverable(f.worker.id, 100)).some(item => item.commandId === commandId), true)
+  // No active Turn matches this forged target; a signed assertion is not fresh authority.
+  assert.deepEqual(await f.server.authorizeEnqueueLaunch(f.worker.id, commandId), { allowed: false })
+  assert.deepEqual(await f.server.authorizeEnqueueLaunch('another-worker' as WorkerId, commandId), { allowed: false })
+})
+
 // Direct SQL failures must leave both the statement and enclosing transaction atomic.
 test('Ticket06 direct SQLite insert/update/delete matrix, exact errors and all-table rollback across restart', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'ticket06-matrix-')), path = join(dir, 'server.db')

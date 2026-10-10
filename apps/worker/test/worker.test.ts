@@ -102,6 +102,67 @@ async function fixture() {
   return { home, store, runtime, events, send, cleanup: async () => { await runtime.shutdown(); store.close(); await rm(home, { recursive: true, force: true }) } }
 }
 
+test('cluster approval without a signed binding is rejected before journal or native resolution', async () => {
+  const f = await fixture()
+  try {
+    const target = { kind: 'runtime.approval.resolve', sessionId, turnId: 'turn' as never, approvalId: 'approval' as never, decision: 'approve' as const, decidedByAccountId: 'actor' as never }
+    const before = await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })
+    await f.runtime.receive({ type: 'command', commandId: 'unsigned-approval' as CommandId, command: target })
+    const ack = f.events.filter(event => event.type === 'ack').at(-1)
+    assert.equal(ack?.type, 'ack')
+    if (ack?.type === 'ack') assert.deepEqual(ack.receipt, { commandId: 'unsigned-approval', status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } })
+    assert.equal((await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events.length, before.events.length)
+    assert.equal(await f.store.commands.get('unsigned-approval' as CommandId), null)
+  } finally { await f.cleanup() }
+})
+
+test('cluster approval rejects forged signature, wrong audience and expired binding before online check', async () => {
+  const f = await fixture()
+  try {
+    const command: WorkerCommand = { kind: 'runtime.approval.resolve', sessionId, turnId: 'turn' as never, approvalId: 'approval' as never, decision: 'approve', decidedByAccountId: 'actor' as never }
+    const signFrame = (id: string) => {
+      const commandId = id as CommandId
+      const claims: EnqueueAuthorization = { version: 2, kind: 'runtime.approval.resolve', keyId: signingKeyId, commandId, workerId, sessionId, projectId: 'project' as never, workspaceId: workspace.workspace.id, taskId: null, actorId: 'actor' as never, actorAuthVersion: 0, commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
+      return { type: 'command' as const, commandId, command, authorization: { claims, signature: sign(null, authorizationBytes(claims), signingKeys.privateKey).toString('base64url') } }
+    }
+    for (const [id, change] of [
+      ['forged', (frame: ReturnType<typeof signFrame>) => ({ ...frame, authorization: { ...frame.authorization, signature: 'forged' } })],
+      ['audience', (frame: ReturnType<typeof signFrame>) => ({ ...frame, authorization: { ...frame.authorization, claims: { ...frame.authorization.claims, workerId: 'other' as WorkerId } } })],
+      ['expired', (frame: ReturnType<typeof signFrame>) => ({ ...frame, authorization: { ...frame.authorization, claims: { ...frame.authorization.claims, expiresAt: new Date(Date.now() - 1000).toISOString() } } })],
+    ] as const) {
+      await f.runtime.receive(change(signFrame(id)))
+      const ack = f.events.filter(event => event.type === 'ack').at(-1)
+      assert.equal(ack?.type, 'ack')
+      if (ack?.type === 'ack') assert.equal(ack.receipt.status, 'rejected')
+      assert.equal(await f.store.commands.get(id as CommandId), null)
+    }
+    await f.runtime.receive(signFrame('signed'))
+    const ack = f.events.filter(event => event.type === 'ack').at(-1)
+    assert.equal(ack?.type, 'ack')
+    if (ack?.type === 'ack' && ack.receipt.status === 'rejected') assert.match(ack.receipt.error.message, /Turn is not active/)
+  } finally { await f.cleanup() }
+})
+
+test('signed cluster approval cannot resolve while online reauthorization is unavailable', async () => {
+  const f = await fixture()
+  try {
+    const command: WorkerCommand = { kind: 'runtime.approval.resolve', sessionId, turnId: 'turn' as never, approvalId: 'approval' as never, decision: 'approve', decidedByAccountId: 'actor' as never }
+    const commandId = 'offline-approval' as CommandId
+    const claims: EnqueueAuthorization = { version: 2, kind: 'runtime.approval.resolve', keyId: signingKeyId, commandId, workerId, sessionId, projectId: 'project' as never, workspaceId: workspace.workspace.id, taskId: null, actorId: 'actor' as never, actorAuthVersion: 0, commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
+    const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })
+    // No active approval is available, so a successful online check would reach validation.
+    // This test exercises a runtime lacking a fresh authorization callback.
+    const offline = new WorkerRuntime(f.store, new LocalProvisioner(join(f.home, 'workspaces')), [new TestAgent(1)], { send: message => f.events.push(message) }, workerId, 'offline')
+    await offline.receive({ type: 'command', commandId, command, authorization: { claims, signature: sign(null, authorizationBytes(claims), signingKeys.privateKey).toString('base64url') } })
+    const ack = f.events.filter(event => event.type === 'ack').at(-1)
+    assert.equal(ack?.type, 'ack')
+    if (ack?.type === 'ack') assert.deepEqual(ack.receipt, { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: true } })
+    assert.equal(await f.store.commands.get(commandId), null)
+    assert.equal((await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events.length, journal.events.length)
+    await offline.shutdown()
+  } finally { await f.cleanup() }
+})
+
 test('FIFO, durable ACK, idempotency conflict, cancellation, stop and stream/tool events', async () => {
   const f = await fixture()
   try {

@@ -70,16 +70,22 @@ export class ServerService {
     try {
       return await this.store.transaction(async tx => {
         const pending = await tx.commands.getPendingCommand(commandId)
-        if (!pending?.authorization || pending.workerId !== workerId || pending.command.kind !== 'session.enqueue') return { allowed: false }
+        if (!pending?.authorization || pending.workerId !== workerId || (pending.command.kind !== 'session.enqueue' && pending.command.kind !== 'runtime.approval.resolve')) return { allowed: false }
         const projection = await tx.commands.get(commandId)
         if (projection?.status !== 'pending' && projection?.status !== 'accepted') return { allowed: false }
         const claims = pending.authorization.claims
-        if (claims.commandId !== commandId || claims.workerId !== workerId || claims.sessionId !== pending.command.sessionId || claims.actorId !== pending.command.message.sentByAccountId || claims.commandDigest !== createHash('sha256').update(JSON.stringify(pending.command)).digest('hex')) return { allowed: false }
+        if (claims.commandId !== commandId || claims.workerId !== workerId || claims.sessionId !== pending.command.sessionId || claims.actorId !== (pending.command.kind === 'session.enqueue' ? pending.command.message.sentByAccountId : pending.command.decidedByAccountId) || (pending.command.kind === 'runtime.approval.resolve' && (claims.version !== 2 || claims.kind !== pending.command.kind)) || claims.commandDigest !== createHash('sha256').update(JSON.stringify(pending.command)).digest('hex')) return { allowed: false }
         const actor = await tx.identity.getUser(claims.actorId)
         if (!actor || (actor.status ?? 'active') !== 'active' || (actor.authVersion ?? 0) !== claims.actorAuthVersion) return { allowed: false }
         const session = this.sessionAccess ? await this.sessionAccess.requireInTx(tx, claims.actorId, claims.sessionId, 'write') : null
         if (!session || session.binding.agent.workerId !== workerId || session.projectId !== claims.projectId || session.workspaceId !== claims.workspaceId || (session.taskId ?? null) !== claims.taskId) return { allowed: false }
         await assertSessionTaskMutable(tx, session)
+        if (pending.command.kind === 'runtime.approval.resolve') {
+          // A decision needs control access unless it belongs to the active Turn owner.
+          const state = await this.executionState(tx, claims.sessionId)
+          if (state.activeTurnId !== pending.command.turnId) return { allowed: false }
+          if (state.activeTurnOwnerId !== claims.actorId) await this.sessionAccess?.requireInTx(tx, claims.actorId, claims.sessionId, 'control')
+        }
         const worker = await tx.resources.getWorker(workerId)
         return { allowed: Boolean(worker && worker.connectionState !== 'revoked') }
       })
@@ -721,7 +727,21 @@ export class ServerService {
       const command = await build(tx)
       if (command === null) return null // Commit a durable non-admission fence before responding.
       const existing = await tx.commands.get(commandId)
-      await this.command(tx, session.binding.agent.workerId, command, commandId)
+      let authorization: import('@wemux/wire-protocol/command-assertion').SignedEnqueueAuthorization | undefined
+      if (command.kind === 'runtime.approval.resolve') {
+        if (!actor || !this.commandSigning) throw new AppError(503, 'Cluster command signing is unavailable', 'command_signing_unavailable')
+        const user = await tx.identity.getUser(actor)
+        if (!user || (user.status ?? 'active') !== 'active') throw new AppError(403, 'Cluster command actor is unavailable', 'command_actor_unavailable')
+        authorization = this.commandSigning.sign({
+          version: 2, kind: command.kind, keyId: this.commandSigning.keyId, commandId,
+          workerId: session.binding.agent.workerId, sessionId: id, projectId: session.projectId,
+          workspaceId: session.workspaceId, taskId: session.taskId ?? null, actorId: actor,
+          actorAuthVersion: user.authVersion ?? 0,
+          commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'),
+          issuedAt: now(), expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+        })
+      }
+      await this.command(tx, session.binding.agent.workerId, command, commandId, authorization)
       if (!existing) await this.audit(tx, command.kind, { kind: 'session', id }, actor)
       return session.binding.agent.workerId
     })
