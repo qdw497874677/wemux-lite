@@ -132,11 +132,18 @@ try {
     assert.equal(result.status(), 403, `nonmember cannot read ${path}`)
     assert.equal((await result.text()).includes(sessionIdForNegative), false, 'denial cannot reveal another account Session')
   }
+  for (const path of [`/api/sessions/${sessionIdForNegative}`, `/api/sessions/${sessionIdForNegative}/events?fromSeq=1&limit=1000`]) {
+    const result = await outsider.request.get(`${origin}${path}`)
+    assert.ok([403, 404].includes(result.status()), `nonmember read must be denied (${result.status()})`)
+    assert.equal((await result.text()).includes('browser-desktop-coordination-echo'), false, 'denial must not disclose another account message')
+  }
   const denied = await outsider.request.post(`${origin}/api/teams/default-team/coordination/sessions`, {
     data: { requestId: randomUUID(), commandId: randomUUID(), workspaceId: placed.workspace.id, workerId, agentKey: 'test', modelId: 'test', content: 'Denied' },
   })
   assert.equal(denied.status(), 403)
-  checks.push('nonmember cannot discover availability, history or create a Team Session')
+  const deniedWrite = await outsider.request.post(`${origin}/api/sessions/${sessionIdForNegative}/messages`, { data: { commandId: randomUUID(), content: 'must-not-write-other-team-session' } })
+  assert.equal(deniedWrite.status(), 403, 'nonmember cannot write a known Team Session')
+  checks.push('nonmember cannot discover availability/history, read/write a known Session or create a Team Session')
   step = 'Worker offline and reconnect on existing Team page'
   const desktop = contexts[0].pages()[0]
   if (worker.child.exitCode === null && worker.child.signalCode === null) worker.child.kill('SIGTERM')
@@ -163,6 +170,42 @@ try {
   await desktop.getByRole('region', { name: '任务会话对话' }).getByText('after-browser-worker-reconnect').last().waitFor()
   await desktop.getByRole('region', { name: '任务会话对话' }).getByText(/Turn 已完成/).waitFor()
   checks.push('reconnected Worker completes another Team Task-bound conversation')
+  const activeSessionId = await desktop.getByRole('region', { name: '任务会话对话' }).getAttribute('data-conversation-session')
+  assert.ok(activeSessionId)
+  const history = () => api(`/sessions/${activeSessionId}/events?fromSeq=1&limit=1000`)
+  step = 'native approval through Team browser controls'
+  const approvalSend = await api(`/sessions/${activeSessionId}/messages`, 'POST', { content: '[test-agent:approval] browser Team approval', commandId: randomUUID() })
+  assert.ok(approvalSend.commandId)
+  await desktop.getByRole('button', { name: '批准操作' }).waitFor()
+  await desktop.getByRole('button', { name: '批准操作' }).click()
+  await eventually(history, value => value.events.some(event => event.payload.kind === 'approval.resolved' && event.payload.decision === 'approve') && value.events.filter(event => event.payload.kind === 'assistant.text.delta').map(event => event.payload.text).join('').includes('Native approval: approve'), 'approved native Test Agent operation')
+  checks.push('Team browser approval reaches native Test Agent and verified Journal')
+  step = 'deny native approval through Team browser controls'
+  const previousResolved = (await history()).events.filter(event => event.payload.kind === 'approval.resolved').length
+  await api(`/sessions/${activeSessionId}/messages`, 'POST', { content: '[test-agent:approval] browser Team denial', commandId: randomUUID() })
+  await desktop.getByRole('button', { name: '拒绝操作' }).waitFor()
+  await desktop.getByRole('button', { name: '拒绝操作' }).click()
+  await eventually(history, value => value.events.filter(event => event.payload.kind === 'approval.resolved').length === previousResolved + 1 && value.events.some(event => event.payload.kind === 'approval.resolved' && event.payload.decision === 'deny') && value.events.filter(event => event.payload.kind === 'assistant.text.delta').map(event => event.payload.text).join('').includes('Native approval: deny'), 'denied native Test Agent operation')
+  checks.push('Team browser denial reaches native Test Agent without approval')
+  step = 'stop running Turn through Team browser controls'
+  await api(`/sessions/${activeSessionId}/messages`, 'POST', { content: '[test-agent:pause-ms=30000] browser stop', commandId: randomUUID() })
+  const stop = desktop.getByRole('button', { name: /停止当前 Turn/ })
+  await stop.waitFor()
+  await stop.click()
+  await eventually(history, value => value.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'cancelled'), 'stopped Test Agent Turn')
+  checks.push('Team browser stops a specific running Turn without completing the Task')
+  step = 'failed Turn visible without hiding history'
+  await api(`/sessions/${activeSessionId}/messages`, 'POST', { content: '[test-agent:fail] browser failure', commandId: randomUUID() })
+  await eventually(history, value => value.events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'failed'), 'failed Test Agent Turn')
+  await desktop.getByRole('region', { name: '任务会话对话' }).getByText(/Turn 失败/).last().waitFor()
+  checks.push('failed Team Turn is visible in browser Journal; earlier history remains')
+  step = 'browser follow-up after failed Turn'
+  const conversation = desktop.getByRole('region', { name: '任务会话对话' })
+  await conversation.getByRole('textbox', { name: '新消息草稿' }).fill('browser-after-failure-recovery')
+  await conversation.getByRole('button', { name: '发送新消息' }).click()
+  await eventually(history, value => value.events.filter(event => event.payload.kind === 'turn.finished').at(-1)?.payload.outcome === 'completed' && value.events.filter(event => event.payload.kind === 'assistant.text.delta').map(event => event.payload.text).join('').includes('browser-after-failure-recovery'), 'follow-up after failed Turn')
+  await conversation.getByText('browser-after-failure-recovery').last().waitFor()
+  checks.push('browser composer recovers after failed Turn and retains verified history')
   assert.deepEqual(errors, [], 'browser page errors')
   console.log(JSON.stringify({ status: 'pass', checks }))
 } catch (error) {
