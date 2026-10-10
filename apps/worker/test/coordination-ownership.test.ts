@@ -20,49 +20,63 @@ const wait = async (predicate: () => boolean | Promise<boolean>) => {
   assert.fail('Timed out waiting for ownership handoff')
 }
 
-for (const failure of ['before-commit', 'after-commit', 'persistent'] as const) test(`terminal finalization ${failure} survives shutdown without relaunch`, async t => {
+for (const failure of ['before-commit', 'after-commit', 'persistent'] as const) test(`terminal finalization ${failure} survives closed store and replacement Runtime`, async t => {
   const home = await mkdtemp(join(tmpdir(), 'wemux-finalizer-'))
   t.after(() => rm(home, { recursive: true, force: true }))
-  const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
-  t.after(() => store.close())
+  const path = join(home, 'worker.sqlite')
+  const originalStore = new SqliteWorkerStore(path)
   const owner = new SessionOwnership()
-  const token = owner.acquire(id)!
-  const runtime = () => new WorkerRuntime(store, new LocalProvisioner(home), [new TestAgent()], { send() {} }, workerId, 'test', undefined, undefined, undefined, null, undefined, undefined, undefined, undefined, owner)
-  const original = runtime()
-  const replacement = runtime()
+  const runtime = (store: SqliteWorkerStore) => new WorkerRuntime(store, new LocalProvisioner(home), [new TestAgent()], { send() {} }, workerId, 'test', undefined, undefined, undefined, null, undefined, undefined, undefined, undefined, owner)
+  const original = runtime(originalStore)
   const stamp = new Date().toISOString() as Timestamp
   let turnId: import('@wemux/domain').TurnId
-  await store.transaction(async tx => {
+  await originalStore.transaction(async tx => {
     await tx.sessions.createSession(id, { workspaceId: 'workspace' as never, agent: { workerId, agentKey: 'test' as never }, modelId: 'test' as never })
     await tx.sessions.enqueue({ sessionId: id, submissionCommandId: 'queued' as CommandId, message: { messageId: 'message' as never, content: 'once' }, queuedAt: stamp })
     turnId = (await tx.sessions.claimNext(id))!.id
   })
+  const token = owner.acquire(id)!
   let attempts = 0
   let available = failure !== 'persistent'
   const originalError = console.error
   console.error = () => {}
+  let replacementStore: SqliteWorkerStore | undefined
+  let replacement: WorkerRuntime | undefined
   try {
-    await original['finishClaimed'](id, token, async () => {
+    await original['finishClaimed'](id, token, async store => {
       attempts++
-      if (!available || (failure !== 'persistent' && attempts === 1 && failure === 'before-commit')) throw new Error('before commit')
+      if (!available || (attempts === 1 && failure === 'before-commit')) throw new Error('injected write failure')
       await store.transaction(tx => tx.sessions.finishTurn({ turnId, outcome: 'completed', finishedAt: stamp }))
-      if (attempts === 1 && failure === 'after-commit') throw new Error('after commit')
+      if (attempts === 1 && failure === 'after-commit') throw new Error('lost commit acknowledgement')
     })
     await original.shutdown()
+    originalStore.close() // CLI closes the store before another Runtime opens it.
+    const attemptsAtClose = attempts
+    await new Promise(resolve => setTimeout(resolve, 350))
+    assert.equal(attempts, attemptsAtClose, 'closed original store must not receive retries')
+    assert.equal(owner.occupied(id), true, 'closed store retains the fence for handoff')
+    replacementStore = new SqliteWorkerStore(path)
+    replacement = runtime(replacementStore)
     await replacement.initialize()
-    assert.equal(owner.occupied(id), true, 'replacement must wait for the original finalizer')
-    assert.equal((await store.sessions.get(id))?.activeTurnId, failure === 'after-commit' ? null : turnId)
     if (failure === 'persistent') {
+      assert.equal(owner.occupied(id), true, 'replacement cannot release during a persistent write failure')
+      assert.equal((await replacementStore.sessions.get(id))?.activeTurnId, turnId)
       await new Promise(resolve => setTimeout(resolve, 350))
       assert.equal(owner.occupied(id), true)
       available = true
     }
     await wait(() => !owner.occupied(id))
-    assert.equal((await store.sessions.get(id))?.activeTurnId, null)
-    const events = (await store.journal.read({ sessionId: id, fromSeq: 1 as never, limit: 100 })).events
+    assert.equal((await replacementStore.sessions.get(id))?.activeTurnId, null)
+    const events = (await replacementStore.journal.read({ sessionId: id, fromSeq: 1 as never, limit: 100 })).events
     assert.equal(events.filter(event => event.payload.kind === 'turn.started').length, 1)
     assert.equal(events.filter(event => event.payload.kind === 'turn.finished').length, 1)
-  } finally { console.error = originalError; await replacement.shutdown() }
+    assert.equal((await replacementStore.sessions.getTurn(turnId))?.state, 'completed')
+  } finally {
+    console.error = originalError
+    await replacement?.shutdown()
+    replacementStore?.close()
+    if (!replacementStore) originalStore.close()
+  }
 })
 
 test('startup recovery reserves before asynchronous reads and cannot clear a live owner', async t => {

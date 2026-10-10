@@ -55,6 +55,7 @@ export class WorkerRuntime {
   private readonly tasks = new Map<SessionId, Promise<void>>()
   private readonly releaseWaiters = new Map<SessionId, () => void>()
   private readonly releaseWakes = new Set<SessionId>()
+  private readonly finalizationRetries = new Map<SessionId, NodeJS.Timeout>()
   private readonly unsafeSessions = new Set<SessionId>()
   private readonly launchRetries = new Map<SessionId, { commandId: CommandId; attempts: number; timer: NodeJS.Timeout | null }>()
   private readonly sent = new Map<SessionId, number>()
@@ -162,13 +163,20 @@ export class WorkerRuntime {
   async initialize() {
     this.store.saveCapabilities(await Promise.all(this.agents.map(agent => agent.detect())))
     for (const session of await this.store.listSessions()) {
+      // A prior commit may have succeeded even when its caller saw an error.
+      // Resume retained results before recovery, including an already-cleared slot.
+      if (this.ownership.hasFinalization(session.sessionId)) {
+        await this.resumeFinalization(session.sessionId)
+        if (this.ownership.occupied(session.sessionId)) this.waitForOwnership(session.sessionId)
+        continue
+      }
       if (session.activeTurnId) {
         // Reserve before the first asynchronous read. Recovery and live execution
         // must use the same fence, including across transaction retries.
         const token = this.ownership.acquire(session.sessionId)
         if (!token) { this.waitForOwnership(session.sessionId); continue }
-        await this.finishClaimed(session.sessionId, token, async () => {
-          await this.store.transaction(async tx => {
+        await this.finishClaimed(session.sessionId, token, async store => {
+          await store.transaction(async tx => {
             const current = await tx.sessions.get(session.sessionId)
             if (!current?.activeTurnId) return
             const turn = await tx.sessions.getTurn(current.activeTurnId)
@@ -577,8 +585,8 @@ export class WorkerRuntime {
       // without launching it; the next queued Turn can still be scheduled.
       try { await this.publish() }
       catch {
-        await this.finishClaimed(id, ownershipToken, async () => {
-          await this.store.transaction(async tx => tx.sessions.finishTurn((await tx.sessions.getTurn(turn.id))?.state === 'stopping'
+        await this.finishClaimed(id, ownershipToken, async store => {
+          await store.transaction(async tx => tx.sessions.finishTurn((await tx.sessions.getTurn(turn.id))?.state === 'stopping'
             ? { turnId: turn.id, outcome: 'cancelled', finishedAt: now() }
             : { turnId: turn.id, outcome: 'failed', failure: { code: 'agent-error', message: '无法发布启动事件' }, finishedAt: now() }))
         })
@@ -793,31 +801,35 @@ export class WorkerRuntime {
     const result = outcome.status === 'failed'
       ? { turnId: turn.id, outcome: 'failed' as const, failure: outcome.failure, finishedAt: now() }
       : { turnId: turn.id, outcome: outcome.status, finishedAt: now() }
-    await this.finishClaimed(turn.sessionId, ownershipToken, () =>
-      this.store.transaction(tx => tx.sessions.finishTurn(result)))
+    await this.finishClaimed(turn.sessionId, ownershipToken, store =>
+      store.transaction(tx => tx.sessions.finishTurn(result)))
   }
-  private async finishClaimed(id: SessionId, token: symbol, finish: () => Promise<void>): Promise<void> {
-    const retry = async (attempt: number): Promise<void> => {
-      try { await finish() }
-      catch (error) {
-        console.error('Claimed Turn finalization failed; retaining Session ownership:', error)
-        // No timer can prove child exit. Only the already-proven-safe owner is
-        // released after the durable slot is cleared; uncertain children stay fenced.
-        // The finalizer belongs to the process-lifetime reservation, not to the
-        // Runtime lifecycle. Shutdown may replace this Runtime in the same process;
-        // cancelling its retry would strand the durable active slot forever.
-        const timer = setTimeout(() => { void retry(Math.min(attempt + 1, 4)) }, Math.min(250 * 2 ** attempt, 2000))
-        timer.unref()
-        return
-      }
-      if (!this.closing) try { await this.publish() } catch { /* Durable Journal replays on the next publication. */ }
-      if (!this.unsafeSessions.has(id)) {
-        this.ownership.release(id, token)
-        if (this.tasks.has(id)) this.releaseWakes.add(id)
-        else this.schedule(id)
-      }
+  private async finishClaimed(id: SessionId, token: symbol, finish: (store: WorkerStore) => Promise<void>): Promise<void> {
+    this.ownership.retainFinalization(id, token, finish, () => !this.unsafeSessions.has(id))
+    await this.resumeFinalization(id, 0, true)
+  }
+  private async resumeFinalization(id: SessionId, attempt = 0, initial = false): Promise<void> {
+    if (this.closing && !initial) return
+    const status = await this.ownership.finalize(id, this.store)
+    if (status === 'failed' || status === 'busy') {
+      if (this.closing || this.finalizationRetries.has(id)) return
+      const timer = setTimeout(() => {
+        this.finalizationRetries.delete(id)
+        void this.resumeFinalization(id, Math.min(attempt + 1, 4))
+      }, Math.min(250 * 2 ** attempt, 2000))
+      timer.unref()
+      this.finalizationRetries.set(id, timer)
+      return
     }
-    await retry(0)
+    if (status === 'finished') {
+      if (!this.closing) try { await this.publish() } catch { /* Journal replays later. */ }
+      if (this.tasks.has(id)) this.releaseWakes.add(id)
+      else this.schedule(id)
+    }
+  }
+  private clearFinalizationRetries() {
+    for (const timer of this.finalizationRetries.values()) clearTimeout(timer)
+    this.finalizationRetries.clear()
   }
   private publish(): Promise<void> {
     const work = this.publishing.then(async () => {
@@ -839,6 +851,7 @@ export class WorkerRuntime {
   async shutdown() {
     this.closing = true
     this.clearLaunchRetries()
+    this.clearFinalizationRetries()
     this.clearReleaseWaiters()
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = null
@@ -865,6 +878,7 @@ export class WorkerRuntime {
     this.aborted = true
     this.closing = true
     this.clearLaunchRetries()
+    this.clearFinalizationRetries()
     this.clearReleaseWaiters()
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = null
