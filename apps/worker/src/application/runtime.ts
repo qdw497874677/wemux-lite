@@ -11,6 +11,7 @@ import type { AgentLaunchContextProvider } from './ports/agent-launch-context.js
 import type { LocalState, RuntimeTransport, WorkspaceProvisioner } from './ports/local-state.js'
 import type { WorkerStore } from './ports/worker-store.js'
 import { WorkerAgentRunner } from './agent-runner.js'
+import { SessionOwnership } from './session-ownership.js'
 import { runtimeAdaptersFor } from './runtime-adapters.js'
 import type { RuntimeSessionAdapter } from './ports/runtime-session.js'
 
@@ -84,7 +85,8 @@ export class WorkerRuntime {
     private readonly piProviderResolver?: PiProviderResolver,
     /** Internal embedding only. Absent in all production constructors. */
     fileWrites?: { readonly write?: typeof writeWorkspaceFile },
-    private readonly authorizeLaunch?: (commandId: CommandId) => Promise<boolean>) {
+    private readonly authorizeLaunch?: (commandId: CommandId) => Promise<boolean>,
+    private readonly ownership: SessionOwnership = new SessionOwnership()) {
     if (fileWrites) {
       this.fileWriteExecutor = new WorkerFileWriteExecutor(store, workerId, fileWrites)
       const publishPending = async (result: import('@wemux/wire-protocol').FileWriteResultPayload, publish: Parameters<FileWriteIngress['replay']>[0]) => {
@@ -486,7 +488,7 @@ export class WorkerRuntime {
       location: workspace.status === 'ready' ? { workspaceId: id, workerId: this.workerId, rootPath: workspace.rootPath, checkouts: await this.store.workspaces.listRepositoryCheckouts(id) } : null } })
   }
   private schedule(id: SessionId) {
-    if (this.closing || this.unsafeSessions.has(id)) return
+    if (this.closing || this.unsafeSessions.has(id) || this.ownership.occupied(id)) return
     const retry = this.launchRetries.get(id)
     if (retry?.timer) {
       clearTimeout(retry.timer)
@@ -497,7 +499,7 @@ export class WorkerRuntime {
     this.tasks.set(id, task)
   }
   private async run(id: SessionId) {
-    while (!this.closing && !this.unsafeSessions.has(id)) {
+    while (!this.closing && !this.unsafeSessions.has(id) && !this.ownership.occupied(id)) {
       const session = await this.store.sessions.get(id)
       if (!session) return
       if (!this.available(session.binding)) {
@@ -562,6 +564,7 @@ export class WorkerRuntime {
     let privateProvider = false
     let childMayHaveStarted = false
     let nextOutstanding = false
+    let ownershipToken: symbol | null = null
     const launchGeneration = this.providerGeneration
     // Claimed Turns cannot safely return to the queue: a retry could launch the
     // same invocation twice. Denial finishes this Turn as failed and releases the
@@ -630,7 +633,8 @@ export class WorkerRuntime {
         // already-stopped Turn: stop() before the first next() cannot stop an
         // async generator that has not registered its invocation yet.
         if ((await this.store.sessions.getTurn(turn.id))?.state === 'stopping') throw new TurnStoppedBeforeLaunchError()
-        const stopBeforeFirstRead = this.closing || (privateProvider && (!this.providerConnectionOpen || this.providerGeneration !== launchGeneration))
+        const stopBeforeFirstRead = privateProvider && (!this.providerConnectionOpen || this.providerGeneration !== launchGeneration)
+        if (this.closing || this.aborted) throw new TurnStoppedBeforeLaunchError()
         const startedAt = Date.now()
         let firstRead = true
         while (true) {
@@ -639,6 +643,11 @@ export class WorkerRuntime {
           // Keep one observed iterator.next() in flight across idle ticks.
           // Check the max deadline before requesting another result. Observe
           // any later rejection immediately, before optional callbacks run.
+          if (this.closing || this.aborted) throw new TurnStoppedBeforeLaunchError()
+          if (!ownershipToken) {
+            ownershipToken = this.ownership.acquire(turn.sessionId)
+            if (!ownershipToken) throw new Error('Agent session ownership is uncertain')
+          }
           childMayHaveStarted = true
           nextOutstanding = true
           const next = iterator.next()
@@ -711,7 +720,10 @@ export class WorkerRuntime {
         catch (error) { cleanupError ??= error; if (childMayHaveStarted) this.unsafeSessions.add(turn.sessionId) }
         // A settled read plus an inactive runner invocation establishes that
         // the runner's finally released the handle. return()/stop() alone do not.
-        if (childMayHaveStarted && !cleanupError && !nextOutstanding && !this.agentRunner.isActive(turn.sessionId, turn.id)) this.unsafeSessions.delete(turn.sessionId)
+        if (childMayHaveStarted && !cleanupError && !nextOutstanding && !this.agentRunner.isActive(turn.sessionId, turn.id)) {
+          this.unsafeSessions.delete(turn.sessionId)
+          if (ownershipToken) this.ownership.release(turn.sessionId, ownershipToken)
+        }
         // Prelaunch stop cannot have started a child; retain its cancellation.
         if (stopError && childMayHaveStarted) throw stopError
         if (childMayHaveStarted && this.unsafeSessions.has(turn.sessionId)) throw cleanupError

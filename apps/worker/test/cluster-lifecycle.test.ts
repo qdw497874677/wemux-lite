@@ -242,9 +242,9 @@ test('CLI persisted identity startup uses ClusterLifecycle as its single owner',
   }
 })
 
-test('connect proceeds when previous runtime shutdown hangs on a stuck agent turn', async t => {
-  // 回归：local runtime 上有一个永不结束的 turn（provider 子进程挂死、stop/close 均无响应）时，
-  // connect() 不得被 previous.shutdown() 永久阻塞：先同步强杀，再限时等待旧 runtime 收尾。
+test('replacement quarantines an outstanding read even when stop and close resolve', async t => {
+  // A resolved stop/close and a synchronous kill request cannot prove that
+  // the outstanding next() settled; replacement must never launch this Session.
   const f = await fixture()
   const server = createServer()
   const sockets = new WebSocketServer({ server })
@@ -252,23 +252,26 @@ test('connect proceeds when previous runtime shutdown hangs on a stuck agent tur
   sockets.on('connection', socket => { connections++; acceptTransportV2(socket) })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const closeAttempts: string[] = []
+  let executions = 0
   let executeStarted = false
-  let releaseProcess!: () => void
-  const processExited = new Promise<void>(resolve => { releaseProcess = resolve })
+  const processExited = new Promise<void>(() => {})
   const stuckSession = {
     execute: async () => {
       executeStarted = true
       return {
         signals: (async function* () { await processExited })(),
-        stop: async () => { await processExited },
+        stop: async () => {},
       }
     },
     command: async () => {},
     resolveApproval: async () => {},
-    close: async () => { closeAttempts.push('close'); await new Promise(() => {}) },
-    kill: () => { closeAttempts.push('kill'); releaseProcess() },
+    close: async () => { closeAttempts.push('close') },
+    kill: () => { closeAttempts.push('kill') },
   }
-  t.mock.method(TestRuntimeSessionAdapter.prototype, 'openSession', async () => stuckSession)
+  t.mock.method(TestRuntimeSessionAdapter.prototype, 'openSession', async () => {
+    executions++
+    return stuckSession
+  })
   try {
     await f.lifecycle.initializeLocalRuntime()
     const workbench = createLocalWorkbenchService(f.store, f.lifecycle)
@@ -288,13 +291,49 @@ test('connect proceeds when previous runtime shutdown hangs on a stuck agent tur
     ])
     assert.equal(raced, 'connected', 'connect() must not block on a hung previous runtime shutdown')
     await waitFor(() => connections > 0 && f.lifecycle.connection().phase === 'online')
-    assert.deepEqual(closeAttempts.slice(0, 1), ['kill'], 'runtime replacement must synchronously kill the stuck provider')
+    assert.equal(closeAttempts.includes('kill'), true, 'runtime replacement requests child termination')
+    const fresh = (f.lifecycle as unknown as { runtime: { executeLocal(commandId: string, command: unknown): Promise<unknown> } }).runtime
+    await fresh.executeLocal('cmd-second', { kind: 'session.enqueue', sessionId: session.sessionId, message: { messageId: 'msg-second', content: 'must not launch' } })
+    await new Promise(resolve => setTimeout(resolve, 80))
+    assert.equal(executions, 1, 'new runtime must not open the uncertain Session')
+    await f.lifecycle.pause() // bounded shutdown of replacement, then local fallback
+    const fallback = (f.lifecycle as unknown as { runtime: { executeLocal(commandId: string, command: unknown): Promise<unknown> } }).runtime
+    await fallback.executeLocal('cmd-third', { kind: 'session.enqueue', sessionId: session.sessionId, message: { messageId: 'msg-third', content: 'still fenced' } })
+    await new Promise(resolve => setTimeout(resolve, 80))
+    assert.equal(executions, 1, 'fallback cannot reopen a Session with an outstanding read')
   } finally {
     for (const socket of sockets.clients) socket.terminate()
     await new Promise<void>(resolve => sockets.close(() => resolve()))
     await new Promise<void>(resolve => server.close(() => resolve()))
     await f.close().catch(() => {})
   }
+})
+
+test('pause keeps Session quarantined when shutdown close resolves but read is pending', async t => {
+  const f = await fixture()
+  let opened = 0
+  t.mock.method(TestRuntimeSessionAdapter.prototype, 'openSession', async () => {
+    opened++
+    return {
+      execute: async () => ({ signals: (async function* () { await new Promise<void>(() => {}) })(), stop: async () => {} }),
+      close: async () => {},
+      kill: () => {},
+    }
+  })
+  try {
+    await f.lifecycle.initializeLocalRuntime()
+    const workbench = createLocalWorkbenchService(f.store, f.lifecycle)
+    const directory = await workbench.addDirectory(f.home)
+    const session = await workbench.createSession({ workspaceId: directory.workspaceId, agentKey: 'test', modelId: 'test' })
+    const current = (f.lifecycle as unknown as { runtime: { executeLocal(commandId: string, command: unknown): Promise<unknown> } }).runtime
+    await current.executeLocal('cmd-pending', { kind: 'session.enqueue', sessionId: session.sessionId, message: { messageId: 'msg-pending', content: 'pending' } })
+    await waitFor(() => opened === 1)
+    await f.lifecycle.pause()
+    const fresh = (f.lifecycle as unknown as { runtime: { executeLocal(commandId: string, command: unknown): Promise<unknown> } }).runtime
+    await fresh.executeLocal('cmd-after-pause', { kind: 'session.enqueue', sessionId: session.sessionId, message: { messageId: 'msg-after-pause', content: 'must stay fenced' } })
+    await new Promise(resolve => setTimeout(resolve, 80))
+    assert.equal(opened, 1)
+  } finally { await f.close() }
 })
 
 test('real capability gateway journals Connector expiry before local Turn cleanup and reopens durably', { timeout: 10000 }, async t => {

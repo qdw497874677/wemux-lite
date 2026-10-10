@@ -51,7 +51,7 @@ export class WorkerAgentRunner implements AgentRunner {
       yield this.terminal(request, { status: 'failed', failure: { code: 'agent-unavailable', message: `Agent runtime unavailable: ${request.agentKey}` } })
       return
     }
-    if (this.active.has(request.sessionId)) {
+    if (this.active.has(request.sessionId) || this.releasing.has(request.sessionId)) {
       yield this.terminal(request, { status: 'failed', failure: { code: 'agent-error', message: 'Agent session already has an active invocation' } })
       return
     }
@@ -134,6 +134,7 @@ export class WorkerAgentRunner implements AgentRunner {
       if (privateProvider) this.privateSessions.delete(request.sessionId)
       await handle?.stop()
       if (lease) await (faulted ? lease.fault() : lease.release())
+      // A rejected stop/release cannot prove child exit; keep it fenced.
       if (this.releasing.get(request.sessionId) === request.invocationId) this.releasing.delete(request.sessionId)
     }
   }
