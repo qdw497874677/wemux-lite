@@ -11,6 +11,7 @@ export function TeamCoordination({ api, teamId }: { api: ProjectClient; teamId: 
   const [resources, setResources] = useState<{ projects: ProjectDTO[]; workspaces: WorkspaceDTO[]; workers: WorkerDTO[] } | null>(null)
   const [sessions, setSessions] = useState<Awaited<ReturnType<ProjectClient['teamCoordinationSessions']>>>([])
   const [target, setTarget] = useState(''), [content, setContent] = useState(''), [selected, setSelected] = useState('')
+  const [reopenTaskId, setReopenTaskId] = useState('')
   const [error, setError] = useState(''), [busy, setBusy] = useState(false)
   const pending = useRef<{ body: { requestId: string; commandId: string; workspaceId: string; workerId: string; agentKey: string; modelId: string; content: string }; teamId: string } | null>(null)
   const generation = useRef(0)
@@ -31,7 +32,7 @@ export function TeamCoordination({ api, teamId }: { api: ProjectClient; teamId: 
   useLayoutEffect(() => {
     const ticket = ++generation.current
     accepted.current = []
-    setResources(null); setSessions([]); setSelected(''); setTarget(''); setBusy(false); pending.current = null; setError('')
+    setResources(null); setSessions([]); setSelected(''); setTarget(''); setReopenTaskId(''); setBusy(false); pending.current = null; setError('')
     void refresh(teamId, ticket).catch(cause => { if (generation.current === ticket) setError(accountError(cause)) })
     return () => { generation.current++ }
   }, [api, teamId])
@@ -39,8 +40,15 @@ export function TeamCoordination({ api, teamId }: { api: ProjectClient; teamId: 
   const choice = options.find(option => option.key === target)
   const session = sessions.find(item => item.id === selected)
   const project = session && resources?.projects.find(item => item.id === session.projectId)
+  function prepareReopen() {
+    if (!session || !session.taskId || busy || pending.current) return
+    const option = options.find(item => item.workspaceId === session.workspaceId && item.workerId === session.binding.agent.workerId && item.agentKey === session.binding.agent.agentKey && item.modelId === session.binding.modelId)
+    if (!option) { setError('原协调会话的执行环境当前不可用，不能在同一 Task 下重开。'); return }
+    setTarget(option.key); setReopenTaskId(session.taskId); setSelected(''); setContent(''); setError('')
+  }
   async function send() {
     if (busy || (!pending.current && (!choice || !content.trim()))) return
+    if (reopenTaskId && choice && !sessions.some(item => item.taskId === reopenTaskId && item.workspaceId === choice.workspaceId && item.binding.agent.workerId === choice.workerId && item.binding.agent.agentKey === choice.agentKey)) { setError('重开目标已变化，请重新选择原协调会话。'); return }
     const ticket = generation.current
     const intent = pending.current?.teamId === teamId ? pending.current.body : { requestId: randomId(), commandId: randomId(), workspaceId: choice!.workspaceId, workerId: choice!.workerId, agentKey: choice!.agentKey, modelId: choice!.modelId, content: content.trim() }
     pending.current = { teamId, body: intent }; setBusy(true); setError('')
@@ -48,7 +56,7 @@ export function TeamCoordination({ api, teamId }: { api: ProjectClient; teamId: 
       const result = await api.createTeamCoordinationSession(teamId, intent)
       if (generation.current !== ticket) return
       // Acceptance is definitive even if the subsequent list refresh fails.
-      pending.current = null; setContent(''); setSelected(result.session.id)
+      pending.current = null; setContent(''); setSelected(result.session.id); setReopenTaskId('')
       if (!accepted.current.some(item => item.id === result.session.id)) accepted.current = [result.session, ...accepted.current]
       setSessions(current => current.some(item => item.id === result.session.id) ? current : [result.session, ...current])
       try { await refresh(teamId, ticket) }
@@ -60,11 +68,13 @@ export function TeamCoordination({ api, teamId }: { api: ProjectClient; teamId: 
     <p>选择已获权的项目工作区与 Worker，首次发送自动创建 Team 协调 Task 和绑定会话。协调 Agent 使用普通执行权限，操作仍需遵守项目、节点及工具审批。</p>
     {error && <p role="alert">{error}</p>}
     <Button variant="outline" disabled={busy} onClick={() => { const ticket = generation.current; void refresh(teamId, ticket).catch(cause => { if (generation.current === ticket) setError(accountError(cause)) }) }}>刷新协调环境与会话</Button>
-    <label>执行环境<select aria-label="协调执行环境" value={target} onChange={event => setTarget(event.target.value)}><option value="">选择 Workspace / Worker / Agent / Model</option>{options.map(option => <option key={option.key} value={option.key}>{option.label}</option>)}</select></label>
+    {reopenTaskId && <p role="status">将在原协调 Task 下新建会话，旧会话历史保留；输入首条消息后发送。<Button variant="outline" disabled={busy} onClick={() => setReopenTaskId('')}>取消重开</Button></p>}
+    <label>执行环境<select aria-label="协调执行环境" value={target} disabled={!!reopenTaskId} onChange={event => setTarget(event.target.value)}><option value="">选择 Workspace / Worker / Agent / Model</option>{options.map(option => <option key={option.key} value={option.key}>{option.label}</option>)}</select></label>
     <label>首条消息<textarea aria-label="协调首条消息" maxLength={100000} value={content} onChange={event => setContent(event.target.value)} /></label>
     <Button disabled={busy || (!pending.current && (!choice || !content.trim()))} onClick={() => void send()}>{pending.current ? '重试原首条消息' : '发送并创建会话'}</Button>
     {resources && !options.length && <p role="status">暂无获权且已就绪的工作区与可用 Agent。</p>}
-    <h2>我的协调会话</h2><div className="account-actions">{sessions.map(item => <Button key={item.id} variant="outline" onClick={() => setSelected(item.id)}>{item.title}（{item.binding.agent.agentKey}）</Button>)}</div>
+    <h2>我的协调会话</h2><div className="account-actions">{sessions.map(item => <Button key={item.id} variant="outline" onClick={() => { setReopenTaskId(''); setSelected(item.id) }}>{item.title}（{item.binding.agent.agentKey}）</Button>)}</div>
+    {session && <Button variant="outline" disabled={busy || !!pending.current} onClick={prepareReopen}>在此 Task 下重开新会话</Button>}
     {session && project && <SessionConversation api={api} project={project} taskId={session.taskId!} sessionId={session.id} close={() => setSelected('')} />}
   </section>
 }

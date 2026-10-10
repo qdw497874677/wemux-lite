@@ -93,6 +93,27 @@ try {
     await page.locator(`[data-conversation-session="${sessionId}"]`).waitFor()
     await page.getByText(text).last().waitFor()
     checks.push(`${name}: reload and restore same Task-bound Session and journal`)
+    step = `${name} reopen new Session under original Task`
+    await page.getByRole('button', { name: '在此 Task 下重开新会话' }).click()
+    await page.getByRole('status').getByText(/将在原协调 Task 下新建会话/).waitFor()
+    const reopenedText = `browser-${name}-reopened-echo`
+    await page.getByRole('textbox', { name: '协调首条消息' }).fill(reopenedText)
+    await page.getByRole('button', { name: '发送并创建会话' }).click()
+    const reopened = page.getByRole('region', { name: '任务会话对话' })
+    await reopened.waitFor()
+    await reopened.getByText(reopenedText).last().waitFor()
+    await reopened.getByText(/Turn 已完成/).waitFor()
+    const reopenedId = await reopened.getAttribute('data-conversation-session')
+    assert.ok(reopenedId && reopenedId !== sessionId, 'reopen creates another Session')
+    const afterReopen = await context.request.get(`${origin}/api/teams/default-team/coordination/sessions`)
+    assert.equal(afterReopen.status(), 200)
+    const allSessions = (await afterReopen.json()).items
+    const pair = allSessions.filter(item => item.id === sessionId || item.id === reopenedId)
+    assert.equal(pair.length, 2, 'both Session histories retained')
+    assert.equal(pair[0].taskId, pair[1].taskId, 'reopened Session uses the original Team Task')
+    await page.getByRole('button', { name: /团队协调（test）/ }).nth(allSessions.findIndex(item => item.id === sessionId)).click()
+    await page.locator(`[data-conversation-session="${sessionId}"]`).getByText(text).last().waitFor()
+    checks.push(`${name}: explicit reopen keeps Team Task and original Session history`)
   }
   assert.deepEqual(errors, [], 'browser page errors')
   console.log(JSON.stringify({ status: 'pass', checks }))
