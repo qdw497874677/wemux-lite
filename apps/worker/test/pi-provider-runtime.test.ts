@@ -400,6 +400,55 @@ test('a non-settling stop and releases quarantine the Session and finalize only 
   } finally { await f.cleanup() }
 })
 
+test('settled stop and return cannot release a Session while iterator.next is pending', async () => {
+  let reads = 0, stops = 0, returns = 0
+  const never = new Promise<never>(() => {})
+  const f = await fixture(async () => ({ definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'stamp', bindingId: 'binding' }), { timeouts: { idleMs: 25, maxMs: 200 } })
+  const runner = (f.runtime as unknown as { agentRunner: { stop: () => Promise<void>; runWithPiProvider: () => AsyncIterable<unknown> } }).agentRunner
+  runner.stop = async () => { stops++ }
+  runner.runWithPiProvider = () => ({ [Symbol.asyncIterator]() { return { next() { reads++; return never }, async return() { returns++; return { done: true, value: undefined } } } } })
+  try {
+    await f.send('pending-first', { kind: 'session.enqueue', sessionId, message: { messageId: 'pending-first' as never, content: 'first', sentByAccountId: 'actor' as never } })
+    await until(async () => reads === 1)
+    await f.send('pending-second', { kind: 'session.enqueue', sessionId, message: { messageId: 'pending-second' as never, content: 'second', sentByAccountId: 'actor' as never } })
+    await until(async () => (await f.store.sessions.get(sessionId))?.activeTurnId === null)
+    assert.equal(stops, 1)
+    assert.equal(returns, 1)
+    assert.equal(reads, 1, 'successor cannot start beside an unresolved iterator read')
+    assert.equal((await f.store.sessions.listQueued(sessionId)).length, 1)
+    const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })
+    assert.equal(journal.events.find(event => event.payload.kind === 'turn.finished')?.payload.outcome, 'failed')
+  } finally { await f.cleanup() }
+})
+
+test('shutdown bounds a hung active stop, aborts owned sessions and observes late rejection', async () => {
+  const f = await fixture(async () => ({ definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'stamp', bindingId: 'binding' }), { timeouts: { idleMs: 25, maxMs: 200 } })
+  let started!: () => void, rejectStop!: (error: Error) => void
+  const active = new Promise<void>(resolve => { started = resolve })
+  const hungStop = new Promise<void>((_, reject) => { rejectStop = reject })
+  const runner = (f.runtime as unknown as { agentRunner: { active: Map<SessionId, { invocationId: string; stopRequested: boolean; stop: () => Promise<void> }>; abort: () => void } }).agentRunner
+  let aborted = 0
+  // Exercise the actual runner.close() path: a registered active invocation
+  // has a stop that never settles, while its iterator read also stays pending.
+  runner.active.set(sessionId, { invocationId: 'shutdown-hung', stopRequested: false, stop: () => hungStop })
+  const originalAbort = runner.abort.bind(runner)
+  runner.abort = () => { aborted++; originalAbort() }
+  const unhandled: unknown[] = []
+  const onUnhandled = (error: unknown) => { unhandled.push(error) }
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    const originalRun = (f.runtime as unknown as { agentRunner: { runWithPiProvider: (...args: unknown[]) => AsyncIterable<unknown> } }).agentRunner
+    originalRun.runWithPiProvider = () => ({ [Symbol.asyncIterator]() { return { next() { started(); return new Promise<never>(() => {}) }, return() { return new Promise<never>(() => {}) } } } })
+    await f.send('shutdown-hung', { kind: 'session.enqueue', sessionId, message: { messageId: 'shutdown-hung' as never, content: 'first', sentByAccountId: 'actor' as never } })
+    await active
+    await Promise.race([f.runtime.shutdown(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error('shutdown hung')), 1500))])
+    assert.equal(aborted, 1)
+    rejectStop(new Error('late stop rejection'))
+    await new Promise(resolve => setTimeout(resolve, 300))
+    assert.deepEqual(unhandled, [])
+  } finally { process.off('unhandledRejection', onUnhandled); await f.cleanup() }
+})
+
 test('publication rejection after claim still finalizes and allows the next queued Turn', async () => {
   let rejectClaim = false, rejected = false
   const f = await fixture(async () => ({ definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'stamp', bindingId: 'binding' }), {

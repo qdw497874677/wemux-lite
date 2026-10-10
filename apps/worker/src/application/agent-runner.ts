@@ -28,6 +28,7 @@ export class WorkerAgentRunner implements AgentRunner {
   }>()
   private readonly runtimeAdapters: ReadonlyMap<AgentKey, RuntimeSessionAdapter>
   private readonly privateSessions = new Set<SessionId>()
+  private readonly releasing = new Map<SessionId, RuntimeOperationId>()
 
   constructor(private readonly options: WorkerAgentRunnerOptions) {
     this.runtimeAdapters = options.runtimeAdapters ?? new Map()
@@ -126,10 +127,14 @@ export class WorkerAgentRunner implements AgentRunner {
         yield event
       }
     } finally {
+      // Active command/approval identity ends now, but termination remains
+      // uncertain until stop and lease release both finish successfully.
+      this.releasing.set(request.sessionId, request.invocationId)
       if (this.active.get(request.sessionId)?.invocationId === request.invocationId) this.active.delete(request.sessionId)
       if (privateProvider) this.privateSessions.delete(request.sessionId)
       await handle?.stop()
       if (lease) await (faulted ? lease.fault() : lease.release())
+      if (this.releasing.get(request.sessionId) === request.invocationId) this.releasing.delete(request.sessionId)
     }
   }
 
@@ -176,6 +181,11 @@ export class WorkerAgentRunner implements AgentRunner {
     await this.managerForSession(request.sessionId).resolveApproval(request.sessionId, request.approvalId, request.decision, () => {
       if (this.active.get(request.sessionId) !== active || active.invocationId !== request.invocationId) throw new Error('Approval invocation is no longer active')
     })
+  }
+
+  /** A resolved stop only requests termination; inactive means the invocation's finally ran. */
+  isActive(sessionId: SessionId, invocationId: RuntimeOperationId): boolean {
+    return this.active.get(sessionId)?.invocationId === invocationId || this.releasing.get(sessionId) === invocationId
   }
 
   async stop(sessionId: SessionId, invocationId: RuntimeOperationId): Promise<void> {

@@ -561,6 +561,7 @@ export class WorkerRuntime {
     let iterator: AsyncIterator<AgentEvent> | null = null
     let privateProvider = false
     let childMayHaveStarted = false
+    let nextOutstanding = false
     const launchGeneration = this.providerGeneration
     // Claimed Turns cannot safely return to the queue: a retry could launch the
     // same invocation twice. Denial finishes this Turn as failed and releases the
@@ -639,8 +640,11 @@ export class WorkerRuntime {
           // Check the max deadline before requesting another result. Observe
           // any later rejection immediately, before optional callbacks run.
           childMayHaveStarted = true
+          nextOutstanding = true
           const next = iterator.next()
-          void next.catch(() => {})
+          // Settlement (including rejection) is distinct from return() or stop()
+          // resolving: neither proves an outstanding read has left the child.
+          void next.then(() => { nextOutstanding = false }, () => { nextOutstanding = false })
           // Async generators register their active invocation on first next(),
           // not when constructed. A stop during preparation must be forwarded
           // after that registration, otherwise it is silently lost.
@@ -698,7 +702,6 @@ export class WorkerRuntime {
         const cleanupTimeoutMs = Math.max(1, Math.min(this.agentTimeouts.idleMs, MAX_AGENT_CLEANUP_TIMEOUT_MS))
         try {
           await boundedAgentCleanup(() => this.agentRunner.stop(turn.sessionId, turn.id), cleanupTimeoutMs)
-          if (childMayHaveStarted) this.unsafeSessions.delete(turn.sessionId)
         } catch (error) { stopError = error; cleanupError = error }
         // Attempt all releases independently even after a rejection or timeout.
         // A timed-out iterator release could still have a live invocation.
@@ -706,6 +709,9 @@ export class WorkerRuntime {
         catch (error) { cleanupError ??= error; if (childMayHaveStarted) this.unsafeSessions.add(turn.sessionId) }
         try { await boundedAgentCleanup(() => prepared.cleanup(), cleanupTimeoutMs) }
         catch (error) { cleanupError ??= error; if (childMayHaveStarted) this.unsafeSessions.add(turn.sessionId) }
+        // A settled read plus an inactive runner invocation establishes that
+        // the runner's finally released the handle. return()/stop() alone do not.
+        if (childMayHaveStarted && !cleanupError && !nextOutstanding && !this.agentRunner.isActive(turn.sessionId, turn.id)) this.unsafeSessions.delete(turn.sessionId)
         // Prelaunch stop cannot have started a child; retain its cancellation.
         if (stopError && childMayHaveStarted) throw stopError
         if (childMayHaveStarted && this.unsafeSessions.has(turn.sessionId)) throw cleanupError
@@ -754,15 +760,22 @@ export class WorkerRuntime {
     this.clearLaunchRetries()
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = null
-    await this.agentRunner.close()
+    const timeoutMs = Math.max(1, Math.min(this.agentTimeouts.idleMs, MAX_AGENT_CLEANUP_TIMEOUT_MS))
+    try { await boundedAgentCleanup(() => this.agentRunner.close(), timeoutMs) }
+    catch { this.abort() /* best-effort kill of owned sessions, not proof of exit */ }
     this.terminals?.disposeAll()
     this.terminalSessions.clear()
-    await this.provisioner.stop?.()
-    await this.commands
-    await this.fileWriteExecutor?.close()
-    await Promise.all(this.provisions.values())
-    await Promise.all(this.tasks.values())
-    await this.publishing
+    // Every wait is bounded independently: an unresponsive external adapter,
+    // provisioner, or I/O operation must not hold shutdown forever.
+    const settle = async (work: () => Promise<unknown>) => {
+      try { await boundedAgentCleanup(work, timeoutMs) } catch { /* best effort */ }
+    }
+    await settle(() => this.provisioner.stop?.() ?? Promise.resolve())
+    await settle(() => this.commands)
+    await settle(() => this.fileWriteExecutor?.close() ?? Promise.resolve())
+    await settle(() => Promise.all(this.provisions.values()))
+    await settle(() => Promise.all(this.tasks.values()))
+    await settle(() => this.publishing)
   }
   /** 同步强制终止：不等待任何 in-flight promise，只杀 agent 子进程。永不挂起。不证明已开始的文件 I/O 停止。 */
   abort() {
