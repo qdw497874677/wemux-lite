@@ -4,7 +4,7 @@ Status: ready-for-agent
 
 ## Problem Statement
 
-Team 协调 Task 的领域模型及查询能力已部分实现，但真实入口仍不可用：`GET /api/teams/:id/coordination/availability` 固定返回禁用；`POST /api/teams/:id/coordination/sessions` 在旧安全门后仍是 501；Web 仅显示诊断卡，没有创建、发送或继续对话的路径。此前把正常聊天绑定到隔离资格门，导致需求无法交付。
+Team 协调 Task 的领域模型及查询能力已实现；历史上 `GET /api/teams/:id/coordination/availability` 固定禁用、`POST /api/teams/:id/coordination/sessions` 在旧安全门后为 501，Web 仅显示诊断卡。现在首发、对话与历史恢复已可用（Test Agent + 真实桌面/手机浏览器验证），但显式重开新 Session、有效非付费 Runtime 及其他完整验收仍未完成。此前把正常聊天绑定到隔离资格门，导致需求无法交付。
 
 用户最新决定：协调 Agent 如普通 Pi Agent 一样使用，**不对协调身份额外限制文件、改代码、终端或联网**；将隔离作为以后独立的安全能力。此决定取代原 spec 的 L1 作用域、六类写通道全部拒绝、书面残余风险接受和隔离门开关要求，见 [ADR 0008](../../docs/adr/0008-coordination-chat-ordinary-runtime-permissions.md)。历史 FAIL、探针和局部实现仍是真实历史，不改写为通过。
 

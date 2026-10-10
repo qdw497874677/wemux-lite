@@ -2,7 +2,7 @@
 /** Real enrolled Worker coordination conversation, non-paid Test Agent only.
  * Run: node --import tsx apps/e2e/team-coordination-transport.mjs
  * This is a positive functional test, not an expected-failure gate test. The 996c617
- * baseline must fail at first-send (403 coordination_gate_closed), not report PASS.
+ * After ADR 0008 this verifies the enabled functional path; historical gate evidence stays unchanged.
  * Scope: owned clean instance, same-home restart and one unauthorized outsider. This
  * does not cover concurrent first-sends, revocation during a queued Turn, unknown
  * Agent, cross-Project placement, model switching, real Pi, or backup migration.
