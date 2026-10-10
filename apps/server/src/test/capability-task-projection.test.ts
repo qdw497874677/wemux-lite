@@ -227,6 +227,30 @@ test('Server current Connector grant verification fences cached Turn tokens on e
 })
 
 
+test('issued Team coordination Turn capability is revoked when its Project owner leaves the Team', async () => {
+  const f = await fixture()
+  try {
+    const created = await f.call(`/teams/${f.project.teamId}/coordination/sessions`, {
+      workspaceId: f.workspaceId, workerId: f.workerId, agentKey: 'test', modelId: 'model',
+      requestId: 'coordination-capability-revoke', commandId: 'coordination-capability-command', content: 'Grant before removal',
+    }, contributor)
+    assert.equal(created.status, 201, JSON.stringify(created.data))
+    const pending = await f.app.store.commands.getPendingCommand(created.data.messageCommandId)
+    if (pending?.command.kind !== 'session.enqueue') throw Error('Expected Team first-send enqueue')
+    const bearer = pending.command.capabilities?.token
+    assert.ok(bearer)
+    const before = await f.ask('grant.verify', { requiredTool: 'http.call' }, bearer)
+    assert.equal(before.status, 200, JSON.stringify(before.data))
+    await f.app.store.transaction(tx => tx.identity.removeMembership(f.project.teamId, contributor))
+    const after = await f.ask('grant.verify', { requiredTool: 'http.call' }, bearer)
+    assert.ok([403, 404].includes(after.status), JSON.stringify(after.data))
+    const list = await f.ask('task.list', { projectId: f.project.id }, bearer)
+    assert.ok([403, 404].includes(list.status), JSON.stringify(list.data))
+    const session = await f.call(`/sessions/${created.data.session.id}`, undefined, contributor)
+    assert.equal(session.status, 404, 'Project grant still exists but Team Session is no longer readable')
+  } finally { await f.close() }
+})
+
 test('Capability preparation and verification reject contradictory Task coordination identity', async () => {
   const f = await fixture()
   try {
