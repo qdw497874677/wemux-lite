@@ -1,7 +1,7 @@
 # 02: 文件、Diff、终端与成果审查引用
 
 Status: ready-for-agent
-Blocked by: 独立后端和受控测试可先行；界面联调需 [01](01-canvas-fork.md)，新增写能力开放仍需[协调安全签收](../../web-next-coordination-closure/issues/04-coordination-acceptance.md)。复用既有 Run/审查合同，不取消安全门。
+Blocked by: 独立后端和受控测试可先行；界面联调需 [01](01-canvas-fork.md)，新增写能力按本票账号/资源授权和审批验收，不再依赖协调隔离风险签收。复用既有 Run/审查合同，不取消普通操作授权与审批。
 
 **Spec:** [会话协作界面](../spec.md)
 **合并来源:** `43966aa` 的原票 02、03。
