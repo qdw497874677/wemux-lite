@@ -1,5 +1,6 @@
 import { parseVerifiedServerFileWriteFrame } from '@wemux/wire-protocol/file-admission-node'
 import { WorkerFileWriteExecutor } from './file-write-executor.js'
+import { verifyEnqueueAuthorization } from './command-authorization.js'
 import type { FileWriteIngress } from '../transport/types.js'
 import { createHash } from 'node:crypto'
 import { projectAgentEventToSessionPayload, type AgentEvent } from '@wemux/agent-interchange'
@@ -65,7 +66,8 @@ export class WorkerRuntime {
     },
     private readonly piProviderResolver?: PiProviderResolver,
     /** Internal embedding only. Absent in all production constructors. */
-    fileWrites?: { readonly write?: typeof writeWorkspaceFile }) {
+    fileWrites?: { readonly write?: typeof writeWorkspaceFile },
+    private readonly authorizeLaunch?: (commandId: CommandId) => Promise<boolean>) {
     if (fileWrites) {
       this.fileWriteExecutor = new WorkerFileWriteExecutor(store, workerId, fileWrites)
       const publishPending = async (result: import('@wemux/wire-protocol').FileWriteResultPayload, publish: Parameters<FileWriteIngress['replay']>[0]) => {
@@ -159,12 +161,13 @@ export class WorkerRuntime {
     this.headRefresh = setInterval(() => { void this.sendHeads() }, 1_000)
     this.headRefresh.unref()
     for (const workspace of await this.store.listWorkspaces()) if (!this.isLocalWorkspace(workspace)) await this.report(workspace.id)
+    for (const session of await this.store.listSessions()) this.schedule(session.sessionId)
   }
   receive(message: ServerToWorker): Promise<void> {
     if (message.type === 'command' && message.command.kind === 'runtime.approval.resolve') message = structuredClone(message)
     const next = this.commands.then(async () => {
       if (this.closing) return
-      if (message.type === 'command') await this.command(message.commandId, message.command, true, 'cluster')
+      if (message.type === 'command') await this.command(message.commandId, message.command, true, 'cluster', message.authorization)
       if (message.type === 'fs.request') await this.files(message)
       if (message.type === 'terminal.request') await this.terminal(message)
       if (message.type === 'sync') {
@@ -240,10 +243,23 @@ export class WorkerRuntime {
     const installationId = this.store.localInstallation()?.installationId
     return Boolean(installationId) && workspace.projectId === ('local' as import('@wemux/domain').ProjectId) && workspace.workerId === `local-${installationId}`
   }
-  private async command(commandId: CommandId, command: WorkerCommand, acknowledge = true, source: 'cluster' | 'local' = 'cluster'): Promise<CommandReceipt> {
+  private async command(commandId: CommandId, command: WorkerCommand, acknowledge = true, source: 'cluster' | 'local' = 'cluster', authorization?: import('@wemux/wire-protocol/command-assertion').SignedEnqueueAuthorization): Promise<CommandReceipt> {
     const payloadFingerprint = createHash('sha256').update(canonical(command.kind === 'session.enqueue' ? { kind: command.kind, sessionId: command.sessionId, message: { messageId: command.message.messageId, content: command.message.content } } : command)).digest('hex')
     const previous = await this.store.commands.get(commandId)
     let receipt: CommandReceipt = { commandId, status: 'accepted' }
+    // Never let an unsigned cluster frame replace a previously accepted command.
+    if (source === 'cluster' && command.kind === 'session.enqueue' && !verifyEnqueueAuthorization(this.store.identity(), this.workerId, commandId, command, authorization, Boolean(previous?.authorization))) {
+      receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } }
+      // Do not poison a commandId: the Server can retry it with its original signed frame.
+      if (acknowledge) this.send({ type: 'ack', receipt })
+      return receipt
+    }
+    // An unsigned historical queue cannot be replayed as a signed command ID.
+    if (source === 'cluster' && command.kind === 'session.enqueue' && previous && !previous.authorization) {
+      receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } }
+      if (acknowledge) this.send({ type: 'ack', receipt })
+      return receipt
+    }
     if (previous) {
       if (command.kind === 'runtime.approval.resolve' && (!(await this.store.sessions.get(command.sessionId)) || (await this.isLocalSession(command.sessionId)) !== (source === 'local'))) {
         receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Session host scope mismatch', retryable: false } }
@@ -267,7 +283,7 @@ export class WorkerRuntime {
             return
           }
         }
-        await tx.commands.record({ commandId, command, payloadFingerprint }, receipt)
+        await tx.commands.record({ commandId, command, payloadFingerprint, ...(authorization && source === 'cluster' ? { authorization } : {}) }, receipt)
         switch (command.kind) {
           case 'session.create': await tx.sessions.createSession(command.session.sessionId, command.session.binding, command.session.storageMode); break
           case 'session.enqueue': await tx.sessions.enqueue({ sessionId: command.sessionId, submissionCommandId: commandId, message: command.message, capabilities: command.capabilities, queuedAt: now() }); break
@@ -457,6 +473,13 @@ export class WorkerRuntime {
       if (!this.available(session.binding)) {
         await this.store.transaction(tx => tx.sessions.setRuntimeState(id, 'unavailable'))
         await this.publish(); return
+      }
+      const queued = (await this.store.sessions.listQueued(id))[0]
+      if (queued && !(await this.isLocalSession(id))) {
+        const record = await this.store.commands.get(queued.submissionCommandId)
+        if (!record?.authorization || !verifyEnqueueAuthorization(this.store.identity(), this.workerId, queued.submissionCommandId, record.command, record.authorization, true)) return
+        if (!this.authorizeLaunch || !await this.authorizeLaunch(queued.submissionCommandId)) return
+        if ((await this.store.sessions.listQueued(id))[0]?.submissionCommandId !== queued.submissionCommandId) continue
       }
       const turn = await this.store.transaction(tx => tx.sessions.claimNext(id))
       if (!turn) return

@@ -346,7 +346,15 @@ export class ClusterLifecycle {
         const session = await this.store.sessions.get(turn.sessionId)
         const workspace = session ? await this.store.workspaces.get(session.binding.workspaceId) : null
         return session && workspace && workspace.workerId === identity.workerId ? { projectId: workspace.projectId, workspaceId: workspace.id, rootPath: workspace.rootPath, agentKey: session.binding.agent.agentKey } : null
-      }), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), await loadNodePty(), this.connectors, (projectId, modelId) => resources!.piProviderForLaunch(projectId, modelId))
+      }), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), await loadNodePty(), this.connectors, (projectId, modelId) => resources!.piProviderForLaunch(projectId, modelId), undefined, async commandId => {
+        if (this.transport !== transport || this.state.phase !== 'online') return false
+        const base = serverUrl(urls[0])
+        base.protocol = ['https:', 'wss:'].includes(base.protocol) ? 'https:' : 'http:'
+        try {
+          const response = await fetch(new URL(`/api/workers/${encodeURIComponent(identity.workerId)}/commands/${encodeURIComponent(commandId)}/authorize-launch`, base.origin), { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(5000), headers: { authorization: `Bearer ${credential}` } })
+          return this.transport === transport && this.state.phase === 'online' && response.ok && (await response.json() as { allowed?: boolean }).allowed === true
+        } catch { return false }
+      })
       this.runtime = runtime
       this.resources = resources
       await runtime.initialize()

@@ -83,6 +83,7 @@ export interface PendingCommand {
   readonly commandId: CommandId
   readonly workerId: WorkerId
   readonly command: WorkerCommand
+  readonly authorization?: import('@wemux/wire-protocol/command-assertion').SignedEnqueueAuthorization
   readonly payloadFingerprint: string
   readonly createdAt: Timestamp
 }

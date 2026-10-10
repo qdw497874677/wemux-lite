@@ -79,6 +79,7 @@ export interface CommandPayload {
   readonly type: 'command'
   readonly commandId: import('@wemux/domain').CommandId
   readonly command: WorkerCommand
+  readonly authorization?: import('./command-authorization.js').SignedEnqueueAuthorization
 }
 
 export interface CommandReceiptPayload {

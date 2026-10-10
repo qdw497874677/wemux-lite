@@ -39,6 +39,7 @@ export interface CommandRecord {
   readonly commandId: CommandId
   readonly command: WorkerCommand
   readonly payloadFingerprint: string
+  readonly authorization?: import('@wemux/wire-protocol/command-assertion').SignedEnqueueAuthorization
   readonly state: CommandExecutionState
   readonly result: unknown
   readonly recordedAt: Timestamp

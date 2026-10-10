@@ -6,6 +6,7 @@ import { createRequest, replayCreate, recordCreate } from './create-request.ts'
 import { dedicatedConversationTask } from './dedicated-conversation-task.ts'
 import { sessionIdleReason } from './session-idle.ts'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import type { CommandSigningIdentity } from './command-signing.ts'
 import type { AgentKey, ApprovalId, CommandId, EventSeq, Id, MessageId, ModelId, ProjectId, RuntimeOperationId, SessionId, TeamId, Timestamp, TurnId, UserId, WorkerId, WorkspaceId } from '@wemux/domain'
 import type { AuditResource, CommandProjection, Project, Session, Worker, Workspace, WorkspacePlacement } from '@wemux/server-domain'
 import type { WorkerCommand } from '@wemux/wire-protocol'
@@ -57,13 +58,33 @@ export class ServerService {
   private readonly workerAccess?: WorkerAccessService
   private readonly projectAccess?: ProjectAccessService
   private readonly sessionAccess?: SessionAccessService
-  constructor(store: ServerStore, notifications: Notifications, capabilities?: CapabilityService, workerAccess?: WorkerAccessService, projectAccess?: ProjectAccessService, sessionAccess?: SessionAccessService) { this.store = store; this.notifications = notifications; this.capabilities = capabilities; this.workerAccess = workerAccess; this.projectAccess = projectAccess; this.sessionAccess = sessionAccess;}
+  constructor(store: ServerStore, notifications: Notifications, capabilities?: CapabilityService, workerAccess?: WorkerAccessService, projectAccess?: ProjectAccessService, sessionAccess?: SessionAccessService, private readonly commandSigning?: CommandSigningIdentity) { this.store = store; this.notifications = notifications; this.capabilities = capabilities; this.workerAccess = workerAccess; this.projectAccess = projectAccess; this.sessionAccess = sessionAccess;}
   async requireWorkerUseInTx(tx: ServerStoreTx, actor: UserId, workerId: WorkerId) {
     return this.workerAccess ? this.workerAccess.requireInTx(tx, actor, workerId) : requireValue(await tx.resources.getWorker(workerId))
   }
   async listWorkers() { return this.store.resources.listWorkers() }
   async getWorker(id: WorkerId) { return requireValue(await this.store.resources.getWorker(id)) }
   async getCommand(id: CommandId) { return requireValue(await this.store.commands.get(id)) }
+  /** A signed assertion proves origin, but never substitutes for current grant checks. */
+  async authorizeEnqueueLaunch(workerId: WorkerId, commandId: CommandId): Promise<{ allowed: boolean }> {
+    try {
+      return await this.store.transaction(async tx => {
+        const pending = await tx.commands.getPendingCommand(commandId)
+        if (!pending?.authorization || pending.workerId !== workerId || pending.command.kind !== 'session.enqueue') return { allowed: false }
+        const projection = await tx.commands.get(commandId)
+        if (projection?.status !== 'pending' && projection?.status !== 'accepted') return { allowed: false }
+        const claims = pending.authorization.claims
+        if (claims.commandId !== commandId || claims.workerId !== workerId || claims.sessionId !== pending.command.sessionId || claims.actorId !== pending.command.message.sentByAccountId || claims.commandDigest !== createHash('sha256').update(JSON.stringify(pending.command)).digest('hex')) return { allowed: false }
+        const actor = await tx.identity.getUser(claims.actorId)
+        if (!actor || (actor.status ?? 'active') !== 'active' || (actor.authVersion ?? 0) !== claims.actorAuthVersion) return { allowed: false }
+        const session = this.sessionAccess ? await this.sessionAccess.requireInTx(tx, claims.actorId, claims.sessionId, 'write') : null
+        if (!session || session.binding.agent.workerId !== workerId || session.projectId !== claims.projectId || session.workspaceId !== claims.workspaceId || (session.taskId ?? null) !== claims.taskId) return { allowed: false }
+        await assertSessionTaskMutable(tx, session)
+        const worker = await tx.resources.getWorker(workerId)
+        return { allowed: Boolean(worker && worker.connectionState !== 'revoked') }
+      })
+    } catch { return { allowed: false } }
+  }
   async listCommands(input: { workerId?: string; status?: string; limit?: number }) {
     const statuses: readonly CommandProjection['status'][] = ['pending', 'accepted', 'rejected', 'completed', 'failed', 'cancelled']
     const status = input.status === undefined ? undefined : statuses.find(value => value === input.status)
@@ -239,7 +260,7 @@ export class ServerService {
       await this.audit(tx, 'worker.enroll', { kind: 'worker', id })
       return worker
     })
-    return { worker, workerId: id, credential }
+    return { worker, workerId: id, credential, ...(this.commandSigning ? { commandSigningKey: { keyId: this.commandSigning.keyId, publicKey: this.commandSigning.publicKey } } : {}) }
   }
   async getProject(id: ProjectId, resources = this.store.resources): Promise<Project> {
     const p = requireValue(await resources.getProject(id))
@@ -479,7 +500,7 @@ export class ServerService {
       return project
     })
   }
-  private async command(tx: ServerStoreTx, workerId: WorkerId, command: WorkerCommand, id = newId<'CommandId'>()) {
+  private async command(tx: ServerStoreTx, workerId: WorkerId, command: WorkerCommand, id = newId<'CommandId'>(), authorization?: import('@wemux/wire-protocol/command-assertion').SignedEnqueueAuthorization) {
     const fingerprint = canonicalFingerprint(command)
     if (await tx.commands.getRejection(id)) throw new AppError(409, 'Conflicting commandId')
     const existing = await tx.commands.get(id)
@@ -487,7 +508,7 @@ export class ServerService {
       if (existing.workerId !== workerId || existing.payloadFingerprint !== fingerprint) throw new AppError(409, 'Conflicting commandId')
       return id
     }
-    await tx.commands.insertPending({ commandId: id, workerId, command, payloadFingerprint: fingerprint, createdAt: now() })
+    await tx.commands.insertPending({ commandId: id, workerId, command, payloadFingerprint: fingerprint, createdAt: now(), ...(authorization ? { authorization } : {}) })
     return id
   }
   async createWorkspace(input: unknown, actor?: UserId): Promise<{ workspace: Workspace & { revision: string }; workerId: WorkerId; commandId: CommandId } | { workspace: Workspace & { revision: string }; workerId: undefined; commandId: undefined }> {
@@ -650,7 +671,15 @@ export class ServerService {
     const prepared = this.capabilities ? await this.capabilities.prepareTurn({ sessionId: id, turnId: newId<'TurnId'>(), actorId: capabilityActor }, tx) : null
     const command: WorkerCommand = { kind: 'session.enqueue', sessionId: id, message: { messageId, content, ...(actor ? { sentByAccountId: actor } : {}) }, ...(prepared ? { capabilities: prepared.runtime } : {}) }
     if (new TextEncoder().encode(JSON.stringify({ type: 'command', commandId, command })).byteLength > 900 * 1024) throw new AppError(413, 'Message and capability assets exceed the worker transport limit')
-    await this.command(tx, session.binding.agent.workerId, command, commandId)
+    const user = actor ? await tx.identity.getUser(actor) : null
+    const claims = actor && user && this.commandSigning ? {
+      version: 1 as const, keyId: this.commandSigning.keyId, commandId, workerId: session.binding.agent.workerId,
+      sessionId: id, projectId: session.projectId, workspaceId: session.workspaceId, taskId: session.taskId ?? null,
+      actorId: actor, actorAuthVersion: user.authVersion ?? 0,
+      commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'),
+      issuedAt: now(), expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+    } : null
+    await this.command(tx, session.binding.agent.workerId, command, commandId, claims ? this.commandSigning!.sign(claims) : undefined)
     await this.audit(tx, 'session.enqueue', { kind: 'session', id }, actor)
     return { commandId, messageId, workerId: session.binding.agent.workerId }
   }

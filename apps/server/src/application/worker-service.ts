@@ -90,7 +90,7 @@ export class WorkerService {
     for (const session of await this.store.resources.listSessions()) if (session.binding.agent.workerId === workerId) this.notifications.session(session.id)
   }
   async deliverable(workerId: WorkerId): Promise<readonly ServerToWorker[]> {
-    return (await this.store.commands.listDeliverable(workerId, 100)).map(p => ({ type: 'command', commandId: p.commandId, command: p.command }))
+    return (await this.store.commands.listDeliverable(workerId, 100)).filter(p => p.command.kind !== 'session.enqueue' || Boolean(p.authorization)).map(p => ({ type: 'command', commandId: p.commandId, command: p.command, ...(p.authorization ? { authorization: p.authorization } : {}) }))
   }
   private request(sessionId: SessionId, seq: number): ServerToWorker {
     return { type: 'sync', kind: 'request', sessionId, fromSeq: (seq + 1) as EventSeq, limit: 500 }

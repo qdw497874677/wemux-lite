@@ -24,6 +24,14 @@ export const publicRoutes: readonly RouteDescriptor[] = [
   },
   { method: 'POST', pattern: '/workers/enroll', auth: 'public', handler: async ({ service, readBody, json }) => json(201, await service.enroll(await readBody())) },
   {
+    method: 'POST', pattern: '/workers/:workerId/commands/:commandId/authorize-launch', auth: 'worker', handler: async ({ request, auth, service, params, json }) => {
+      const token = request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice(7) : undefined
+      const workerId = await auth.authenticateWorker(token)
+      if (workerId !== params.workerId) throw new AppError(403, 'Forbidden')
+      return json(200, await service.authorizeEnqueueLaunch(workerId, params.commandId as import('@wemux/domain').CommandId))
+    },
+  },
+  {
     method: 'DELETE', pattern: '/workers/:workerId/enrollment', auth: 'worker', handler: async ({ request, auth, service, control, params, response }) => {
       const header = request.headers.authorization
       const token = header?.startsWith('Bearer ') ? header.slice(7) : undefined

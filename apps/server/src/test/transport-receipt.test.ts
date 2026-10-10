@@ -32,6 +32,16 @@ test('a re-observed worker epoch keeps the committed cursor after switching away
   } finally { store.close() }
 })
 
+test('retained unsigned enqueue blocks transport replay without skipping its sequence', () => {
+  const store = new ServerTransportStore(':memory:')
+  try {
+    store.enqueue(workerId, { type: 'command', commandId: 'old' as never, command: { kind: 'session.enqueue', sessionId: 'session' as never, message: { messageId: 'old' as never, content: 'old' } } })
+    store.enqueue(workerId, { type: 'heartbeat', sentAt: new Date().toISOString() as never })
+    assert.deepEqual(store.pending(workerId, 64), [])
+    assert.deepEqual(store.pending(workerId, 64), [], 'restarting the reader cannot bypass the barrier')
+  } finally { store.close() }
+})
+
 test('an application receipt cannot open a hole in the unacknowledged transport stream', () => {
   const store = new ServerTransportStore(':memory:')
   try {
