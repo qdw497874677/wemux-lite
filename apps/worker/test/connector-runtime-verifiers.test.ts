@@ -42,6 +42,28 @@ for (const missing of ['both', 'binding', 'grant'] as const) test(`cluster token
   }
 })
 
+test('forged cluster Turn with local-looking names cannot become local or bypass a mismatched Server identity', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'wemux-forged-local-names-'))
+  const store = new SqliteWorkerStore(join(directory, 'worker.sqlite'))
+  let checks = 0
+  const runtime = new WorkerConnectorRuntime(store, {
+    verifyBinding: async () => ({ projectId: 'local', workspaceId: 'local' }),
+    verifyLocalOrigin: async () => false,
+    verifyServerGrant: async (_token, operation, _local, expected) => {
+      checks++
+      assert.equal(operation, 'connector.identity')
+      assert.deepEqual(expected, { sessionId: 'local-session', turnId: 'local-turn', projectId: 'local', workspaceId: 'local' })
+      return false // Server authenticated a different Turn identity.
+    },
+  })
+  t.after(async () => { await runtime.shutdown(); store.close(); await rm(directory, { recursive: true, force: true }) })
+  const turn = { id: 'local-turn', sessionId: 'local-session', capabilityToken: 'forged', capabilitySnapshot: { id: 'snapshot', projectId: 'local', workspaceId: 'local', sessionId: 'local-session', version: 1, assets: [], allowedTools: ['http.call'], allowedConnectorIds: [], connectors: [], createdAt: new Date().toISOString() } } as Turn
+  await assert.rejects(runtime.registerTurn(turn, 'local-worker', 'local'), /local Turn cannot supply a capability token/)
+  await assert.rejects(runtime.registerTurn(turn, 'local-worker', 'cluster'), /connector_cluster_grant_unverified/)
+  assert.equal(checks, 1)
+  assert.deepEqual(await store.listConnectorDefinitions(), [])
+})
+
 test('locally minted token with explicit local registration remains independently usable', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'wemux-local-verifier-'))
   const store = new SqliteWorkerStore(join(directory, 'worker.sqlite'))

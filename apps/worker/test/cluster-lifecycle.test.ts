@@ -81,13 +81,25 @@ test('production cluster verifier denies registration before Connector writes wh
     let checks = 0
     t.mock.method(globalThis, 'fetch', async (input: URL | string, init: RequestInit) => {
       checks++
-      assert.equal(String(input), 'http://127.0.0.1:1/agent-capabilities/session.info')
+      assert.equal(String(input), 'http://127.0.0.1:1/agent-capabilities/connector.identity')
+      assert.equal(init.redirect, 'error')
       assert.equal(init.headers && (init.headers as Record<string, string>).authorization, 'Bearer server-token')
       assert.deepEqual(JSON.parse(String(init.body)), {})
       return new Response('{}', { status: 403 })
     })
     await assert.rejects(lifecycle.connectors.registerTurn(turn, workerId, 'cluster'), /connector_cluster_grant_unverified/)
     assert.equal(checks, 1)
+    assert.deepEqual(await f.store.getConnectorDefinition(definition.id), definition)
+    t.mock.restoreAll()
+    let grantChecks = 0
+    t.mock.method(globalThis, 'fetch', async (input: URL | string, init: RequestInit) => {
+      grantChecks++
+      assert.equal(String(input), 'http://127.0.0.1:1/agent-capabilities/connector.identity')
+      assert.equal(init.redirect, 'error')
+      return Response.json({ projectId, workspaceId, sessionId, turnId: 'other-turn' })
+    })
+    await assert.rejects(lifecycle.connectors.registerTurn(turn, workerId, 'cluster'), /connector_cluster_grant_unverified/)
+    assert.equal(grantChecks, 1, 'identity mismatch rejects before checking a tool grant')
     assert.deepEqual(await f.store.getConnectorDefinition(definition.id), definition)
   } finally { await f.close() }
 })
@@ -204,7 +216,7 @@ test('failed cluster runtime initialization is cleaned up and restores local run
   } finally { await f.close() }
 })
 
-test('connected local workbench Turn mints a verified local Connector context without a Server token', async () => {
+test('connected local workbench Turn mints a verified local Connector context without a Server token', async t => {
   const f = await fixture()
   const server = createServer()
   const sockets = new WebSocketServer({ server })
@@ -223,6 +235,33 @@ test('connected local workbench Turn mints a verified local Connector context wi
     assert.ok(events.some(event => event.payload.kind === 'assistant.text.delta'))
     assert.ok(events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'completed'), JSON.stringify(events))
     assert.equal((await f.store.sessions.getTurn((await f.store.sessions.get(session.sessionId))!.activeTurnId!))?.capabilityToken ?? null, null)
+    // A connected Worker still owns local Sessions; exercise the real Connector
+    // gateway with a locally minted token, not only Turn registration.
+    const localSession = (await f.store.sessions.get(session.sessionId))!
+    const localWorkerId = localSession.binding.agent.workerId
+    const now = new Date().toISOString() as Timestamp
+    const connector = { id: 'local-http' as never, projectId: 'local' as never, kind: 'http' as const, name: 'Local HTTP', description: null, revision: 1, enabled: true, allowedWorkerIds: [], credentialRef: null, credentialAvailability: 'not_required' as const, riskDefaults: { requireApprovalForRead: false, allowMcpReadOnlyHint: false }, config: { baseUrl: 'https://fixture.example.test', authentication: 'none' as const, publicHeaders: {}, allowedOperations: [{ id: 'read', method: 'GET' as const, pathTemplate: '/items', allowedQueryNames: [], allowedRequestHeaderNames: [], requestContentTypes: [] }], allowPrivateNetwork: false }, createdAt: now, updatedAt: now }
+    await f.store.saveConnectorDefinition(connector)
+    await f.store.transaction(tx => tx.sessions.enqueue({ sessionId: session.sessionId, submissionCommandId: 'local-connector-command' as CommandId, message: { messageId: 'local-connector-message' as MessageId, content: 'invoke' }, queuedAt: now }))
+    const localTurn = await f.store.transaction(tx => tx.sessions.claimNext(session.sessionId))
+    assert.ok(localTurn)
+    const runtime = (f.lifecycle as unknown as { connectors: import('../src/connectors/runtime.js').WorkerConnectorRuntime }).connectors
+    const registration = await runtime.registerTurn(localTurn, localWorkerId, 'local')
+    assert.equal(registration.snapshot.allowedConnectorIds.includes(connector.id), true)
+    let calls = 0
+    // Intercept the outbound executor boundary; authorization and gateway
+    // dispatch remain real, without contacting an external endpoint.
+    t.mock.method(runtime.http, 'execute', async (...args: Parameters<typeof runtime.http.execute>) => {
+      calls++
+      assert.equal(args[0].id, connector.id)
+      assert.equal(args[1].operationId, 'read')
+      return { output: { ok: true }, agentSummary: { ok: true }, journalSummary: { ok: true }, retryAfterMs: null }
+    })
+    const result = await runtime.handle('http.call', registration.token, { connectorId: connector.id, connectorRevision: 1, operationId: 'read', requestId: 'local-connector-request', toolCallId: 'local-connector-tool', input: {} })
+    assert.equal(result?.status, 200)
+    assert.equal((result?.body as { ok: boolean }).ok, true, JSON.stringify(result))
+    assert.equal(calls, 1)
+    await registration.release()
   } finally {
     await f.close()
     for (const socket of sockets.clients) socket.terminate()

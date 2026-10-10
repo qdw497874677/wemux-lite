@@ -26,11 +26,11 @@ export class WorkerConnectorRuntime {
   private readonly finalizing = new Map<string, { sessionId: string; turnId: string; done: Promise<void> }>()
   private closing = false
   private readonly verifyLocalOrigin?: (turn: Turn, workerId: string) => Promise<boolean>
-  private readonly verifyServerGrant?: (token: string, operation: 'session.info' | 'mcp.list_tools' | 'mcp.call' | 'http.call', local: boolean, expected?: { sessionId: string; turnId: string; projectId: string; workspaceId: string }) => Promise<boolean>
+  private readonly verifyServerGrant?: (token: string, operation: 'connector.identity' | 'mcp.list_tools' | 'mcp.call' | 'http.call', local: boolean, expected?: { sessionId: string; turnId: string; projectId: string; workspaceId: string }) => Promise<boolean>
   private readonly verifyBinding?: (turn: Turn, workerId: string) => Promise<{ projectId: string; workspaceId: string } | null>
   private shutdownPromise: Promise<void> | null = null
 
-  constructor(store: WorkerConnectorStore, options: { readonly fetch?: typeof fetch; readonly lookup?: import('@wemux/connector').GuardedFetchDnsLookup; readonly supervisor?: McpProcessSupervisor; readonly onApproval?: (event: ConnectorApprovalEvent) => void | Promise<void>; readonly verifyLocalOrigin?: (turn: Turn, workerId: string) => Promise<boolean>; readonly verifyBinding?: (turn: Turn, workerId: string) => Promise<{ projectId: string; workspaceId: string } | null>; readonly verifyServerGrant?: (token: string, operation: 'session.info' | 'mcp.list_tools' | 'mcp.call' | 'http.call', local: boolean, expected?: { sessionId: string; turnId: string; projectId: string; workspaceId: string }) => Promise<boolean> } = {}) {
+  constructor(store: WorkerConnectorStore, options: { readonly fetch?: typeof fetch; readonly lookup?: import('@wemux/connector').GuardedFetchDnsLookup; readonly supervisor?: McpProcessSupervisor; readonly onApproval?: (event: ConnectorApprovalEvent) => void | Promise<void>; readonly verifyLocalOrigin?: (turn: Turn, workerId: string) => Promise<boolean>; readonly verifyBinding?: (turn: Turn, workerId: string) => Promise<{ projectId: string; workspaceId: string } | null>; readonly verifyServerGrant?: (token: string, operation: 'connector.identity' | 'mcp.list_tools' | 'mcp.call' | 'http.call', local: boolean, expected?: { sessionId: string; turnId: string; projectId: string; workspaceId: string }) => Promise<boolean> } = {}) {
     this.store = store
     this.verifyBinding = options.verifyBinding
     this.verifyLocalOrigin = options.verifyLocalOrigin
@@ -75,7 +75,7 @@ export class WorkerConnectorRuntime {
       if (!binding || !turn.capabilitySnapshot || turn.capabilitySnapshot.projectId !== binding.projectId || turn.capabilitySnapshot.workspaceId !== binding.workspaceId || turn.capabilitySnapshot.sessionId !== turn.sessionId || !this.verifyServerGrant) throw new Error('connector_cluster_grant_unverified')
       try {
         const operations = turn.capabilitySnapshot.allowedTools.filter((tool): tool is 'mcp.list_tools' | 'mcp.call' | 'http.call' => tool === 'mcp.list_tools' || tool === 'mcp.call' || tool === 'http.call')
-        if (!(await this.verifyServerGrant(turn.capabilityToken, 'session.info', false, { sessionId: turn.sessionId, turnId: turn.id, projectId: binding.projectId, workspaceId: binding.workspaceId })) || !(await Promise.all(operations.map(tool => this.verifyServerGrant!(turn.capabilityToken!, tool, false)))).every(Boolean)) throw new Error('connector_cluster_grant_unverified')
+        if (!(await this.verifyServerGrant(turn.capabilityToken, 'connector.identity', false, { sessionId: turn.sessionId, turnId: turn.id, projectId: binding.projectId, workspaceId: binding.workspaceId })) || !(await Promise.all(operations.map(tool => this.verifyServerGrant!(turn.capabilityToken!, tool, false)))).every(Boolean)) throw new Error('connector_cluster_grant_unverified')
       } catch { throw new Error('connector_cluster_grant_unverified') }
     }
     const installed = (await this.store.listConnectorDefinitions()).filter(definition => definition.enabled && (!definition.allowedWorkerIds.length || definition.allowedWorkerIds.includes(workerId as never)))

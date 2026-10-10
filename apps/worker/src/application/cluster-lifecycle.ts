@@ -105,9 +105,9 @@ export class ClusterLifecycle {
     if (local) return true
     if (!this.clusterGrantUrl) return false
     try {
-      const result = await fetch(new URL(operation === 'session.info' ? '/agent-capabilities/session.info' : '/agent-capabilities/grant.verify', httpOrigin(this.clusterGrantUrl)), { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(operation === 'session.info' ? {} : { requiredTool: operation }), signal: AbortSignal.timeout(5_000) })
+      const result = await fetch(new URL(operation === 'connector.identity' ? '/agent-capabilities/connector.identity' : '/agent-capabilities/grant.verify', httpOrigin(this.clusterGrantUrl)), { method: 'POST', redirect: 'error', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(operation === 'connector.identity' ? {} : { requiredTool: operation }), signal: AbortSignal.timeout(5_000) })
       if (!result.ok) return false
-      if (operation !== 'session.info') return true
+      if (operation !== 'connector.identity') return true
       const info = await result.json() as { projectId?: string; workspaceId?: string; sessionId?: string; turnId?: string }
       return !!expected && info.projectId === expected.projectId && info.workspaceId === expected.workspaceId && info.sessionId === expected.sessionId && info.turnId === expected.turnId
     } catch { return false }
