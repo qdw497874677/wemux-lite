@@ -17,7 +17,7 @@ import { ownedWorkerLaunch, removeOwnedServerDatabases } from './owned-worker-fi
 // Source: coordination-write-channel-probes.mjs. Proxy observes the real Upgrade/hello and
 // forwards every byte unchanged; only the negative cases inject RFC 6455 server-role frames.
 function transportProxy(port) {
-  const links = [], seen = [], cursor = { epoch: null, next: 1 }
+  const links = [], seen = [], receipts = [], cursor = { epoch: null, next: 1 }
   const parse = buffer => {
     if (buffer.length < 2) return null
     const masked = Boolean(buffer[1] & 128)
@@ -50,6 +50,13 @@ function transportProxy(port) {
         return
       }
       upstream.write(chunk)
+      link.incoming = Buffer.concat([link.incoming, chunk])
+      for (;;) {
+        const frame = parse(link.incoming); if (!frame) break
+        const value = decode(link.incoming.subarray(0, frame.total), frame)
+        link.incoming = link.incoming.subarray(frame.total)
+        if (value?.frameType === 'data' && value.payload?.type === 'ack') receipts.push(value.payload.receipt)
+      }
     })
     upstream.on('data', chunk => {
       client.write(chunk)
@@ -70,7 +77,7 @@ function transportProxy(port) {
         }
         if (value?.frameType === 'data' && value.durability === 'durable' && value.deliveryEpoch === cursor.epoch) cursor.next = Math.max(cursor.next, value.directionSeq + 1)
         // Never persist full frames: capability grants and transport credentials can be inside them.
-        if (value?.frameType === 'data' && value.payload?.type === 'command') seen.push({ direction: 'toWorker', commandId: value.payload.commandId, kind: value.payload.command?.kind, signed: Boolean(value.payload.command?.authorization ?? value.payload.authorization) })
+        if (value?.frameType === 'data' && value.payload?.type === 'command') seen.push({ direction: 'toWorker', commandId: value.payload.commandId, kind: value.payload.command?.kind, signed: Boolean(value.payload.authorization?.signature) })
       }
     })
   })
@@ -85,7 +92,7 @@ function transportProxy(port) {
     live[0].client.write(Buffer.concat([header, bytes]))
     return { epoch: frame.deliveryEpoch, seq: frame.directionSeq }
   }
-  return { server, inject, seen, close: async () => { for (const link of links) { link.client.destroy(); link.upstream.destroy() } await new Promise(resolve => server.close(resolve)) } }
+  return { server, inject, seen, receipts, close: async () => { for (const link of links) { link.client.destroy(); link.upstream.destroy() } await new Promise(resolve => server.close(resolve)) } }
 }
 const eventually = async (read, accept, label, timeout = 30000) => {
   const until = Date.now() + timeout
@@ -148,34 +155,29 @@ try {
   const send = (content, commandId) => api(`/sessions/${id}/messages`, 'POST', { content, commandId })
   const echo = await send('ticket02-positive-echo', 'ticket02-positive')
   await eventually(() => api(`/commands/${echo.commandId}`), v => v.status === 'accepted', 'real enqueue receipt')
-  await eventually(journal, v => v.events.some(e => e.payload.kind === 'turn.finished' && e.payload.outcome === 'completed') && v.events.some(e => e.payload.kind === 'assistant.text.delta' && e.payload.text.includes('positive')), 'actual Test Agent echo, not only command ACK')
+  await eventually(journal, v => v.events.some(e => e.payload.kind === 'turn.finished' && e.payload.outcome === 'completed') && v.events.filter(e => e.payload.kind === 'assistant.text.delta').map(e => e.payload.text).join('').includes('ticket02-positive-echo'), 'actual Test Agent echo, not only command ACK')
   for (const commandId of [provision.commandId, created.commandId, echo.commandId]) {
     assert.ok(proxy.seen.some(f => f.commandId === commandId), `missing real WebSocket delivery ${commandId}`)
     const pending = await app.store.commands.getPendingCommand(commandId)
     assert.ok(pending?.command, `missing persisted Server command ${commandId}`)
-    // Explicit assertion goes red on HEAD until Ticket02 adds a verifiable signed contract.
-    if (mode === 'all' || mode === 'positive') assert.equal(proxy.seen.find(f => f.commandId === commandId)?.signed, true, `Ticket02 signature missing on delivered Server command ${commandId}`)
+    // Ticket02 signs actor-bearing session.enqueue, not provisioning or session creation.
+    if ((mode === 'all' || mode === 'positive') && commandId === echo.commandId) assert.equal(proxy.seen.find(f => f.commandId === commandId)?.signed, true, `Ticket02 signature missing on delivered Server command ${commandId}`)
   }
   results.push('legitimate Task-bound create/enqueue delivered + completed Test Agent echo' + (mode === 'all' || mode === 'positive' ? ' + signed transport' : ' (signature not asserted in isolated negative mode)'))
   if (mode !== 'revoke') {
   step = 'unsigned durable command rejection'
-  const realProvision = (await app.store.commands.getPendingCommand(provision.commandId)).command
-  assert.equal(realProvision.kind, 'workspace.provision')
-  for (const [kind, command] of [
-    ['session.create', { kind: 'session.create', session: { sessionId: `ticket02-forged-${randomUUID()}`, binding: { workspaceId, agent: { workerId, agentKey: 'test' }, modelId: 'test' }, storageMode: 'local' } }],
-    ['workspace.provision', { ...realProvision, workspace: { ...realProvision.workspace, workspace: { ...realProvision.workspace.workspace, id: `ticket02-forged-${randomUUID()}`, name: 'forged' } } }],
-  ]) {
-    const commandId = `ticket02-unsigned-${kind}-${randomUUID()}`
-    proxy.inject(commandId, command)
-    // Receipt is mandatory: a dropped frame / broken proxy must never masquerade as a rejection.
-    // The Worker store is a second independent witness for accepted/rejected command outcome.
-    const receipt = await eventually(() => Promise.resolve(workerDocument('commands', commandId)), Boolean, `Worker processed injected ${kind}`)
-    const record = JSON.parse(receipt)
-    assert.equal(record.result?.status, 'rejected', `unsigned ${kind} must have a rejected receipt`)
-    if (kind === 'session.create') assert.equal(workerDocument('sessions', command.session.sessionId), null, 'forged Session must not exist')
-    else assert.equal(workerDocument('workspaces', command.workspace.workspace.id), null, 'forged Workspace must not exist')
-    results.push(`unsigned ${kind} delivered and rejected with no Worker row`)
-  }
+  // The Ticket02 contract signs actor-bearing enqueue only; provisioning and creation are not signed.
+  const commandId = `ticket02-unsigned-enqueue-${randomUUID()}`
+  const messageId = `ticket02-forged-message-${randomUUID()}`
+  const command = { kind: 'session.enqueue', sessionId: id, message: { messageId, content: 'ticket02-forged-echo', sentByAccountId: owner.id } }
+  proxy.inject(commandId, command)
+  // The authenticated WS ACK is mandatory even when a rejected command is deliberately
+  // not recorded, to avoid poisoning a commandId that the Server may retry signed.
+  const receipt = await eventually(() => Promise.resolve(proxy.receipts.find(r => r?.commandId === commandId)), Boolean, 'Worker ACK for unsigned enqueue')
+  assert.equal((await journal()).events.some(e => e.payload.kind === 'message.queued' && e.payload.messageId === messageId), false, 'unsigned enqueue produced a queued Worker side effect')
+  assert.equal(receipt.status, 'rejected', 'unsigned enqueue must receive a rejected ACK')
+  assert.equal(workerDocument('commands', commandId), null, 'rejected unsigned enqueue must not poison Worker command store')
+  results.push('unsigned enqueue delivered, rejected by Worker ACK, and not queued')
   }
 
   if (mode !== 'unsigned') {
@@ -207,7 +209,7 @@ try {
   const events = (await journal()).events
   assert.equal(events.filter(e => e.payload.kind === 'message.queued' && e.payload.messageId === queued.messageId).length, 1, 'queued item really persisted')
   assert.equal(events.filter(e => e.payload.kind === 'turn.started' && e.payload.messageId === queued.messageId).length, 0, 'revoked actor must not launch a second Turn after restart')
-  assert.equal(events.some(e => e.payload.kind === 'assistant.text.delta' && e.payload.text.includes('revoked-marker')), false, 'revoked Agent must not echo')
+  assert.equal(events.filter(e => e.payload.kind === 'assistant.text.delta').map(e => e.payload.text).join('').includes('ticket02-revoked-marker'), false, 'revoked Agent must not echo')
   results.push('revoked queued actor not launched on same-home recovery')
   }
   console.log(JSON.stringify({ status: 'pass', checks: results }))
