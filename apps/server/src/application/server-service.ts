@@ -4,6 +4,7 @@ import { FileWriteResultRejectedError, FileWriteResultUnavailableError, fileWrit
 import { assertSessionTaskMutable } from './task-lifecycle.ts'
 import { createRequest, replayCreate, recordCreate } from './create-request.ts'
 import { dedicatedConversationTask } from './dedicated-conversation-task.ts'
+import { teamCoordinationTask, coordinationAnchor } from './team-coordination-task.ts'
 import { sessionIdleReason } from './session-idle.ts'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { CommandSigningIdentity } from './command-signing.ts'
@@ -612,6 +613,60 @@ export class ServerService {
     await recordCreate(tx, request, result)
     return result
   }
+  /** Team first-send is atomic: no orphan Session/Task or unsent first message on failure. */
+  async createTeamCoordinationSession(team: TeamId, actor: UserId, input: unknown) {
+    const b = object(input)
+    const workspaceId = text(b.workspaceId, 'workspaceId') as WorkspaceId
+    const workerId = text(b.workerId, 'workerId') as WorkerId
+    const agentKey = text(b.agentKey, 'agentKey') as AgentKey
+    const requestId = text(b.requestId, 'requestId', 180)
+    const content = text(b.content, 'content', 100000)
+    const modelId = b.modelId === undefined ? null : text(b.modelId, 'modelId')
+    const commandId = b.commandId === undefined ? `coordination:${createHash('sha256').update(canonicalCommand([actor, team, requestId])).digest('hex')}` : text(b.commandId, 'commandId', 200)
+    if (!requestId || !content.trim()) throw new AppError(400, 'requestId and content are required')
+    if (Object.keys(b).some(key => !['workspaceId', 'workerId', 'agentKey', 'modelId', 'title', 'requestId', 'commandId', 'content'].includes(key))) throw new AppError(400, 'Invalid coordination request')
+    const title = b.title === undefined ? '团队协调' : text(b.title, 'title')
+    const result = await this.store.transaction(async tx => {
+      const membership = (await tx.identity.getIdentityRecords({ userId: actor, teamId: team })).membership
+      if (!membership) throw new AppError(403, 'Team membership required', 'team_membership_required')
+      const fingerprint = createHash('sha256').update(canonicalCommand({ actor, team, workspaceId, workerId, agentKey, modelId, title, content, commandId })).digest('hex')
+      // Check the durable first-send receipt before revalidating mutable placement or
+      // Agent availability. A retry must neither enqueue a second message nor create a Task.
+      let previous: Awaited<ReturnType<typeof tx.resources.getSession>> = null
+      for (const session of await tx.resources.listSessions()) {
+        if (session.ownerId !== actor || session.creation?.requestId !== `coordination:${requestId}` || !session.taskId?.startsWith('coordination:')) continue
+        const task = await tx.tasks.get(session.taskId)
+        if (task?.teamCoordination?.teamId === team) { previous = session; break }
+      }
+      if (previous) {
+        if (previous.creation?.coordinationIntentFingerprint !== fingerprint || !previous.creation.coordinationMessageCommandId || previous.deletedAt) throw new AppError(409, 'requestId already belongs to a different coordination first send', 'request_id_conflict')
+        await this.requireSessionAccessInTx(tx, actor, previous.id, 'write')
+        return { session: previous, commandId: previous.creation.commandId as CommandId, created: false, messageCommandId: previous.creation.coordinationMessageCommandId, messageId: previous.creation.coordinationMessageId ?? previous.creation.coordinationMessageCommandId }
+      }
+      const workspace = await this.authorizedWorkspaceInTx(tx, workspaceId, actor)
+      const worker = await this.requireWorkerUseInTx(tx, actor, workerId)
+      if (worker.teamId !== team || (await tx.resources.getProject(workspace.projectId))?.teamId !== team) throw new AppError(404, 'Workspace or Worker not found', 'workspace_not_found')
+      const taskId = await teamCoordinationTask(tx, { teamId: team, ownerId: actor, workerId, agentKey }, requestId)
+      const created = await this.createSessionInTx(tx, { workspaceId, workerId, agentKey, modelId: modelId ?? undefined, title, requestId: `coordination:${requestId}` }, { ownerId: actor, taskId, runId: null })
+      const sent = await this.enqueueInTx(tx, created.session.id, { commandId, content }, actor)
+      const session = { ...created.session, creation: { ...created.session.creation!, coordinationIntentFingerprint: fingerprint, coordinationMessageCommandId: sent.commandId, coordinationMessageId: sent.messageId } }
+      await tx.resources.saveSession(session)
+      return { ...created, session, messageCommandId: sent.commandId, messageId: sent.messageId }
+    })
+    this.notifications.commands(workerId)
+    return result
+  }
+  async listTeamCoordinationSessions(team: TeamId, actor: UserId) {
+    const membership = (await this.store.identity.getIdentityRecords({ userId: actor, teamId: team })).membership
+    if (!membership) throw new AppError(403, 'Team membership required', 'team_membership_required')
+    const sessions = await this.store.resources.listSessions()
+    return Promise.all(sessions.filter(session => session.ownerId === actor && !session.deletedAt && !!session.taskId).map(async session => {
+      const task = await this.store.tasks.get(session.taskId!)
+      if (!task?.teamCoordination || task.deletedAt || task.projectId !== coordinationAnchor(team) || task.teamCoordination.ownerId !== actor || task.teamCoordination.workerId !== session.binding.agent.workerId || task.teamCoordination.agentKey !== session.binding.agent.agentKey) return null
+      try { await this.sessionAccess?.require(actor, session.id) } catch { return null }
+      return this.sessionView(session.id, actor)
+    })).then(items => items.filter((item): item is NonNullable<typeof item> => item !== null))
+  }
   async createSession(input: unknown, actor?: UserId) {
     const result = await this.store.transaction(tx => this.createSessionInTx(tx, input, actor ? { ownerId: actor } : undefined))
     if (result.created) this.notifications.commands(result.session.binding.agent.workerId)
@@ -647,7 +702,7 @@ export class ServerService {
     let dedicated: import('@wemux/web-contract').Task['dedicatedConversation']
     if (source?.taskId) {
       const task = await tx.tasks.get(source.taskId)
-      if (!task || task.projectId !== workspace.projectId) throw new AppError(404, 'Task not found')
+      if (!task || (task.teamCoordination ? task.projectId !== coordinationAnchor((await tx.resources.getProject(workspace.projectId))?.teamId ?? '') || task.teamCoordination.ownerId !== provenance?.ownerId || task.teamCoordination.workerId !== b.workerId || task.teamCoordination.agentKey !== b.agentKey : task.projectId !== workspace.projectId)) throw new AppError(404, 'Task not found')
       if (task.deletedAt) throw new AppError(410, 'Task is permanently deleted', 'task_deleted')
       dedicated = task.dedicatedConversation
     }
@@ -680,6 +735,7 @@ export class ServerService {
     }
     const previous = requestId ? await tx.resources.getSessionByCreateRequest(ownerId, workspace.projectId, requestId) : null
     if (previous) {
+      if (source && (previous.taskId !== source.taskId || previous.runId !== source.runId)) throw new AppError(409, 'requestId belongs to a different Task', 'request_id_conflict')
       if (provenance?.ownerId) await this.requireSessionAccessInTx(tx, provenance.ownerId, previous.id, 'write')
       else await this.getSession(previous.id, tx.resources)
       await assertSessionTaskMutable(tx, previous)
@@ -864,7 +920,7 @@ export class ServerService {
       if (session.projectId !== projectId) throw new AppError(404, 'Approval not found', 'approval_not_found')
       if (session.taskId) {
         const task = await tx.tasks.get(session.taskId)
-        if (!task || task.projectId !== projectId) throw new AppError(404, 'Approval not found', 'approval_not_found')
+        if (!task || (task.teamCoordination ? task.projectId !== coordinationAnchor((await tx.resources.getProject(projectId))?.teamId ?? '') || task.teamCoordination.ownerId !== session.ownerId || task.teamCoordination.workerId !== session.binding.agent.workerId || task.teamCoordination.agentKey !== session.binding.agent.agentKey : task.projectId !== projectId)) throw new AppError(404, 'Approval not found', 'approval_not_found')
       }
       // Root-created Sessions legitimately have no Task/Run provenance. Validate
       // recorded bindings, but do not invent one just to retrieve a receipt.

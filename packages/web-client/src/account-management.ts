@@ -69,9 +69,10 @@ export function accountManagementOperations(transport: ReturnType<typeof createC
     revokeTeamInvitation: (teamId: string, invitationId: string) => request<{ id: string; status: string }>(routes.teamInvitation(teamId, invitationId), undefined, undefined, 'DELETE'),
     invitation: (token: string, signal?: AbortSignal) => request<{ team: { id: string; name: string }; email: string; role: 'admin' | 'member'; status: 'pending' | 'accepted' | 'expired' | 'revoked' }>(routes.invitation(token), undefined, signal),
     acceptInvitation: (token: string) => request<{ teamId: string; role: 'owner' | 'admin' | 'member' }>(routes.acceptInvitation(token), {}),
-    // Team 协调入口（票 05）：可用性投影与 enqueue 都是 Server 资格门唯一裁决，UI 不硬编码结论。
+    // Team 协调首条消息及既有会话沿用普通 Session 的权限和执行路径。
     teamCoordinationAvailability: (teamId: string, signal?: AbortSignal) => request<TeamCoordinationAvailabilityDTO>(routes.teamCoordinationAvailability(teamId), undefined, signal),
-    enqueueTeamCoordinationSession: (teamId: string, body: Record<string, unknown>) => request<never>(routes.teamCoordinationSessions(teamId), body),
+    teamCoordinationSessions: (teamId: string, signal?: AbortSignal) => list<import('@wemux/web-contract').ConversationSession>(routes.teamCoordinationSessions(teamId), signal),
+    createTeamCoordinationSession: (teamId: string, body: { requestId: string; commandId: string; workspaceId: string; workerId: string; agentKey: string; modelId: string; content: string }) => request<{ session: import('@wemux/web-contract').ConversationSession; created: boolean; messageCommandId: string }>(routes.teamCoordinationSessions(teamId), body),
     resendVerification: (email: string) => request<AcceptedEmailDTO>(routes.authRegisterResend, { email }),
     verifyEmail: async (token: string) => {
       // 验证成功同时签发了 Cookie 会话，因此这里和登录一样接住 CSRF 令牌。

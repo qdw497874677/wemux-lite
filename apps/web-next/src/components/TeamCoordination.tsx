@@ -1,44 +1,70 @@
-import { useEffect, useState } from 'react'
-import { ShieldAlert } from 'lucide-react'
-import { Failure } from './Failure.tsx'
-import { errorPresentation } from '../application.ts'
+import { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { randomId } from '@wemux/web-client'
+import type { ProjectDTO, WorkspaceDTO, WorkerDTO } from '@wemux/web-contract/browser-host'
+import type { ProjectClient } from './ProjectManagement.tsx'
+import { SessionConversation } from './SessionConversation.tsx'
+import { accountError } from './AccountForms.tsx'
+import { Button } from './primitives.tsx'
+import { taskSessionOptions } from '../lib/task-session-options.ts'
 
-/** 服务端资格门投影；字段由 /api/teams/:id/coordination/availability 下发，浏览器不硬编码结论。 */
-export type CoordinationAvailability = { status: 'disabled' | 'enabled'; gate: { verdict: 'FAIL' | 'PASS'; reasons: readonly string[]; evidencePath: string; remediationSection: string; reopenConditions: readonly string[] } }
-export type CoordinationApi = { teamCoordinationAvailability: (teamId: string, signal?: AbortSignal) => Promise<CoordinationAvailability> }
-
-/**
- * Team 范围的协调入口（D-01/D-03）：可见但处于可诊断禁用态。
- * 不渲染任何发送或上传控件；禁用原因、证据与解除条件全部来自 Server 资格门投影。
- */
-export function TeamCoordination({ api, teamId }: { api: CoordinationApi; teamId: string }) {
-  const [availability, setAvailability] = useState<CoordinationAvailability | null>(null)
-  const [error, setError] = useState<unknown>(null)
-  const [loading, setLoading] = useState(true)
-  useEffect(() => {
-    const controller = new AbortController()
-    setLoading(true); setError(null)
-    api.teamCoordinationAvailability(teamId, controller.signal)
-      .then(value => { if (!controller.signal.aborted) { setAvailability(value); setLoading(false) } })
-      .catch(cause => { if (!controller.signal.aborted) { setError(cause); setLoading(false) } })
-    return () => controller.abort()
+export function TeamCoordination({ api, teamId }: { api: ProjectClient; teamId: string }) {
+  const [resources, setResources] = useState<{ projects: ProjectDTO[]; workspaces: WorkspaceDTO[]; workers: WorkerDTO[] } | null>(null)
+  const [sessions, setSessions] = useState<Awaited<ReturnType<ProjectClient['teamCoordinationSessions']>>>([])
+  const [target, setTarget] = useState(''), [content, setContent] = useState(''), [selected, setSelected] = useState('')
+  const [error, setError] = useState(''), [busy, setBusy] = useState(false)
+  const pending = useRef<{ body: { requestId: string; commandId: string; workspaceId: string; workerId: string; agentKey: string; modelId: string; content: string }; teamId: string } | null>(null)
+  const generation = useRef(0)
+  const refreshGeneration = useRef(0)
+  // A successful first-send receipt is authoritative even when a read replica returns an older list.
+  const accepted = useRef<Awaited<ReturnType<ProjectClient['teamCoordinationSessions']>>>([])
+  async function refresh(team: string, ticket: number) {
+    const refreshTicket = ++refreshGeneration.current
+    const [projects, workers, existing] = await Promise.all([api.projects(), api.workers(), api.teamCoordinationSessions(team)])
+    const eligible = projects.filter(project => project.teamId === team && project.accessRole !== 'viewer')
+    const spaces = await Promise.all(eligible.map(project => api.workspaces(project.id, 'all')))
+    if (generation.current !== ticket || refreshGeneration.current !== refreshTicket) return
+    const ids = new Set(existing.map(item => item.id))
+    accepted.current = accepted.current.filter(item => !ids.has(item.id))
+    setResources({ projects: eligible, workspaces: spaces.flat(), workers })
+    setSessions([...accepted.current, ...existing])
+  }
+  useLayoutEffect(() => {
+    const ticket = ++generation.current
+    accepted.current = []
+    setResources(null); setSessions([]); setSelected(''); setTarget(''); setBusy(false); pending.current = null; setError('')
+    void refresh(teamId, ticket).catch(cause => { if (generation.current === ticket) setError(accountError(cause)) })
+    return () => { generation.current++ }
   }, [api, teamId])
-  if (loading) return <section aria-labelledby="team-coordination-heading"><h1 id="team-coordination-heading">团队协调</h1><p role="status">正在获取协调入口状态…</p></section>
-  if (error) return <section aria-labelledby="team-coordination-heading"><h1 id="team-coordination-heading">团队协调</h1><Failure error={errorPresentation(error)} retry={() => { setLoading(true); setError(null); api.teamCoordinationAvailability(teamId).then(setAvailability).catch(setError).finally(() => setLoading(false)) }} /><p>协调入口状态暂时不可用；服务端在资格门 FAIL 期间同样拒绝任何协调会话创建。</p></section>
-  const disabled = availability?.status === 'disabled'
-  return <section aria-labelledby="team-coordination-heading" aria-busy={false}>
-    <h1 id="team-coordination-heading">团队协调</h1>
-    <p>Team 范围的协调对话入口：用于团队讨论与交接的专用 Task 会话。当前处于禁用状态，仅呈现诊断信息。</p>
-    {disabled && <div className="account-section" role="region" aria-label="协调资格门状态">
-      <h2><ShieldAlert aria-hidden /> 协调入口不可用</h2>
-      <p>资格门判定：{availability?.gate.verdict}（运行时隔离资格门，服务端同源拒绝）。</p>
-      <h3>不可用原因</h3>
-      <ul>{availability?.gate.reasons.map(reason => <li key={reason}>{reason}</li>)}</ul>
-      <h3>证据</h3>
-      <p>判定证据与探测过程见仓库内 <code>{availability?.gate.evidencePath}</code>；写入通道复核矩阵见 <code>docs/acceptance/coordination-write-channel-matrix.md</code>。</p>
-      <h3>解除条件</h3>
-      <ol>{availability?.gate.reopenConditions.map(condition => <li key={condition}>{condition}</li>)}</ol>
-      <p>以上条件全部满足并重新探测为 PASS 前，服务端对所有协调会话创建请求返回 403 coordination_gate_closed；此页面不提供任何发送或上传控件。</p>
-    </div>}
+  const options = useMemo(() => resources?.projects.flatMap(project => taskSessionOptions(project.id, teamId, resources.workspaces, resources.workers)) ?? [], [resources, teamId])
+  const choice = options.find(option => option.key === target)
+  const session = sessions.find(item => item.id === selected)
+  const project = session && resources?.projects.find(item => item.id === session.projectId)
+  async function send() {
+    if (busy || (!pending.current && (!choice || !content.trim()))) return
+    const ticket = generation.current
+    const intent = pending.current?.teamId === teamId ? pending.current.body : { requestId: randomId(), commandId: randomId(), workspaceId: choice!.workspaceId, workerId: choice!.workerId, agentKey: choice!.agentKey, modelId: choice!.modelId, content: content.trim() }
+    pending.current = { teamId, body: intent }; setBusy(true); setError('')
+    try {
+      const result = await api.createTeamCoordinationSession(teamId, intent)
+      if (generation.current !== ticket) return
+      // Acceptance is definitive even if the subsequent list refresh fails.
+      pending.current = null; setContent(''); setSelected(result.session.id)
+      if (!accepted.current.some(item => item.id === result.session.id)) accepted.current = [result.session, ...accepted.current]
+      setSessions(current => current.some(item => item.id === result.session.id) ? current : [result.session, ...current])
+      try { await refresh(teamId, ticket) }
+      catch (cause) { if (generation.current === ticket) setError(accountError(cause)) }
+    } catch (cause) { if (generation.current === ticket) setError(accountError(cause)) }
+    finally { if (generation.current === ticket) setBusy(false) }
+  }
+  return <section aria-labelledby="team-coordination-heading"><h1 id="team-coordination-heading">团队协调</h1>
+    <p>选择已获权的项目工作区与 Worker，首次发送自动创建 Team 协调 Task 和绑定会话。协调 Agent 使用普通执行权限，操作仍需遵守项目、节点及工具审批。</p>
+    {error && <p role="alert">{error}</p>}
+    <Button variant="outline" disabled={busy} onClick={() => { const ticket = generation.current; void refresh(teamId, ticket).catch(cause => { if (generation.current === ticket) setError(accountError(cause)) }) }}>刷新协调环境与会话</Button>
+    <label>执行环境<select aria-label="协调执行环境" value={target} onChange={event => setTarget(event.target.value)}><option value="">选择 Workspace / Worker / Agent / Model</option>{options.map(option => <option key={option.key} value={option.key}>{option.label}</option>)}</select></label>
+    <label>首条消息<textarea aria-label="协调首条消息" maxLength={100000} value={content} onChange={event => setContent(event.target.value)} /></label>
+    <Button disabled={busy || (!pending.current && (!choice || !content.trim()))} onClick={() => void send()}>{pending.current ? '重试原首条消息' : '发送并创建会话'}</Button>
+    {resources && !options.length && <p role="status">暂无获权且已就绪的工作区与可用 Agent。</p>}
+    <h2>我的协调会话</h2><div className="account-actions">{sessions.map(item => <Button key={item.id} variant="outline" onClick={() => setSelected(item.id)}>{item.title}（{item.binding.agent.agentKey}）</Button>)}</div>
+    {session && project && <SessionConversation api={api} project={project} taskId={session.taskId!} sessionId={session.id} close={() => setSelected('')} />}
   </section>
 }

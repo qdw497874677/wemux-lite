@@ -10,8 +10,7 @@ import { AppError } from './errors.ts'
 export function coordinationAnchor(teamId: string): string { return `${teamCoordinationAnchorPrefix}${teamId}` }
 export { isTeamCoordinationAnchor }
 
-/** 协调身份 capability snapshot 的 allowedTools 固定为只读查询面；写类 operation（连接器调用、
- * 写文件、终端、外部投递）不属于协调身份，Worker/Server 侧按快照拒绝。 */
+/** Legacy read-only fixture for the write-channel probe. Runtime grants use ordinary capability policy. */
 export const coordinationQueryOperations = [
   'session.info', 'project.list', 'project.get', 'project.resources',
   'task.list', 'task.get', 'task.sessions', 'session.get', 'session.events', 'agent.list',
