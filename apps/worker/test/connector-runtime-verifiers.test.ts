@@ -25,7 +25,7 @@ for (const missing of ['both', 'binding', 'grant'] as const) test(`cluster token
   t.mock.method(runtime.mcp, 'listTools', async () => { mcpCalls++; throw new Error('MCP external execution forbidden') })
   const token = 'server-issued-capability-token'
   // A local-looking Project and Worker must not launder a supplied cluster token.
-  const registration = await runtime.registerTurn({ id: 'turn', sessionId: 'session', capabilityToken: token } as Turn, 'local-worker')
+  const registration = await runtime.registerTurn({ id: 'turn', sessionId: 'session', capabilityToken: token } as Turn, 'local-worker', 'cluster')
   const result = await runtime.handle('http.call', token, { connectorId: 'http', connectorRevision: 1, operationId: 'read', requestId: 'req', toolCallId: 'call', input: {} })
   assert.equal((result?.body as { error?: { code?: string } }).error?.code, 'scope_denied', JSON.stringify(result))
   const mcpResult = await runtime.handle('mcp.list_tools', token, { connectorId: 'mcp' })
@@ -36,22 +36,42 @@ for (const missing of ['both', 'binding', 'grant'] as const) test(`cluster token
   assert.deepEqual((await store.listConnectorDenials()).map(item => item.reasonCode), ['scope_denied', 'scope_denied'])
   await registration.release()
   if (missing === 'both') {
-    const local = await runtime.registerTurn({ id: 'local-turn', sessionId: 'local-session' } as Turn, 'local-worker', 'local')
-    const localResult = await runtime.handle('http.call', local.token, { connectorId: 'http', connectorRevision: 1, operationId: 'read', requestId: 'local-req', toolCallId: 'local-call', input: {} })
-    assert.equal((localResult?.body as { ok?: boolean }).ok, true)
-    assert.equal(outbound, 1, 'independently minted local capability can execute without Server verifiers')
-    await local.release()
+    await assert.rejects(runtime.registerTurn({ id: 'local-turn', sessionId: 'local-session' } as Turn, 'local-worker', 'local'), /local_origin_unverified/)
+    assert.equal(outbound, 0)
   }
 })
 
 test('locally minted token with explicit local registration remains independently usable', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'wemux-local-verifier-'))
   const store = new SqliteWorkerStore(join(directory, 'worker.sqlite'))
-  const runtime = new WorkerConnectorRuntime(store)
+  const runtime = new WorkerConnectorRuntime(store, { verifyBinding: async () => ({ projectId: 'local', workspaceId: 'local' }), verifyLocalOrigin: async () => true })
   t.after(async () => { await runtime.shutdown(); store.close(); await rm(directory, { recursive: true, force: true }) })
   const registered = await runtime.registerTurn({ id: 'local-turn', sessionId: 'local-session' } as Turn, 'local-worker', 'local')
   assert.ok(registered.token)
   assert.equal(registered.snapshot.projectId, 'local')
   await registered.release()
   await assert.rejects(runtime.registerTurn({ id: 'bad', sessionId: 'local-session', capabilityToken: 'supplied' } as Turn, 'local-worker', 'local'), /local.*token/i)
+})
+
+// A supplied cluster snapshot with a missing token must not be relabelled local,
+// even when the caller explicitly asserts local provenance.
+test('tokenless cluster snapshot cannot mint a local Connector capability', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'wemux-untrusted-snapshot-'))
+  const store = new SqliteWorkerStore(join(directory, 'worker.sqlite'))
+  let outbound = 0
+  const runtime = new WorkerConnectorRuntime(store, {
+    verifyBinding: async () => ({ projectId: 'local', workspaceId: 'local' }),
+    verifyLocalOrigin: async () => false,
+    fetch: async () => { outbound++; return new Response('{}') },
+  })
+  t.after(async () => { await runtime.shutdown(); store.close(); await rm(directory, { recursive: true, force: true }) })
+  const turn = { id: 'cluster-turn', sessionId: 'cluster-session', capabilityToken: null, capabilitySnapshot: {
+    id: 'cluster-snapshot', projectId: 'local', workspaceId: 'local', sessionId: 'cluster-session',
+    version: 1, assets: [], allowedTools: ['http.call'], allowedConnectorIds: [], connectors: [], createdAt: new Date().toISOString(),
+  } } as Turn
+  await assert.rejects(runtime.registerTurn(turn, 'local-worker', 'local'), /local Turn cannot supply a capability snapshot/)
+  await assert.rejects(runtime.registerTurn({ ...turn, capabilitySnapshot: null } as Turn, 'local-worker', 'local'), /local_origin_unverified/)
+  await assert.rejects(runtime.registerTurn(turn, 'local-worker', 'cluster'), /cluster Turn requires an explicit origin and Server capability token/)
+  await assert.rejects(runtime.registerTurn(turn, 'local-worker', undefined as never), /explicit origin/)
+  assert.equal(outbound, 0)
 })

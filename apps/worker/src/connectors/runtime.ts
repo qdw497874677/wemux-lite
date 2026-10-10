@@ -25,12 +25,14 @@ export class WorkerConnectorRuntime {
   private readonly pending = new Map<string, Pending>()
   private readonly finalizing = new Map<string, { sessionId: string; turnId: string; done: Promise<void> }>()
   private closing = false
+  private readonly verifyLocalOrigin?: (turn: Turn, workerId: string) => Promise<boolean>
   private readonly verifyBinding?: (turn: Turn, workerId: string) => Promise<{ projectId: string; workspaceId: string } | null>
   private shutdownPromise: Promise<void> | null = null
 
-  constructor(store: WorkerConnectorStore, options: { readonly fetch?: typeof fetch; readonly lookup?: import('@wemux/connector').GuardedFetchDnsLookup; readonly supervisor?: McpProcessSupervisor; readonly onApproval?: (event: ConnectorApprovalEvent) => void | Promise<void>; readonly verifyBinding?: (turn: Turn, workerId: string) => Promise<{ projectId: string; workspaceId: string } | null>; readonly verifyServerGrant?: (token: string, operation: 'mcp.list_tools' | 'mcp.call' | 'http.call', local: boolean) => Promise<boolean> } = {}) {
+  constructor(store: WorkerConnectorStore, options: { readonly fetch?: typeof fetch; readonly lookup?: import('@wemux/connector').GuardedFetchDnsLookup; readonly supervisor?: McpProcessSupervisor; readonly onApproval?: (event: ConnectorApprovalEvent) => void | Promise<void>; readonly verifyLocalOrigin?: (turn: Turn, workerId: string) => Promise<boolean>; readonly verifyBinding?: (turn: Turn, workerId: string) => Promise<{ projectId: string; workspaceId: string } | null>; readonly verifyServerGrant?: (token: string, operation: 'mcp.list_tools' | 'mcp.call' | 'http.call', local: boolean) => Promise<boolean> } = {}) {
     this.store = store
     this.verifyBinding = options.verifyBinding
+    this.verifyLocalOrigin = options.verifyLocalOrigin
     this.credentials = WorkerCredentialStore.fromEnvironment(store)
     this.supervisor = options.supervisor ?? new McpProcessSupervisor()
     this.mcp = new WorkerMcpClient({ supervisor: this.supervisor, fetch: options.fetch, lookup: options.lookup, deploymentAllowsPrivateNetwork: process.env.WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK === 'true' })
@@ -43,13 +45,13 @@ export class WorkerConnectorRuntime {
     }, verifyBinding: async (token, snapshot, turn) => {
       const active = this.turns.get(token)
       if (!active || active.snapshot !== snapshot || active.workerId !== turn.workerId || active.claims.sessionId !== turn.sessionId || active.claims.turnId !== turn.turnId || active.claims.projectId !== turn.projectId || active.claims.workspaceId !== turn.workspaceId) return false
-      if (!this.verifyBinding) return active.origin === 'local'
+      if (!this.verifyBinding) return false
       const binding = await this.verifyBinding({ sessionId: turn.sessionId, id: turn.turnId } as Turn, turn.workerId)
       return !!binding && binding.projectId === turn.projectId && binding.workspaceId === turn.workspaceId
     }, verifyCurrentGrant: async (token, operation) => {
       const active = this.turns.get(token)
       if (!active) return false
-      if (active.origin === 'local') return true
+      if (active.origin === 'local') return !!this.verifyBinding && !!this.verifyLocalOrigin && await this.verifyLocalOrigin({ id: active.claims.turnId, sessionId: active.claims.sessionId } as Turn, active.workerId)
       // A cluster grant must have both a current binding and a Server verifier.
       // Neither a local-looking Project nor a Worker name is proof of provenance.
       if (!this.verifyBinding || !options.verifyServerGrant) return false
@@ -57,9 +59,13 @@ export class WorkerConnectorRuntime {
     } }, approval, this.http)
   }
 
-  async registerTurn(turn: Turn, workerId: string, origin: 'local' | 'cluster' = turn.capabilityToken ? 'cluster' : 'local'): Promise<{ token: string; snapshot: CapabilitySnapshot; release(): Promise<void> }> {
+  async registerTurn(turn: Turn, workerId: string, origin: 'local' | 'cluster'): Promise<{ token: string; snapshot: CapabilitySnapshot; release(): Promise<void> }> {
     if (this.closing) throw new Error('Connector runtime is shutting down')
-    if (origin === 'local' && turn.capabilityToken) throw new Error('local Turn cannot supply a capability token')
+    if (origin === 'local') {
+      if (turn.capabilityToken) throw new Error('local Turn cannot supply a capability token')
+      if (turn.capabilitySnapshot) throw new Error('local Turn cannot supply a capability snapshot')
+      if (!this.verifyBinding || !this.verifyLocalOrigin || !await this.verifyLocalOrigin(turn, workerId)) throw new Error('connector_local_origin_unverified')
+    } else if (origin !== 'cluster' || !turn.capabilityToken) throw new Error('cluster Turn requires an explicit origin and Server capability token')
     const installed = (await this.store.listConnectorDefinitions()).filter(definition => definition.enabled && (!definition.allowedWorkerIds.length || definition.allowedWorkerIds.includes(workerId as never)))
     const binding = this.verifyBinding ? await this.verifyBinding(turn, workerId) : null
     if (this.verifyBinding && !binding) throw new Error('connector_turn_binding_mismatch')

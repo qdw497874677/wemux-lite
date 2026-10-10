@@ -39,7 +39,7 @@ test('turn registration retains HTTP and MCP definitions in the non-secret snaps
   await store.saveConnectorDefinition(mcpDefinition)
   const snapshot: CapabilitySnapshot = { id: 'snapshot-1', projectId: 'project-1' as never, workspaceId: 'workspace-1' as never, sessionId: 'session-1' as never, version: 1, assets: [], allowedTools: ['mcp.call', 'http.call'], allowedConnectorIds: [httpDefinition.id, mcpDefinition.id], connectors: [httpDefinition, mcpDefinition], createdAt: timestamp }
   const turn = { id: 'turn-1', sessionId: snapshot.sessionId, commandId: 'command-1', message: { messageId: 'message-1', content: 'call connector' }, state: 'queued', requestedAt: timestamp, startedAt: null, finishedAt: null, capabilitySnapshot: snapshot, capabilityToken: 'token' } as Turn
-  const registered = await runtime.registerTurn(turn, 'worker-1')
+  const registered = await runtime.registerTurn(turn, 'worker-1', 'cluster')
   assert.deepEqual(new Set(registered.snapshot.allowedConnectorIds), new Set([httpDefinition.id, mcpDefinition.id]))
   assert.deepEqual(new Set(registered.snapshot.connectors?.map(item => item.kind)), new Set(['http', 'mcp']))
   assert.equal(JSON.stringify(registered.snapshot).includes('PRIVATE-TOKEN'), false)
@@ -67,6 +67,7 @@ for (const mode of ['pending', 'timeout', 'cancelled', 'shutdown', 'already-abor
   }
   t.after(() => resumePreparation())
   const runtime = new WorkerConnectorRuntime(store, {
+    verifyBinding: async () => ({ projectId: 'project-1', workspaceId: 'local' }), verifyLocalOrigin: async () => true,
     onApproval: event => { approvalEvents.push(event); if (event.kind === 'requested') { requestEvents++; notify() } },
     lookup: async () => [{ address: '8.8.8.8', family: 4 }],
     fetch: async () => { nativeCalls++; return new Response('{}') },
@@ -75,8 +76,8 @@ for (const mode of ['pending', 'timeout', 'cancelled', 'shutdown', 'already-abor
   const definition = http()
   await store.saveConnectorDefinition({ ...definition, credentialRef: null, credentialAvailability: 'not_required', config: { ...definition.config, authentication: 'none' } })
   const turn = { id: 'release-turn', sessionId: 'release-session' } as Turn
-  const registration = await runtime.registerTurn(turn, 'worker')
-  const unrelated = await runtime.registerTurn({ id: 'other-turn', sessionId: 'other-session' } as Turn, 'worker')
+  const registration = await runtime.registerTurn(turn, 'worker', 'local')
+  const unrelated = await runtime.registerTurn({ id: 'other-turn', sessionId: 'other-session', capabilityToken: 'unrelated-token' } as Turn, 'worker', 'cluster')
   const abort = new AbortController()
   if (mode === 'already-aborted') abort.abort()
   if (mode === 'timeout') t.mock.timers.enable({ apis: ['setTimeout'] })
@@ -127,12 +128,12 @@ test('connector pending consumption requires exact Session and Turn and active c
   let notify!: () => void
   const requested = new Promise<void>(resolve => { notify = resolve })
   let nativeCalls = 0
-  const runtime = new WorkerConnectorRuntime(store, { onApproval: event => { if (event.kind === 'requested') { approvals.push(event.approval); notify() } }, lookup: async () => [{ address: '8.8.8.8', family: 4 }], fetch: async () => { nativeCalls++; return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }) } })
+  const runtime = new WorkerConnectorRuntime(store, { verifyBinding: async () => ({ projectId: 'project-1', workspaceId: 'local' }), verifyLocalOrigin: async () => true, onApproval: event => { if (event.kind === 'requested') { approvals.push(event.approval); notify() } }, lookup: async () => [{ address: '8.8.8.8', family: 4 }], fetch: async () => { nativeCalls++; return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }) } })
   t.after(async () => { await runtime.shutdown(); store.close(); await rm(directory, { recursive: true, force: true }) })
   const definition = http()
   await store.saveConnectorDefinition({ ...definition, credentialRef: null, credentialAvailability: 'not_required', config: { ...definition.config, authentication: 'none' } })
   const turn = { id: 'turn-identity', sessionId: 'session-identity' } as Turn
-  const registered = await runtime.registerTurn(turn, 'worker')
+  const registered = await runtime.registerTurn(turn, 'worker', 'local')
   const result = runtime.handle('http.call', registered.token, { connectorId: definition.id, connectorRevision: 1, operationId: 'create', requestId: 'request', toolCallId: 'call', input: { body: {} } })
   await requested
   const identity = { sessionId: turn.sessionId, turnId: turn.id, approvalId: approvals[0].approvalId, decision: 'approve' as const }
@@ -158,7 +159,7 @@ test('Connector turn binding rejects moved Worker and ended Turn before outbound
   const connector = http()
   await store.saveConnectorDefinition({ ...connector, credentialRef: null, credentialAvailability: 'not_required', config: { ...connector.config, authentication: 'none' } })
   const snapshot: CapabilitySnapshot = { id: 'binding-snapshot', projectId: 'project-1' as never, workspaceId: 'workspace-1' as never, sessionId: 'binding-session' as never, version: 1, assets: [], allowedTools: ['http.call'], allowedConnectorIds: [connector.id], connectors: [{ ...connector, credentialRef: null, credentialAvailability: 'not_required', config: { ...connector.config, authentication: 'none' } }], createdAt: timestamp }
-  const registration = await runtime.registerTurn({ id: 'binding-turn', sessionId: snapshot.sessionId, capabilitySnapshot: snapshot } as Turn, owner)
+  const registration = await runtime.registerTurn({ id: 'binding-turn', sessionId: snapshot.sessionId, capabilitySnapshot: snapshot, capabilityToken: 'binding-token' } as Turn, owner, 'cluster')
   const call = (requestId: string) => runtime.handle('http.call', registration.token, { connectorId: connector.id, connectorRevision: 1, operationId: 'create', requestId, toolCallId: requestId, input: { body: {} } })
   owner = 'worker-2'
   const moved = await call('moved-worker')

@@ -83,7 +83,19 @@ export class ClusterLifecycle {
     private readonly store: WorkerStore & LocalState & SessionStore & ProviderCredentialRepository & WorkerConnectorStore,
     private agents: readonly AgentAdapter[],
     private readonly options: ClusterLifecycleOptions,
-  ) { this.ownership = ownershipForHome(options.home); this.connectors = new WorkerConnectorRuntime(store, { onApproval: event => this.publishConnectorApproval(event), verifyBinding: async (turn, workerId) => {
+  ) { this.ownership = ownershipForHome(options.home); this.connectors = new WorkerConnectorRuntime(store, { onApproval: event => this.publishConnectorApproval(event), verifyLocalOrigin: async (turn, workerId) => {
+    // Only the local-host runtime supplies 'local'; check its persisted installation,
+    // Session, Workspace and running Turn rather than trusting a caller's label.
+    const installation = this.store.localInstallation()
+    const session = await this.store.sessions.get(turn.sessionId)
+    const workspace = session && await this.store.workspaces.get(session.binding.workspaceId)
+    const persisted = await this.store.sessions.getTurn(turn.id)
+    return !!installation && workerId === `local-${installation.installationId}`
+      && session?.binding.agent.workerId === workerId && session.storageMode === 'local'
+      && session.activeTurnId === turn.id
+      && workspace?.workerId === workerId && workspace.projectId === 'local'
+      && persisted?.sessionId === turn.sessionId && persisted.state === 'running'
+  }, verifyBinding: async (turn, workerId) => {
     const session = await this.store.sessions.get(turn.sessionId)
     const workspace = session && await this.store.workspaces.get(session.binding.workspaceId)
     const persisted = await this.store.sessions.getTurn(turn.id)
