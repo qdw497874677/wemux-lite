@@ -11,14 +11,30 @@ import { resolve } from 'node:path'
 export class SessionOwnership {
   private readonly owners = new Map<SessionId, symbol>()
   private readonly listeners = new Map<SessionId, Set<() => void>>()
+  private readonly finalizationListeners = new Map<SessionId, Set<() => void>>()
   private readonly finalizations = new Map<SessionId, { token: symbol; finish: (store: WorkerStore) => Promise<void>; safe: () => boolean; busy: boolean }>()
 
   retainFinalization(sessionId: SessionId, token: symbol, finish: (store: WorkerStore) => Promise<void>, safe: () => boolean): void {
     if (this.owners.get(sessionId) !== token) throw new Error('Finalization owner mismatch')
     this.finalizations.set(sessionId, { token, finish, safe, busy: false })
+    for (const notify of this.finalizationListeners.get(sessionId) ?? []) {
+      try { notify() }
+      catch (error) { console.error('Finalization availability listener failed:', error) }
+    }
   }
 
   hasFinalization(sessionId: SessionId): boolean { return this.finalizations.has(sessionId) }
+
+  /** Availability invites a terminal-write attempt, never a new claim or proof of child exit. */
+  onFinalizationAvailable(sessionId: SessionId, notify: () => void): () => void {
+    let listeners = this.finalizationListeners.get(sessionId)
+    if (!listeners) { listeners = new Set(); this.finalizationListeners.set(sessionId, listeners) }
+    listeners.add(notify)
+    return () => {
+      listeners!.delete(notify)
+      if (!listeners!.size) this.finalizationListeners.delete(sessionId)
+    }
+  }
 
   /** Only the supplied open store is used. An old Runtime never owns retries on a closed store. */
   async finalize(sessionId: SessionId, store: WorkerStore): Promise<'busy' | 'failed' | 'finished' | 'unsafe' | 'absent'> {

@@ -79,6 +79,44 @@ for (const failure of ['before-commit', 'after-commit', 'persistent'] as const) 
   }
 })
 
+test('late retention after replacement initialize and old store close finalizes without relaunch', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'wemux-late-finalizer-'))
+  t.after(() => rm(home, { recursive: true, force: true }))
+  const path = join(home, 'worker.sqlite')
+  const originalStore = new SqliteWorkerStore(path)
+  const owner = new SessionOwnership()
+  const runtime = (store: SqliteWorkerStore) => new WorkerRuntime(store, new LocalProvisioner(home), [new TestAgent()], { send() {} }, workerId, 'test', undefined, undefined, undefined, null, undefined, undefined, undefined, undefined, owner)
+  const original = runtime(originalStore)
+  const stamp = new Date().toISOString() as Timestamp
+  let turnId: import('@wemux/domain').TurnId
+  await originalStore.transaction(async tx => {
+    await tx.sessions.createSession(id, { workspaceId: 'workspace' as never, agent: { workerId, agentKey: 'test' as never }, modelId: 'test' as never })
+    await tx.sessions.enqueue({ sessionId: id, submissionCommandId: 'queued' as CommandId, message: { messageId: 'message' as never, content: 'once' }, queuedAt: stamp })
+    turnId = (await tx.sessions.claimNext(id))!.id
+  })
+  const token = owner.acquire(id)!
+  const replacementStore = new SqliteWorkerStore(path)
+  const replacement = runtime(replacementStore)
+  try {
+    assert.equal(owner.hasFinalization(id), false)
+    await replacement.initialize()
+    assert.equal(owner.occupied(id), true)
+    await original.shutdown()
+    originalStore.close()
+    await original['finishClaimed'](id, token, store =>
+      store.transaction(tx => tx.sessions.finishTurn({ turnId, outcome: 'completed', finishedAt: stamp })))
+    await wait(() => !owner.occupied(id))
+    assert.equal((await replacementStore.sessions.getTurn(turnId))?.state, 'completed')
+    assert.equal((await replacementStore.sessions.get(id))?.activeTurnId, null)
+    const events = (await replacementStore.journal.read({ sessionId: id, fromSeq: 1 as never, limit: 100 })).events
+    assert.equal(events.filter(event => event.payload.kind === 'turn.started').length, 1, 'no relaunch')
+    assert.equal(events.filter(event => event.payload.kind === 'turn.finished').length, 1)
+  } finally {
+    await replacement.shutdown()
+    replacementStore.close()
+  }
+})
+
 test('startup recovery reserves before asynchronous reads and cannot clear a live owner', async t => {
   const home = await mkdtemp(join(tmpdir(), 'wemux-recovery-fence-'))
   t.after(() => rm(home, { recursive: true, force: true }))

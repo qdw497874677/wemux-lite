@@ -54,6 +54,7 @@ function canonical(value: unknown): string {
 export class WorkerRuntime {
   private readonly tasks = new Map<SessionId, Promise<void>>()
   private readonly releaseWaiters = new Map<SessionId, () => void>()
+  private readonly finalizationWaiters = new Map<SessionId, () => void>()
   private readonly releaseWakes = new Set<SessionId>()
   private readonly finalizationRetries = new Map<SessionId, NodeJS.Timeout>()
   private readonly unsafeSessions = new Set<SessionId>()
@@ -509,16 +510,27 @@ export class WorkerRuntime {
   }
   private waitForOwnership(id: SessionId) {
     if (this.closing || this.unsafeSessions.has(id) || this.releaseWaiters.has(id)) return
+    // A predecessor may finish after initialize observed an occupied slot. This
+    // notification only retries its terminal write; it must not schedule a claim.
+    const stopFinalization = this.ownership.onFinalizationAvailable(id, () => {
+      if (!this.closing) void this.resumeFinalization(id)
+    })
+    this.finalizationWaiters.set(id, stopFinalization)
     const unsubscribe = this.ownership.onRelease(id, () => {
+      stopFinalization()
+      this.finalizationWaiters.delete(id)
       this.releaseWaiters.delete(id)
       if (this.closing) return
       if (this.tasks.has(id)) this.releaseWakes.add(id)
       else this.schedule(id)
     })
     this.releaseWaiters.set(id, unsubscribe)
-    // Do not lose a release between observing occupation and registering.
+    // Do not lose retention or release between observing occupation and registering.
+    if (this.ownership.hasFinalization(id)) void this.resumeFinalization(id)
     if (!this.ownership.occupied(id)) {
       unsubscribe()
+      stopFinalization()
+      this.finalizationWaiters.delete(id)
       this.releaseWaiters.delete(id)
       if (this.tasks.has(id)) this.releaseWakes.add(id)
       else this.schedule(id)
@@ -526,6 +538,8 @@ export class WorkerRuntime {
   }
   private clearReleaseWaiters() {
     for (const unsubscribe of this.releaseWaiters.values()) unsubscribe()
+    for (const unsubscribe of this.finalizationWaiters.values()) unsubscribe()
+    this.finalizationWaiters.clear()
     this.releaseWaiters.clear()
     this.releaseWakes.clear()
   }
