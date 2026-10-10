@@ -64,7 +64,10 @@ export class SessionAccessService {
     if (session.taskId?.startsWith('coordination:') && (!task?.teamCoordination || task.deletedAt)) throw notFound()
     if (task?.teamCoordination) {
       const identity = task.teamCoordination
-      if (task.projectId !== `team:${project.teamId}` || identity.teamId !== project.teamId || identity.ownerId !== session.ownerId || identity.workerId !== session.binding.agent.workerId || identity.agentKey !== session.binding.agent.agentKey || session.ownerId !== actor || projectRank[project.accessRole] < projectRank.contributor) throw notFound()
+      // A Project owner can retain Project access after leaving the Team. Coordination
+      // sessions require CURRENT Team membership independently of the Project role.
+      const membership = (await readers.identity.getIdentityRecords({ userId: actor, teamId: identity.teamId as never })).membership
+      if (!membership || task.projectId !== `team:${project.teamId}` || identity.teamId !== project.teamId || identity.ownerId !== session.ownerId || identity.workerId !== session.binding.agent.workerId || identity.agentKey !== session.binding.agent.agentKey || session.runId != null || session.workspaceId !== session.binding.workspaceId || session.ownerId !== actor || projectRank[project.accessRole] < projectRank.contributor) throw notFound()
       return { canRead: true, canWrite: true, canControl: true, projectRole: project.accessRole }
     }
     const projectRole = project.accessRole

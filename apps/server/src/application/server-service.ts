@@ -621,19 +621,37 @@ export class ServerService {
     const agentKey = text(b.agentKey, 'agentKey') as AgentKey
     const requestId = text(b.requestId, 'requestId', 180)
     const content = text(b.content, 'content', 100000)
+    const modelId = b.modelId === undefined ? null : text(b.modelId, 'modelId')
+    const commandId = b.commandId === undefined ? `coordination:${createHash('sha256').update(canonicalCommand([actor, team, requestId])).digest('hex')}` : text(b.commandId, 'commandId', 200)
     if (!requestId || !content.trim()) throw new AppError(400, 'requestId and content are required')
     if (Object.keys(b).some(key => !['workspaceId', 'workerId', 'agentKey', 'modelId', 'title', 'requestId', 'commandId', 'content'].includes(key))) throw new AppError(400, 'Invalid coordination request')
+    const title = b.title === undefined ? '团队协调' : text(b.title, 'title')
     const result = await this.store.transaction(async tx => {
       const membership = (await tx.identity.getIdentityRecords({ userId: actor, teamId: team })).membership
       if (!membership) throw new AppError(403, 'Team membership required', 'team_membership_required')
+      const fingerprint = createHash('sha256').update(canonicalCommand({ actor, team, workspaceId, workerId, agentKey, modelId, title, content, commandId })).digest('hex')
+      // Check the durable first-send receipt before revalidating mutable placement or
+      // Agent availability. A retry must neither enqueue a second message nor create a Task.
+      let previous: Awaited<ReturnType<typeof tx.resources.getSession>> = null
+      for (const session of await tx.resources.listSessions()) {
+        if (session.ownerId !== actor || session.creation?.requestId !== `coordination:${requestId}` || !session.taskId?.startsWith('coordination:')) continue
+        const task = await tx.tasks.get(session.taskId)
+        if (task?.teamCoordination?.teamId === team) { previous = session; break }
+      }
+      if (previous) {
+        if (previous.creation?.coordinationIntentFingerprint !== fingerprint || !previous.creation.coordinationMessageCommandId || previous.deletedAt) throw new AppError(409, 'requestId already belongs to a different coordination first send', 'request_id_conflict')
+        await this.requireSessionAccessInTx(tx, actor, previous.id, 'write')
+        return { session: previous, commandId: previous.creation.commandId as CommandId, created: false, messageCommandId: previous.creation.coordinationMessageCommandId, messageId: previous.creation.coordinationMessageId ?? previous.creation.coordinationMessageCommandId }
+      }
       const workspace = await this.authorizedWorkspaceInTx(tx, workspaceId, actor)
       const worker = await this.requireWorkerUseInTx(tx, actor, workerId)
       if (worker.teamId !== team || (await tx.resources.getProject(workspace.projectId))?.teamId !== team) throw new AppError(404, 'Workspace or Worker not found', 'workspace_not_found')
       const taskId = await teamCoordinationTask(tx, { teamId: team, ownerId: actor, workerId, agentKey }, requestId)
-      const created = await this.createSessionInTx(tx, { workspaceId, workerId, agentKey, modelId: b.modelId, title: b.title ?? '团队协调', requestId: `coordination:${requestId}` }, { ownerId: actor, taskId, runId: null })
-      const commandId = b.commandId === undefined ? `coordination:${requestId}` : text(b.commandId, 'commandId', 200)
+      const created = await this.createSessionInTx(tx, { workspaceId, workerId, agentKey, modelId: modelId ?? undefined, title, requestId: `coordination:${requestId}` }, { ownerId: actor, taskId, runId: null })
       const sent = await this.enqueueInTx(tx, created.session.id, { commandId, content }, actor)
-      return { ...created, messageCommandId: sent.commandId, messageId: sent.messageId }
+      const session = { ...created.session, creation: { ...created.session.creation!, coordinationIntentFingerprint: fingerprint, coordinationMessageCommandId: sent.commandId, coordinationMessageId: sent.messageId } }
+      await tx.resources.saveSession(session)
+      return { ...created, session, messageCommandId: sent.commandId, messageId: sent.messageId }
     })
     this.notifications.commands(workerId)
     return result

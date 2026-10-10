@@ -99,6 +99,10 @@ export interface Session {
     readonly requestId: string
     readonly fingerprint: string
     readonly commandId: string
+    /** First-send identity includes the message and enqueue command, not only Session binding. */
+    readonly coordinationIntentFingerprint?: string
+    readonly coordinationMessageCommandId?: string
+    readonly coordinationMessageId?: string
   }
   readonly id: SessionId
   readonly projectId: ProjectId

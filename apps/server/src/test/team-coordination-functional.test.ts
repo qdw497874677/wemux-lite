@@ -116,3 +116,57 @@ test('coordination rejects untrusted identity, unauthorized Team/Worker/Workspac
     assert.equal((await f.call(path, undefined, contributor)).data.items.length, 0)
   } finally { await f.close() }
 })
+
+test('the same actor and requestId in separate Teams create independent first sends', async () => {
+  const f = await fixture()
+  try {
+    const team = (await f.call('/teams', { name: 'Independent Team' })).data
+    const project = (await f.call('/projects', { teamId: team.id, name: 'Second Team project' })).data
+    await f.app.store.transaction(async tx => {
+      await tx.resources.saveWorker({ id: 'second-team-worker' as WorkerId, teamId: team.id, ownerId: project.ownerId, name: 'Second Worker', shareScope: 'team', connectionState: 'online', version: '1', platform: 'linux', lastSeenAt: at, capabilities: [{ agentKey: 'test' as AgentKey, displayName: 'Test', version: '1', mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' as ModelId, displayName: 'Model', source: 'configured' }] }] })
+      await tx.resources.saveWorkspace({ id: 'second-team-space' as WorkspaceId, projectId: project.id, name: 'Second Team Workspace', spec: { kind: 'composite', memberWorkspaceIds: [] }, placements: [{ workerId: 'second-team-worker' as WorkerId, status: 'ready', failureReason: null, location: null }], deletedAt: null })
+    })
+    const firstBody = { ...f.request, requestId: 'shared-between-teams', content: 'First', commandId: undefined }
+    const secondBody = { ...firstBody, workspaceId: 'second-team-space', workerId: 'second-team-worker', content: 'Second' }
+    const first = await f.call('/teams/default-team/coordination/sessions', firstBody)
+    const second = await f.call(`/teams/${team.id}/coordination/sessions`, secondBody)
+    assert.equal(first.status, 201, JSON.stringify(first.data))
+    assert.equal(second.status, 201, JSON.stringify(second.data))
+    assert.notEqual(first.data.session.id, second.data.session.id)
+    assert.notEqual(first.data.messageCommandId, second.data.messageCommandId)
+    assert.equal(second.data.messageId, second.data.messageCommandId)
+    const replay = await f.call(`/teams/${team.id}/coordination/sessions`, secondBody)
+    assert.equal(replay.status, 201, JSON.stringify(replay.data))
+    assert.equal(replay.data.created, false)
+    assert.equal(replay.data.session.id, second.data.session.id)
+    assert.equal((await f.app.store.commands.list({ limit: 1000 })).filter(c => c.commandId === second.data.messageCommandId).length, 1)
+  } finally { await f.close() }
+})
+
+test('first-send intent immutable and actor-scoped; removed owner loses Team conversation', async () => {
+  const f = await fixture()
+  try {
+    const path = '/teams/default-team/coordination/sessions'
+    const body = { ...f.request, content: 'Immutable handoff', commandId: 'immutable-send' }
+    const initial = await f.call(path, body, contributor)
+    assert.equal(initial.status, 201, JSON.stringify(initial.data))
+    assert.equal(initial.data.messageId, initial.data.messageCommandId)
+    for (const patch of [{ content: 'Altered' }, { title: 'Different title' }, { commandId: 'altered-send' }, { modelId: 'second' }, { agentKey: 'other' }, { workspaceId: 'other-workspace' }, { workerId: 'other-worker' }]) {
+      const rejected = await f.call(path, { ...body, ...patch }, contributor)
+      assert.equal(rejected.status, 409, JSON.stringify({ patch, rejected }))
+    }
+    assert.equal((await f.app.store.commands.list({ limit: 1000 })).filter(c => c.commandId === body.commandId).length, 1)
+    await f.reopen()
+    assert.equal((await f.call(path, body, contributor)).data.session.id, initial.data.session.id)
+    const auto = { ...body, requestId: 'shared-request', commandId: undefined }
+    const first = await f.call(path, auto, contributor), second = await f.call(path, auto, administratorToken)
+    assert.equal(first.status, 201, JSON.stringify(first.data)); assert.equal(second.status, 201, JSON.stringify(second.data))
+    assert.notEqual(first.data.messageCommandId, second.data.messageCommandId)
+    assert.notEqual(first.data.session.id, second.data.session.id)
+    await f.app.store.transaction(tx => tx.identity.removeMembership('default-team' as never, second.data.session.ownerId))
+    assert.equal((await f.call(`/sessions/${second.data.session.id}`)).status, 404)
+    assert.equal((await f.call(`/sessions/${second.data.session.id}/events?fromSeq=1`)).status, 404)
+    assert.equal((await f.call(`/sessions/${second.data.session.id}/messages`, { commandId: 'blocked', content: 'Blocked' })).status, 404)
+    assert.equal((await f.call(path)).status, 403)
+  } finally { await f.close() }
+})

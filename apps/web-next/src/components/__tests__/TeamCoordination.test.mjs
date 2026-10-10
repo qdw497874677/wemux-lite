@@ -14,13 +14,14 @@ test('Team coordination browser selects authorized placement, sends once, reopen
       const project = { id: 'project-1', teamId: 'team-1', accessRole: 'contributor' };
       const worker = { id: 'worker-1', teamId: 'team-1', name: 'Test Worker', connectionState: 'online', capabilities: [{ agentKey: 'test', displayName: 'Test Agent', mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'test-model', displayName: 'Test Model' }] }] };
       const workspace = { id: 'workspace-1', projectId: 'project-1', name: 'Test Workspace', deletedAt: null, placements: [{ workerId: 'worker-1', status: 'ready' }] };
-      window.attempts = []; window.failOnce = true;
+      window.attempts = []; window.failOnce = true; window.failRefresh = false; window.refreshCalls = 0; window.pauseSend = false; window.releaseSend = null;
       let sessions = [];
       const api = {
         projects: async () => [project], workers: async () => [worker], workspaces: async () => [workspace],
-        teamCoordinationSessions: async () => sessions,
+        teamCoordinationSessions: async () => { window.refreshCalls++; if (window.failRefresh) throw Error('refresh offline'); return sessions; },
         createTeamCoordinationSession: async (team, body) => {
           window.attempts.push({ team, body });
+          if (window.pauseSend) await new Promise(resolve => { window.releaseSend = resolve });
           if (window.failOnce) { window.failOnce = false; throw Error('request lost'); }
           const session = { id: 'session-1', taskId: 'coordination:task', projectId: project.id, title: '团队协调', binding: { agent: { agentKey: 'test' } } };
           sessions = [session]; return { session, created: true };
@@ -35,7 +36,9 @@ test('Team coordination browser selects authorized placement, sends once, reopen
         resolveApproval: async () => { throw Error('synthetic only'); },
         selectModel: async () => { throw Error('synthetic only'); },
       };
-      createRoot(document.getElementById('root')).render(<TeamCoordination api={api} teamId="team-1" />);
+      const root = createRoot(document.getElementById('root'));
+      window.switchTeam = team => root.render(<TeamCoordination api={api} teamId={team} />);
+      window.switchTeam('team-1');
     `, resolveDir: fileURLToPath(new URL('../', import.meta.url)), loader: 'tsx' },
     bundle: true, write: false, platform: 'browser', format: 'esm', jsx: 'automatic',
   })
@@ -69,6 +72,25 @@ test('Team coordination browser selects authorized placement, sends once, reopen
     await page.getByRole('button', { name: '关闭会话' }).click()
     await page.getByRole('button', { name: /团队协调（test）/ }).click()
     await page.locator('[data-conversation-session="session-1"]').waitFor()
+    await page.evaluate(() => { window.failRefresh = true })
+    await page.getByRole('textbox', { name: '协调首条消息' }).fill('New accepted handoff')
+    await page.getByRole('button', { name: '发送并创建会话' }).click()
+    await page.getByText('refresh offline').waitFor()
+    assert.equal(await page.getByRole('button', { name: '重试原首条消息' }).count(), 0, 'refresh failure must not resurrect an accepted first-send')
+    await page.evaluate(() => { window.failRefresh = false; window.pauseSend = true })
+    await page.getByRole('textbox', { name: '协调首条消息' }).fill('In-flight stale handoff')
+    await page.getByRole('button', { name: '发送并创建会话' }).click()
+    await page.waitForFunction(() => !!window.releaseSend)
+    await page.evaluate(() => window.switchTeam('team-2'))
+    await page.getByRole('textbox', { name: '协调首条消息' }).waitFor()
+    await page.evaluate(() => window.releaseSend())
+    await page.waitForTimeout(100)
+    assert.equal(await page.getByRole('button', { name: '重试原首条消息' }).count(), 0, 'team change clears pending send')
+    assert.equal(await page.locator('[data-conversation-session="session-1"]').count(), 0, 'stale send response cannot select old Team conversation')
+    await page.evaluate(() => { window.pauseSend = false; window.switchTeam('team-1') })
+    await page.getByRole('combobox', { name: '协调执行环境' }).selectOption({ index: 1 })
+    await page.getByRole('textbox', { name: '协调首条消息' }).fill('Fresh team handoff')
+    assert.equal(await page.getByRole('button', { name: '发送并创建会话' }).isEnabled(), true, 'team change clears busy state')
     assert.deepEqual(errors, [])
   } finally { await browser?.close(); server.close() }
 })
