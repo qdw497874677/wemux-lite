@@ -139,12 +139,13 @@ export class ServerTransportStore {
     const epoch = this.meta(workerId, 'outbound_epoch') ?? this.setMeta(workerId, 'outbound_epoch', randomUUID())
     const ack = this.outboundAckThrough(workerId, epoch)
     const rows = this.db.prepare('SELECT seq,message_id,payload_json FROM transport_outbox WHERE worker_id=? AND delivery_epoch=? AND seq>? ORDER BY seq LIMIT ?').all(workerId, epoch, ack, limit) as Array<{seq:number;message_id:string;payload_json:string}>
-    // A retained pre-authorization enqueue must never be sent from the old transport outbox.
-    // Keep its sequence as a barrier: skipping it would leave receiver cursors with a hole.
+    // Retained pre-authorization enqueue/approval commands must never be replayed.
+    // Keep their sequence as a barrier: skipping it would leave receiver cursors with a hole.
+    // An operator must explicitly clean up the legacy outbox; do not delete rows here.
     const frames: Extract<ServerDataFrame, { readonly durability: 'durable' }>[] = []
     for (const row of rows) {
       const payload = JSON.parse(row.payload_json) as ServerPayload
-      if (payload.type === 'command' && payload.command.kind === 'session.enqueue' && !payload.authorization) break
+      if (payload.type === 'command' && (payload.command.kind === 'session.enqueue' || payload.command.kind === 'runtime.approval.resolve') && !payload.authorization) break
       frames.push({ frameType: 'data', durability: 'durable', deliveryEpoch: epoch, directionSeq: row.seq, messageId: row.message_id as MessageId, lane: 'command', payloadVersion: 'wemux.server.payload.v1', expiresAt: null, payload })
     }
     return frames

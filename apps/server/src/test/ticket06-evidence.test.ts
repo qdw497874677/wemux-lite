@@ -49,6 +49,21 @@ function snapshot(db: DatabaseSync) {
   return db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => ({ name: row.name, rows: db.prepare(`SELECT * FROM "${String(row.name).replaceAll('"', '""')}" ORDER BY rowid`).all() }))
 }
 
+test('approval without a trusted actor fails closed without a command or notification', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ticket02-missing-actor-')), path = join(dir, 'server.db')
+  const f = await fixture(path)
+  t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
+  const commandId = 'unsigned-approval' as CommandId
+  let wakes = 0
+  const unsubscribe = f.signals.onCommands(f.worker.id, () => { wakes++ })
+  t.after(unsubscribe)
+  const input = { commandId, turnId: 'turn', decision: 'approve' }
+  await assert.rejects(f.server.resolveRuntimeApproval(f.independent.id, 'approval' as never, input), { status: 403, code: 'command_actor_required' })
+  assert.equal(await f.store.commands.get(commandId), null)
+  assert.equal((await f.store.commands.listDeliverable(f.worker.id, 100)).some(item => item.commandId === commandId), false)
+  assert.equal(wakes, 0)
+})
+
 test('cluster approval decision is signed and bound to issuer, target and worker before dispatch', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'ticket02-approval-')), path = join(dir, 'server.db')
   const f = await fixture(path)

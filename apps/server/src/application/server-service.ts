@@ -729,7 +729,8 @@ export class ServerService {
       const existing = await tx.commands.get(commandId)
       let authorization: import('@wemux/wire-protocol/command-assertion').SignedEnqueueAuthorization | undefined
       if (command.kind === 'runtime.approval.resolve') {
-        if (!actor || !this.commandSigning) throw new AppError(503, 'Cluster command signing is unavailable', 'command_signing_unavailable')
+        if (!actor) throw new AppError(403, 'Cluster approval requires an authenticated actor', 'command_actor_required')
+        if (!this.commandSigning) throw new AppError(503, 'Cluster command signing is unavailable', 'command_signing_unavailable')
         const user = await tx.identity.getUser(actor)
         if (!user || (user.status ?? 'active') !== 'active') throw new AppError(403, 'Cluster command actor is unavailable', 'command_actor_unavailable')
         authorization = this.commandSigning.sign({
