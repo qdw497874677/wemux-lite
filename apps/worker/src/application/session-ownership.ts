@@ -5,9 +5,22 @@ import { resolve } from 'node:path'
 /** Process-lifetime fence shared by every Runtime using one Worker home.
  * An abort, resolved stop/return, or bounded shutdown is not proof of child exit.
  * Unknown ownership stays quarantined until process exit; no timer unlocks it.
+ * Release signals are process-local, not cross-process coordination.
  */
 export class SessionOwnership {
   private readonly owners = new Map<SessionId, symbol>()
+  private readonly listeners = new Map<SessionId, Set<() => void>>()
+
+  /** In-process, one-shot release signal; never implies a child has exited. */
+  onRelease(sessionId: SessionId, notify: () => void): () => void {
+    let listeners = this.listeners.get(sessionId)
+    if (!listeners) { listeners = new Set(); this.listeners.set(sessionId, listeners) }
+    listeners.add(notify)
+    return () => {
+      listeners!.delete(notify)
+      if (!listeners!.size) this.listeners.delete(sessionId)
+    }
+  }
 
   occupied(sessionId: SessionId): boolean { return this.owners.has(sessionId) }
 
@@ -19,7 +32,11 @@ export class SessionOwnership {
   }
 
   release(sessionId: SessionId, token: symbol): void {
-    if (this.owners.get(sessionId) === token) this.owners.delete(sessionId)
+    if (this.owners.get(sessionId) !== token) return
+    this.owners.delete(sessionId)
+    const listeners = this.listeners.get(sessionId)
+    this.listeners.delete(sessionId)
+    for (const notify of listeners ?? []) notify()
   }
 }
 

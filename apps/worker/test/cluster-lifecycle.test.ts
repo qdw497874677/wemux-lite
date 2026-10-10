@@ -482,3 +482,39 @@ test('register refuses to silently no-op on an existing identity and --force rep
     } finally { store.close() }
   } finally { await f.close() }
 })
+
+test('connected competitor takes queued Turn after owner shuts down during preparation', async t => {
+  const f = await fixture()
+  let releasePrepare!: () => void
+  const preparing = new Promise<void>(resolve => { releasePrepare = resolve })
+  let entered!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve })
+  let executions = 0
+  t.mock.method(TestRuntimeSessionAdapter.prototype, 'openSession', async () => {
+    executions++
+    return { execute: async () => ({ signals: (async function* () { yield { kind: 'finished' as const, outcome: { status: 'completed' as const } } })(), stop: async () => {} }), command: async () => {}, resolveApproval: async () => {}, close: async () => {} }
+  })
+  let competitor: WorkerRuntime | undefined
+  try {
+    await f.lifecycle.initializeLocalRuntime()
+    const workbench = createLocalWorkbenchService(f.store, f.lifecycle)
+    const directory = await workbench.addDirectory(f.home)
+    const session = await workbench.createSession({ workspaceId: directory.workspaceId, agentKey: 'test', modelId: 'test' })
+    const owner = (f.lifecycle as unknown as { runtime: WorkerRuntime }).runtime
+    const original = (owner as unknown as { launchContexts: { prepare: (turn: unknown) => Promise<unknown> } }).launchContexts
+    ;(owner as unknown as { launchContexts: { prepare: (turn: unknown) => Promise<unknown> } }).launchContexts = { ...original, async prepare(turn: unknown) { entered(); await preparing; return original.prepare(turn) } }
+    await workbench.enqueue(session.sessionId, 'owner turn')
+    await started
+    await workbench.enqueue(session.sessionId, 'competitor turn')
+    const ownership = (f.lifecycle as unknown as { ownership: import('../src/application/session-ownership.ts').SessionOwnership }).ownership
+    competitor = new WorkerRuntime(f.store, { provision: async () => { throw new Error('unused') } }, [new TestAgent(1)], { send: () => {} }, session.binding.agent.workerId, 'competitor', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, ownership)
+    await competitor.initialize()
+    assert.equal((await f.store.sessions.listQueued(session.sessionId)).length, 1)
+    assert.equal(executions, 0)
+    const shutdown = owner.shutdown()
+    releasePrepare()
+    await shutdown
+    await waitFor(async () => (await f.store.journal.read({ sessionId: session.sessionId, fromSeq: 1 as never, limit: 100 })).events.filter(event => event.payload.kind === 'turn.finished').length === 2)
+    assert.equal(executions, 1, 'owner never launched; competitor handles the queued Turn')
+  } finally { releasePrepare?.(); await competitor?.shutdown(); await f.close() }
+})

@@ -53,6 +53,8 @@ function canonical(value: unknown): string {
 
 export class WorkerRuntime {
   private readonly tasks = new Map<SessionId, Promise<void>>()
+  private readonly releaseWaiters = new Map<SessionId, () => void>()
+  private readonly releaseWakes = new Set<SessionId>()
   private readonly unsafeSessions = new Set<SessionId>()
   private readonly launchRetries = new Map<SessionId, { commandId: CommandId; attempts: number; timer: NodeJS.Timeout | null }>()
   private readonly sent = new Map<SessionId, number>()
@@ -487,19 +489,46 @@ export class WorkerRuntime {
     this.send({ type: 'event', scope: 'workspace', report: { ...(workspace.provisionCommandId ? { commandId: workspace.provisionCommandId } : {}), workspaceId: id, status: workspace.status, reason: workspace.failureReason, occurredAt: workspace.updatedAt,
       location: workspace.status === 'ready' ? { workspaceId: id, workerId: this.workerId, rootPath: workspace.rootPath, checkouts: await this.store.workspaces.listRepositoryCheckouts(id) } : null } })
   }
+  private waitForOwnership(id: SessionId) {
+    if (this.closing || this.unsafeSessions.has(id) || this.releaseWaiters.has(id)) return
+    const unsubscribe = this.ownership.onRelease(id, () => {
+      this.releaseWaiters.delete(id)
+      if (this.closing) return
+      if (this.tasks.has(id)) this.releaseWakes.add(id)
+      else this.schedule(id)
+    })
+    this.releaseWaiters.set(id, unsubscribe)
+    // Do not lose a release between observing occupation and registering.
+    if (!this.ownership.occupied(id)) {
+      unsubscribe()
+      this.releaseWaiters.delete(id)
+      if (this.tasks.has(id)) this.releaseWakes.add(id)
+      else this.schedule(id)
+    }
+  }
+  private clearReleaseWaiters() {
+    for (const unsubscribe of this.releaseWaiters.values()) unsubscribe()
+    this.releaseWaiters.clear()
+    this.releaseWakes.clear()
+  }
   private schedule(id: SessionId) {
-    if (this.closing || this.unsafeSessions.has(id) || this.ownership.occupied(id)) return
+    if (this.closing || this.unsafeSessions.has(id)) return
+    if (this.ownership.occupied(id)) { this.waitForOwnership(id); return }
     const retry = this.launchRetries.get(id)
     if (retry?.timer) {
       clearTimeout(retry.timer)
       this.launchRetries.delete(id)
     }
     if (this.tasks.has(id)) return
-    const task = this.run(id).catch(error => { console.error('Session execution failed:', error) }).finally(() => { this.tasks.delete(id) })
+    const task = this.run(id).catch(error => { console.error('Session execution failed:', error) }).finally(() => {
+      this.tasks.delete(id)
+      if (this.releaseWakes.delete(id)) this.schedule(id)
+    })
     this.tasks.set(id, task)
   }
   private async run(id: SessionId) {
-    while (!this.closing && !this.unsafeSessions.has(id) && !this.ownership.occupied(id)) {
+    while (!this.closing && !this.unsafeSessions.has(id)) {
+      if (this.ownership.occupied(id)) { this.waitForOwnership(id); return }
       const session = await this.store.sessions.get(id)
       if (!session) return
       if (!this.available(session.binding)) {
@@ -526,7 +555,7 @@ export class WorkerRuntime {
       // Reserve before the durable claim. A competing Runtime must not claim
       // the next Turn while this owner is still preparing or running a child.
       const ownershipToken = this.ownership.acquire(id)
-      if (!ownershipToken) return
+      if (!ownershipToken) { this.waitForOwnership(id); return }
       let turn: Turn | null
       try { turn = await this.store.transaction(tx => tx.sessions.claimNext(id)) }
       catch (error) { this.ownership.release(id, ownershipToken); throw error }
@@ -725,7 +754,6 @@ export class WorkerRuntime {
         // the runner's finally released the handle. return()/stop() alone do not.
         if (childMayHaveStarted && !cleanupError && !nextOutstanding && !this.agentRunner.isActive(turn.sessionId, turn.id)) {
           this.unsafeSessions.delete(turn.sessionId)
-          this.ownership.release(turn.sessionId, ownershipToken)
         }
         // Prelaunch stop cannot have started a child; retain its cancellation.
         if (stopError && childMayHaveStarted) throw stopError
@@ -757,7 +785,7 @@ export class WorkerRuntime {
         : { turnId: turn.id, outcome: outcome.status, finishedAt: now() }))
       await this.publish()
     } finally {
-      if (!childMayHaveStarted) this.ownership.release(turn.sessionId, ownershipToken)
+      if (!this.unsafeSessions.has(turn.sessionId)) this.ownership.release(turn.sessionId, ownershipToken)
     }
   }
   private publish(): Promise<void> {
@@ -780,6 +808,7 @@ export class WorkerRuntime {
   async shutdown() {
     this.closing = true
     this.clearLaunchRetries()
+    this.clearReleaseWaiters()
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = null
     const timeoutMs = Math.max(1, Math.min(this.agentTimeouts.idleMs, MAX_AGENT_CLEANUP_TIMEOUT_MS))
@@ -805,6 +834,7 @@ export class WorkerRuntime {
     this.aborted = true
     this.closing = true
     this.clearLaunchRetries()
+    this.clearReleaseWaiters()
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = null
     try { this.agentRunner.abort() } catch {}

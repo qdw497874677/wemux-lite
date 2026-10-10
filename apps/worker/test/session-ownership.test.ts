@@ -20,7 +20,17 @@ test('one Worker home has one ownership fence across lexical and symlink aliases
     competing.release('session' as never, Symbol('not the owner'))
     assert.equal(owner.occupied('session' as never), true)
   }
+  let wakes = 0
+  const cancel = ownershipForHome(join(root, 'alias')).onRelease('session' as never, () => { wakes++ })
+  const ignored = ownershipForHome(join(root, 'alias')).onRelease('session' as never, () => { throw new Error('cancelled waiter fired') })
+  ignored()
+  owner.release('session' as never, Symbol('wrong final token'))
+  assert.equal(wakes, 0)
   owner.release('session' as never, token)
+  assert.equal(wakes, 1, 'final alias token release wakes the waiter once')
+  owner.release('session' as never, token)
+  assert.equal(wakes, 1)
+  cancel()
   assert.ok(ownershipForHome(join(root, 'alias')).acquire('session' as never))
 })
 
