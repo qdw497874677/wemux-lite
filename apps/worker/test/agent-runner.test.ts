@@ -335,6 +335,31 @@ test('same-session concurrency is rejected without disturbing the active invocat
   await runner.close()
 })
 
+test('direct run refuses a second invocation while the first lease release is pending', async () => {
+  let unblock!: () => void
+  let releasing!: () => void
+  const releaseStarted = new Promise<void>(resolve => { releasing = resolve })
+  const delayedRelease = new Promise<void>(resolve => { unblock = resolve })
+  let executions = 0
+  const adapter: RuntimeSessionAdapter = { async openSession() { return {
+    async execute() { executions++; return { signals: (async function* (): AsyncGenerator<never> { throw new Error('faulted invocation') })(), async stop() {} } },
+    async close() { if (executions === 1) { releasing(); await delayedRelease } },
+  } } }
+  const runner = new WorkerAgentRunner({ agents: [executionAgent], runtimeAdapters: new Map([[agentKey, adapter]]) })
+  try {
+    const first = collect(runner.run(request()))
+    await releaseStarted
+    const second = await collect(runner.run(request({ invocationId: 'second-release' as TurnId })))
+    assert.equal(second[0]?.customMetadata?.wemux?.terminal, 'failed')
+    assert.equal(executions, 1)
+    unblock()
+    await first
+    const third = await collect(runner.run(request({ invocationId: 'after-release' as TurnId })))
+    assert.equal(third.at(-1)?.customMetadata?.wemux?.terminal, 'failed')
+    assert.equal(executions, 2)
+  } finally { unblock(); await runner.close() }
+})
+
 test('session command routes through the retained runtime while approval stays bound to the active invocation', async () => {
   const calls: string[] = []
   let release: (() => void) | undefined

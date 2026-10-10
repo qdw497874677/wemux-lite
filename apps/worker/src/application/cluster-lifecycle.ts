@@ -12,6 +12,7 @@ import { enroll, toSocketUrl } from '../transport/enrollment.js'
 import { WebSocketTransport } from '../transport/websocket.js'
 import type { StateChange } from '../transport/types.js'
 import { WorkerRuntime } from './runtime.js'
+import { ownershipForHome } from './session-ownership.js'
 import { LocalWorkbenchError } from './local-workbench.js'
 import { LocalProvisioner } from '../workspaces/local-provisioner.js'
 import { runtimeAdaptersFor } from './runtime-adapters.js'
@@ -72,6 +73,7 @@ export class ClusterLifecycle {
   private tunnelPool: TunnelPool | null = null
   private resources: ResourceReconciler | null = null
   private readonly connectors: WorkerConnectorRuntime
+  private readonly ownership: ReturnType<typeof ownershipForHome>
   private clusterGrantUrl: string | null = null
   private transitions: Promise<unknown> = Promise.resolve()
   private state: WorkerConnectionState = { phase: 'offline', retryAt: null, failure: null }
@@ -81,7 +83,7 @@ export class ClusterLifecycle {
     private readonly store: WorkerStore & LocalState & SessionStore & ProviderCredentialRepository & WorkerConnectorStore,
     private agents: readonly AgentAdapter[],
     private readonly options: ClusterLifecycleOptions,
-  ) { this.connectors = new WorkerConnectorRuntime(store, { onApproval: event => this.publishConnectorApproval(event), verifyBinding: async (turn, workerId) => {
+  ) { this.ownership = ownershipForHome(options.home); this.connectors = new WorkerConnectorRuntime(store, { onApproval: event => this.publishConnectorApproval(event), verifyBinding: async (turn, workerId) => {
     const session = await this.store.sessions.get(turn.sessionId)
     const workspace = session && await this.store.workspaces.get(session.binding.workspaceId)
     const persisted = await this.store.sessions.getTurn(turn.id)
@@ -232,7 +234,7 @@ export class ClusterLifecycle {
       const session = await this.store.sessions.get(turn.sessionId)
       const workspace = session && await this.store.workspaces.get(session.binding.workspaceId)
       return workspace && workspace.workerId === workerId ? { projectId: workspace.projectId, workspaceId: workspace.id, rootPath: workspace.rootPath, agentKey: session!.binding.agent.agentKey } : null
-    }), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), null, this.connectors)
+    }), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), null, this.connectors, undefined, undefined, undefined, this.ownership)
     try {
       await runtime.initialize()
       this.runtime = runtime
@@ -329,9 +331,8 @@ export class ClusterLifecycle {
       })
       // Only replace the runtime once connection resources are ready. The failure
       // path restores a local runtime before allowing subsequent local commands.
-      // connect 会以新 runtime 接管同一个持久化 store。先同步强杀旧 provider，
-      // 再给旧 runtime 一个有上限的收尾窗口，尽量避免两个 runtime 并发写状态；
-      // 即使旧 close() 本身挂死，也不能永久阻塞新连接建立。
+      // A bounded close is not proof of child exit. The process-lifetime
+      // ownership fence is shared with replacement and local fallback.
       const previous = this.runtime
       this.runtime = null
       if (previous) {
@@ -354,7 +355,7 @@ export class ClusterLifecycle {
           const response = await fetch(new URL(`/api/workers/${encodeURIComponent(identity.workerId)}/commands/${encodeURIComponent(commandId)}/authorize-launch`, base.origin), { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(5000), headers: { authorization: `Bearer ${credential}` } })
           return this.transport === transport && this.state.phase === 'online' && response.ok && (await response.json() as { allowed?: boolean }).allowed === true
         } catch { return false }
-      })
+      }, this.ownership)
       this.runtime = runtime
       this.resources = resources
       await runtime.initialize()

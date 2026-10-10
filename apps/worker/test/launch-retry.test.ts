@@ -48,7 +48,10 @@ test('online authorization retries transient HTTP errors and stays closed on rev
     const revoked: WorkerCommand = { kind: 'session.enqueue', sessionId, message: { messageId: 'revoked-message' as never, content: 'must wait', sentByAccountId: 'actor' as never } }
     const revokedClaims = { ...claims, commandId: revokedId, commandDigest: createHash('sha256').update(JSON.stringify(revoked)).digest('hex') }
     await runtime.receive({ type: 'command', commandId: revokedId, command: revoked, authorization: { claims: revokedClaims, signature: sign(null, authorizationBytes(revokedClaims), keys.privateKey).toString('base64url') } })
-    await until(() => checks >= 8, 5000)
+    await until(() => checks >= 9, 5000)
+    // The first Turn now has post-claim checks as well; wait until the
+    // bounded four-attempt launch retry window has drained.
+    await new Promise(resolve => setTimeout(resolve, 2200))
     const bounded = checks
     await new Promise(resolve => setTimeout(resolve, 1200))
     assert.equal(checks, bounded, 'revocation does not create a busy polling loop')

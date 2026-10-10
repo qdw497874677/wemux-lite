@@ -4,6 +4,7 @@ export type AbortReason =
   | 'control_plane_disconnect'
   | 'timeout'
   | 'provider_error'
+  | 'authorization_unavailable'
   | 'cancelled'
   | 'unknown'
 
@@ -13,6 +14,7 @@ export const ABORT_REASON_LABELS: Readonly<Record<AbortReason, string>> = {
   control_plane_disconnect: '控制面连接已断开',
   timeout: '本轮执行超时',
   provider_error: '模型服务执行失败',
+  authorization_unavailable: '启动授权已失效或暂时无法验证',
   cancelled: '本轮已取消',
   unknown: '本轮因未知原因中止',
 }

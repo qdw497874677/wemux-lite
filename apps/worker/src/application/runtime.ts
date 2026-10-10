@@ -11,6 +11,7 @@ import type { AgentLaunchContextProvider } from './ports/agent-launch-context.js
 import type { LocalState, RuntimeTransport, WorkspaceProvisioner } from './ports/local-state.js'
 import type { WorkerStore } from './ports/worker-store.js'
 import { WorkerAgentRunner } from './agent-runner.js'
+import { SessionOwnership } from './session-ownership.js'
 import { runtimeAdaptersFor } from './runtime-adapters.js'
 import type { RuntimeSessionAdapter } from './ports/runtime-session.js'
 
@@ -28,7 +29,22 @@ const now = () => new Date().toISOString() as Timestamp
 const WRITE_CHANNEL_CLOSED = 'write_channel_closed: 平台当前未开放文件和终端写入通道。'
 const DEFAULT_AGENT_IDLE_TIMEOUT_MS = 30_000
 const DEFAULT_AGENT_MAX_TIMEOUT_MS = 10 * 60_000
+const MAX_AGENT_CLEANUP_TIMEOUT_MS = 5_000
+
+/** Observe late rejection after deadline, and remove the deadline timer on settlement. */
+async function boundedAgentCleanup(work: () => Promise<unknown>, timeoutMs: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    const operation = Promise.resolve().then(work)
+    await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new AgentTimeoutError('智能体清理超时')), timeoutMs) }),
+    ])
+  } finally { if (timer) clearTimeout(timer) }
+}
 class AgentTimeoutError extends Error {}
+class LaunchAuthorizationDeniedError extends Error {}
+class TurnStoppedBeforeLaunchError extends Error {}
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
   if (value && typeof value === 'object') return `{${Object.entries(value).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(',')}}`
@@ -37,6 +53,7 @@ function canonical(value: unknown): string {
 
 export class WorkerRuntime {
   private readonly tasks = new Map<SessionId, Promise<void>>()
+  private readonly unsafeSessions = new Set<SessionId>()
   private readonly launchRetries = new Map<SessionId, { commandId: CommandId; attempts: number; timer: NodeJS.Timeout | null }>()
   private readonly sent = new Map<SessionId, number>()
   private readonly provisions = new Map<import('@wemux/domain').WorkspaceId, Promise<void>>()
@@ -68,7 +85,8 @@ export class WorkerRuntime {
     private readonly piProviderResolver?: PiProviderResolver,
     /** Internal embedding only. Absent in all production constructors. */
     fileWrites?: { readonly write?: typeof writeWorkspaceFile },
-    private readonly authorizeLaunch?: (commandId: CommandId) => Promise<boolean>) {
+    private readonly authorizeLaunch?: (commandId: CommandId) => Promise<boolean>,
+    private readonly ownership: SessionOwnership = new SessionOwnership()) {
     if (fileWrites) {
       this.fileWriteExecutor = new WorkerFileWriteExecutor(store, workerId, fileWrites)
       const publishPending = async (result: import('@wemux/wire-protocol').FileWriteResultPayload, publish: Parameters<FileWriteIngress['replay']>[0]) => {
@@ -319,7 +337,14 @@ export class WorkerRuntime {
       return receipt
     }
     if (command.kind === 'turn.stop' && (await this.store.sessions.getTurn(command.turnId))?.state === 'stopping') {
-      await this.agentRunner.stop(command.sessionId, command.turnId)
+      try {
+        await boundedAgentCleanup(() => this.agentRunner.stop(command.sessionId, command.turnId), Math.max(1, Math.min(this.agentTimeouts.idleMs, MAX_AGENT_CLEANUP_TIMEOUT_MS)))
+      } catch (error) {
+        // A failed external stop cannot prove the child exited; block future
+        // invocations even when the Turn is still being finalized elsewhere.
+        this.unsafeSessions.add(command.sessionId)
+        throw error
+      }
     }
     await this.publish()
     if ('sessionId' in command) this.schedule(command.sessionId)
@@ -463,7 +488,7 @@ export class WorkerRuntime {
       location: workspace.status === 'ready' ? { workspaceId: id, workerId: this.workerId, rootPath: workspace.rootPath, checkouts: await this.store.workspaces.listRepositoryCheckouts(id) } : null } })
   }
   private schedule(id: SessionId) {
-    if (this.closing) return
+    if (this.closing || this.unsafeSessions.has(id) || this.ownership.occupied(id)) return
     const retry = this.launchRetries.get(id)
     if (retry?.timer) {
       clearTimeout(retry.timer)
@@ -474,7 +499,7 @@ export class WorkerRuntime {
     this.tasks.set(id, task)
   }
   private async run(id: SessionId) {
-    while (!this.closing) {
+    while (!this.closing && !this.unsafeSessions.has(id) && !this.ownership.occupied(id)) {
       const session = await this.store.sessions.get(id)
       if (!session) return
       if (!this.available(session.binding)) {
@@ -482,7 +507,8 @@ export class WorkerRuntime {
         await this.publish(); return
       }
       const queued = (await this.store.sessions.listQueued(id))[0]
-      if (queued && !(await this.isLocalSession(id))) {
+      const localSession = await this.isLocalSession(id)
+      if (queued && !localSession) {
         const record = await this.store.commands.get(queued.submissionCommandId)
         if (!record?.authorization || !verifyEnqueueAuthorization(this.store.identity(), this.workerId, queued.submissionCommandId, record.command, record.authorization, true)) return
         // A failed HTTP check cannot launch; bounded retries recover transient failures
@@ -499,8 +525,17 @@ export class WorkerRuntime {
       }
       const turn = await this.store.transaction(tx => tx.sessions.claimNext(id))
       if (!turn) return
-      await this.publish()
-      await this.execute(turn)
+      // The claim is durable even if publication fails. Fail this invocation
+      // without launching it; the next queued Turn can still be scheduled.
+      try { await this.publish() }
+      catch {
+        await this.store.transaction(async tx => tx.sessions.finishTurn((await tx.sessions.getTurn(turn.id))?.state === 'stopping'
+          ? { turnId: turn.id, outcome: 'cancelled', finishedAt: now() }
+          : { turnId: turn.id, outcome: 'failed', failure: { code: 'agent-error', message: '无法发布启动事件' }, finishedAt: now() }))
+        try { await this.publish() } catch { /* Replay on the next publication. */ }
+        continue
+      }
+      await this.execute(turn, localSession ? undefined : queued?.submissionCommandId ?? null)
     }
   }
   private retryLaunch(id: SessionId, commandId: CommandId) {
@@ -523,18 +558,39 @@ export class WorkerRuntime {
     for (const retry of this.launchRetries.values()) if (retry.timer) clearTimeout(retry.timer)
     this.launchRetries.clear()
   }
-  private async execute(turn: Turn) {
+  private async execute(turn: Turn, clusterCommandId: CommandId | null | undefined) {
     let outcome: AgentTurnOutcome = { status: 'failed', failure: { code: 'agent-error', message: 'Agent ended without a terminal event' } }
     let iterator: AsyncIterator<AgentEvent> | null = null
     let privateProvider = false
+    let childMayHaveStarted = false
+    let nextOutstanding = false
+    let ownershipToken: symbol | null = null
     const launchGeneration = this.providerGeneration
+    // Claimed Turns cannot safely return to the queue: a retry could launch the
+    // same invocation twice. Denial finishes this Turn as failed and releases the
+    // active slot; subsequent queued Turns remain subject to their own checks.
+    const recheckLaunch = async () => {
+      if (clusterCommandId === undefined) return
+      let allowed = false
+      if (clusterCommandId !== null) {
+        try { allowed = await this.authorizeLaunch?.(clusterCommandId) === true }
+        catch { /* Offline or failed HTTP checks must fail closed. */ }
+      }
+      // Every post-claim check is an admission boundary, not just the last
+      // one. A stop while authorization is pending wins over either result.
+      if ((await this.store.sessions.getTurn(turn.id))?.state === 'stopping') throw new TurnStoppedBeforeLaunchError()
+      if (!allowed) throw new LaunchAuthorizationDeniedError()
+    }
     try {
+      await recheckLaunch()
       const session = (await this.store.sessions.get(turn.sessionId))!
       const workspace = (await this.store.workspaces.get(session.binding.workspaceId))!
       // Only pre-upgrade Turns lack a snapshot. Null explicitly selects Agent default.
       const modelId = Object.hasOwn(turn, 'modelId') ? turn.modelId! : session.binding.modelId
       const prepared = await this.launchContexts.prepare(turn)
+      let launchError: unknown = null
       try {
+        await recheckLaunch()
         const fingerprint = createHash('sha256').update(canonical({ cwd: workspace.rootPath, modelId, nativeSession: session.nativeSession })).digest('hex')
         const customPi = session.binding.agent.agentKey === 'pi' && modelId?.startsWith('openai-compatible::')
         // This branch is intentionally cluster-only; local Web Sessions never
@@ -549,6 +605,7 @@ export class WorkerRuntime {
           catch { throw new Error('pi_provider_unavailable') }
           if (!provider || !this.providerConnectionOpen || this.providerGeneration !== launchGeneration) throw new Error('pi_provider_unavailable')
         }
+        await recheckLaunch()
         const runRequest = {
           appName: 'wemux-worker',
           userId: this.workerId,
@@ -567,8 +624,17 @@ export class WorkerRuntime {
         iterator = (privateProvider && provider
           ? this.agentRunner.runWithPiProvider({ ...runRequest, resume: null }, provider, `${provider.bindingId}:${provider.credentialStamp ?? ''}`)
           : this.agentRunner.run(runRequest))[Symbol.asyncIterator]()
-        const stoppingBeforeRun = (await this.store.sessions.getTurn(turn.id))?.state === 'stopping'
-        const stopBeforeFirstRead = this.closing || stoppingBeforeRun || (privateProvider && (!this.providerConnectionOpen || this.providerGeneration !== launchGeneration))
+        // The last asynchronous admission check sits immediately before the
+        // first read (the point where an async generator can start a process).
+        // Every post-claim admission check gives an explicit stop precedence
+        // over a failed HTTP check. Do not start the iterator in either case.
+        await recheckLaunch()
+        // turn.stop can arrive while the HTTP check is pending. Never start an
+        // already-stopped Turn: stop() before the first next() cannot stop an
+        // async generator that has not registered its invocation yet.
+        if ((await this.store.sessions.getTurn(turn.id))?.state === 'stopping') throw new TurnStoppedBeforeLaunchError()
+        const stopBeforeFirstRead = privateProvider && (!this.providerConnectionOpen || this.providerGeneration !== launchGeneration)
+        if (this.closing || this.aborted) throw new TurnStoppedBeforeLaunchError()
         const startedAt = Date.now()
         let firstRead = true
         while (true) {
@@ -577,14 +643,23 @@ export class WorkerRuntime {
           // Keep one observed iterator.next() in flight across idle ticks.
           // Check the max deadline before requesting another result. Observe
           // any later rejection immediately, before optional callbacks run.
+          if (this.closing || this.aborted) throw new TurnStoppedBeforeLaunchError()
+          if (!ownershipToken) {
+            ownershipToken = this.ownership.acquire(turn.sessionId)
+            if (!ownershipToken) throw new Error('Agent session ownership is uncertain')
+          }
+          childMayHaveStarted = true
+          nextOutstanding = true
           const next = iterator.next()
-          void next.catch(() => {})
+          // Settlement (including rejection) is distinct from return() or stop()
+          // resolving: neither proves an outstanding read has left the child.
+          void next.then(() => { nextOutstanding = false }, () => { nextOutstanding = false })
           // Async generators register their active invocation on first next(),
           // not when constructed. A stop during preparation must be forwarded
           // after that registration, otherwise it is silently lost.
           if (firstRead) {
             firstRead = false
-            if (stopBeforeFirstRead) await this.agentRunner.stop(turn.sessionId, turn.id)
+            if (stopBeforeFirstRead) await boundedAgentCleanup(() => this.agentRunner.stop(turn.sessionId, turn.id), Math.max(1, Math.min(this.agentTimeouts.idleMs, MAX_AGENT_CLEANUP_TIMEOUT_MS)))
           }
           let result: Awaited<typeof next>
           while (true) {
@@ -624,20 +699,51 @@ export class WorkerRuntime {
           })
           await this.publish()
         }
+      } catch (error) {
+        launchError = error
+        throw error
       } finally {
-        await this.agentRunner.stop(turn.sessionId, turn.id)
-        await iterator?.return?.()
-        await prepared.cleanup()
+        let cleanupError: unknown = null
+        let stopError: unknown = null
+        // Quarantine before any await: a stop that hangs must not admit another
+        // invocation. A deadline bounds bookkeeping, not child termination.
+        if (childMayHaveStarted) this.unsafeSessions.add(turn.sessionId)
+        const cleanupTimeoutMs = Math.max(1, Math.min(this.agentTimeouts.idleMs, MAX_AGENT_CLEANUP_TIMEOUT_MS))
+        try {
+          await boundedAgentCleanup(() => this.agentRunner.stop(turn.sessionId, turn.id), cleanupTimeoutMs)
+        } catch (error) { stopError = error; cleanupError = error }
+        // Attempt all releases independently even after a rejection or timeout.
+        // A timed-out iterator release could still have a live invocation.
+        try { await boundedAgentCleanup(() => iterator?.return?.() ?? Promise.resolve(), cleanupTimeoutMs) }
+        catch (error) { cleanupError ??= error; if (childMayHaveStarted) this.unsafeSessions.add(turn.sessionId) }
+        try { await boundedAgentCleanup(() => prepared.cleanup(), cleanupTimeoutMs) }
+        catch (error) { cleanupError ??= error; if (childMayHaveStarted) this.unsafeSessions.add(turn.sessionId) }
+        // A settled read plus an inactive runner invocation establishes that
+        // the runner's finally released the handle. return()/stop() alone do not.
+        if (childMayHaveStarted && !cleanupError && !nextOutstanding && !this.agentRunner.isActive(turn.sessionId, turn.id)) {
+          this.unsafeSessions.delete(turn.sessionId)
+          if (ownershipToken) this.ownership.release(turn.sessionId, ownershipToken)
+        }
+        // Prelaunch stop cannot have started a child; retain its cancellation.
+        if (stopError && childMayHaveStarted) throw stopError
+        if (childMayHaveStarted && this.unsafeSessions.has(turn.sessionId)) throw cleanupError
+        if (launchError === null && cleanupError) throw cleanupError
       }
     } catch (error) {
-      const message = privateProvider
-        ? 'Pi Provider 不可用或执行失败，请检查 Worker 本地配置'
-        : error instanceof Error ? error.message : 'Agent failed'
-      outcome = { status: 'failed', failure: {
-        code: 'agent-error',
-        message,
-        abortReason: error instanceof AgentTimeoutError ? 'timeout' : this.closing ? 'executor_disconnected' : 'provider_error',
-      } }
+      if (error instanceof TurnStoppedBeforeLaunchError) outcome = { status: 'cancelled' }
+      else {
+        const message = error instanceof LaunchAuthorizationDeniedError
+          ? '启动授权已失效或暂时无法验证，智能体未启动'
+          : privateProvider
+          ? 'Pi Provider 不可用或执行失败，请检查 Worker 本地配置'
+          : error instanceof Error ? error.message : 'Agent failed'
+        outcome = { status: 'failed', failure: {
+          code: error instanceof LaunchAuthorizationDeniedError ? 'agent-unavailable' : 'agent-error',
+          message,
+          abortReason: error instanceof LaunchAuthorizationDeniedError ? 'authorization_unavailable' : error instanceof AgentTimeoutError ? 'timeout' : this.closing ? 'executor_disconnected' : 'provider_error',
+          ...(error instanceof LaunchAuthorizationDeniedError ? { retryable: false } : {}),
+        } }
+      }
     }
     await this.store.transaction(tx => tx.sessions.finishTurn(outcome.status === 'failed'
       ? { turnId: turn.id, outcome: 'failed', failure: outcome.failure, finishedAt: now() }
@@ -666,15 +772,22 @@ export class WorkerRuntime {
     this.clearLaunchRetries()
     if (this.headRefresh) clearInterval(this.headRefresh)
     this.headRefresh = null
-    await this.agentRunner.close()
+    const timeoutMs = Math.max(1, Math.min(this.agentTimeouts.idleMs, MAX_AGENT_CLEANUP_TIMEOUT_MS))
+    try { await boundedAgentCleanup(() => this.agentRunner.close(), timeoutMs) }
+    catch { this.abort() /* best-effort kill of owned sessions, not proof of exit */ }
     this.terminals?.disposeAll()
     this.terminalSessions.clear()
-    await this.provisioner.stop?.()
-    await this.commands
-    await this.fileWriteExecutor?.close()
-    await Promise.all(this.provisions.values())
-    await Promise.all(this.tasks.values())
-    await this.publishing
+    // Every wait is bounded independently: an unresponsive external adapter,
+    // provisioner, or I/O operation must not hold shutdown forever.
+    const settle = async (work: () => Promise<unknown>) => {
+      try { await boundedAgentCleanup(work, timeoutMs) } catch { /* best effort */ }
+    }
+    await settle(() => this.provisioner.stop?.() ?? Promise.resolve())
+    await settle(() => this.commands)
+    await settle(() => this.fileWriteExecutor?.close() ?? Promise.resolve())
+    await settle(() => Promise.all(this.provisions.values()))
+    await settle(() => Promise.all(this.tasks.values()))
+    await settle(() => this.publishing)
   }
   /** 同步强制终止：不等待任何 in-flight promise，只杀 agent 子进程。永不挂起。不证明已开始的文件 I/O 停止。 */
   abort() {
