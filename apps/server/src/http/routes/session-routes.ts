@@ -144,7 +144,8 @@ export const sessionRoutes: readonly RouteDescriptor[] = [
     context.json(202, await context.service.invokeRuntimeCommand(context.params.sessionId as SessionId, await context.readBody(), actor))
   } },
   { method: 'POST', pattern: '/sessions/:sessionId/runtime/approvals/:approvalId', auth: 'authenticated', handler: async context => {
-    const actor = context.sessionAccess ? await context.actor() : (await context.operator(), undefined)
+    if (!context.sessionAccess) { await context.operator(); throw new AppError(503, 'Cluster approval access is unavailable', 'approval_access_unavailable') }
+    const actor = await context.actor()
     context.json(202, await context.service.resolveRuntimeApproval(context.params.sessionId as SessionId, context.params.approvalId as ApprovalId, await context.readBody(), actor))
   } },
   { method: 'GET', pattern: '/sessions/:sessionId/events', auth: 'authenticated', handler: async context => {

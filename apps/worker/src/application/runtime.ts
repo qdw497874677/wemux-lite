@@ -280,6 +280,15 @@ export class WorkerRuntime {
       return receipt
     }
     if (previous) {
+      // A persisted receipt is safe to replay without repeating the native effect,
+      // but only after current Server authority is checked again. Expired signing
+      // windows are acceptable for this exact recorded identity, not fresh intents.
+      if (source === 'cluster' && command.kind === 'runtime.approval.resolve' && previous.payloadFingerprint === payloadFingerprint && !(await this.authorizeLaunch?.(commandId))) {
+        receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: true } }
+        // Do not persist a terminal Server receipt for a transient access/projection
+        // denial. No native effect is repeated; a future delivery can recheck.
+        return receipt
+      }
       if (command.kind === 'runtime.approval.resolve' && (!(await this.store.sessions.get(command.sessionId)) || (await this.isLocalSession(command.sessionId)) !== (source === 'local'))) {
         receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Session host scope mismatch', retryable: false } }
       }
@@ -291,7 +300,8 @@ export class WorkerRuntime {
     try {
       // Approval resolution unblocks native execution. Verify current access before any journal or adapter effect.
       if (source === 'cluster' && command.kind === 'runtime.approval.resolve' && !(await this.authorizeLaunch?.(commandId))) {
-        if (acknowledge) this.send({ type: 'ack', receipt: { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: true } } })
+        // A stale Server projection or temporary denial must not settle the
+        // command: retry on a later bounded notification/reconnect.
         return { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: true } }
       }
       await this.validate(command, source)

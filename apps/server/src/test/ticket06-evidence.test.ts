@@ -12,6 +12,8 @@ import { SharedSqliteDatabase } from '../storage/sqlite/shared-database.js'
 import { CommandSigningIdentity } from '../application/command-signing.js'
 import { migrate } from '../storage/sqlite/migrations.js'
 import { ServerService } from '../application/server-service.js'
+import { SessionAccessService } from '../application/session-access-service.js'
+import { ProjectAccessService } from '../application/project-access-service.js'
 import { TaskService } from '../application/task-service.js'
 import { WorkerService } from '../application/worker-service.js'
 import { Notifications } from '../application/notifications.js'
@@ -82,6 +84,46 @@ test('cluster approval decision is signed and bound to issuer, target and worker
   // No active Turn matches this forged target; a signed assertion is not fresh authority.
   assert.deepEqual(await f.server.authorizeEnqueueLaunch(f.worker.id, commandId), { allowed: false })
   assert.deepEqual(await f.server.authorizeEnqueueLaunch('another-worker' as WorkerId, commandId), { allowed: false })
+})
+
+test('unsigned historical approval retry stays unsigned and requires a new commandId', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ticket02-unsigned-retry-')), path = join(dir, 'server.db')
+  const f = await fixture(path)
+  t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
+  const commandId = 'historical-approval' as CommandId
+  const command = { kind: 'runtime.approval.resolve' as const, sessionId: f.independent.id, turnId: 'turn' as never, approvalId: 'approval' as never, decision: 'approve' as const, decidedByAccountId: instanceOperatorId }
+  const { createHash } = await import('node:crypto')
+  await f.store.transaction(tx => tx.commands.insertPending({ commandId, workerId: f.worker.id, command, payloadFingerprint: createHash('sha256').update(JSON.stringify(command)).digest('hex'), createdAt: new Date().toISOString() as Timestamp }))
+  await assert.rejects(f.server.resolveRuntimeApproval(f.independent.id, command.approvalId, { commandId, turnId: 'turn', decision: 'approve' }, instanceOperatorId), { status: 409, code: 'unsigned_approval_retry' })
+  assert.equal((await f.store.commands.getPendingCommand(commandId))?.authorization, undefined)
+  assert.equal((await new WorkerService(f.store, f.signals).deliverable(f.worker.id)).some(item => item.type === 'command' && item.commandId === commandId), false)
+})
+
+test('signed approval reaches deliverable transport with current access despite lagging Turn projection', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ticket02-positive-approval-')), path = join(dir, 'server.db')
+  const f = await fixture(path)
+  t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
+  const service = new ServerService(f.store, f.signals, undefined, undefined, undefined,
+    new SessionAccessService(f.store, new ProjectAccessService(f.store)), f.commandSigning)
+  const commandId = 'positive-approval' as CommandId
+  await service.resolveRuntimeApproval(f.independent.id, 'approval' as never, { commandId, turnId: 'worker-turn-not-in-cache', decision: 'approve' }, instanceOperatorId)
+  assert.deepEqual(await service.authorizeEnqueueLaunch(f.worker.id, commandId), { allowed: true })
+  const frames = await new WorkerService(f.store, f.signals).deliverable(f.worker.id)
+  assert.ok(frames.some(frame => frame.type === 'command' && frame.commandId === commandId && frame.authorization?.claims.kind === 'runtime.approval.resolve'))
+})
+
+test('unsigned backlog does not starve later signed approvals', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ticket02-deliverable-window-')), path = join(dir, 'server.db')
+  const f = await fixture(path)
+  t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
+  for (let i = 0; i < 101; i++) {
+    const commandId = `old-${i}` as CommandId
+    const command = { kind: 'runtime.approval.resolve' as const, sessionId: f.independent.id, turnId: 'turn' as never, approvalId: 'approval' as never, decision: 'approve' as const }
+    await f.store.transaction(tx => tx.commands.insertPending({ commandId, workerId: f.worker.id, command, payloadFingerprint: `old-${i}`, createdAt: new Date().toISOString() as Timestamp }))
+  }
+  const commandId = 'later-signed' as CommandId
+  await f.server.resolveRuntimeApproval(f.independent.id, 'approval' as never, { commandId, turnId: 'turn', decision: 'approve' }, instanceOperatorId)
+  assert.ok((await new WorkerService(f.store, f.signals).deliverable(f.worker.id)).some(item => item.type === 'command' && item.commandId === commandId))
 })
 
 // Direct SQL failures must leave both the statement and enclosing transaction atomic.

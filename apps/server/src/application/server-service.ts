@@ -83,8 +83,9 @@ export class ServerService {
         if (pending.command.kind === 'runtime.approval.resolve') {
           // A decision needs control access unless it belongs to the active Turn owner.
           const state = await this.executionState(tx, claims.sessionId)
-          if (state.activeTurnId !== pending.command.turnId) return { allowed: false }
-          if (state.activeTurnOwnerId !== claims.actorId) await this.sessionAccess?.requireInTx(tx, claims.actorId, claims.sessionId, 'control')
+          // Cache events can lag the Worker journal. The Worker checks the actual
+          // pending approval before executing; never terminally reject on a stale projection.
+          if (state.activeTurnId !== pending.command.turnId || state.activeTurnOwnerId !== claims.actorId) await this.sessionAccess?.requireInTx(tx, claims.actorId, claims.sessionId, 'control')
         }
         const worker = await tx.resources.getWorker(workerId)
         return { allowed: Boolean(worker && worker.connectionState !== 'revoked') }
@@ -727,6 +728,10 @@ export class ServerService {
       const command = await build(tx)
       if (command === null) return null // Commit a durable non-admission fence before responding.
       const existing = await tx.commands.get(commandId)
+      if (command.kind === 'runtime.approval.resolve' && existing && !(await tx.commands.getPendingCommand(commandId))?.authorization) {
+        // Historical unsigned intent cannot be silently upgraded to a new approval.
+        throw new AppError(409, 'Historical unsigned approval requires a new commandId', 'unsigned_approval_retry')
+      }
       let authorization: import('@wemux/wire-protocol/command-assertion').SignedEnqueueAuthorization | undefined
       if (command.kind === 'runtime.approval.resolve') {
         if (!actor) throw new AppError(403, 'Cluster approval requires an authenticated actor', 'command_actor_required')
