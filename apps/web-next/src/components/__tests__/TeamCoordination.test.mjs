@@ -16,6 +16,7 @@ test('Team coordination browser selects authorized placement, sends once, reopen
       const workspace = { id: 'workspace-1', projectId: 'project-1', name: 'Test Workspace', deletedAt: null, placements: [{ workerId: 'worker-1', status: 'ready' }] };
       window.attempts = []; window.failOnce = true; window.failRefresh = false; window.refreshCalls = 0; window.completedLists = 0; window.pauseSend = false; window.releaseSend = null;
       window.staleList = false; window.pauseListTeam = null; window.releaseList = null;
+      window.switchModel = modelId => { worker.capabilities[0].models = [{ modelId, displayName: modelId }] };
       let sessions = [];
       const api = {
         projects: async () => [project], workers: async () => [worker], workspaces: async () => [workspace],
@@ -31,7 +32,7 @@ test('Team coordination browser selects authorized placement, sends once, reopen
           window.attempts.push({ team, body });
           if (window.pauseSend) await new Promise(resolve => { window.releaseSend = resolve });
           if (window.failOnce) { window.failOnce = false; throw Error('request lost'); }
-          const session = { id: 'session-1', taskId: 'coordination:task', projectId: project.id, title: '团队协调', binding: { agent: { agentKey: 'test' } } };
+          const session = { id: 'session-1', taskId: 'coordination:task', projectId: project.id, workspaceId: workspace.id, title: '团队协调', binding: { agent: { workerId: worker.id, agentKey: 'test' }, modelId: body.modelId } };
           sessions = [session]; return { session, created: true };
         },
         taskSessionScope: { host: location.origin, account: 'actor', teamId: 'team-1' },
@@ -85,6 +86,14 @@ test('Team coordination browser selects authorized placement, sends once, reopen
     await page.getByRole('button', { name: '关闭会话' }).click()
     await page.getByRole('button', { name: /团队协调（test）/ }).click()
     await page.locator('[data-conversation-session="session-1"]').waitFor()
+    await page.evaluate(() => window.switchModel('replacement-model'))
+    await page.getByRole('button', { name: '刷新协调环境与会话' }).click()
+    await page.waitForFunction(() => [...document.querySelectorAll('select[aria-label="协调执行环境"] option')].some(option => option.value.includes('replacement-model')))
+    await page.getByRole('button', { name: '在此 Task 下重开新会话' }).click()
+    await page.getByRole('alert').getByText('原模型不可用，重开将使用当前可用模型。').waitFor()
+    assert.match(await page.getByRole('combobox', { name: '协调执行环境' }).inputValue(), /replacement-model/)
+    await page.getByRole('button', { name: '取消重开' }).click()
+    await page.getByRole('button', { name: /团队协调（test）/ }).click()
     await page.evaluate(() => { window.failRefresh = true })
     await page.getByRole('textbox', { name: '协调首条消息' }).fill('New accepted handoff')
     await page.getByRole('button', { name: '发送并创建会话' }).click()
