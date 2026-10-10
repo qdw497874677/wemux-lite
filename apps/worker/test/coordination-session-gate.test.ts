@@ -75,7 +75,18 @@ test('只读查询 operation 直通上游且不落入本地写面', async t => {
 test('协调身份与普通 Project 身份的 allowedTools 集合互不串用', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'wemux-coordination-mix-'))
   const store = new SqliteWorkerStore(join(directory, 'worker.sqlite'))
-  const runtime = new WorkerConnectorRuntime(store, { verifyBinding: async (turn) => turn.capabilitySnapshot ? { projectId: turn.capabilitySnapshot.projectId, workspaceId: turn.capabilitySnapshot.workspaceId } : null, verifyServerGrant: async () => true })
+  const bindings = new Map([
+    ['session-mix-coord', { projectId: 'team:team-1', workspaceId: 'workspace-coordination' }],
+    ['session-mix-ord', { projectId: 'project-1', workspaceId: 'workspace-1' }],
+  ])
+  let runtime: WorkerConnectorRuntime
+  runtime = new WorkerConnectorRuntime(store, {
+    verifyBinding: async turn => bindings.get(turn.sessionId) ?? null,
+    verifyServerGrant: async () => true,
+    onApproval: event => {
+      if (event.kind === 'requested') runtime.resolveApproval({ sessionId: event.approval.sessionId, turnId: event.approval.turnId, approvalId: event.approval.approvalId, decision: 'deny' })
+    },
+  })
   t.after(async () => { await runtime.shutdown(); store.close(); await rm(directory, { recursive: true, force: true }) })
   const definition = mcp()
   await store.saveConnectorDefinition(definition)
@@ -92,7 +103,7 @@ test('协调身份与普通 Project 身份的 allowedTools 集合互不串用', 
   assert.equal(coordinationBody.error?.code, 'scope_denied')
   const ordinaryResult = await runtime.handle('mcp.call', ordinary.token, input)
   const ordinaryBody = ordinaryResult!.body as { ok?: boolean; error?: { code?: string } }
-  assert.equal(ordinaryBody.error?.code, 'scope_denied', '无 Server verifier 时普通集群身份也必须拒绝')
+  assert.equal(ordinaryBody.error?.code, 'approval_denied', '普通身份通过作用域检查，拒绝审批后不启动 MCP 进程')
   // 令牌无法借用他人 Turn 身份：handle 只从令牌自身的 claims 推导 currentTurn，伪造不了。
   // 无效令牌一律 401。
   assert.deepEqual(await runtime.handle('mcp.call', 'unknown-token', {}), { status: 401, body: { error: 'Invalid capability token' } })
