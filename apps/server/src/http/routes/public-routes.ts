@@ -54,6 +54,10 @@ export const publicRoutes: readonly RouteDescriptor[] = [
         await capabilities.verify(token, input.requiredTool)
         return json(200, { valid: true })
       }
+      if (operation === 'connector.identity') {
+        const claims = await capabilities.verifyConnectorIdentity(token)
+        return json(200, { projectId: claims.projectId, workspaceId: claims.workspaceId, sessionId: claims.sessionId, turnId: claims.turnId })
+      }
       const claims = await capabilities.verify(token, operation as CapabilityToolName)
       let result: unknown
       try { result = operation === 'session.info' ? await capabilities.sessionInfo(claims)

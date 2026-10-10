@@ -13,11 +13,11 @@ async function fixture(t: TestContext, publish: (event: ConnectorApprovalEvent) 
   const directory = await mkdtemp(join(tmpdir(), 'wemux-approval-finalization-'))
   const store = new SqliteWorkerStore(join(directory, 'worker.sqlite'))
   let externalCalls = 0
-  const runtime = new WorkerConnectorRuntime(store, { onApproval: publish, lookup: async () => [{ address: '8.8.8.8', family: 4 }], fetch: async () => { externalCalls++; throw new Error('External call forbidden') } })
+  const runtime = new WorkerConnectorRuntime(store, { verifyBinding: async () => ({ projectId: 'local', workspaceId: 'local' }), verifyLocalOrigin: async () => true, onApproval: publish, lookup: async () => [{ address: '8.8.8.8', family: 4 }], fetch: async () => { externalCalls++; throw new Error('External call forbidden') } })
   t.after(async () => { await runtime.shutdown(); store.close(); await rm(directory, { recursive: true, force: true }) })
   const now = new Date().toISOString() as never
   await store.saveConnectorDefinition({ id: 'http' as never, projectId: 'local' as never, kind: 'http', name: 'Fixture', description: null, revision: 1, enabled: true, allowedWorkerIds: [], credentialRef: null, credentialAvailability: 'not_required', riskDefaults: { requireApprovalForRead: false, allowMcpReadOnlyHint: false }, config: { baseUrl: 'https://fixture.example.test', authentication: 'none', publicHeaders: {}, allowedOperations: [{ id: 'write', method: 'POST', pathTemplate: '/items', allowedQueryNames: [], allowedRequestHeaderNames: [], requestContentTypes: ['application/json'] }], allowPrivateNetwork: false }, createdAt: now, updatedAt: now })
-  const registration = await runtime.registerTurn({ id: 'turn', sessionId: 'session' } as Turn, 'worker')
+  const registration = await runtime.registerTurn({ id: 'turn', sessionId: 'session' } as Turn, 'worker', 'local')
   const call = (id: string, signal?: AbortSignal) => runtime.handle('http.call', registration.token, { connectorId: 'http', connectorRevision: 1, operationId: 'write', requestId: id, toolCallId: id, input: { body: {} } }, signal)
   return { store, runtime, registration, call, externalCalls: () => externalCalls }
 }
@@ -37,7 +37,7 @@ for (const trigger of ['abort', 'timeout']) for (const cleanup of ['release', 's
     else abort.abort()
     await reached.promise
     assert.deepEqual(f.runtime.listApprovals(), [])
-    const other = await f.runtime.registerTurn({ id: 'other-turn', sessionId: 'other-session' } as Turn, 'worker')
+    const other = await f.runtime.registerTurn({ id: 'other-turn', sessionId: 'other-session' } as Turn, 'worker', 'local')
     await other.release() // An unrelated Turn does not wait for this finalizer.
     let settled = false
     const finish = (cleanup === 'release' ? f.registration.release() : f.runtime.shutdown()).then(() => { settled = true })
@@ -61,7 +61,7 @@ test('shutdown rejects registration that was already awaiting definition discove
   const f = await fixture(t, async () => {})
   const list = f.store.listConnectorDefinitions.bind(f.store)
   t.mock.method(f.store, 'listConnectorDefinitions', async () => { const definitions = await list(); reached.resolve(); await gate.promise; return definitions })
-  const registration = f.runtime.registerTurn({ id: 'late-turn', sessionId: 'late-session' } as Turn, 'worker')
+  const registration = f.runtime.registerTurn({ id: 'late-turn', sessionId: 'late-session' } as Turn, 'worker', 'local')
   const rejected = assert.rejects(registration, /shut.*down/i)
   await reached.promise
   await f.runtime.shutdown()
@@ -87,7 +87,7 @@ test('shutdown fences already-authorized preparation and concurrent Turn registr
   const response = await second
   assert.ok(response && 'ok' in response.body && !response.body.ok)
   assert.equal(response.body.error.code, 'approval_denied')
-  await assert.rejects(f.runtime.registerTurn({ id: 'new-turn', sessionId: 'new-session' } as Turn, 'worker'), /shut.*down/i)
+  await assert.rejects(f.runtime.registerTurn({ id: 'new-turn', sessionId: 'new-session' } as Turn, 'worker', 'local'), /shut.*down/i)
   assert.deepEqual(events.map(event => event.kind), ['requested', 'expired'])
   publication.resolve(); await shutdown; await first
   assert.equal(f.externalCalls(), 0)

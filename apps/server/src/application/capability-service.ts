@@ -225,6 +225,13 @@ export class CapabilityService {
     }
   }
 
+  async verifyConnectorIdentity(token: string): Promise<CapabilityGrantClaims> {
+    const claims = this.tokens.verify(token)
+    const tool = (['mcp.list_tools', 'mcp.call', 'http.call'] as const).find(item => claims.allowedTools.includes(item))
+    if (!tool) throw new CapabilityError('forbidden', 'Connector grant is not allowed')
+    return this.verify(token, tool)
+  }
+
   async verify(token: string, requiredTool: CapabilityToolName): Promise<CapabilityGrantClaims> {
     const claims = this.tokens.verify(token)
     if (!claims.allowedTools.includes(requiredTool)) throw new CapabilityError('forbidden', `Capability ${requiredTool} is not allowed`)

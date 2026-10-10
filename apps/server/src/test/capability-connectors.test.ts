@@ -105,6 +105,25 @@ test('capability snapshot injects a versioned same-Worker collaboration roster a
   assert.notEqual(second.runtime.snapshot.collaboration?.version, originalVersion)
 })
 
+test('Connector identity verifies subset grants without granting session.info', async t => {
+  const f = await fixture(t)
+  const tokens = new CapabilityTokenService('test-secret'.repeat(4), () => timestamp)
+  const capabilities = new CapabilityService(f.store, () => timestamp, tokens, { list: async () => [connector(f.project.id)] })
+  const grant = await capabilities.prepareTurn({ sessionId: f.session.id, turnId: 'connector-turn' as never, actorId: f.user.id, allowedTools: ['http.call'] })
+  assert.deepEqual(grant.runtime.snapshot.allowedTools, ['http.call'])
+  await assert.rejects(capabilities.verify(grant.token, 'session.info'), /not allowed/)
+  // Missing live access verifiers must fail closed; with active access the
+  // identity check works despite session.info being absent from allowedTools.
+  await assert.rejects(capabilities.verifyConnectorIdentity(grant.token), /access checks are unavailable/)
+  const access = { require: async () => ({}) }
+  capabilities.attachProjectQueries(access as never, access as never, access as never, access as never, access as never)
+  const identity = await capabilities.verifyConnectorIdentity(grant.token)
+  assert.equal(identity.sessionId, f.session.id)
+  assert.equal(identity.turnId, 'connector-turn')
+  assert.equal(identity.projectId, f.project.id)
+  assert.deepEqual(identity.allowedTools, ['http.call'])
+})
+
 test('capability connector resolution fails closed for missing actor, A3-invisible actor, and repository failure', async t => {
   const f = await fixture(t)
   const visible = connector(f.project.id)
