@@ -21,7 +21,7 @@ const definition = { providerKey: 'openai-compatible' as const, endpoint: 'https
 const agent: AgentAdapter = { agentKey, mode: 'execution', async detect() { return { agentKey, displayName: 'Fake Pi', version: '1', mode: 'execution' as const, executablePath: '/fake/pi', diagnostics: [], availability: { status: 'available' as const }, models: [{ modelId, displayName: 'Offline', source: 'configured' as const }] } }, async startTurn() { throw new Error('unexpected legacy adapter') } }
 const until = async (predicate: () => Promise<boolean>) => { for (let i = 0; i < 200; i++) { if (await predicate()) return; await new Promise(resolve => setTimeout(resolve, 10)) } throw new Error('Timed out waiting for provider Turn') }
 
-async function fixture(resolver?: PiProviderResolver, controls?: { prepare?: import('../src/application/ports/agent-launch-context.ts').AgentLaunchContextProvider; authorize?: (commandId: import('@wemux/domain').CommandId) => Promise<boolean>; publish?: (message: unknown) => void }) {
+async function fixture(resolver?: PiProviderResolver, controls?: { prepare?: import('../src/application/ports/agent-launch-context.ts').AgentLaunchContextProvider; authorize?: (commandId: import('@wemux/domain').CommandId) => Promise<boolean>; publish?: (message: unknown) => void; timeouts?: { idleMs: number; maxMs: number } }) {
   const home = await mkdtemp(join(tmpdir(), 'wemux-provider-runtime-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
   const keys = generateKeyPairSync('ed25519')
@@ -36,7 +36,7 @@ async function fixture(resolver?: PiProviderResolver, controls?: { prepare?: imp
       async command() {}, async resolveApproval() {}, async close() {},
     }
   } }
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send(message) { controls?.publish?.(message) } }, workerId, 'fixture', controls?.prepare, undefined, new Map([[agentKey, adapter]]), null, undefined, resolver, undefined, controls?.authorize ?? (async () => true))
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send(message) { controls?.publish?.(message) } }, workerId, 'fixture', controls?.prepare, controls?.timeouts, new Map([[agentKey, adapter]]), null, undefined, resolver, undefined, controls?.authorize ?? (async () => true))
   await runtime.initialize()
   if (resolver) runtime.providerConnected()
   const workspaceId = 'provider-workspace' as never
@@ -370,6 +370,35 @@ for (const rejected of ['stop', 'return', 'cleanup'] as const) {
     } finally { release(); await f.cleanup() }
   })
 }
+
+test('a non-settling stop and releases quarantine the Session and finalize only the claimed Turn', async () => {
+  let stops = 0, returns = 0, cleanups = 0, reads = 0
+  const never = new Promise<never>(() => {})
+  const f = await fixture(async () => ({ definition, environment: { OPENAI_API_KEY: secret }, credentialStamp: 'stamp', bindingId: 'binding' }), {
+    timeouts: { idleMs: 25, maxMs: 200 },
+    prepare: { async prepare() { return { context: null, async cleanup() { cleanups++; await never } } } },
+  })
+  const runner = (f.runtime as unknown as { agentRunner: { stop: (sessionId: SessionId, turnId: string) => Promise<void>; runWithPiProvider: (...args: unknown[]) => AsyncIterable<unknown> } }).agentRunner
+  runner.stop = async () => { stops++; await never }
+  runner.runWithPiProvider = () => ({ [Symbol.asyncIterator]() { return { async next() { reads++; throw new Error('child failed') }, async return() { returns++; await never } } } })
+  try {
+    await f.send('hung-first', { kind: 'session.enqueue', sessionId, message: { messageId: 'hung-first' as never, content: 'first', sentByAccountId: 'actor' as never } })
+    await until(async () => reads === 1)
+    await f.send('hung-second', { kind: 'session.enqueue', sessionId, message: { messageId: 'hung-second' as never, content: 'second', sentByAccountId: 'actor' as never } })
+    await until(async () => (await f.store.sessions.get(sessionId))?.activeTurnId === null)
+    assert.equal(stops, 1)
+    assert.equal(returns, 1)
+    assert.equal(cleanups, 1)
+    assert.equal(reads, 1, 'a possible live child must block the successor')
+    assert.equal((await f.store.sessions.listQueued(sessionId)).length, 1)
+    const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as never, limit: 100 })
+    const finished = journal.events.filter(event => event.payload.kind === 'turn.finished')
+    assert.equal(finished.length, 1)
+    assert.equal(finished[0]?.payload.kind === 'turn.finished' && finished[0].payload.outcome, 'failed')
+    await f.runtime.shutdown()
+    assert.equal(reads, 1)
+  } finally { await f.cleanup() }
+})
 
 test('publication rejection after claim still finalizes and allows the next queued Turn', async () => {
   let rejectClaim = false, rejected = false

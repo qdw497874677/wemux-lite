@@ -28,6 +28,19 @@ const now = () => new Date().toISOString() as Timestamp
 const WRITE_CHANNEL_CLOSED = 'write_channel_closed: 平台当前未开放文件和终端写入通道。'
 const DEFAULT_AGENT_IDLE_TIMEOUT_MS = 30_000
 const DEFAULT_AGENT_MAX_TIMEOUT_MS = 10 * 60_000
+const MAX_AGENT_CLEANUP_TIMEOUT_MS = 5_000
+
+/** Observe late rejection after deadline, and remove the deadline timer on settlement. */
+async function boundedAgentCleanup(work: () => Promise<unknown>, timeoutMs: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined
+  try {
+    const operation = Promise.resolve().then(work)
+    await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new AgentTimeoutError('智能体清理超时')), timeoutMs) }),
+    ])
+  } finally { if (timer) clearTimeout(timer) }
+}
 class AgentTimeoutError extends Error {}
 class LaunchAuthorizationDeniedError extends Error {}
 class TurnStoppedBeforeLaunchError extends Error {}
@@ -322,7 +335,14 @@ export class WorkerRuntime {
       return receipt
     }
     if (command.kind === 'turn.stop' && (await this.store.sessions.getTurn(command.turnId))?.state === 'stopping') {
-      await this.agentRunner.stop(command.sessionId, command.turnId)
+      try {
+        await boundedAgentCleanup(() => this.agentRunner.stop(command.sessionId, command.turnId), Math.max(1, Math.min(this.agentTimeouts.idleMs, MAX_AGENT_CLEANUP_TIMEOUT_MS)))
+      } catch (error) {
+        // A failed external stop cannot prove the child exited; block future
+        // invocations even when the Turn is still being finalized elsewhere.
+        this.unsafeSessions.add(command.sessionId)
+        throw error
+      }
     }
     await this.publish()
     if ('sessionId' in command) this.schedule(command.sessionId)
@@ -626,7 +646,7 @@ export class WorkerRuntime {
           // after that registration, otherwise it is silently lost.
           if (firstRead) {
             firstRead = false
-            if (stopBeforeFirstRead) await this.agentRunner.stop(turn.sessionId, turn.id)
+            if (stopBeforeFirstRead) await boundedAgentCleanup(() => this.agentRunner.stop(turn.sessionId, turn.id), Math.max(1, Math.min(this.agentTimeouts.idleMs, MAX_AGENT_CLEANUP_TIMEOUT_MS)))
           }
           let result: Awaited<typeof next>
           while (true) {
@@ -672,19 +692,23 @@ export class WorkerRuntime {
       } finally {
         let cleanupError: unknown = null
         let stopError: unknown = null
-        try { await this.agentRunner.stop(turn.sessionId, turn.id) }
-        catch (error) { stopError = error; cleanupError = error }
-        // Attempt all releases independently; a rejection must not skip later cleanup.
-        try { await iterator?.return?.() } catch (error) { cleanupError ??= error }
-        try { await prepared.cleanup() } catch (error) { cleanupError ??= error }
+        // Quarantine before any await: a stop that hangs must not admit another
+        // invocation. A deadline bounds bookkeeping, not child termination.
+        if (childMayHaveStarted) this.unsafeSessions.add(turn.sessionId)
+        const cleanupTimeoutMs = Math.max(1, Math.min(this.agentTimeouts.idleMs, MAX_AGENT_CLEANUP_TIMEOUT_MS))
+        try {
+          await boundedAgentCleanup(() => this.agentRunner.stop(turn.sessionId, turn.id), cleanupTimeoutMs)
+          if (childMayHaveStarted) this.unsafeSessions.delete(turn.sessionId)
+        } catch (error) { stopError = error; cleanupError = error }
+        // Attempt all releases independently even after a rejection or timeout.
+        // A timed-out iterator release could still have a live invocation.
+        try { await boundedAgentCleanup(() => iterator?.return?.() ?? Promise.resolve(), cleanupTimeoutMs) }
+        catch (error) { cleanupError ??= error; if (childMayHaveStarted) this.unsafeSessions.add(turn.sessionId) }
+        try { await boundedAgentCleanup(() => prepared.cleanup(), cleanupTimeoutMs) }
+        catch (error) { cleanupError ??= error; if (childMayHaveStarted) this.unsafeSessions.add(turn.sessionId) }
         // Prelaunch stop cannot have started a child; retain its cancellation.
-        // A failed stop of a possibly running child must never be marked cancelled.
-        if (stopError && childMayHaveStarted) {
-          // The child may still be alive. Do not admit a second invocation in
-          // this Session until a Worker restart terminates the old process.
-          this.unsafeSessions.add(turn.sessionId)
-          throw stopError
-        }
+        if (stopError && childMayHaveStarted) throw stopError
+        if (childMayHaveStarted && this.unsafeSessions.has(turn.sessionId)) throw cleanupError
         if (launchError === null && cleanupError) throw cleanupError
       }
     } catch (error) {
