@@ -1363,6 +1363,25 @@ test('Run cancel coalesces concurrent requests, survives restart, and converges 
   } finally { try { f.store.close() } catch {} await rm(dir, { recursive: true, force: true }) }
 })
 
+test('Run cancel on unsigned ServerService issues exactly one stop without id conflict', async () => {
+  const f = await fixture()
+  try {
+    // 未声明签名能力的装配（测试/历史兼容）：clusterCommandIssuer 必须返回已插入的命令 id，
+    // 否则 ensureRunCancel 会以同一 commandId 裸插入并触发 UNIQUE 冲突（回归：insert 后 return undefined）
+    const unsigned = new ServerService(f.store, new Notifications())
+    const tasks = new TaskService(f.store, () => {}, unsigned)
+    const { run } = await f.launch()
+    const cancelled = await tasks.cancelRun(run.projectId, run.taskId, run.id, { runId: run.id, sessionId: run.sessionId, requestId: 'unsigned-cancel' }, context)
+    assert.equal(cancelled.run.status, 'cancelling')
+    assert.equal(cancelled.run.cancelCommandIds.length, 1)
+    const stops = (await f.store.commands.list({ limit: 100 })).filter(c => c.commandId.startsWith('run-cancel:'))
+    assert.equal(stops.length, 1, 'exactly one cancel command row exists')
+    const pending = await f.store.commands.getPendingCommand(stops[0].commandId as CommandId)
+    assert.ok(pending, 'cancel command stays pending')
+    assert.equal(pending.authorization, undefined, 'unsigned assembly issues an unsigned stop')
+  } finally { f.store.close() }
+})
+
 test('task-bound independent Session survives disk restart with immutable provenance and binding', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'independent-restart-')), path = join(dir, 'server.db')
   const f = await fixture(path)
