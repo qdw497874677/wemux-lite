@@ -6,6 +6,8 @@ import { normalizeEmail } from './email-address.ts'
 import { AppError } from './errors.ts'
 import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
 import type { Notifications } from './notifications.ts'
+import type { CommandSigningIdentity } from './command-signing.ts'
+import { issueCommandAssertion, sessionAssertionScope } from './command-assertion-issuer.ts'
 
 const now = (): Timestamp => new Date().toISOString() as Timestamp
 const invitationLifetimeMs = 7 * 24 * 60 * 60 * 1000
@@ -31,7 +33,8 @@ export interface TeamInvitationView {
 export class TeamService {
   private readonly store: ServerStore
   private readonly notifications?: Notifications
-  constructor(store: ServerStore, notifications?: Notifications) { this.store = store; this.notifications = notifications;}
+  private readonly commandSigning?: CommandSigningIdentity
+  constructor(store: ServerStore, notifications?: Notifications, commandSigning?: CommandSigningIdentity) { this.store = store; this.notifications = notifications; this.commandSigning = commandSigning;}
 
   async create(actorId: UserId, input: unknown): Promise<TeamSummary> {
     const name = teamName(input)
@@ -119,7 +122,11 @@ export class TeamService {
         if (existing) {
           if (existing.workerId !== session.binding.agent.workerId || existing.payloadFingerprint !== commandFingerprint(command)) throw new AppError(409, '撤权停止命令冲突', 'revocation_command_conflict')
         } else {
-          await tx.commands.insertPending({ commandId, workerId: session.binding.agent.workerId, command, payloadFingerprint: commandFingerprint(command), createdAt: now() })
+          // Revocation stops stay reducing-signature: sign when possible, but never
+          // block the stop itself on signing or actor availability.
+          const authorityUser = await tx.identity.getUser(actorId)
+          const authorization = this.commandSigning && authorityUser && (authorityUser.status ?? 'active') === 'active' ? await issueCommandAssertion(tx, this.commandSigning, actorId, { commandId, command, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) }) : undefined
+          await tx.commands.insertPending({ commandId, workerId: session.binding.agent.workerId, command, payloadFingerprint: commandFingerprint(command), createdAt: now(), ...(authorization ? { authorization } : {}) })
           stopCommands++
         }
         cancellationWorkers.add(session.binding.agent.workerId)

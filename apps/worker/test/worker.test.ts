@@ -11,6 +11,7 @@ import type { CommandId, EventSeq, SessionId, Timestamp, WorkerId, WorkspaceProv
 import { WEMUX_ADK_PROFILE_V1, parseWorkerTransportFrame, type ServerToWorkerFrame, type WorkerCommand, type WorkerPayload, type WorkerTransportHello } from '@wemux/wire-protocol'
 import { randomUUID, createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { authorizationBytes, type EnqueueAuthorization } from '@wemux/wire-protocol/command-assertion'
+import { clusterCommandAssertion } from './fixtures/cluster-signing.ts'
 import { SqliteWorkerStore } from '../src/storage/sqlite-store.js'
 import { WorkerRuntime } from '../src/application/runtime.js'
 import type { WorkerAgentRunner } from '../src/application/agent-runner.js'
@@ -36,9 +37,9 @@ const signingKeyId = createHash('sha256').update(signingPublicKey).digest('hex')
 const signingIdentity = { workerId, serverUrl: 'ws://localhost/ws', credentialRef: 'credential' as const, enrolledAt: new Date().toISOString() as Timestamp, commandSigningKey: { keyId: signingKeyId, publicKey: signingPublicKey } }
 function frame(id: string, command: WorkerCommand): { type: 'command'; commandId: CommandId; command: WorkerCommand; authorization?: { claims: EnqueueAuthorization; signature: string } } {
   const commandId = id as CommandId
-  if (command.kind !== 'session.enqueue') return { type: 'command', commandId, command }
-  const claims: EnqueueAuthorization = { version: 1, keyId: signingKeyId, commandId, workerId, sessionId: command.sessionId, projectId: 'project' as never, workspaceId: workspace.workspace.id, taskId: null, actorId: 'actor' as never, actorAuthVersion: 0, commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
-  return { type: 'command', commandId, command, authorization: { claims, signature: sign(null, authorizationBytes(claims), signingKeys.privateKey).toString('base64url') } }
+  if (command.kind !== 'session.enqueue' && command.kind !== 'workspace.provision' && command.kind !== 'session.create' && command.kind !== 'session.delete' && command.kind !== 'turn.stop' && command.kind !== 'session.cancel-queued' && command.kind !== 'runtime.command') return { type: 'command', commandId, command }
+  const authorization = clusterCommandAssertion(signingKeys.privateKey, signingKeyId, { workerId, projectId: 'project' as never, workspaceId: workspace.workspace.id }, id, command)
+  return { type: 'command', commandId, command, authorization }
 }
 
 
@@ -95,7 +96,10 @@ async function fixture(options?: { ownership?: SessionOwnership; prepare?: () =>
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
   store.saveIdentity(signingIdentity)
   const events: WorkerToServer[] = []
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [new TestAgent(15)], { send: message => { options?.send?.(message); events.push(message) } }, workerId, 'test', options?.prepare ? { prepare: async () => { await options.prepare!(); return { context: null, cleanup: async () => undefined } } } : undefined, undefined, options?.runtimeAdapters, null, undefined, undefined, undefined, options?.authorize ?? (async () => true), options?.ownership)
+  // Fixture setup provisions the workspace before tests; its launch gate must not
+  // consume a test-provided authorization hook (tests count its invocations).
+  const authorizeHook = options?.authorize ? (async (id: CommandId) => id === ('provision' as CommandId) ? true : options.authorize!(id)) : (async () => true)
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [new TestAgent(15)], { send: message => { options?.send?.(message); events.push(message) } }, workerId, 'test', options?.prepare ? { prepare: async () => { await options.prepare!(); return { context: null, cleanup: async () => undefined } } } : undefined, undefined, options?.runtimeAdapters, null, undefined, undefined, undefined, authorizeHook, options?.ownership)
   await runtime.initialize()
   const send = (id: string, command: WorkerCommand) => runtime.receive(frame(id, command))
   await send('provision', { kind: 'workspace.provision', workspace })

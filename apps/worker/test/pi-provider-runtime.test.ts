@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { authorizationBytes, type EnqueueAuthorization } from '@wemux/wire-protocol/command-assertion'
+import { clusterCommandAssertion } from './fixtures/cluster-signing.ts'
 import type { AgentKey, ModelId, ProjectId, SessionId, WorkerId } from '@wemux/domain'
 import type { AgentAdapter } from '../src/application/ports/agent-adapter.ts'
 import type { RuntimeSessionAdapter } from '../src/application/ports/runtime-session.ts'
@@ -36,7 +37,7 @@ async function fixture(resolver?: PiProviderResolver, controls?: { prepare?: imp
       async command() {}, async resolveApproval() {}, async close() {},
     }
   } }
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send(message) { controls?.publish?.(message) } }, workerId, 'fixture', controls?.prepare, controls?.timeouts, new Map([[agentKey, adapter]]), null, undefined, resolver, undefined, controls?.authorize ?? (async () => true))
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send(message) { controls?.publish?.(message) } }, workerId, 'fixture', controls?.prepare, controls?.timeouts, new Map([[agentKey, adapter]]), null, undefined, resolver, undefined, async id => { if (id === 'provision-provider') return true; return (controls?.authorize ?? (async () => true))(id) })
   await runtime.initialize()
   if (resolver) runtime.providerConnected()
   const workspaceId = 'provider-workspace' as never
@@ -46,7 +47,7 @@ async function fixture(resolver?: PiProviderResolver, controls?: { prepare?: imp
     const assertion = command.kind === 'session.enqueue' ? (() => {
       const claims: EnqueueAuthorization = { version: 1, keyId, commandId: id as never, workerId, sessionId, projectId, workspaceId, taskId: null, actorId: 'actor' as never, actorAuthVersion: 0, commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
       return { claims, signature: sign(null, authorizationBytes(claims), keys.privateKey).toString('base64url') }
-    })() : undefined
+    })() : clusterCommandAssertion(keys.privateKey, keyId, { workerId, projectId, workspaceId }, id, command)
     return runtime.receive({ type: 'command', commandId: id as never, command, ...(assertion ? { authorization: assertion } : {}) })
   }
   await send('provision-provider', { kind: 'workspace.provision', workspace } as never)

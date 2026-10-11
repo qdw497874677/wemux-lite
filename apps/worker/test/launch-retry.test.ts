@@ -7,6 +7,7 @@ import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import type { CommandId, SessionId, Timestamp, WorkerId, WorkspaceProvisionSpec } from '@wemux/domain'
 import type { WorkerCommand } from '@wemux/wire-protocol'
 import { authorizationBytes, type EnqueueAuthorization } from '@wemux/wire-protocol/command-assertion'
+import { clusterCommandAssertion } from './fixtures/cluster-signing.ts'
 import { SqliteWorkerStore } from '../src/storage/sqlite-store.js'
 import { WorkerRuntime } from '../src/application/runtime.js'
 import { TestAgent } from '../src/agents/test-agent.js'
@@ -27,14 +28,15 @@ test('online authorization retries transient HTTP errors and stays closed on rev
   const keyId = createHash('sha256').update(publicKey).digest('hex')
   store.saveIdentity({ workerId, serverUrl: 'ws://localhost/ws', credentialRef: 'credential', enrolledAt: new Date().toISOString() as Timestamp, commandSigningKey: { keyId, publicKey } })
   let checks = 0, allowed = false
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [new TestAgent(1)], { send: () => undefined }, workerId, 'test', undefined, undefined, undefined, null, undefined, undefined, undefined, async () => { checks++; if (checks === 1) throw new Error('transient HTTP'); return allowed })
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [new TestAgent(1)], { send: () => undefined }, workerId, 'test', undefined, undefined, undefined, null, undefined, undefined, undefined, async id => { if (id === 'provision') return true; checks++; if (checks === 1) throw new Error('transient HTTP'); return allowed })
   const binding = { workspaceId: 'workspace' as never, agent: { workerId, agentKey: 'test' as const }, modelId: 'test' as never }
   const provision: WorkerCommand = { kind: 'workspace.provision', workspace: { workspace: { id: binding.workspaceId, workerId, projectId: 'project' as never, name: 'test', spec: { kind: 'composite', memberWorkspaceIds: [] }, status: 'pending', failureReason: null }, repositories: [] } as WorkspaceProvisionSpec }
   try {
     await runtime.initialize()
-    await runtime.receive({ type: 'command', commandId: 'provision' as CommandId, command: provision })
+    await runtime.receive({ type: 'command', commandId: 'provision' as CommandId, command: provision, authorization: clusterCommandAssertion(keys.privateKey, keyId, { workerId, projectId: 'project' as never, workspaceId: binding.workspaceId }, 'provision', provision) })
     await until(async () => (await store.workspaces.get(binding.workspaceId))?.status === 'ready')
-    await runtime.receive({ type: 'command', commandId: 'create' as CommandId, command: { kind: 'session.create', session: { sessionId, binding, storageMode: 'local' } } })
+    const create: WorkerCommand = { kind: 'session.create', session: { sessionId, binding, storageMode: 'local' } }
+    await runtime.receive({ type: 'command', commandId: 'create' as CommandId, command: create, authorization: clusterCommandAssertion(keys.privateKey, keyId, { workerId, projectId: 'project' as never, workspaceId: binding.workspaceId }, 'create', create) })
     const command: WorkerCommand = { kind: 'session.enqueue', sessionId, message: { messageId: 'message' as never, content: 'hello', sentByAccountId: 'actor' as never } }
     const claims: EnqueueAuthorization = { version: 1, keyId, commandId, workerId, sessionId, projectId: 'project' as never, workspaceId: binding.workspaceId, taskId: null, actorId: 'actor' as never, actorAuthVersion: 1, commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
     await runtime.receive({ type: 'command', commandId, command, authorization: { claims, signature: sign(null, authorizationBytes(claims), keys.privateKey).toString('base64url') } })

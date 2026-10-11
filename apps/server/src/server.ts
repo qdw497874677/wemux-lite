@@ -133,14 +133,14 @@ export function createWemuxServer(options: WemuxServerOptions) {
     WEMUX_MAIL_OUTBOX: process.env.WEMUX_MAIL_OUTBOX,
   })
   const notifications = new Notifications()
-  const teams = new TeamService(store, notifications)
+  const teams = new TeamService(store, notifications, commandSigning)
   const projects = new ProjectAccessService(store, notifications)
   const workerAccess = new WorkerAccessService(store, notifications)
   const sessionAccess = new SessionAccessService(store, projects, notifications)
   const canvasCollaboration = new CanvasCollaborationService(projects, sessionAccess, notifications)
   const canvasCollaborationStreams = new CanvasCollaborationStreams(canvasCollaboration, notifications)
   const personalAccessTokens = new PersonalAccessTokenService(store)
-  const lifecycle = new AccountLifecycleService(store, administrators, identity, notifications)
+  const lifecycle = new AccountLifecycleService(store, administrators, identity, notifications, undefined, commandSigning)
   const registration = new EmailRegistrationService({ store, identity, settings, mail: mail.settings, mailReason: mail.reason, teams })
   // Google 的半配置会抛错：设计上宁可部署启动失败，也不要等用户点击后才发现回调地址不存在。
   const googleSettings = resolveGoogleSettings(options.google ?? {
@@ -187,7 +187,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const canvasLayouts = new CanvasLayoutService(store, new SqliteCanvasLayoutRepository(store), projects, lineage)
   const projectStreams = new ProjectStreams(notifications)
   let gateway: WorkerGateway | undefined
-  const connectors = new ConnectorService(connectorRepository, store, projects, workerAccess, notifications)
+  const connectors = new ConnectorService(connectorRepository, store, projects, workerAccess, notifications, commandSigning)
   const channelRepository = new SqliteChannelRepository(database)
   const encryptionKey = options.channelEncryptionKey?.trim() || process.env.WEMUX_CONNECTOR_ENCRYPTION_KEY?.trim()
   const channelCodec = encryptionKey ? new AesGcmSecretCodec({ currentKey: encryptionKey, previousKeys: process.env.WEMUX_CONNECTOR_ENCRYPTION_PREVIOUS_KEYS?.split(',').map(value => value.trim()).filter(Boolean) }) : null
@@ -201,7 +201,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const channelOutbox = new ChannelOutbox(channelRepository, projects, sessionAccess, workerAccess, store, { deploymentAllowsPrivateNetwork: process.env.WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK === 'true', connectorAllowsPrivateNetwork: true }, options.channelFetch, kind => adapters.get(kind)!)
   const resourceRepository = new SqliteResourceRepository(database)
   let resources: ResourceService
-  const workers = new WorkerService(store, notifications, (workerId, report) => connectors.report(workerId, report), async (sessionId, events) => { await channelOutbox.projectJournal(sessionId, events); setImmediate(() => void channelOutbox.drain().catch(() => undefined)) }, null, resourceBlobs)
+  const workers = new WorkerService(store, notifications, (workerId, report) => connectors.report(workerId, report), async (sessionId, events) => { await channelOutbox.projectJournal(sessionId, events); setImmediate(() => void channelOutbox.drain().catch(() => undefined)) }, null, resourceBlobs, tx => service.clusterCommandIssuer(tx), true)
   const workerGateway = { send: (workerId: import('@wemux/domain').WorkerId, payload: import('@wemux/wire-protocol').ServerPayload) => {
     if (!gateway) throw new Error('Worker gateway is not ready')
     return gateway.send(workerId, payload)

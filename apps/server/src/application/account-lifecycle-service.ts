@@ -7,6 +7,8 @@ import type { Clock, IdentityService } from './identity-service.ts'
 import { systemClock } from './identity-service.ts'
 import type { Notifications } from './notifications.ts'
 import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
+import type { CommandSigningIdentity } from './command-signing.ts'
+import { issueCommandAssertion, sessionAssertionScope } from './command-assertion-issuer.ts'
 
 export interface AccountLifecycleView {
   readonly status: UserStatus
@@ -24,13 +26,17 @@ export class AccountLifecycleService {
   private readonly identity: IdentityService
   private readonly notifications?: Notifications
   private readonly clock: Clock
+  private readonly commandSigning?: CommandSigningIdentity
+  private readonly commandAuthority?: (tx: ServerStoreTx) => Promise<UserId | undefined>
   constructor(
     store: ServerStore,
     administrators: AdministratorDirectory,
     identity: IdentityService,
     notifications?: Notifications,
     clock: Clock = systemClock,
-  ) { this.store = store; this.administrators = administrators; this.identity = identity; this.notifications = notifications; this.clock = clock;}
+    commandSigning?: CommandSigningIdentity,
+    commandAuthority?: (tx: ServerStoreTx) => Promise<UserId | undefined>,
+  ) { this.store = store; this.administrators = administrators; this.identity = identity; this.notifications = notifications; this.clock = clock; this.commandSigning = commandSigning; this.commandAuthority = commandAuthority;}
 
   async view(actorId: UserId): Promise<AccountLifecycleView> {
     const user = await this.requireUser(actorId)
@@ -184,7 +190,15 @@ export class AccountLifecycleService {
       if (!active) continue
       const commandId = `account-${reason}:${userId}:${session.id}:${active.turnId}` as CommandId
       const command = { kind: 'turn.stop' as const, sessionId: session.id, turnId: active.turnId }
-      if (!await tx.commands.get(commandId)) await tx.commands.insertPending({ commandId, workerId: session.binding.agent.workerId, command, payloadFingerprint: createHash('sha256').update(JSON.stringify(command)).digest('hex'), createdAt })
+      if (!await tx.commands.get(commandId)) {
+        // Revocation stops must execute even when the target account is already
+        // disabled: authority is the acting administrator, and a missing actor
+        // or signing identity degrades to the historical unsigned stop.
+        const authority = await this.commandAuthority?.(tx).catch(() => undefined)
+        const authorityUser = authority ? await tx.identity.getUser(authority) : undefined
+        const authorization = this.commandSigning && authority && authorityUser && (authorityUser.status ?? 'active') === 'active' ? await issueCommandAssertion(tx, this.commandSigning, authority, { commandId, command, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) }) : undefined
+        await tx.commands.insertPending({ commandId, workerId: session.binding.agent.workerId, command, payloadFingerprint: createHash('sha256').update(JSON.stringify(command)).digest('hex'), createdAt, ...(authorization ? { authorization } : {}) })
+      }
       workerIds.add(session.binding.agent.workerId)
     }
     return workerIds
