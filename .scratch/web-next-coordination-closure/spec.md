@@ -4,7 +4,7 @@ Status: ready-for-agent
 
 ## Problem Statement
 
-Team 协调 Task 的领域模型及查询能力已实现；历史上 `GET /api/teams/:id/coordination/availability` 固定禁用、`POST /api/teams/:id/coordination/sessions` 在旧安全门后为 501，Web 仅显示诊断卡。现在首发、对话与历史恢复已可用（Test Agent + 真实桌面/手机浏览器验证），显式重开新 Session 已通过 Test Agent 桌面/手机浏览器验证，用户授权的真实付费 Pi Runtime 单次协调对话已完成（见 `docs/acceptance/web-next-team-coordination-browser-partial.md`），但其它完整验收仍未完成。此前把正常聊天绑定到隔离资格门，导致需求无法交付。
+Team 协调 Task 的领域模型及查询能力已实现；历史上 `GET /api/teams/:id/coordination/availability` 固定禁用、`POST /api/teams/:id/coordination/sessions` 在旧安全门后为 501，Web 仅显示诊断卡。现在首发、对话与历史恢复已可用（Test Agent + 真实桌面/手机浏览器验证），显式重开新 Session 已通过 Test Agent 桌面/手机浏览器验证，用户授权的真实 Pi `5.3-flash` 普通对话、文件创建与同 Session 工具读回已有一次按 Turn 验证通过，另一次第二 Turn 失败待诊断（见 `docs/acceptance/web-next-team-coordination-browser-partial.md`），但其它完整验收仍未完成。此前把正常聊天绑定到隔离资格门，导致需求无法交付。
 
 用户最新决定：协调 Agent 如普通 Pi Agent 一样使用，**不对协调身份额外限制文件、改代码、终端或联网**；将隔离作为以后独立的安全能力。此决定取代原 spec 的 L1 作用域、六类写通道全部拒绝、书面残余风险接受和隔离门开关要求，见 [ADR 0008](../../docs/adr/0008-coordination-chat-ordinary-runtime-permissions.md)。历史 FAIL、探针和局部实现仍是真实历史，不改写为通过。
 
@@ -32,7 +32,7 @@ Team 成员在 Web 选择获权 Worker/Agent/Workspace，从首次发送自动�
 
 - Server API：成员/非成员、撤权、跨 Team、跨 Project Workspace、Worker/Agent 可用性、重复请求、并发首发、原 Task 重开 Session、失联与恢复；真实 Server + 注册 Worker + 非付费 Test Agent 正向创建、发送、结果、重连。
 - Web：团队页首屏不创建、选项只含获权资源、首次发送后对话、刷新恢复、重开、出错重试、审批；用真实浏览器验证桌面和手机。普通 Project 对话不受影响。
-- 不以 OS 隔离、L1 作用域、全部平台中介写通道拒绝、书面风险接受或付费 Runtime 作为此功能验收条件；现有未经确认的安全保证不得在 UI/文档出现。原始日志不入库，脱敏结果入 `docs/acceptance/`。
+- 不以 OS 隔离、L1 作用域、全部平台中介写通道拒绝或书面风险接受作为此功能验收条件；有效 Runtime 的真实对话及工具路径仍按票据验证。现有未经确认的安全保证不得在 UI/文档出现。原始日志不入库，脱敏结果入 `docs/acceptance/`。
 
 ## Out of Scope
 

@@ -173,8 +173,8 @@ test('human review ordering migration retains existing review data and actionabl
     const page = await f.source.listApprovalsPage(f.query)
     assert.equal(page.items[0]?.reviewId, 'retained')
     f.db.exec('DROP INDEX attention_human_reviews_order')
-    // Replay the migration that owns this index, not the last (personal Workspace visibility) migration.
-    f.db.prepare('DELETE FROM schema_migrations WHERE version=?').run(migrationCount - 1)
+    // Replay the migration that owns this index; newer Team coordination migrations may follow it.
+    f.db.prepare('DELETE FROM schema_migrations WHERE version=?').run(migrationCount - 2)
     for (let replay = 0; replay < 2; replay++) {
       migrate(f.db)
       assert.deepEqual(f.db.prepare('SELECT * FROM review_requests WHERE id=?').get('retained'), before)
