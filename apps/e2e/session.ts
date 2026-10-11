@@ -13,6 +13,8 @@ export interface AdminSession {
   readonly cookie: string
   readonly csrfToken: string
   api<T = any>(path: string, method?: string, body?: unknown): Promise<T>
+  /** 与 api 同鉴权，但不抛出非 2xx，返回 {status, ok, data}，供负例断言用（Ticket 04 授权矩阵）。 */
+  raw(path: string, method?: string, body?: unknown): Promise<{ status: number; ok: boolean; data: any }>
 }
 
 const cookieFrom = (response: Response): string => {
@@ -48,5 +50,14 @@ export async function login(baseUrl: string, username: string, password: string)
     const data = result.status === 204 ? null : await result.json()
     if (!result.ok) throw new Error(`${method} ${path}: ${result.status} ${JSON.stringify(data)}`)
     return data as T
+  },
+  raw: async (path: string, method = 'GET', body?: unknown): Promise<{ status: number; ok: boolean; data: any }> => {
+    const unsafe = method !== 'GET' && method !== 'HEAD'
+    const result = await fetch(baseUrl + '/api' + path, {
+      method, headers: { 'Content-Type': 'application/json', Cookie: cookie, ...(unsafe ? { 'X-CSRF-Token': csrfToken } : {}) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    })
+    const data = result.status === 204 ? null : await result.text().then(text => { try { return JSON.parse(text) } catch { return text } })
+    return { status: result.status, ok: result.ok, data }
   } }
 }

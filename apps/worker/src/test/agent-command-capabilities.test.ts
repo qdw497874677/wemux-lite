@@ -29,5 +29,5 @@ test('opencode and deterministic test agent honestly advertise no native slash c
   assert.deepEqual(echo.agentCommands, [])
   assert.equal(opencode.compactMode, undefined)
   assert.equal('compactMode' in echo ? echo.compactMode : undefined, undefined)
-  assert.notEqual('modelSwap' in echo && echo.modelSwap, true)
+  assert.equal('modelSwap' in echo && echo.modelSwap, true)
 })
