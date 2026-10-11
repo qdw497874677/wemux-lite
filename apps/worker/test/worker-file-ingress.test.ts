@@ -3,7 +3,7 @@ import test, { type TestContext } from 'node:test'
 import { mkdtemp, mkdir, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash, generateKeyPairSync } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { WebSocketServer, WebSocket } from 'ws'
 import type { FileWriteAdmitPayload, FileWriteResultPayload } from '@wemux/wire-protocol'
@@ -14,6 +14,10 @@ import { SqliteWorkerStore } from '../src/storage/sqlite-store.js'
 import { WorkerTransportStore } from '../src/transport/transport-store.js'
 import { WebSocketTransport } from '../src/transport/websocket.js'
 import { writeWorkspaceFile } from '../src/files/workspace-files.js'
+import { clusterCommandAssertion } from './fixtures/cluster-signing.ts'
+const signingKeys = generateKeyPairSync('ed25519')
+const signingPublicKey = signingKeys.publicKey.export({ format: 'pem', type: 'spki' }).toString()
+const signingKeyId = createHash('sha256').update(signingPublicKey).digest('hex')
 
 const feature = 'fs-write-admission-v1'
 function admission(requestId = 'admission-1'): FileWriteAdmitPayload {
@@ -42,7 +46,7 @@ async function fixture(t: TestContext, options: { enabled?: boolean; peer?: bool
   const observer = new DatabaseSync(join(dir, 'transport.sqlite'))
   const appObserver = new DatabaseSync(join(dir, 'application.sqlite'))
   const a = admission()
-  store.saveIdentity({ workerId: a.workerId, serverUrl: 'http://127.0.0.1', credentialRef: 'synthetic', enrolledAt: '2026-01-01T00:00:00Z' as never })
+  store.saveIdentity({ workerId: a.workerId, serverUrl: 'http://127.0.0.1', credentialRef: 'synthetic', enrolledAt: '2026-01-01T00:00:00Z' as never, commandSigningKey: { keyId: signingKeyId, publicKey: signingPublicKey } })
   store.saveLocalInstallation({ installationId: 'install-1', name: 'local', createdAt: '2026-01-01T00:00:00Z' as never })
   const workspace = { id: a.binding.workspaceId, workerId: a.workerId, projectId: 'project-1' as never, rootPath: root, spec: { kind: 'composite' as const, memberWorkspaceIds: [] }, status: 'ready' as const, failureReason: null, updatedAt: '2026-01-01T00:00:00Z' as never }
   await store.transaction(async tx => { await tx.workspaces.save(workspace); await tx.sessions.createSession(a.sessionId, a.binding) })
@@ -273,7 +277,7 @@ test('Runtime command deletion waits for active file write then denies queued ad
   const entered = deferred(), release = deferred()
   const f = await fixture(t, { write: async (...args) => { entered.resolve(); await release.promise; return writeWorkspaceFile(...args) } }); await f.start()
   const first = f.result(); f.send(f.frame(f.a)); await entered.promise
-  const deletion = f.runtime.receive({ type: 'command', commandId: 'delete-command' as never, command: { kind: 'session.delete', sessionId: f.a.sessionId } })
+  const deletion = f.runtime.receive({ type: 'command', commandId: 'delete-command' as never, command: { kind: 'session.delete', sessionId: f.a.sessionId }, authorization: clusterCommandAssertion(signingKeys.privateKey, signingKeyId, { workerId: f.a.workerId, projectId: 'project-1' as never, workspaceId: f.a.binding.workspaceId }, 'delete-command', { kind: 'session.delete', sessionId: f.a.sessionId }) })
   const nextAdmission = f.runtime.fileWriteIngress!.receive(f.frame(admission('after-delete')), { localFeatures: [feature], peerFeatures: [feature] }, async () => assert.fail('unexpected publication'))
   const denied = assert.rejects(nextAdmission, /binding mismatch/)
   assert.ok(await f.store.sessions.get(f.a.sessionId), 'delete must wait behind the common commands queue')

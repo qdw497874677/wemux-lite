@@ -1,6 +1,6 @@
 import { parseVerifiedServerFileWriteFrame } from '@wemux/wire-protocol/file-admission-node'
 import { WorkerFileWriteExecutor } from './file-write-executor.js'
-import { verifyCommandAuthorization } from './command-authorization.js'
+import { commandAuthorizationFailure, verifyCommandAuthorization } from './command-authorization.js'
 import type { FileWriteIngress } from '../transport/types.js'
 import { createHash } from 'node:crypto'
 import { projectAgentEventToSessionPayload, type AgentEvent } from '@wemux/agent-interchange'
@@ -60,6 +60,7 @@ export class WorkerRuntime {
   private readonly finalizationRetries = new Map<SessionId, NodeJS.Timeout>()
   private readonly unsafeSessions = new Set<SessionId>()
   private readonly launchRetries = new Map<SessionId, { commandId: CommandId; attempts: number; timer: NodeJS.Timeout | null }>()
+  private readonly provisionLaunchRetries = new Map<import('@wemux/domain').WorkspaceId, { commandId: CommandId; attempts: number; timer: NodeJS.Timeout | null }>()
   private readonly sent = new Map<SessionId, number>()
   private readonly provisions = new Map<import('@wemux/domain').WorkspaceId, Promise<void>>()
   private readonly agentRunner: WorkerAgentRunner
@@ -190,7 +191,9 @@ export class WorkerRuntime {
       }
     }
     for (const record of await this.store.commands.listRecoverable(100000)) {
-      if (record.command.kind === 'workspace.provision') this.startProvision(record.commandId, record.command)
+      // Restart recovery is the same launch boundary: a new provisioning side
+      // effect still needs a valid assertion plus an online Server re-check.
+      if (record.command.kind === 'workspace.provision') await this.authorizeProvisionLaunch(record.commandId, record.command, 'recovery')
     }
     for (const session of await this.store.listSessions()) this.schedule(session.sessionId)
   }
@@ -202,13 +205,22 @@ export class WorkerRuntime {
     this.headRefresh = setInterval(() => { void this.sendHeads() }, 1_000)
     this.headRefresh.unref()
     for (const workspace of await this.store.listWorkspaces()) if (!this.isLocalWorkspace(workspace)) await this.report(workspace.id)
+    // Reconnection is a bounded event: it re-kicks provisioning deferred by a
+    // failed online re-check without re-enqueueing anything new.
+    for (const record of await this.store.commands.listRecoverable(100000)) {
+      if (record.command.kind !== 'workspace.provision') continue
+      const id = record.command.workspace.workspace.id
+      if (this.provisions.has(id) || this.provisionLaunchRetries.get(id)?.timer) continue
+      this.provisionLaunchRetries.delete(id)
+      await this.authorizeProvisionLaunch(record.commandId, record.command, 'recovery')
+    }
     for (const session of await this.store.listSessions()) this.schedule(session.sessionId)
   }
-  receive(message: ServerToWorker): Promise<void> {
+  receive(message: ServerToWorker): Promise<CommandReceipt | void> {
     if (message.type === 'command' && message.command.kind === 'runtime.approval.resolve') message = structuredClone(message)
-    const next = this.commands.then(async () => {
+    const next = this.commands.then(async (): Promise<CommandReceipt | void> => {
       if (this.closing) return
-      if (message.type === 'command') await this.command(message.commandId, message.command, true, 'cluster', message.authorization)
+      if (message.type === 'command') return await this.command(message.commandId, message.command, true, 'cluster', message.authorization)
       if (message.type === 'fs.request') await this.files(message)
       if (message.type === 'terminal.request') await this.terminal(message)
       if (message.type === 'sync') {
@@ -288,23 +300,23 @@ export class WorkerRuntime {
     const payloadFingerprint = createHash('sha256').update(canonical(command.kind === 'session.enqueue' ? { kind: command.kind, sessionId: command.sessionId, message: { messageId: command.message.messageId, content: command.message.content } } : command)).digest('hex')
     const previous = await this.store.commands.get(commandId)
     let receipt: CommandReceipt = { commandId, status: 'accepted' }
-    // Never let an unsigned cluster frame replace a previously accepted command.
-    if (source === 'cluster' && (command.kind === 'session.enqueue' || command.kind === 'runtime.approval.resolve') && !verifyCommandAuthorization(this.store.identity(), this.workerId, commandId, command, authorization, Boolean(previous?.authorization) || command.kind === 'runtime.approval.resolve')) {
-      receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } }
-      // Expiry alone is a recoverable delivery failure: the Server must first
-      // receive the transport ACK and then reissue a newly signed envelope.
-      // A malformed/tampered assertion remains a terminal rejection.
-      const expiredApproval = command.kind === 'runtime.approval.resolve' && authorization &&
-        Date.parse(authorization.claims.expiresAt) <= Date.now() &&
-        verifyCommandAuthorization(this.store.identity(), this.workerId, commandId, command, authorization, true)
-      if (acknowledge && !expiredApproval) this.send({ type: 'ack', receipt })
-      return receipt
-    }
-    // An unsigned historical queue cannot be replayed as a signed command ID.
-    if (source === 'cluster' && (command.kind === 'session.enqueue' || command.kind === 'runtime.approval.resolve') && previous && !previous.authorization) {
-      receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } }
-      if (acknowledge) this.send({ type: 'ack', receipt })
-      return receipt
+    // Every cluster side effect needs a valid Server-signed assertion at the
+    // entrance; a failure is fail-closed, auditable and without local effect.
+    if (source === 'cluster') {
+      const failure = commandAuthorizationFailure(this.store.identity(), this.workerId, commandId, command, authorization, Boolean(previous?.authorization) || command.kind === 'runtime.approval.resolve')
+      if (failure) {
+        receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } }
+        await this.recordAuthorizationDenial(commandId, command, failure, 'receive')
+        if (acknowledge) this.send({ type: 'ack', receipt })
+        return receipt
+      }
+      // Never let an unsigned cluster frame replace a previously accepted command.
+      if (previous && !previous.authorization) {
+        receipt = { commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } }
+        await this.recordAuthorizationDenial(commandId, command, 'authorization_missing', 'receive')
+        if (acknowledge) this.send({ type: 'ack', receipt })
+        return receipt
+      }
     }
     if (previous) {
       // A persisted receipt is safe to replay without repeating the native effect,
@@ -321,6 +333,15 @@ export class WorkerRuntime {
       }
       else if (previous.payloadFingerprint !== payloadFingerprint) receipt = { commandId, status: 'rejected', error: { code: 'conflicting-command', message: 'Command ID reused with a different payload', retryable: false } }
       else if (previous.state === 'rejected') receipt = previous.result as CommandReceipt
+      else if (command.kind === 'workspace.provision' && source === 'cluster' && previous.state === 'accepted') {
+        // A replayed accepted provision needs the same launch gate as a new one;
+        // the persisted record alone never substitutes current authority.
+        const id = command.workspace.workspace.id
+        if (!this.provisions.has(id) && !this.provisionLaunchRetries.get(id)?.timer) {
+          this.provisionLaunchRetries.delete(id)
+          await this.authorizeProvisionLaunch(commandId, command, 'recovery')
+        }
+      }
       if (acknowledge) this.send({ type: 'ack', receipt })
       return receipt
     }
@@ -369,7 +390,9 @@ export class WorkerRuntime {
     if (acknowledge) this.send({ type: 'ack', receipt })
     if (receipt.status === 'rejected') return receipt
     if (command.kind === 'workspace.provision') {
-      this.startProvision(commandId, command)
+      // Provisioning is a new cluster side effect: the durable assertion alone
+      // is not enough, it also needs a current online Server authorization.
+      await this.authorizeProvisionLaunch(commandId, command, 'launch')
       return receipt
     }
     if (command.kind === 'session.delete') {
@@ -494,6 +517,56 @@ export class WorkerRuntime {
     if (!requested || resolved || finished) throw new Error('Approval is not pending for this Session and Turn')
     return connectorApproval
   }
+  /** Durable fail-closed audit for a rejected cluster command. Receipt text stays generic; reasons live here. */
+  private async recordAuthorizationDenial(commandId: CommandId, command: { readonly kind?: unknown }, reason: string, stage: 'receive' | 'launch' | 'recovery') {
+    try {
+      // Idempotent audit: repeated delivery or recovery of the same failure
+      // keeps one durable trace per command and stage instead of an unbounded log.
+      const existing = await this.store.listAuthorizationDenials()
+      if (existing.some(denial => denial.commandId === commandId && denial.stage === stage)) return
+      await this.store.appendAuthorizationDenial({ commandId, kind: typeof command?.kind === 'string' ? command.kind : 'unknown', reason, stage, occurredAt: now() })
+    } catch (error) {
+      // An audit write failure must not convert a rejection into acceptance.
+      console.error('Failed to record command authorization denial', error)
+    }
+  }
+
+  /**
+   * A new provisioning side effect needs the durable assertion to still verify
+   * plus a current online Server authorization, at live launch and at restart
+   * recovery alike. Neither available → defer, never start, bounded retry.
+   */
+  private async authorizeProvisionLaunch(commandId: CommandId, command: Extract<WorkerCommand, { kind: 'workspace.provision' }>, stage: 'launch' | 'recovery', audit = true) {
+    const record = await this.store.commands.get(commandId)
+    const failure = record?.authorization
+      ? commandAuthorizationFailure(this.store.identity(), this.workerId, commandId, record.command, record.authorization, true)
+      : 'authorization_missing'
+    if (!record || failure) {
+      if (audit) await this.recordAuthorizationDenial(commandId, command, failure ?? 'authorization_invalid', stage)
+      return
+    }
+    let allowed = false
+    try { allowed = await this.authorizeLaunch?.(commandId) === true }
+    catch { /* A failed HTTP check cannot authorize a new side effect. */ }
+    if (!allowed) { this.retryProvisionLaunch(command.workspace.workspace.id, commandId, command, stage); return }
+    this.provisionLaunchRetries.delete(command.workspace.workspace.id)
+    this.startProvision(commandId, command)
+  }
+
+  private retryProvisionLaunch(id: import('@wemux/domain').WorkspaceId, commandId: CommandId, command: Extract<WorkerCommand, { kind: 'workspace.provision' }>, stage: 'launch' | 'recovery') {
+    const prior = this.provisionLaunchRetries.get(id)
+    const attempts = prior?.commandId === commandId ? prior.attempts + 1 : 1
+    if (attempts > 4 || this.closing) { this.provisionLaunchRetries.set(id, { commandId, attempts, timer: null }); return }
+    const timer = setTimeout(() => {
+      const pending = this.provisionLaunchRetries.get(id)
+      if (pending?.timer !== timer || this.closing) return
+      this.provisionLaunchRetries.set(id, { ...pending, timer: null })
+      void this.authorizeProvisionLaunch(commandId, command, stage, false)
+    }, Math.min(250 * 2 ** (attempts - 1), 2000))
+    timer.unref()
+    this.provisionLaunchRetries.set(id, { commandId, attempts, timer })
+  }
+
   private startProvision(commandId: CommandId, command: Extract<WorkerCommand, { kind: 'workspace.provision' }>) {
     const id = command.workspace.workspace.id
     if (this.provisions.has(id)) return
@@ -607,7 +680,12 @@ export class WorkerRuntime {
       const localSession = await this.isLocalSession(id)
       if (queued && !localSession) {
         const record = await this.store.commands.get(queued.submissionCommandId)
-        if (!record?.authorization || !verifyCommandAuthorization(this.store.identity(), this.workerId, queued.submissionCommandId, record.command, record.authorization, true)) return
+        if (!record?.authorization) return
+        const failure = commandAuthorizationFailure(this.store.identity(), this.workerId, queued.submissionCommandId, record.command, record.authorization, true)
+        if (failure) {
+          await this.recordAuthorizationDenial(queued.submissionCommandId, record.command, failure, 'launch')
+          return
+        }
         // A failed HTTP check cannot launch; bounded retries recover transient failures
         // without a WebSocket reconnect. A new command or connection can wake it again.
         let allowed = false
@@ -661,6 +739,8 @@ export class WorkerRuntime {
   private clearLaunchRetries() {
     for (const retry of this.launchRetries.values()) if (retry.timer) clearTimeout(retry.timer)
     this.launchRetries.clear()
+    for (const retry of this.provisionLaunchRetries.values()) if (retry.timer) clearTimeout(retry.timer)
+    this.provisionLaunchRetries.clear()
   }
   private async execute(turn: Turn, clusterCommandId: CommandId | null | undefined, ownershipToken: symbol) {
     let outcome: AgentTurnOutcome = { status: 'failed', failure: { code: 'agent-error', message: 'Agent ended without a terminal event' } }

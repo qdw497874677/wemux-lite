@@ -1,4 +1,4 @@
-import type { JournalEvent, JournalEventDraft, SessionId } from '@wemux/domain'
+import type { CommandId, JournalEvent, JournalEventDraft, SessionId, Timestamp } from '@wemux/domain'
 import type {
   LocalWorkspaceReader,
   LocalWorkspaceWriter,
@@ -25,6 +25,24 @@ export interface WorkerStore {
 
   /** Effects/publication must use only the successful outer return value, never provisional tx decisions. */
   transaction<T>(work: (tx: WorkerStoreTx) => Promise<T>): Promise<T>
+
+  /**
+   * Durable fail-closed audit for a cluster command rejected at an authorization
+   * boundary. Stores the rejection reason code; the transport receipt itself
+   * stays generic and leaks no internals.
+   */
+  appendAuthorizationDenial(entry: CommandAuthorizationDenial): Promise<void>
+  /** Denial audit for tests and local diagnostics; ordered by occurrence. */
+  listAuthorizationDenials(): Promise<readonly CommandAuthorizationDenial[]>
+}
+
+/** One rejected cluster command at receive/launch/recovery boundary. */
+export interface CommandAuthorizationDenial {
+  readonly commandId: CommandId
+  readonly kind: string
+  readonly reason: string
+  readonly stage: 'receive' | 'launch' | 'recovery'
+  readonly occurredAt: Timestamp
 }
 
 export interface WorkerStoreTx {

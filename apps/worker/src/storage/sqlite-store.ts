@@ -6,7 +6,7 @@ import { retentionDestinationInvariants, retentionInvariants } from './retention
 import { randomUUID } from 'node:crypto'
 import type { AgentEvent, AgentSession, SessionKey, SessionStore } from '@wemux/agent-interchange'
 import type { EventSeq, JournalEvent, JournalEventDraft, QueuedMessage, SessionId, Timestamp, Turn, TurnId } from '@wemux/domain'
-import type { WorkerStore, WorkerStoreTx } from '../application/ports/worker-store.ts'
+import type { CommandAuthorizationDenial, WorkerStore, WorkerStoreTx } from '../application/ports/worker-store.ts'
 import type { LocalState } from '../application/ports/local-state.ts'
 import type { CommandRecord, SessionExecution } from '../domain/session-execution.ts'
 import type { LocalWorkspace, RepositoryCheckout } from '../domain/local-workspace.ts'
@@ -156,6 +156,17 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
   identity: LocalState['identity'] = () => this.getDocument('identity', 'worker')
   saveIdentity: LocalState['saveIdentity'] = identity => this.put('identity', 'worker', identity)
   clearIdentity: LocalState['clearIdentity'] = () => { this.db.prepare('DELETE FROM documents WHERE bucket=? AND id=?').run('identity', 'worker') }
+  private denialSequence = 0
+  async appendAuthorizationDenial(entry: CommandAuthorizationDenial): Promise<void> {
+    await this.tail
+    const sequence = String(Date.now()).padStart(14, '0') + '-' + String(this.denialSequence++).padStart(6, '0')
+    this.put('authorization-denials', sequence, entry)
+  }
+  /** Test/audit seam: denials ordered oldest first. */
+  async listAuthorizationDenials(): Promise<readonly CommandAuthorizationDenial[]> {
+    await this.tail
+    return this.list<CommandAuthorizationDenial>('authorization-denials')
+  }
   localInstallation: LocalState['localInstallation'] = () => this.getDocument<LocalInstallationIdentity>('identity', 'installation')
   saveLocalInstallation: LocalState['saveLocalInstallation'] = identity => this.put('identity', 'installation', identity)
   localAdmin: LocalState['localAdmin'] = () => this.getDocument<LocalAdminRecord>('identity', 'local-admin')

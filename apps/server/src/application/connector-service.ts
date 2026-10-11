@@ -10,6 +10,8 @@ import type { ProjectAccessService } from './project-access-service.ts'
 import type { WorkerAccessService } from './worker-access-service.ts'
 import type { ServerStore } from './ports/server-store.ts'
 import type { ConnectorRepository, ConnectorRequestRecord } from './ports/connector-repository.ts'
+import type { CommandSigningIdentity } from './command-signing.ts'
+import { connectorAssertionScope, issueCommandAssertion, withCommandAssertion } from './command-assertion-issuer.ts'
 
 interface WriteInput { readonly projectId: ProjectId; readonly requestId: string; readonly fingerprint: string }
 interface DefinitionInput extends WriteInput { readonly definition: unknown }
@@ -19,6 +21,7 @@ export class ConnectorService {
   private readonly store: ServerStore
   private readonly projects: ProjectAccessService
   private readonly workers: WorkerAccessService
+  private readonly commandSigning?: CommandSigningIdentity
   private readonly notifications: Notifications
 
   constructor(
@@ -27,12 +30,14 @@ export class ConnectorService {
     projects: ProjectAccessService,
     workers: WorkerAccessService,
     notifications: Notifications,
+    commandSigning?: CommandSigningIdentity,
   ) {
     this.repository = repository
     this.store = store
     this.projects = projects
     this.workers = workers
     this.notifications = notifications
+    this.commandSigning = commandSigning
   }
 
   async list(actorId: UserId, projectId: ProjectId): Promise<readonly ConnectorDefinition[]> {
@@ -103,7 +108,7 @@ export class ConnectorService {
     const fingerprint = this.identity(input, { operation: 'test', connectorId: input.connectorId, workerId: input.workerId, expectedRevision: input.expectedRevision })
     const replay = await this.replay<ConnectorTestResult>(input, fingerprint)
     if (replay) return replay
-    const commandId = await this.enqueue(input.workerId, { kind: 'connector.test', requestId: input.requestId, connectorId: definition.id, projectId: definition.projectId, workerId: input.workerId, connectorRevision: definition.revision })
+    const commandId = await this.enqueue(input.workerId, { kind: 'connector.test', requestId: input.requestId, connectorId: definition.id, projectId: definition.projectId, workerId: input.workerId, connectorRevision: definition.revision }, actorId)
     const result: ConnectorTestResult = { connectorId: definition.id, workerId: input.workerId, revision: definition.revision, requestId: input.requestId, commandId, replayed: false }
     await this.repository.saveRequest(request(input, fingerprint, 'test', definition.id, result))
     this.notifications.commands(input.workerId)
@@ -127,16 +132,22 @@ export class ConnectorService {
     for (const workerId of unique) {
       await this.workers.require(actorId, workerId, 'use')
       const commandRequestId = `${requestId}:${workerId}`
-      const commandId = await this.enqueue(workerId, { kind: 'connector.definition.sync', requestId: commandRequestId, definition })
+      const commandId = await this.enqueue(workerId, { kind: 'connector.definition.sync', requestId: commandRequestId, definition }, actorId)
       commandIds.push(commandId)
       await this.repository.saveDistribution({ connectorId: definition.id, workerId, revision: definition.revision, requestId: commandRequestId, commandId, status: 'pending', credentialAvailability: definition.credentialAvailability, message: null, updatedAt: now() })
       this.notifications.commands(workerId)
     }
     return { definition, replayed: false, commandIds }
   }
-  private async enqueue(workerId: WorkerId, command: WorkerCommand): Promise<string> {
+  private async enqueue(workerId: WorkerId, command: WorkerCommand, actorId?: UserId): Promise<string> {
     const commandId = randomUUID() as CommandId, payloadFingerprint = stableFingerprint(command)
-    await this.store.transaction(async tx => { await tx.commands.insertPending({ commandId, workerId, command, payloadFingerprint, createdAt: now() }) })
+    await this.store.transaction(async tx => {
+      // Connector frames never block distribution on signing: an unavailable actor
+      // or key degrades to the historical unsigned command instead of failing sync.
+      const actorUser = actorId ? await tx.identity.getUser(actorId) : undefined
+      const assertion = this.commandSigning && actorId && actorUser && (actorUser.status ?? 'active') === 'active' ? await issueCommandAssertion(tx, this.commandSigning, actorId, { commandId, command, workerId, scope: connectorAssertionScope(command.kind === 'connector.definition.sync' ? command.definition.projectId : command.kind === 'connector.test' ? command.projectId : (command as { projectId: ProjectId }).projectId) }) : undefined
+      await tx.commands.insertPending(withCommandAssertion({ commandId, workerId, command, payloadFingerprint, createdAt: now() }, assertion))
+    })
     return commandId
   }
   private identity(input: WriteInput, value: unknown): string {
