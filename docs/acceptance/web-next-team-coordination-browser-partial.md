@@ -39,10 +39,25 @@ WEMUX_NEXT_TEST_DIST="$DIST" TMPDIR=/home/qdw/.cache/wemux-test-tmp \
 
 两个实际 Pi 链路覆盖普通回复与文件创建/工具读回；一次按 Turn 边界的复测失败、一次通过，仍需排查失败是否偶发。不代替其它 Runtime/模型、模型切换、审批、停止、恢复或完整票据签收。旧 `apps/e2e/pi-provider-https-offline.test.ts` 的独立回归仍然失败，不能因付费链路通过而抹去。
 
+## 真实 Pi 模型切换验收与偶发失败诊断（2026-10-11）
+
+新增 `apps/e2e/team-coordination-model-switch-paid-pi.mjs`：真实 Server、注册 Worker、Team 协调 Session 上验证 `modelSwap` 能力断言、首 Turn 在初始模型下完成、`set_model` 运行时命令被接受、Journal `model.changed`、两个 Turn 各自的 modelId 快照、第二 Turn 回复标记与最终 Session 绑定。失败时输出每个 Turn 的 outcome/failureCode/abortReason、Worker 连接状态与末条命令状态；`WEMUX_E2E_KEEP_DIR=1` 保留临时目录供事后取证。
+
+付费运行（每次最多 2 个 Turn）：
+- flash → highspeed 第一次：第二 Turn 断言失败。事后取证（Pi 会话文件）：`glm-5.3-highspeed` 连续 5 次返回空内容，pi 重试后用 `context_edit` 逐条移出上下文，Turn 以无文本完成。
+- 同配置重试：第二 Turn 诊断 `outcome: failed, failureCode: agent-error, abortReason: timeout, failureMessage: 智能体长时间没有产生任何事件，请重试。`（Worker 看门狗，模型侧无事件）。
+- flash → `glm-5.3` 重试：退出码 **0**，`paidTurns: 2`，能力/首发/`model.changed`/双 Turn 模型快照/第二回复/最终绑定全部通过。两次失败均集中在 `glm-5.3-highspeed` 第二 Turn，判定为上游模型当时不可用，非链路缺陷。
+
+免费模型压力循环（`opencode-go::longcat-2.5-preview-free` → `step-5-preview-free`，零成本）：累计约 155 次运行，5 次失败，全部为模型/提供方侧：
+- 捕获一次 `第二 Turn 回复 [SILENT]`：Worker Journal `message.queued` 内容正确，Pi 上下文含完整首 Turn 历史（input 19,858 tokens）与新指令，两 Turn 系统提示相同；模型字面返回 `[SILENT]`。该 token 是本平台协作协议的一部分（`capability-service.ts` `collaborationInstructions`：若有意不产生用户可见内容，仅返回精确 token `[SILENT]`），Worker 将其按刻意空回复处理。属模型不遵守指令，非管道缺陷。
+- 其余为 `agent-error/timeout`（提供方限流时段）与一次第二命令回执超时（仅出现在补装诊断之前，未再复现）。
+
+结论：Server 签名入队、Worker 验证投递、Pi 会话恢复（含历史）、模型切换、Journal 与回执链路在全部取证失败中均无缺陷证据；付费真实模型切换端到端通过一次。断言依赖模型遵守指令，弱模型偶发不合规属预期噪声。
+
 ## 仍未验证/交付
 
 - 上传与其进度/恢复；显式重开目前已通过 Test Agent 桌面/手机浏览器验证，尚未覆盖 Worker 断线时的重开拒绝。模型从 Worker 清单消失时，UI 可选择同一 Agent 当前可用的模型，尚未进行独立真实浏览器负例验收。
-- 真实 Pi `5.3-flash` 协调首发与同 Session 文件创建、工具读回在加强版按 Turn 分隔后通过一次；此前第二 Turn 失败一次，原因待诊断，不据此称稳定。其它模型/Runtime、Pi 实际模型切换/停止/审批及旧离线 Pi 用例的签名队列适配尚未完成。Test Agent 仍只作为可重复集成证据。
+- 真实 Pi `5.3-flash` 协调首发与同 Session 文件创建、工具读回在加强版按 Turn 分隔后通过一次；此前第二 Turn 失败已诊断为模型侧（highspeed 空回复/超时、免费模型 `[SILENT]`，见上节），链路无缺陷证据。Pi 实际模型切换已付费通过一次；停止、审批、其它 Runtime/模型及旧离线 Pi 用例的签名队列适配尚未完成。Test Agent 仍只作为可重复集成证据。
 - Worker 进程断线与同 home 重连、非成员 HTTP 负例、原生审批、运行中 Turn 停止与失败后会话再次发送已在真实浏览器脚本中验证；网络半断开/恢复、模型切换、审批超时、未知结果重试与跨 Team/Project/Worker 授权矩阵仍未完成。四个定向 Server 测试文件 **15/15**，`npm run typecheck --workspace @wemux/web-next` 退出码 0。新增 Server 全量原始 Node 串行运行 (`TMPDIR` 为磁盘目录) **951/951 pass，退出码 0，约 380 秒**；首次运行 **948/951**，三项迁移测试仍按“最后迁移”位置重放，而 Team 协调迁移新增了末尾条目，已修复测试定位并单独复测 15/15 后全量复测。三个测试修改不改变生产迁移。
 - Team Session 持久来源升级测试 `apps/server/src/test/team-coordination-source-migration.test.ts`：既有普通 Session 保留、迁移可重放，Team Task 绑定的 owner/Worker/Agent/Project Team/Run 越界被数据库拒绝（2/2）；`apps/server/src/test/capability-task-projection.test.ts` 覆盖 Team 成员移除后既有 Turn grant 和 Session 读取失效。定向合跑 `team-coordination-functional`、`team-coordination-entry`、`team-coordination-source-migration`、`capability-task-projection` 四文件 15/15 通过；全套 Server 结果见上文。
 - 旧的 `apps/e2e/pi-provider-https-offline.test.ts` 在本机 Pi 1.0.4 + 自有 HTTPS 假模型下重跑为 **0/1**：断言 `WorkerRuntime turn completed` 失败（第 91 行）；该用例的 WorkerRuntime 部分仍直接发送无签名的集群 `session.enqueue`，与当前签名命令合同不符。直接 Pi RPC 的成功不等于 Team 协调真实 Runtime 验收；此处保留失败，尚未修复/补齐端到端证据。

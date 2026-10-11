@@ -16,7 +16,7 @@ Team 成员在 Web 选择获权 Worker/Agent/Workspace，从首次发送自动�
 
 ## Implementation Decisions
 
-- 复用已有协调 Task ID、Team 成员校验及 `(teamId, ownerId, workerId, agentKey)` 复用键；Model 不参与 Task 复用。首次发送/上传才创建 Task，失败不留下孤儿 Session/命令；同 requestId 幂等、不同请求的并发创建收敛。
+- 复用已有协调 Task ID、Team 成员校验及 `(teamId, ownerId, workerId, agentKey)` 复用键；Model 不参与 Task 复用。首次发送/上传才创建 Task；上传须区分 Server 有界收件、Task/Session 元数据绑定与选定 Worker 的 Agent 实际读取，不以 Server 收件冒充已可供 Agent 使用，也不捏造首次消息。失败不留下可见孤儿 Session/命令；同 requestId 幂等、不同请求的并发创建收敛。
 - Session 始终绑定协调 Task 与选定 Worker/Workspace/Agent，选用真实已就绪的 Workspace Placement，权限在 Server 事务边界校验，不能凭客户端自报 owner/Team/Worker。Team 业务归属不等于 Workspace 的 Project 访问权；查询每个 Project 仍需独立鉴权。不同 Worker 不隐式迁移文件或会话。
 - UI 在 `/next/` 团队页提供可选择执行环境、发送与对话恢复入口；仅展示当前用户可用资源和自己的协调历史，失败可重试且不得泄漏别的 Team/Session。沿用现有对话与审批组件，桌面/手机均可用；同 Session 模型切换仅对下一 Turn 生效。
 - 旧静态安全资格门从协调功能路径移除，**只在创建/发送/恢复真实可用并通过授权负例后**才能把 availability 标为 enabled。绝不以把 FAIL 常量改为 PASS 或 403 改为 501 冒充可用。
