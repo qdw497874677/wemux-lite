@@ -2,6 +2,23 @@ import type { AccountViewDTO, AccountPayloadDTO, AcceptedEmailDTO, VerifiedEmail
 import type { createClusterTransport } from './cluster-transport.ts'
 
 const id = encodeURIComponent
+/** 阶段二投递状态：待投递/已投递/失败，由 Server 命令投影推导，不代表 Agent 已使用。 */
+export interface CoordinationAttachmentView {
+  id: string
+  sessionId: string
+  taskId: string
+  workerId: string
+  filename: string
+  subpath: string
+  contentType: string | null
+  size: number
+  sha256: string
+  uploadedBy: string
+  createdAt: string
+  upload: { receivedAt: string }
+  delivery: { state: 'pending' | 'delivered' | 'failed'; commandId: string; detail: string | null; workerConnectionState: string | null }
+}
+export interface CoordinationAttachmentUploadResult { session: import('@wemux/web-contract').ConversationSession; created: boolean; attachment: CoordinationAttachmentView }
 export const routes = {
   authOptions: '/api/auth/options',
   authGoogleStart: '/api/auth/oauth/google/start',
@@ -42,6 +59,8 @@ export const routes = {
   acceptInvitation: (token: string) => `/api/team-invitations/${id(token)}/accept`,
   teamCoordinationAvailability: (teamId: string) => `/api/teams/${id(teamId)}/coordination/availability`,
   teamCoordinationSessions: (teamId: string) => `/api/teams/${id(teamId)}/coordination/sessions`,
+  teamCoordinationAttachments: (teamId: string) => `/api/teams/${id(teamId)}/coordination/attachments`,
+  teamCoordinationAttachment: (teamId: string, attachmentId: string) => `/api/teams/${id(teamId)}/coordination/attachments/${id(attachmentId)}`,
 }
 
 /** Existing account/team contracts over the shared Cookie/CSRF identity transport. */
@@ -73,6 +92,19 @@ export function accountManagementOperations(transport: ReturnType<typeof createC
     teamCoordinationAvailability: (teamId: string, signal?: AbortSignal) => request<TeamCoordinationAvailabilityDTO>(routes.teamCoordinationAvailability(teamId), undefined, signal),
     teamCoordinationSessions: (teamId: string, signal?: AbortSignal) => list<import('@wemux/web-contract').ConversationSession>(routes.teamCoordinationSessions(teamId), signal),
     createTeamCoordinationSession: (teamId: string, body: { requestId: string; commandId: string; workspaceId: string; workerId: string; agentKey: string; modelId: string; content: string }) => request<{ session: import('@wemux/web-contract').ConversationSession; created: boolean; messageCommandId: string }>(routes.teamCoordinationSessions(teamId), body),
+    // 附件上传（两阶段）：阶段一 multipart 收件建 Task/Session，阶段二投递状态由 attachmentView 轮询。
+    uploadTeamCoordinationAttachment: (teamId: string, input: { file: File; requestId: string; workspaceId: string; workerId: string; agentKey: string; modelId?: string; title?: string }) => {
+      const form = new FormData()
+      form.append('file', input.file, input.file.name)
+      form.append('requestId', input.requestId)
+      form.append('workspaceId', input.workspaceId)
+      form.append('workerId', input.workerId)
+      form.append('agentKey', input.agentKey)
+      if (input.modelId) form.append('modelId', input.modelId)
+      if (input.title) form.append('title', input.title)
+      return transport.postForm<CoordinationAttachmentUploadResult>(routes.teamCoordinationAttachments(teamId), form)
+    },
+    coordinationAttachmentView: (teamId: string, attachmentId: string, signal?: AbortSignal) => request<{ attachment: CoordinationAttachmentView }>(routes.teamCoordinationAttachment(teamId, attachmentId), undefined, signal),
     resendVerification: (email: string) => request<AcceptedEmailDTO>(routes.authRegisterResend, { email }),
     verifyEmail: async (token: string) => {
       // 验证成功同时签发了 Cookie 会话，因此这里和登录一样接住 CSRF 令牌。

@@ -47,7 +47,7 @@ export interface CommandAuthorizationDenial {
 
 export interface WorkerStoreTx {
   readonly fileWrites: WorkerFileWriteWriter
-  readonly workspaces: LocalWorkspaceWriter
+  readonly workspaces: LocalWorkspaceWriter & Pick<LocalWorkspaceReader, 'get'>
   readonly sessions: SessionExecutionWriter & Pick<SessionExecutionReader, 'get' | 'getTurn'>
   readonly journal: Pick<WorkerJournalReader, 'read'>
   readonly commands: WorkerCommandWriter

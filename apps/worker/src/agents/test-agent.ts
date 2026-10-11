@@ -7,7 +7,10 @@ export class TestAgent implements Extract<AgentAdapter, { mode: 'execution' }> {
   readonly mode = 'execution' as const
   async detect() {
     return { agentKey: this.agentKey, displayName: 'Deterministic Test Agent', version: '1', mode: this.mode,
-      availability: { status: 'available' as const }, runtime: { resume: false, tools: true, approvals: true, usage: true, cancel: true, structuredOutput: false, commands: ['compact'] }, agentCommands: [], models: [{ modelId: 'test' as ModelId, displayName: 'Test', source: 'configured' as const }],
+      availability: { status: 'available' as const }, runtime: { resume: false, tools: true, approvals: true, usage: true, cancel: true, structuredOutput: false, commands: ['compact'] }, agentCommands: [], attachments: true,
+      /* Two advertised models + modelSwap let browser E2E exercise the runtime set_model path
+         (persisted binding + model.changed journal). Execution itself stays model-agnostic. */
+      modelSwap: true, models: [{ modelId: 'test' as ModelId, displayName: 'Test', source: 'configured' as const }, { modelId: 'test-alt' as ModelId, displayName: 'Test Alt', source: 'configured' as const }],
       executablePath: null, diagnostics: [] }
   }
 }

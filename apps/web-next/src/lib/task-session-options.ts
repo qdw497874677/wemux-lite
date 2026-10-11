@@ -7,6 +7,8 @@ export interface TaskSessionOption {
   workerId: string
   agentKey: string
   modelId: string
+  /** Agent 如实声明的附件能力：未声明的 Agent 不开放上传入口。 */
+  agentAttachments: boolean
 }
 /** Discovery is a selection aid; the Server rechecks permissions and availability on creation. */
 export function taskSessionOptions(projectId: string, teamId: string, workspaces: readonly WorkspaceDTO[], workers: readonly WorkerDTO[]): TaskSessionOption[] {
@@ -18,6 +20,7 @@ export function taskSessionOptions(projectId: string, teamId: string, workspaces
             key: JSON.stringify([workspace.id, worker.id, agent.agentKey, model.modelId]),
             label: `${workspace.name} / ${worker.name} / ${agent.displayName} / ${model.displayName}（${model.modelId}）`,
             workspaceId: workspace.id, workerId: worker.id, agentKey: agent.agentKey, modelId: model.modelId,
+            agentAttachments: agent.attachments === true,
           })))))
   )
 }

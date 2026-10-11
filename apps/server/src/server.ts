@@ -154,7 +154,9 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const capabilitySecret = options.capabilitySecret ?? process.env.WEMUX_CAPABILITY_SECRET ?? randomCapabilitySecret()
   const connectorRepository = new SqliteConnectorRepository(database)
   const capabilities = new CapabilityService(store, now, new CapabilityTokenService(capabilitySecret, now), connectorRepository)
-  const service = new ServerService(store, notifications, capabilities, workerAccess, projects, sessionAccess, commandSigning)
+  // 内容寻址收件存储：协调附件阶段一先落盘，阶段二命令投递后再由 Worker 落盘。
+  const resourceBlobs = new ResourceBlobStore(options.databasePath === ':memory:' ? join(process.cwd(), 'data', 'resource-blobs') : join(dirname(options.databasePath), 'resource-blobs'))
+  const service = new ServerService(store, notifications, capabilities, workerAccess, projects, sessionAccess, commandSigning, resourceBlobs)
   const delegationRepository = new SqliteDelegationRepository(database)
   const delegations = new DelegationApplicationService(
     delegationRepository,
@@ -198,7 +200,6 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const channels = new ChannelService(channelRepository, channelCodec, projects, sessionAccess, workerAccess, kind => adapters.get(kind))
   const channelOutbox = new ChannelOutbox(channelRepository, projects, sessionAccess, workerAccess, store, { deploymentAllowsPrivateNetwork: process.env.WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK === 'true', connectorAllowsPrivateNetwork: true }, options.channelFetch, kind => adapters.get(kind)!)
   const resourceRepository = new SqliteResourceRepository(database)
-  const resourceBlobs = new ResourceBlobStore(options.databasePath === ':memory:' ? join(process.cwd(), 'data', 'resource-blobs') : join(dirname(options.databasePath), 'resource-blobs'))
   let resources: ResourceService
   const workers = new WorkerService(store, notifications, (workerId, report) => connectors.report(workerId, report), async (sessionId, events) => { await channelOutbox.projectJournal(sessionId, events); setImmediate(() => void channelOutbox.drain().catch(() => undefined)) }, null, resourceBlobs, tx => service.clusterCommandIssuer(tx), true)
   const workerGateway = { send: (workerId: import('@wemux/domain').WorkerId, payload: import('@wemux/wire-protocol').ServerPayload) => {
