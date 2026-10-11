@@ -607,13 +607,14 @@ export class ServerService {
   /**
    * Cluster assertion issuer for composing services (runs, teams, connectors)
    * that enqueue Worker commands inside transactions owned here. The authority
-   * is the acting user when known, otherwise the instance operator. Callers
-   * that cannot resolve an actor receive unsigned issuance (legacy paths).
+   * is the acting user when known, otherwise the instance operator. Unsigned
+   * assemblies still insert and return the command id so idempotent composers
+   * (run cancellation) never re-insert the same identity.
    */
   clusterCommandIssuer(tx: ServerStoreTx, actor?: UserId): (workerId: WorkerId, command: WorkerCommand, scope: CommandAssertionScope, commandId?: CommandId) => Promise<CommandId | undefined> {
     return async (workerId, command, scope, commandId) => {
       const authority = actor ?? await this.operator(undefined, tx).catch(() => undefined)
-      if (!this.commandSigning) { await this.command(tx, workerId, command, commandId ?? newId<'CommandId'>()); return undefined }
+      if (!this.commandSigning) return await this.command(tx, workerId, command, commandId ?? newId<'CommandId'>())
       if (!authority) return undefined
       const authorization = await issueCommandAssertion(tx, this.commandSigning, authority, { commandId: commandId ?? newId<'CommandId'>(), command, workerId, scope })
       return await this.command(tx, workerId, command, commandId ?? newId<'CommandId'>(), authorization)

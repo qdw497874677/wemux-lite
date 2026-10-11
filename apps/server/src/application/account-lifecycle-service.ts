@@ -27,7 +27,6 @@ export class AccountLifecycleService {
   private readonly notifications?: Notifications
   private readonly clock: Clock
   private readonly commandSigning?: CommandSigningIdentity
-  private readonly commandAuthority?: (tx: ServerStoreTx) => Promise<UserId | undefined>
   constructor(
     store: ServerStore,
     administrators: AdministratorDirectory,
@@ -35,8 +34,7 @@ export class AccountLifecycleService {
     notifications?: Notifications,
     clock: Clock = systemClock,
     commandSigning?: CommandSigningIdentity,
-    commandAuthority?: (tx: ServerStoreTx) => Promise<UserId | undefined>,
-  ) { this.store = store; this.administrators = administrators; this.identity = identity; this.notifications = notifications; this.clock = clock; this.commandSigning = commandSigning; this.commandAuthority = commandAuthority;}
+  ) { this.store = store; this.administrators = administrators; this.identity = identity; this.notifications = notifications; this.clock = clock; this.commandSigning = commandSigning;}
 
   async view(actorId: UserId): Promise<AccountLifecycleView> {
     const user = await this.requireUser(actorId)
@@ -77,7 +75,7 @@ export class AccountLifecycleService {
     await this.assertAdministratorPreserved(targetId)
     const changedAt = at(this.clock)
     const workers = await this.store.transaction(async tx => {
-      const stopWorkers = await this.revokeExecution(tx, targetId, 'disable', changedAt)
+      const stopWorkers = await this.revokeExecution(tx, targetId, 'disable', changedAt, actorId)
       await tx.identity.saveUser({ ...target, status: 'disabled', authVersion: versionOf(target) + 1, statusChangedAt: changedAt })
       const revokedSessions = await tx.identity.revokeLoginSessions(targetId, changedAt)
       const revokedTokens = await tx.identity.revokePersonalAccessTokens(targetId, changedAt)
@@ -108,7 +106,7 @@ export class AccountLifecycleService {
     if (blockers.length) throw new AppError(409, `销号前必须处理所有权：${blockers.join('、')}`, 'account_deletion_blocked')
     const changedAt = at(this.clock)
     const workers = await this.store.transaction(async tx => {
-      const stopWorkers = await this.revokeExecution(tx, targetId, 'delete', changedAt)
+      const stopWorkers = await this.revokeExecution(tx, targetId, 'delete', changedAt, actorId)
       await tx.identity.saveUser({ ...target, status: 'deletion_pending', authVersion: versionOf(target) + 1, statusChangedAt: changedAt })
       const revokedSessions = await tx.identity.revokeLoginSessions(targetId, changedAt)
       const revokedTokens = await tx.identity.revokePersonalAccessTokens(targetId, changedAt)
@@ -182,7 +180,7 @@ export class AccountLifecycleService {
     return blockers
   }
 
-  private async revokeExecution(tx: ServerStoreTx, userId: UserId, reason: string, createdAt: Timestamp): Promise<Set<WorkerId>> {
+  private async revokeExecution(tx: ServerStoreTx, userId: UserId, reason: string, createdAt: Timestamp, actorId: UserId): Promise<Set<WorkerId>> {
     const workerIds = new Set<WorkerId>()
     for (const session of await tx.resources.listSessions()) {
       if (session.deletedAt) continue
@@ -192,11 +190,11 @@ export class AccountLifecycleService {
       const command = { kind: 'turn.stop' as const, sessionId: session.id, turnId: active.turnId }
       if (!await tx.commands.get(commandId)) {
         // Revocation stops must execute even when the target account is already
-        // disabled: authority is the acting administrator, and a missing actor
-        // or signing identity degrades to the historical unsigned stop.
-        const authority = await this.commandAuthority?.(tx).catch(() => undefined)
-        const authorityUser = authority ? await tx.identity.getUser(authority) : undefined
-        const authorization = this.commandSigning && authority && authorityUser && (authorityUser.status ?? 'active') === 'active' ? await issueCommandAssertion(tx, this.commandSigning, authority, { commandId, command, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) }) : undefined
+        // disabled: authority is the acting administrator (or the account itself
+        // for self-deletion, captured before the status change commits), and a
+        // missing actor row or signing identity degrades to the unsigned stop.
+        const authorityUser = await tx.identity.getUser(actorId)
+        const authorization = this.commandSigning && authorityUser && (authorityUser.status ?? 'active') === 'active' ? await issueCommandAssertion(tx, this.commandSigning, actorId, { commandId, command, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) }) : undefined
         await tx.commands.insertPending({ commandId, workerId: session.binding.agent.workerId, command, payloadFingerprint: createHash('sha256').update(JSON.stringify(command)).digest('hex'), createdAt, ...(authorization ? { authorization } : {}) })
       }
       workerIds.add(session.binding.agent.workerId)

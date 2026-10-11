@@ -142,6 +142,27 @@ test('expired approval refresh preserves identity and requires current authority
   assert.equal(await service.authorizeApprovalReplay(f.worker.id, id, expired), false, 'revoked actor version must block sent original')
 })
 
+test('v3 approval refresh keeps identity and window instead of failing the version gate', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ticket02-v3-refresh-')), path = join(dir, 'server.db')
+  const f = await fixture(path)
+  t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
+  const service = new ServerService(f.store, f.signals, undefined, undefined, undefined,
+    new SessionAccessService(f.store, new ProjectAccessService(f.store)), f.commandSigning)
+  const id = 'v3-refresh-approval' as CommandId
+  await service.resolveRuntimeApproval(f.independent.id, 'approval' as never, { commandId: id, turnId: 'worker-turn', decision: 'approve' }, instanceOperatorId)
+  const original = (await f.store.commands.getPendingCommand(id))!.authorization!
+  assert.equal(original.claims.version, 2, 'sessionControl issues v2 approvals today')
+  // 直接把存储断言替换为同一身份的 v3 并使窗口过期：模拟 v3 审批（升级/后续版本签发）在投递唤醒时的重签
+  const expired = f.commandSigning.sign({ ...original.claims, version: 3, issuedAt: new Date(Date.now() - 360_000).toISOString(), expiresAt: new Date(Date.now() - 60_000).toISOString() })
+  const row = f.database.connection.prepare('SELECT data FROM commands WHERE id=?').get(id) as { data: string }
+  f.database.connection.prepare('UPDATE commands SET data=? WHERE id=?').run(JSON.stringify({ ...JSON.parse(row.data), authorization: expired }), id)
+  assert.equal(await service.refreshPendingApproval(f.worker.id, id), true, 'refreshPendingAccept claims v2|v3; the store must not 409 on v3')
+  const fresh = (await f.store.commands.getPendingCommand(id))!.authorization!
+  assert.equal(fresh.claims.version, 3, 'refresh preserves the original version')
+  assert.ok(Date.parse(fresh.claims.expiresAt) > Date.now())
+  assert.deepEqual(Object.fromEntries(Object.entries(fresh.claims).filter(([key]) => key !== 'issuedAt' && key !== 'expiresAt')), Object.fromEntries(Object.entries(expired.claims).filter(([key]) => key !== 'issuedAt' && key !== 'expiresAt')))
+})
+
 test('unsigned backlog does not starve later signed approvals', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'ticket02-deliverable-window-')), path = join(dir, 'server.db')
   const f = await fixture(path)
