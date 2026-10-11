@@ -32,4 +32,4 @@ Blocked by: 无；整票安全加固不再阻塞协调聊天功能（ADR 0008）
 - [x] 合法集群命令及经本地鉴权的独立宿主操作可执行，离线不拿旧集群签名启动新副作用，现有 worker 测试全绿
 - [x] 负例测试与断言输出作为证据留存
 
-**验收记录（2026-10-12）：** 全部 10 项在干净实例（新建临时 DB/home）验证。负例断言输出在 `/tmp/wemux-t02-evidence/`（不入库），脱敏摘要见 `docs/acceptance/command-frame-authorization.md`。核心测试：`packages/wire-protocol/src/command-authorization.test.ts`（5/5）、`apps/worker/test/command-frame-authorization.test.ts`（9/9）、`apps/server/src/test/command-frame-signing.test.ts`（5/5）；全量 `@wemux/worker` 523/0 fail、`@wemux/server` 956/0 fail、根 typecheck 0 错误。范围外：混合版本升级、旧命令补签/迁移、备份对账、密钥轮换（票据已声明）。
+**验收记录（2026-10-12）：** 全部 10 项在干净实例（新建临时 DB/home）验证。负例断言输出在 `/tmp/wemux-t02-evidence/`（不入库），脱敏摘要见 `docs/acceptance/command-frame-authorization.md`。核心测试：`packages/wire-protocol/src/command-authorization.test.ts`（5/5）、`apps/worker/test/command-frame-authorization.test.ts`（9/9）、`apps/server/src/test/command-frame-signing.test.ts`（5/5）；合入 integration tip 后全量 `@wemux/worker` 532/0 fail、`@wemux/server` 964/0 fail、根 typecheck 0 错误（含集成分支新增 `session.attachment.deliver` 命令类型的 v3 覆盖）。范围外：混合版本升级、旧命令补签/迁移、备份对账、密钥轮换（票据已声明）。

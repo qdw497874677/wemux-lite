@@ -52,6 +52,7 @@ export const WORKER_COMMAND_KINDS: readonly string[] = [
   'workspace.delete',
   'session.create',
   'session.enqueue',
+  'session.attachment.deliver',
   'session.cancel-queued',
   'session.delete',
   'turn.stop',
@@ -105,6 +106,7 @@ export function assertionScopeMatches(
 ): boolean {
   switch (command.kind) {
     case 'session.enqueue':
+    case 'session.attachment.deliver':
     case 'session.cancel-queued':
     case 'session.delete':
     case 'turn.stop':
