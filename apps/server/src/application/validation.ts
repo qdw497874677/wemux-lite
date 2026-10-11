@@ -85,6 +85,7 @@ function capability(value: unknown): AgentCapability {
   const a = object(c.availability); oneOf(a.status, ['available', 'unavailable', 'authentication-required'])
   if (a.status !== 'available') text(a.reason, 'reason')
   if (c.modelSwap !== undefined) boolean(c.modelSwap)
+  if (c.attachments !== undefined) boolean(c.attachments)
   if (c.authorization !== undefined) {
     const authorization = object(c.authorization)
     oneOf(authorization.state, ['unknown', 'authorized', 'unauthorized', 'expired'])

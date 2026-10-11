@@ -1,5 +1,7 @@
 import type { TeamId, UserId } from '@wemux/domain'
 import { coordinationAvailability } from '../../application/coordination-gate.ts'
+import { ATTACHMENT_MULTIPART_OVERHEAD_BYTES, MAX_ATTACHMENT_UPLOAD_BYTES } from '../../application/coordination-attachments.ts'
+import { parseMultipart } from '../multipart.ts'
 import { AppError } from '../../application/errors.ts'
 import { sendTeamInvitationMail } from '../../application/team-invitation-mail.ts'
 import type { RouteDescriptor } from './types.ts'
@@ -47,5 +49,23 @@ export const teamRoutes: readonly RouteDescriptor[] = [
     const teamId = context.params.teamId as TeamId, actor = await context.actor()
     await requireTeams(context.teams).members(actor, teamId)
     context.json(201, await context.service.createTeamCoordinationSession(teamId, actor, await context.readBody()))
+  } },
+  { method: 'POST', pattern: '/teams/:teamId/coordination/attachments', auth: 'authenticated', handler: async context => {
+    const teamId = context.params.teamId as TeamId, actor = await context.actor()
+    await requireTeams(context.teams).members(actor, teamId)
+    // multipart 二进制收件：读原始字节后交给领域服务，不经过 JSON 化的 readBody。
+    const body = await context.readRawBody(MAX_ATTACHMENT_UPLOAD_BYTES + ATTACHMENT_MULTIPART_OVERHEAD_BYTES)
+    const parts = parseMultipart(body, context.request?.headers?.['content-type'])
+    const file = parts.find(part => part.filename !== null)
+    if (!file || !file.filename) throw new AppError(400, 'multipart form must include a file part', 'multipart_file_required')
+    const field = (name: string) => parts.find(part => part.name === name && part.filename === null)?.data.toString('utf8').trim() ?? ''
+    const requestId = field('requestId'), workspaceId = field('workspaceId'), workerId = field('workerId'), agentKey = field('agentKey')
+    if (!requestId || !workspaceId || !workerId || !agentKey) throw new AppError(400, 'requestId, workspaceId, workerId and agentKey are required')
+    context.json(201, await context.service.createTeamCoordinationAttachment(teamId, actor, { requestId, workspaceId, workerId, agentKey, modelId: field('modelId') || null, title: field('title'), filename: file.filename, contentType: file.contentType, bytes: file.data }))
+  } },
+  { method: 'GET', pattern: '/teams/:teamId/coordination/attachments/:attachmentId', auth: 'authenticated', handler: async context => {
+    const teamId = context.params.teamId as TeamId, actor = await context.actor()
+    await requireTeams(context.teams).members(actor, teamId)
+    context.json(200, await context.service.coordinationAttachmentView(teamId, actor, context.params.attachmentId))
   } },
 ]

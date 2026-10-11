@@ -5,6 +5,9 @@ import { assertSessionTaskMutable } from './task-lifecycle.ts'
 import { createRequest, replayCreate, recordCreate } from './create-request.ts'
 import { dedicatedConversationTask } from './dedicated-conversation-task.ts'
 import { teamCoordinationTask, coordinationAnchor } from './team-coordination-task.ts'
+import { attachmentDeliveryView, attachmentSafeFilename, coordinationUploadRequestId, validateAttachmentUpload, type AttachmentDeliveryView, type AttachmentUploadInput } from './coordination-attachments.ts'
+import type { SessionAttachmentRecord } from './ports/server-store-types.js'
+import type { ResourceBlobStore } from '../storage/resource-blob-store.ts'
 import { sessionIdleReason } from './session-idle.ts'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { CommandSigningIdentity } from './command-signing.ts'
@@ -59,7 +62,7 @@ export class ServerService {
   private readonly workerAccess?: WorkerAccessService
   private readonly projectAccess?: ProjectAccessService
   private readonly sessionAccess?: SessionAccessService
-  constructor(store: ServerStore, notifications: Notifications, capabilities?: CapabilityService, workerAccess?: WorkerAccessService, projectAccess?: ProjectAccessService, sessionAccess?: SessionAccessService, private readonly commandSigning?: CommandSigningIdentity) { this.store = store; this.notifications = notifications; this.capabilities = capabilities; this.workerAccess = workerAccess; this.projectAccess = projectAccess; this.sessionAccess = sessionAccess;}
+  constructor(store: ServerStore, notifications: Notifications, capabilities?: CapabilityService, workerAccess?: WorkerAccessService, projectAccess?: ProjectAccessService, sessionAccess?: SessionAccessService, private readonly commandSigning?: CommandSigningIdentity, private readonly attachmentBlobs?: ResourceBlobStore) { this.store = store; this.notifications = notifications; this.capabilities = capabilities; this.workerAccess = workerAccess; this.projectAccess = projectAccess; this.sessionAccess = sessionAccess;}
   async requireWorkerUseInTx(tx: ServerStoreTx, actor: UserId, workerId: WorkerId) {
     return this.workerAccess ? this.workerAccess.requireInTx(tx, actor, workerId) : requireValue(await tx.resources.getWorker(workerId))
   }
@@ -666,6 +669,77 @@ export class ServerService {
       try { await this.sessionAccess?.require(actor, session.id) } catch { return null }
       return this.sessionView(session.id, actor)
     })).then(items => items.filter((item): item is NonNullable<typeof item> => item !== null))
+  }
+  /** Team attachment upload is two-phase and atomic per phase: phase one stores bytes and binds
+   * Task/Session/attachment metadata in one transaction with a dependent delivery command; phase
+   * two is the Worker command projection. No first message is fabricated. */
+  async createTeamCoordinationAttachment(team: TeamId, actor: UserId, input: AttachmentUploadInput) {
+    if (!this.attachmentBlobs) throw new AppError(503, 'Attachment storage is not configured', 'attachment_storage_unavailable')
+    const intent = validateAttachmentUpload(actor, team, input)
+    // 阶段一收件先落盘：内容寻址，失败/冲突只可能留下不可见的去重 blob，不产生可见孤儿。
+    await this.attachmentBlobs.put(input.bytes, intent.sha256)
+    const createdRequest = coordinationUploadRequestId(input.requestId)
+    const result = await this.store.transaction(async tx => {
+      const membership = (await tx.identity.getIdentityRecords({ userId: actor, teamId: team })).membership
+      if (!membership) throw new AppError(403, 'Team membership required', 'team_membership_required')
+      // 幂等重放：同一意图返回原 Session/附件；不同载荷的同一 requestId 拒绝。
+      let previous: Awaited<ReturnType<typeof tx.resources.getSession>> = null
+      for (const session of await tx.resources.listSessions()) {
+        if (session.ownerId !== actor || session.creation?.requestId !== createdRequest || !session.taskId?.startsWith('coordination:')) continue
+        const task = await tx.tasks.get(session.taskId)
+        if (task?.teamCoordination?.teamId === team) { previous = session; break }
+      }
+      if (previous) {
+        if (previous.creation?.coordinationAttachmentFingerprint !== intent.fingerprint || !previous.creation.coordinationAttachmentId || previous.deletedAt) throw new AppError(409, 'requestId already belongs to a different coordination upload', 'request_id_conflict')
+        await this.requireSessionAccessInTx(tx, actor, previous.id, 'write')
+        const record = await tx.resources.getSessionAttachment(previous.creation.coordinationAttachmentId)
+        if (!record) throw new AppError(409, 'Attachment record missing for replayed upload', 'request_id_conflict')
+        return { session: previous, attachment: record, created: false }
+      }
+      const workspace = await this.authorizedWorkspaceInTx(tx, input.workspaceId as WorkspaceId, actor)
+      const worker = await this.requireWorkerUseInTx(tx, actor, input.workerId as WorkerId)
+      if (worker.teamId !== team || (await tx.resources.getProject(workspace.projectId))?.teamId !== team) throw new AppError(404, 'Workspace or Worker not found', 'workspace_not_found')
+      const capability = worker.capabilities.find(item => item.agentKey === (input.agentKey as AgentKey))
+      // 能力如实声明：未声明可读附件的 Agent 不接受上传，不以 Server 收件冒充可用。
+      if (!capability || capability.mode !== 'execution' || capability.attachments !== true) throw new AppError(409, '所选 Agent 未声明附件读取能力', 'attachment_capability_missing')
+      const taskId = await teamCoordinationTask(tx, { teamId: team, ownerId: actor, workerId: input.workerId as WorkerId, agentKey: input.agentKey as AgentKey }, input.requestId)
+      const created = await this.createSessionInTx(tx, { workspaceId: input.workspaceId as WorkspaceId, workerId: input.workerId as WorkerId, agentKey: input.agentKey as AgentKey, modelId: (input.modelId ?? undefined) as ModelId | undefined, title: input.title || '团队协调', requestId: createdRequest }, { ownerId: actor, taskId, runId: null })
+      const attachment: SessionAttachmentRecord = { id: newId<'AttachmentId'>(), sessionId: created.session.id, taskId, workerId: worker.id, filename: attachmentSafeFilename(input.filename), subpath: intent.subpath, contentType: input.contentType, size: input.bytes.length, sha256: intent.sha256, uploadedBy: actor, createdAt: now(), deliverCommandId: intent.commandId }
+      const deliverCommandId = await this.command(tx, worker.id, { kind: 'session.attachment.deliver', sessionId: created.session.id, attachment: { attachmentId: attachment.id, filename: attachment.filename, subpath: attachment.subpath, size: attachment.size, sha256: attachment.sha256, base64Content: input.bytes.toString('base64') } }, intent.commandId)
+      // 投递必须等待 Session 创建命令被 Worker 确认，同一事务内声明依赖。
+      await tx.commands.depend(deliverCommandId, created.commandId)
+      const session = { ...created.session, creation: { ...created.session.creation!, coordinationAttachmentFingerprint: intent.fingerprint, coordinationAttachmentId: attachment.id, coordinationDeliverCommandId: deliverCommandId } }
+      await tx.resources.saveSession(session)
+      await tx.resources.saveSessionAttachment(attachment)
+      return { session, attachment, created: true }
+    })
+    this.notifications.commands(input.workerId as WorkerId)
+    return { created: result.created, session: await this.sessionView(result.session.id, actor), attachment: await this.attachmentViewRecord(team, actor, result.attachment) }
+  }
+  async coordinationAttachmentView(team: TeamId, actor: UserId, attachmentId: string) {
+    const membership = (await this.store.identity.getIdentityRecords({ userId: actor, teamId: team })).membership
+    if (!membership) throw new AppError(403, 'Team membership required', 'team_membership_required')
+    const record = await this.store.resources.getSessionAttachment(attachmentId)
+    if (!record) throw new AppError(404, 'Attachment not found')
+    const task = await this.store.tasks.get(record.taskId)
+    if (!task?.teamCoordination || task.teamCoordination.teamId !== team) throw new AppError(404, 'Attachment not found')
+    try { await this.sessionAccess?.require(actor, record.sessionId) } catch { throw new AppError(404, 'Attachment not found') }
+    return { attachment: await this.attachmentViewRecord(team, actor, record) }
+  }
+  private async attachmentViewRecord(_team: TeamId, _actor: UserId, record: SessionAttachmentRecord) {
+    const command = await this.store.commands.get(record.deliverCommandId)
+    const worker = await this.store.resources.getWorker(record.workerId)
+    const receipt = command?.status === 'rejected' ? await this.store.commands.getReceipt(record.deliverCommandId) : null
+    const rejectionDetail = receipt && receipt.status === 'rejected' ? `${receipt.error.message}（${receipt.error.code}）` : null
+    const delivery: AttachmentDeliveryView = attachmentDeliveryView(record, command, worker?.connectionState ?? null, rejectionDetail)
+    return {
+      id: record.id, sessionId: record.sessionId, taskId: record.taskId, workerId: record.workerId,
+      filename: record.filename, subpath: record.subpath, contentType: record.contentType,
+      size: record.size, sha256: record.sha256, uploadedBy: record.uploadedBy, createdAt: record.createdAt,
+      // 阶段一：Server 收件（有界文件已存档）；阶段二：选定 Worker 的投递状态。
+      upload: { receivedAt: record.createdAt },
+      delivery,
+    }
   }
   async createSession(input: unknown, actor?: UserId) {
     const result = await this.store.transaction(tx => this.createSessionInTx(tx, input, actor ? { ownerId: actor } : undefined))

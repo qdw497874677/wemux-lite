@@ -277,6 +277,8 @@ export class SqliteServerStore implements ServerStore {
     listCapabilityAssets: async projectId => this.get<CapabilityAsset[]>('capability-assets', projectId) ?? [],
     listAgentInboxMessages: async (sessionId, unreadOnly) => this.list<AgentInboxMessage>('agent-inbox').filter(message => message.toSessionId === sessionId && (!unreadOnly || message.status !== 'read')),
     getAgentInboxMessage: async messageId => this.get('agent-inbox', messageId),
+    getSessionAttachment: async id => this.get<import('../../application/ports/server-store-types.js').SessionAttachmentRecord>('session-attachment', id),
+    listSessionAttachments: async sessionId => this.list<import('../../application/ports/server-store-types.js').SessionAttachmentRecord>('session-attachment').filter(record => record.sessionId === sessionId),
   }
   readonly resources = this.committed(this.resourceReader)
   private commandProjection(id: string): CommandProjection | null {
@@ -289,6 +291,7 @@ export class SqliteServerStore implements ServerStore {
       return row ? JSON.parse(String(row.data)) : null
     },
     getPendingCommand: async id => { const row = this.db.prepare('SELECT data FROM commands WHERE id=?').get(id); return row ? JSON.parse(String(row.data)) : null },
+    getReceipt: async id => this.get('receipt', id),
     get: async id => this.commandProjection(id),
     listWorkspaceProvisions: async id => this.db.prepare("SELECT data FROM commands WHERE json_extract(data,'$.command.kind')='workspace.provision' AND json_extract(data,'$.command.workspace.workspace.id')=? ORDER BY rowid").all(id).map(row => JSON.parse(String(row.data)) as PendingCommand),
     hasProvisionAttempt: async id => Boolean(this.db.prepare("SELECT 1 FROM commands WHERE json_extract(data,'$.command.kind')='workspace.provision' AND json_extract(data,'$.command.workspace.workspace.id')=? LIMIT 1").get(id)),
@@ -608,6 +611,7 @@ export class SqliteServerStore implements ServerStore {
       saveCreateRequest: async (key, record) => this.put('create-request', key, record),
       saveWorker: async r => this.put('worker', r.id, r), saveProject: async r => this.put('project', r.id, r),
       saveRepository: async r => this.put('repository', r.id, r), saveWorkspace: async r => this.put('workspace', r.id, r), saveSession: async r => this.put('session', r.id, r),
+      saveSessionAttachment: async r => this.put('session-attachment', r.id, r),
       saveSessionFork: async fork => {
         const index = forkRequestIndexId(fork.projectId, fork.creation.requestId), indexed = this.get<string>('session-fork-request', index)
         // Index and row are written together: a second Fork claiming the same requestId in one

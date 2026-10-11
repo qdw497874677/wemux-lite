@@ -103,6 +103,10 @@ export interface Session {
     readonly coordinationIntentFingerprint?: string
     readonly coordinationMessageCommandId?: string
     readonly coordinationMessageId?: string
+    /** Upload intent identity: fingerprint covers file bytes plus binding; attachment + deliver command ids are replay anchors. */
+    readonly coordinationAttachmentFingerprint?: string
+    readonly coordinationAttachmentId?: string
+    readonly coordinationDeliverCommandId?: string
   }
   readonly id: SessionId
   readonly projectId: ProjectId

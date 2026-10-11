@@ -16,8 +16,8 @@ Blocked by: [03 协调创建/发送](03-gate-standard-reprobe.md)的真实 API �
 ## 测试与验收
 
 - [ ] Web Team 入口可用：页面打开不创建 Task；首次发送自动创建/复用，显示消息及 Agent 结果
-- [ ] 首次上传有界文件创建 Task/Session 与私有附件引用，同一意图幂等、冲突拒绝、撤权失效；没有虚构首条消息，失败不留下可见孤儿
-- [ ] 附件经授权投递到选定 Worker 后由 Agent 实际读取原字节；离线、重试、重启与撤权时明确区分待投递/已投递/失败。只有 Server 收件不算完成上传能力，也不提前开启 Web 上传控件
+- [x] 首次上传有界文件创建 Task/Session 与私有附件引用，同一意图幂等、冲突拒绝、撤权失效；没有虚构首条消息，失败不留下可见孤儿（见 `docs/acceptance/web-next-coordination-attachments-two-phase.md`；Server 测试与整链负例：幂等重放/冲突 409/撤权 409/孤儿无残留）
+- [x] 附件经授权投递到选定 Worker 后由 Agent 实际读取原字节；离线、重试、重启与撤权时明确区分待投递/已投递/失败。只有 Server 收件不算完成上传能力，也不提前开启 Web 上传控件（同上文档：Test Agent read-file 回显原字节 sha256/size；Web 控件仅对声明 `attachments` 能力的 Agent 开启；真实 Pi 未声明，控件保持关闭）
 - [ ] 获权 Worker/Agent/Workspace 选择、刷新恢复、重开新 Session、模型切换、停止/审批/失败重试按实际能力验证
 - [ ] 非成员、跨 Team/Project/Worker 或他人 Session 无法探测和写入；普通 Task/独立宿主权限不回归
 - [x] 至少一个真实有效的 Runtime 完成协调对话：用户允许的 Pi CLI 1.0.4 + `zai-coding-cn::glm-5.3-flash` 首发与文件创建、同 Session 工具读回按 Turn 边界验证通过一次，第二 Turn 历史失败已诊断为模型侧（见 `docs/acceptance/web-next-team-coordination-browser-partial.md`）；另付费验证模型切换 flash → `glm-5.3` 端到端通过一次（同文档新增章节）；Test Agent 用于可重复集成，不代替有效 Runtime 验收

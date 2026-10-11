@@ -17,6 +17,7 @@ export interface AgentDTO {
   agentCommands?: string[]
   compactMode?: 'native' | 'slash-command'
   modelSwap?: boolean
+  attachments?: boolean
   models: { modelId: string; displayName: string; source: 'detected' | 'configured' }[]
 }
 

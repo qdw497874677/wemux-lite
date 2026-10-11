@@ -1,4 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises'
+import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
 import type { ApprovalId, NativeSessionRef, ToolCallId } from '@wemux/domain'
 import type { AgentSignal, AgentTurnHandle } from '../application/ports/agent-adapter.js'
 import type { AgentRuntimeSession, RuntimeOperationInput, RuntimeSessionAdapter, RuntimeSessionOpenInput } from '../application/ports/runtime-session.js'
@@ -64,6 +67,35 @@ class TestRuntimeSession implements AgentRuntimeSession {
         // native decision; production adapters may finish asynchronously too.
         await wait()
         yield { kind: 'event', event: { kind: 'assistant.text.delta', text: `Native approval: ${decision}`, streamKind: 'assistant_text' } }
+        yield { kind: 'finished', outcome: { status: 'completed' } }
+        return
+      }
+      // Delivered-attachment verification fixture: reads the original bytes
+      // from the session working directory and echoes their digest, proving
+      // the Agent (not just the Server) actually received the upload.
+      const readFileFixture = /^\[test-agent:read-file\]\s*(\S+)/.exec(input.message.content)
+      if (readFileFixture) {
+        const subpath = readFileFixture[1]
+        const readToolCallId = `${input.operationId}:read-file` as ToolCallId
+        yield { kind: 'event', event: { kind: 'tool.started', toolCallId: readToolCallId, toolName: 'read-file', input: { subpath }, streamKind: 'command_output' } }
+        let bytes: Buffer
+        try {
+          const cwd = resolve(this.open.cwd)
+          const candidate = resolve(cwd, subpath)
+          if (candidate !== cwd && !candidate.startsWith(cwd + '/')) throw new Error(`read-file fixture path escapes the session directory: ${subpath}`)
+          bytes = await readFile(candidate)
+        } catch (error) {
+          await wait()
+          yield { kind: 'event', event: { kind: 'tool.finished', toolCallId: readToolCallId, exitCode: 1 } }
+          yield { kind: 'finished', outcome: { status: 'failed', failure: { code: 'agent-error', message: `read-file fixture failed: ${(error as Error).message}` } } }
+          return
+        }
+        const digest = createHash('sha256').update(bytes).digest('hex')
+        await wait()
+        yield { kind: 'event', event: { kind: 'tool.output.delta', toolCallId: readToolCallId, text: `${subpath} ${bytes.length} bytes`, streamKind: 'command_output' } }
+        yield { kind: 'event', event: { kind: 'tool.finished', toolCallId: readToolCallId, exitCode: 0 } }
+        await wait()
+        yield { kind: 'event', event: { kind: 'assistant.text.delta', text: `Read ${subpath}: sha256=${digest} size=${bytes.length}`, streamKind: 'assistant_text' } }
         yield { kind: 'finished', outcome: { status: 'completed' } }
         return
       }

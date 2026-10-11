@@ -22,7 +22,7 @@ export type PiProviderResolver = (projectId: ProjectId, modelId: ModelId) => Pro
   readonly credentialStamp: string | null
   readonly bindingId: string
 } | null>
-import { diffWorkspaceFile, FILE_READ_ERROR, fileReadErrorMessage, listWorkspaceFiles, MAX_FS_RESPONSE_PAYLOAD_BYTES, readWorkspaceFile, writeWorkspaceFile } from '../files/workspace-files.js'
+import { decodeFileBase64, diffWorkspaceFile, FILE_READ_ERROR, fileReadErrorMessage, listWorkspaceFiles, MAX_FS_RESPONSE_PAYLOAD_BYTES, readWorkspaceFile, writeWorkspaceFile } from '../files/workspace-files.js'
 import { TerminalManager, type PtyAdapter } from '../terminal/terminal-manager.js'
 
 const now = () => new Date().toISOString() as Timestamp
@@ -348,6 +348,15 @@ export class WorkerRuntime {
         switch (command.kind) {
           case 'session.create': await tx.sessions.createSession(command.session.sessionId, command.session.binding, command.session.storageMode); break
           case 'session.enqueue': await tx.sessions.enqueue({ sessionId: command.sessionId, submissionCommandId: commandId, message: command.message, capabilities: command.capabilities, queuedAt: now() }); break
+          case 'session.attachment.deliver': {
+            // The write happens inside the record transaction: a crash after the
+            // write but before commit replays the whole command idempotently,
+            // while a recorded receipt never leaves the file unwritten.
+            const session = await tx.sessions.get(command.sessionId)
+            const workspace = await tx.workspaces.get(session!.binding.workspaceId)
+            await writeWorkspaceFile(workspace!.rootPath, command.attachment.subpath, command.attachment.base64Content)
+            break
+          }
           case 'session.delete': await tx.sessions.deleteSession(command.sessionId); break
           case 'session.cancel-queued': await tx.sessions.cancelQueued(command.sessionId, command.submissionCommandId); break
           case 'turn.stop': await tx.sessions.requestStop(command.sessionId, command.turnId); break
@@ -429,6 +438,19 @@ export class WorkerRuntime {
     if (command.kind === 'session.delete') return // Active protection is checked atomically in the store.
     if (command.kind === 'session.enqueue') {
       if ((await this.store.workspaces.get(session.binding.workspaceId))?.status !== 'ready' || !this.available(session.binding)) throw new Error('Workspace, agent or model unavailable')
+    }
+    if (command.kind === 'session.attachment.deliver') {
+      // Delivery is a workspace operation: the Session host scope above already
+      // binds this Worker; bytes are verified against the Server declaration
+      // before any filesystem effect, so a tampered frame never lands on disk.
+      const workspace = await this.store.workspaces.get(session.binding.workspaceId)
+      if (!workspace || workspace.status !== 'ready' || workspace.workerId !== this.workerId) throw new Error('Workspace is not ready')
+      const { size, sha256: digest, base64Content } = command.attachment
+      if (!Number.isInteger(size) || size < 0) throw new Error('Invalid attachment size')
+      if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error('Invalid attachment sha256')
+      const bytes = decodeFileBase64(base64Content)
+      if (bytes.length !== size) throw new Error(`Attachment size mismatch: declared ${size}, received ${bytes.length}`)
+      if (createHash('sha256').update(bytes).digest('hex') !== digest) throw new Error('Attachment sha256 mismatch')
     }
     if (command.kind === 'turn.stop' && (await this.store.sessions.getTurn(command.turnId))?.sessionId !== command.sessionId) throw new Error('Turn not found')
     if (command.kind === 'runtime.command') {

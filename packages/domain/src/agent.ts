@@ -51,5 +51,7 @@ export interface AgentCapability {
   readonly runtime?: AgentRuntimeCapabilities
   /** Whether an existing Session can switch models without creating a new Session. */
   readonly modelSwap?: boolean
+  /** Whether the Agent runtime can actually read delivered attachments. Optional while older Workers upgrade. */
+  readonly attachments?: boolean
   readonly models: readonly AgentModelCapability[]
 }

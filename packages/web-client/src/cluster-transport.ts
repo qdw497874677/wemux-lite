@@ -31,9 +31,11 @@ export function createClusterTransport(config: AccountSession, onUnauthorized: (
     const url = target(path)
     const headers: Record<string, string> = { Accept: 'application/json', ...extra }
     if (csrfToken && unsafe(method)) headers['X-CSRF-Token'] = csrfToken
-    if (body !== undefined) headers['Content-Type'] = 'application/json'
+    // FormData 由 fetch 自行设置 multipart 边界；手工指定 Content-Type 会破坏上传。
+    const form = typeof FormData !== 'undefined' && body instanceof FormData ? body : undefined
+    if (body !== undefined && !form) headers['Content-Type'] = 'application/json'
     try {
-      return await fetcher(url, { method, headers, credentials: 'same-origin', redirect: 'error', cache: 'no-store', body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.any([scope.signal, ...(signal ? [signal] : []), ...(timeoutMs === undefined ? [] : [AbortSignal.timeout(timeoutMs)])]) })
+      return await fetcher(url, { method, headers, credentials: 'same-origin', redirect: 'error', cache: 'no-store', body: body === undefined ? undefined : form ?? JSON.stringify(body), signal: AbortSignal.any([scope.signal, ...(signal ? [signal] : []), ...(timeoutMs === undefined ? [] : [AbortSignal.timeout(timeoutMs)])]) })
     } catch (error) {
       check(signal)
       throw new ApiError('连接失败：无法访问 Server，请检查服务是否启动、端口与网络。', undefined, 'network')
@@ -126,6 +128,22 @@ export function createClusterTransport(config: AccountSession, onUnauthorized: (
     check(signal)
     return value
   }
+  /** Multipart 上传：写请求同样享受 CSRF 刷新重试，响应解析与 request 一致。 */
+  async function postForm<T>(path: string, form: FormData, signal?: AbortSignal, timeoutMs = 60000): Promise<T> {
+    let response = await send(path, form, signal, 'POST', timeoutMs)
+    if (response.status === 403 && csrfToken) {
+      let refreshed = false
+      try { refreshed = await refreshCsrf() } catch (error) {
+        if (error instanceof ApiError && error.status === 401) throw error
+        check(signal)
+      }
+      if (refreshed) response = await send(path, form, signal, 'POST', timeoutMs)
+    }
+    check(signal)
+    await requireSuccess(response, signal)
+    if (!response.headers.get('content-type')?.toLowerCase().includes('application/json')) throw new ApiError('服务端响应格式异常，请检查当前访问地址是否为 Wemux Lite Server。', undefined, 'contract')
+    try { return await response.json() as T } catch { check(signal); throw new ApiError('API 响应不是有效的 JSON。', undefined, 'contract') }
+  }
   /** One SSE connection. The consumer receives event names only, never cursor IDs or payloads. */
   async function stream(path: string, onEvent: (event: string) => void, signal?: AbortSignal): Promise<void> {
     const connection = new AbortController()
@@ -153,5 +171,5 @@ export function createClusterTransport(config: AccountSession, onUnauthorized: (
     if (!value || !Array.isArray(value.items)) throw new ApiError('API 契约错误：列表响应应包含 items 数组。', undefined, 'contract')
     return value.items
   }
-  return { request, list, stream, signal: scope.signal, unauthorized, setCsrfToken: (value: string) => { check(); csrfToken = value }, dispose: () => { csrfToken = ''; scope.abort() } }
+  return { request, list, postForm, stream, signal: scope.signal, unauthorized, setCsrfToken: (value: string) => { check(); csrfToken = value }, dispose: () => { csrfToken = ''; scope.abort() } }
 }

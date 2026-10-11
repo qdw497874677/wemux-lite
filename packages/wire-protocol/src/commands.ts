@@ -36,6 +36,19 @@ export type WorkerCommand =
       readonly capabilities?: CapabilityRuntimePayload
     }
   | {
+      readonly kind: 'session.attachment.deliver'
+      readonly sessionId: SessionId
+      /** Server-pinned identity; the Worker independently verifies bytes against this declaration. */
+      readonly attachment: {
+        readonly attachmentId: string
+        readonly filename: string
+        readonly subpath: string
+        readonly size: number
+        readonly sha256: string
+        readonly base64Content: string
+      }
+    }
+  | {
       readonly kind: 'session.cancel-queued'
       readonly sessionId: SessionId
       readonly submissionCommandId: CommandId

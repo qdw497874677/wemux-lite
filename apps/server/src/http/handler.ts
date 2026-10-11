@@ -14,11 +14,19 @@ import { serveStaticSite } from './static.ts'
 async function rawBody(request: IncomingMessage, maximumBytes: number): Promise<Buffer> {
   let size = 0
   const chunks: Buffer[] = []
+  let exceeded = false
   for await (const chunk of request) {
     const buffer = Buffer.from(chunk); size += buffer.length
-    if (size > maximumBytes) throw new AppError(413, 'Request too large')
+    if (size > maximumBytes) {
+      // 丢弃剩余字节而不是立即中断：未读完的请求体会让内核以 RST 拆除连接，客户端只能看到网络错误而不是 413。
+      // 有界排空（再最多 16 MiB）防御恶意无限流，超过后直接断开。
+      exceeded = true
+      if (size > maximumBytes + 16 * 1024 * 1024) { request.destroy(); throw new AppError(413, 'Request too large') }
+      continue
+    }
     chunks.push(buffer)
   }
+  if (exceeded) throw new AppError(413, 'Request too large')
   return Buffer.concat(chunks)
 }
 async function body(request: IncomingMessage): Promise<unknown> {

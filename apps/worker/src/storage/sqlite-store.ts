@@ -341,6 +341,8 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
   private tx: Omit<WorkerStoreTx, 'fileWrites'> = {
     journal: { read: async input => this.readJournal(input) },
     workspaces: {
+      // Direct read without the tail chain: safe inside an open transaction.
+      get: async id => this.getDocument('workspaces', id),
       save: async workspace => this.put('workspaces', workspace.id, workspace),
       saveRepositoryCheckouts: async items => { for (const item of items) this.put('checkouts', `${item.workspaceId}:${item.repositoryId}`, item) },
       remove: async id => { this.db.prepare('DELETE FROM documents WHERE bucket=? AND id=?').run('workspaces', id) },
