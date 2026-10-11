@@ -120,6 +120,23 @@ test('coordination rejects untrusted identity, unauthorized Team/Worker/Workspac
   } finally { await f.close() }
 })
 
+test('coordination Task reuse key ignores the model; a different model opens a new Session under the same Task', async () => {
+  const f = await fixture()
+  try {
+    const path = '/teams/default-team/coordination/sessions'
+    const body = { ...f.request, content: 'First model', commandId: 'model-independent-first' }
+    const first = await f.call(path, body, contributor)
+    assert.equal(first.status, 201, JSON.stringify(first.data))
+    const second = await f.call(path, { ...body, requestId: 'model-independent-second', commandId: 'model-independent-second', modelId: 'second', content: 'Second model' }, contributor)
+    assert.equal(second.status, 201, JSON.stringify(second.data))
+    assert.equal(second.data.session.taskId, first.data.session.taskId, 'reuse key is Team + user + Worker + Agent; the model does not participate')
+    assert.equal(second.data.session.binding.modelId, 'second', 'the new Session records the requested model')
+    assert.notEqual(second.data.session.id, first.data.session.id)
+    const history = (await f.call(path, undefined, contributor)).data.items as { taskId: string }[]
+    assert.equal(new Set(history.map(item => item.taskId)).size, 1, 'both Sessions share one coordination Task')
+  } finally { await f.close() }
+})
+
 test('the same actor and requestId in separate Teams create independent first sends', async () => {
   const f = await fixture()
   try {
