@@ -807,7 +807,7 @@ export class ServerService {
       return { session, attachment, created: true }
     })
     this.notifications.commands(input.workerId as WorkerId)
-    return { created: result.created, session: await this.sessionView(result.session.id, actor), attachment: await this.attachmentViewRecord(team, actor, result.attachment) }
+    return { created: result.created, session: await this.sessionView(result.session.id, actor), attachment: await this.attachmentViewRecord(result.attachment) }
   }
   async coordinationAttachmentView(team: TeamId, actor: UserId, attachmentId: string) {
     const membership = (await this.store.identity.getIdentityRecords({ userId: actor, teamId: team })).membership
@@ -817,9 +817,9 @@ export class ServerService {
     const task = await this.store.tasks.get(record.taskId)
     if (!task?.teamCoordination || task.teamCoordination.teamId !== team) throw new AppError(404, 'Attachment not found')
     try { await this.sessionAccess?.require(actor, record.sessionId) } catch { throw new AppError(404, 'Attachment not found') }
-    return { attachment: await this.attachmentViewRecord(team, actor, record) }
+    return { attachment: await this.attachmentViewRecord(record) }
   }
-  private async attachmentViewRecord(_team: TeamId, _actor: UserId, record: SessionAttachmentRecord) {
+  private async attachmentViewRecord(record: SessionAttachmentRecord) {
     const command = await this.store.commands.get(record.deliverCommandId)
     const worker = await this.store.resources.getWorker(record.workerId)
     const receipt = command?.status === 'rejected' ? await this.store.commands.getReceipt(record.deliverCommandId) : null
