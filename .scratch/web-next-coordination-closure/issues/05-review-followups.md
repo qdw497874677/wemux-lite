@@ -23,7 +23,7 @@ Blocked by: 无（02 已 done；本票是 integration/web-next-coordination-clos
 - [x] 附件投递失败后的用户路径明确（引导重建，不重投），E2E 断言（2026-10-14 `t05-attachment-retry`：失败意图重放只回放失败记录不复活；同文件新 requestId 重传畅通且端到端落盘成功，失败历史保留；UI 明确引导 + 一键「原文件重新上传（新请求）」，组件浏览器用例与 e2e 断言见 Comments）
 - [x] coordination-command-transport e2e 连续多次首跑稳定或抖动有检测与重试（2026-10-14 分支 `t05-e2e-jitter`：代理审计已认证 WS 链路生命周期，投递等待期检测链路断开并给一次有界 60s 自愈预算，终态回执快速失败；连续 5 次独立首跑全部 exit 0，详见 Comments）
 - [x] apps/web 全量测试在本机可运行且通过（无硬编码绝对路径）
-- [ ] 第 6 项重构若实施：行为不变，全量套件绿
+- [x] 第 6 项重构若实施：行为不变，全量套件绿（2026-10-14 分支 `t05-standards-refactor` 基于 47c67dd：六条实施 + 第 2 条确认 main 上已无需改码，行为不变，全量五步退出码全 0，详见 Comments）
 
 ## Comments
 
@@ -60,3 +60,19 @@ UI：`TeamCoordination.tsx` 文案改为“Worker 当前离线，恢复后自动
 改动：`TeamCoordination.tsx` 投递失败态新增引导文案（`data-attachment-guidance="failed"`）+ 一键「原文件重新上传（新请求）」按钮（保留阶段一成功的 File，新 requestId=randomId()，不重放失败意图；环境失效时按钮不可用，用户改选下拉中仍在线的环境，与 taskSessionOptions 只列可用环境的诚实口径一致）。
 
 验收证据（本机，日志在 `/var/tmp/t06a-*.log`）：红→绿组件浏览器用例 `apps/web-next/src/components/__tests__/TeamCoordinationAttachments.test.mjs`（失败引导呈现、一键重传用新 requestId 且复用原文件、终态后引导与按钮消失）；server 契约锁定用例 `apps/server/src/test/team-coordination-attachments.test.ts`「投递失败后的重建路径」（旧意图重放只回放失败记录、新 requestId 同文件重传创建独立新投递且失败历史不改写）；真实整链 `node --import tsx apps/e2e/team-coordination-attachments.mjs` exit 0：撤权失败后注册第二个 Worker + 新工作区，同文件新 requestId 重传端到端 delivered 且落盘 sha256 一致，失败附件保持 failed。merge main tip（3b81f72，第 4 项）后全量复验绿：build:packages / typecheck / @wemux/server 978 / @wemux/worker 527+5 skipped / web-next 浏览器套件 169 / 三个协调 e2e 全 exit 0。顺手修复：`apps/e2e/team-coordination-attachments-mobile.mjs` 断言的离线文案自第 1 项（e1274e6）改写为「恢复后自动续签投递」后未同步，在 main 上即失败（非本项回归），已更新断言与当前文案一致并复跑 exit 0。
+
+### 2026-10-14 第 6 项：Standards 判断题级重构（分支 `t05-standards-refactor`）
+
+逐条结果（每条独立提交，基于 47c67dd）：
+
+1. **签发降级并入 helper（5f4cbf3）**：`command-assertion-issuer.ts` 新增 `issueReducingCommandAssertion`（无 signing 或无 actor → 不签名；主体缺失/非 active → 降级为不签名而不是抛 403）。替换五处同形降级块：team-service、account-lifecycle-service、connector-service（顺带删除其 actorUser 前置查询，helper 内部统一查一次）、server-service 会话控制与会话删除两块（后者三路 command 调用合并为一次）。
+2. **ASSERTION_REQUIRED_COMMAND_KINDS 拷贝（无需改码）**：核实 main 上已不是拷贝——worker 侧 `apps/worker/src/application/command-authorization.ts` 全部 import 自 `@wemux/wire-protocol/command-assertion`，包内 `ASSERTION_REQUIRED_COMMAND_KINDS = [...WORKER_COMMAND_KINDS]` 是派生数组。本条在评审意见提出后已被主线解决，不重复改动。
+3. **构造参数改 options 对象（f9761ec）**：`ServerService` 六个可选位置参改 `ServerServiceOptions`（capabilities/workerAccess/projectAccess/sessionAccess/commandSigning/attachmentBlobs，原 parameter property 改显式字段）；`WorkerService` 后六参改 `WorkerServiceOptions`（reportConnector/projectJournal/resources/resourceBlobs/issueClusterCommand/signingConfigured，默认值 `??` 保持原状）。37 处多参调用点全部转换（含 server.ts 全参与六个测试文件），等价性由「字面 undefined/null 对应键即省略」保证。
+4. **attachmentViewRecord 死参（ef84f99）**：删除 `_team`/`_actor` 两个死参，两处调用点同步。
+5. **幂等重放全表扫收窄（6b5e782，放弃索引化）**：`createTeamCoordinationSession` / `createTeamCoordinationAttachment` 的重放查找从「listSessions() 全量物化再 JS 过滤」改为 reader 新方法 `listSessionsByCreationRequestId(requestId)`（`kind='session' AND json_extract(data,'$.creation.requestId')=?`，与既有 json_extract 查询同风格），调用侧保留 ownerId/协调 Task 前缀/teamId 过滤。语义等价：requestId 不匹配的行原本就被 continue。**放弃索引化的理由**：追加迁移会破坏三个按「相对末尾位置」硬编码的迁移测试（workspace-visibility 删 migrationCount-1、attention-source-pages 删 -2/-3、team-coordination-source-migration 删末条），中途插入则打乱既有库的 version 编号；收益（个人实例规模下的扫描成本）不抵风险。
+6. **两套启动重试共享调度器（5e4c5e6）**：runtime.ts 提取 `scheduleLaunchRetry(retries, id, commandId, wake)` + `clearRetryTimers(retries)`，`retryLaunch` 与 `retryProvisionLaunch` 变为薄包装（各自 wake 回调不同）。退避曲线（250ms 起、×2、上限 2s、4 次封顶、closing 墓碑、timer 守卫、unref）逐字保留，时序语义不变。
+7. **actorField 三元并入共享 helper（e2c4950）**：wire-protocol 新增 `commandActorBinding(command)` 返回 `{ named, accountId }`。两侧语义差异显式保留：worker 侧具名 kind 缺字段放行（`accountId !== undefined` 才比对），server 侧具名 kind 缺字段拒绝（回退断言主体比对必失败）；`named` 判别让同一 helper 同时服务两种严格度而不互相污染。
+
+**验证（日志 `/var/tmp/t06c-*.log`，退出码全 0）**：`npm run build:packages` 0；`npm run typecheck` 0；`npm test --workspace @wemux/worker` 532 tests（527 pass / 5 skip / 0 fail）；server+worker 构建后 `node --import tsx --test apps/server/src/test/*.test.ts` 978 pass / 0 fail；`TMPDIR=/var/tmp/t06c-e2e-run1 node --import tsx apps/e2e/coordination-command-transport.mjs` exit 0 且 `status:pass`（三项检查全过）。
+
+**残余风险**：第 5 条的收窄仍是 SQL 侧逐行过滤（无索引），个人/团队实例规模下无感知，数据量显著增长时需先解开三个相对位置测试再补索引；第 7 条两侧严格度差异靠 `named` 判别与注释维护，若未来新增具名 kind 需同步 helper 与两侧语义。
