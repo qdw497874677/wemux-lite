@@ -41,6 +41,10 @@ Blocked by: 无（02 已 done；本票是 integration/web-next-coordination-clos
 
 **残余风险：** 真正的半开死链（无 FIN/RST，loopback 基本不发生）最长需 Server 侧约 75s 才检测，30+60s 总预算覆盖典型重连场景；若未来复现为「链路存活但 >30s 未投递」，分类诊断会如实报出，届时按诊断深挖（不排除产品侧投递路径问题，本票未发现证据）。
 
+### 2026-10-14 主会话：手机 E2E read-file 等待预算修正（非行为变更）
+
+主树复验第 3 项合并时，`team-coordination-attachments-mobile.mjs` read-file 步`waitFor('Turn 已完成')` 走 Playwright 默认 30s，而 Worker 刚重启、重连退避最长 30s，3 跑 1 超时；改为该步显式 75s 预算（覆盖重连 + Turn 执行），其余等待不变。
+
 ### 2026-10-13 第 1 项：断言过期补签（分支 `t05-resign`，TDD 红→绿）
 
 设计取向：服务端补签而非降级。新增 `ServerService.refreshPendingCommandAuthorization`：先走 `authorizeEnqueueLaunch` 在线复核（主体 active 且 authVersion 一致、会话/工作区权限仍满足、Worker 未撤销、摘要与受众一致），通过后以原领域身份重签（同 commandId，仅更新 issuedAt/expiresAt）；存储层新增 `refreshCommandAuthorization`（拒绝任何身份字段变动，签名不可洗白）。网关在有界投递唤醒与重放阶段对过期非审批命令帧先补签再投递；已发送未被 Worker 处理的过期帧原位替换（同 directionSeq/messageId）；重签被拒时按原始字节投递，由 Worker 终态拒收（诚实失败，拒绝后果沿用票据 02 语义）。审批命令保持原 `refreshPendingApproval` 通道不变。撤销类 `turn.stop` 重签同样要求操作主体仍 active，主体停用即 fail-closed（残余：已排队 Turn 不被截停，已在验收文档写明）。无 ACK 驱动的重签，无忙循环风险。

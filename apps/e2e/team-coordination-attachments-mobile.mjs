@@ -149,7 +149,8 @@ try {
   step = '同一手机会话内 Agent read-file 读取附件原字节并回显摘要'
   await conversation.getByRole('textbox', { name: '新消息草稿' }).fill(`[test-agent:read-file] ${subpath}`)
   await conversation.getByRole('button', { name: '发送新消息' }).click()
-  await conversation.getByText('Turn 已完成').waitFor()
+  // Worker 刚重启，重连退避最长 30s；预算需覆盖重连 + Turn 执行，默认 30s 不够（主树复验曾 1/3 超时）
+  await conversation.getByText('Turn 已完成').waitFor({ timeout: 75000 })
   await conversation.getByText(`Read ${subpath}: sha256=${sha256} size=${bytes.length}`).waitFor()
   const journal = await api(`/sessions/${sessionId}/events?fromSeq=1&limit=1000`)
   const echoed = journal.events.filter(event => event.payload.kind === 'assistant.text.delta').map(event => event.payload.text).join('')
