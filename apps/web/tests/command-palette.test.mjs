@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import test from 'node:test'
 import { build } from 'esbuild'
-import { chromium } from '/opt/data/.npm/_npx/9833c18b2d85bc59/node_modules/playwright/index.mjs'
+import { loadChromium } from './browser-env.mjs'
 
 import { executePaletteItem, filterPaletteItems, nextPaletteSelection, orderCommandsByRecent, paletteTextSegments, readRecentCommandIds, sessionPaletteItems } from '../src/features/command-palette/model.ts'
 
@@ -59,6 +59,7 @@ test('disabled palette commands do not execute or alter recents', () => {
 })
 
 test('rendered palette opens, selects and executes commands and sessions from the keyboard', async () => {
+  const { chromium, executablePath } = await loadChromium()
   const bundle = await build({
     entryPoints: [new URL('./command-palette-rendered.tsx', import.meta.url).pathname],
     bundle: true,
@@ -71,7 +72,7 @@ test('rendered palette opens, selects and executes commands and sessions from th
     response.end(request.url === '/test.js' ? bundle.outputFiles[0].text : '<div id="root"></div><script src="/test.js"></script>')
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
-  const browser = await chromium.launch({ headless: true, executablePath: '/opt/data/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome' })
+  const browser = await chromium.launch({ headless: true, executablePath })
   try {
     const page = await browser.newPage()
     await page.goto(`http://127.0.0.1:${server.address().port}`)

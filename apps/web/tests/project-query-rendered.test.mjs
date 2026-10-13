@@ -2,13 +2,14 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { build } from 'esbuild'
 import { createServer } from 'node:http'
-import { chromium } from '/opt/data/.npm/_npx/9833c18b2d85bc59/node_modules/playwright/index.mjs'
+import { loadChromium } from './browser-env.mjs'
 
 test('rendered project owner: scopes, cleanup, malformed hints, catch-up, recovery and fallback preserve history', async () => {
+ const { chromium, executablePath } = await loadChromium()
  const bundle = await build({ entryPoints: ['apps/web/tests/project-query-rendered.tsx'].map(p => new URL('../../../' + p, import.meta.url).pathname), bundle: true, write: false, format: 'iife', jsx: 'automatic' })
  const server = createServer((req, res) => { res.setHeader('Content-Type', req.url === '/test.js' ? 'text/javascript' : 'text/html'); res.end(req.url === '/test.js' ? bundle.outputFiles[0].text : '<div id="root"></div><script src="/test.js"></script>') })
  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
- const browser = await chromium.launch({ headless: true, executablePath: '/opt/data/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome' })
+ const browser = await chromium.launch({ headless: true, executablePath })
  try {
   const page = await browser.newPage(); await page.clock.install()
   await page.goto(`http://127.0.0.1:${server.address().port}`)
