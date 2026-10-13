@@ -11,7 +11,7 @@ import type { ResourceBlobStore } from '../storage/resource-blob-store.ts'
 import { sessionIdleReason } from './session-idle.ts'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { CommandSigningIdentity } from './command-signing.ts'
-import { buildCommandAssertionClaims, connectorAssertionScope, issueCommandAssertion, provisionAssertionScope, sessionAssertionScope, type CommandAssertionScope } from './command-assertion-issuer.ts'
+import { buildCommandAssertionClaims, connectorAssertionScope, issueCommandAssertion, issueReducingCommandAssertion, provisionAssertionScope, sessionAssertionScope, type CommandAssertionScope } from './command-assertion-issuer.ts'
 import type { AgentKey, ApprovalId, CommandId, EventSeq, Id, MessageId, ModelId, ProjectId, RuntimeOperationId, SessionId, TeamId, Timestamp, TurnId, UserId, WorkerId, WorkspaceId } from '@wemux/domain'
 import type { AuditResource, CommandProjection, Project, Session, Worker, Workspace, WorkspacePlacement } from '@wemux/server-domain'
 import type { WorkerCommand } from '@wemux/wire-protocol'
@@ -1001,10 +1001,7 @@ export class ServerService {
         // the Session owner for operator-driven flows. Reducing commands stay
         // deliverable when signing is absent (revocation stops must survive).
         const authority = actor ?? session.ownerId
-        if (this.commandSigning && authority) {
-          const user = await tx.identity.getUser(authority)
-          if (user && (user.status ?? 'active') === 'active') authorization = await issueCommandAssertion(tx, this.commandSigning, authority, { commandId, command, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) })
-        }
+        authorization = await issueReducingCommandAssertion(tx, this.commandSigning, authority, { commandId, command, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) })
       }
       await this.command(tx, session.binding.agent.workerId, command, commandId, authorization)
       if (!existing) await this.audit(tx, command.kind, { kind: 'session', id }, actor)
@@ -1144,13 +1141,8 @@ export class ServerService {
         }
         await tx.cache.deleteSessionHistory(session.id)
         const deleteAuthority = actor ?? session.ownerId
-        if (this.commandSigning && deleteAuthority) {
-          const user = await tx.identity.getUser(deleteAuthority)
-          if (user && (user.status ?? 'active') === 'active') {
-            const authorization = await issueCommandAssertion(tx, this.commandSigning, deleteAuthority, { commandId: `session-delete:${session.id}` as CommandId, command: { kind: 'session.delete', sessionId: session.id }, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) })
-            await this.command(tx, session.binding.agent.workerId, { kind: 'session.delete', sessionId: session.id }, `session-delete:${session.id}` as CommandId, authorization)
-          } else await this.command(tx, session.binding.agent.workerId, { kind: 'session.delete', sessionId: session.id }, `session-delete:${session.id}` as CommandId)
-        } else await this.command(tx, session.binding.agent.workerId, { kind: 'session.delete', sessionId: session.id }, `session-delete:${session.id}` as CommandId)
+        const authorization = await issueReducingCommandAssertion(tx, this.commandSigning, deleteAuthority, { commandId: `session-delete:${session.id}` as CommandId, command: { kind: 'session.delete', sessionId: session.id }, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) })
+        await this.command(tx, session.binding.agent.workerId, { kind: 'session.delete', sessionId: session.id }, `session-delete:${session.id}` as CommandId, authorization)
       }
       else {
         await this.getWorkspace(id as WorkspaceId, tx.resources)
