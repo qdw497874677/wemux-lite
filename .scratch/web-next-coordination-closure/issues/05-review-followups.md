@@ -22,7 +22,7 @@ Blocked by: 无（02 已 done；本票是 integration/web-next-coordination-clos
 - [ ] 手机视口两阶段上传 E2E 退出码记录入库
 - [ ] 附件投递失败后的用户路径明确（重投或引导重建），E2E 断言
 - [ ] coordination-command-transport e2e 连续多次首跑稳定或抖动有检测与重试
-- [ ] apps/web 全量测试在本机可运行且通过（无硬编码绝对路径）
+- [x] apps/web 全量测试在本机可运行且通过（无硬编码绝对路径）
 - [ ] 第 6 项重构若实施：行为不变，全量套件绿
 
 ## Comments

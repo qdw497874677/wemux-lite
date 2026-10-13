@@ -2,9 +2,10 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { build } from 'esbuild'
 import { createServer } from 'node:http'
-import { chromium } from '/opt/data/.npm/_npx/9833c18b2d85bc59/node_modules/playwright/index.mjs'
+import { loadChromium } from './browser-env.mjs'
 
 test('Base UI dialog and popover coexist with Radix dialog and AI Elements', async () => {
+  const { chromium, executablePath } = await loadChromium()
   const bundle = await build({
     entryPoints: [new URL('./base-ui-coexistence-rendered.tsx', import.meta.url).pathname],
     bundle: true,
@@ -17,7 +18,7 @@ test('Base UI dialog and popover coexist with Radix dialog and AI Elements', asy
     res.end(req.url === '/test.js' ? bundle.outputFiles[0].text : '<div id="root"></div><script src="/test.js"></script>')
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
-  const browser = await chromium.launch({ headless: true, executablePath: '/opt/data/.cache/ms-playwright/chromium-1243/chrome-linux64/chrome' })
+  const browser = await chromium.launch({ headless: true, executablePath })
   try {
     const page = await browser.newPage()
     await page.goto(`http://127.0.0.1:${server.address().port}`)
