@@ -3,6 +3,8 @@
 Status: needs-triage
 Blocked by: 无（02 已 done；本票是 integration/web-next-coordination-closure 全量 review 后的遗留项收敛，非功能门）。
 
+**优先级（2026-10-12 主会话排定）：** 第 1、2、5 项现在做（断言过期补签是可用性/诚实性缺口；手机上传 E2E 与 apps/web 环境修复便宜且解除本机验证阻塞）；第 3、4 项挂起（症状偶发/可绕）；第 6 项机会性处理不单开门。
+
 **来源:** 2026-10-12 integration 分支双轴 code-review（Standards + Spec）。P0/P1 级发现（`commandAuthority` 未接线导致停用账号停不掉在跑 Turn、v3 审批刷新 409、验收文档失实）由 t02-review-fixes 分支即时修复，不入本票；本票只收推迟项。
 
 **What to build / verify:**
