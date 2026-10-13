@@ -20,7 +20,7 @@ Blocked by: 无（02 已 done；本票是 integration/web-next-coordination-clos
 
 - [x] 长离线（>5 分钟）场景有明确终态：补签后正常投递，或用户可见的诚实失败与恢复路径，UI 文案与行为一致
 - [x] 手机视口两阶段上传 E2E 退出码记录入库（2026-10-12 `t05-mobile-upload-e2e` 新增 `apps/e2e/team-coordination-attachments-mobile.mjs`：playwright-core 真实 Chromium 手机视口 390×844（isMobile/hasTouch）走完整两阶段上传——选文件 → 阶段一 Server 有界收件 + 协调 Task/Session 原子绑定 + Worker 离线「待投递/恢复后自动继续」如实呈现 + 不虚构首条消息 → 阶段二 Worker 重启后 UI 轮询翻转为「已投递」且工作区落盘 sha256 字节精确 → 同一手机会话 read-file 回显 sha256/size → 刷新恢复同一 Task 历史；裸跑（缺 env）exit 1 by design；同候选连续两次 exit 0，merge main tip（6deb365）后复跑仍 exit 0，原始 JSON 日志在 `/var/tmp/wemux-t05b-evidence/attachments-mobile-run{1,2,3-merged}.log`，不入库）
-- [ ] 附件投递失败后的用户路径明确（重投或引导重建），E2E 断言
+- [x] 附件投递失败后的用户路径明确（引导重建，不重投），E2E 断言（2026-10-14 `t05-attachment-retry`：失败意图重放只回放失败记录不复活；同文件新 requestId 重传畅通且端到端落盘成功，失败历史保留；UI 明确引导 + 一键「原文件重新上传（新请求）」，组件浏览器用例与 e2e 断言见 Comments）
 - [ ] coordination-command-transport e2e 连续多次首跑稳定或抖动有检测与重试
 - [x] apps/web 全量测试在本机可运行且通过（无硬编码绝对路径）
 - [ ] 第 6 项重构若实施：行为不变，全量套件绿
@@ -34,3 +34,11 @@ Blocked by: 无（02 已 done；本票是 integration/web-next-coordination-clos
 UI：`TeamCoordination.tsx` 文案改为“Worker 当前离线，恢复后自动续签投递；账号或权限失效时会改为失败并显示原因”，组件浏览器验收同步更新断言。文档：`docs/acceptance/command-frame-authorization.md` 已知限制一节改写为补签后的真实行为。
 
 验收证据（本机，日志退出码在 `/var/tmp/t05-*.log`）：红→绿 `apps/server/src/test/command-assertion-refresh.test.ts` 9/9（重签身份保持、窗口内不重复签发；主体停用/Worker 撤销/会话删除负例；篡改不洗白；turn.stop 主体停用 fail-closed；审批通道回归；传输层屏障与原位替换单测；真实 WS 重连重签投递；已发送未处理帧原位替换重投；拒绝后终态回执落库）。全量 `@wemux/server` / `@wemux/worker` 套件绿；`npm run build:packages` / `npm run typecheck` 0 错误；组件浏览器验收 `TeamCoordinationAttachments.test.mjs` 1/1、`TeamCoordination.test.mjs` 1/1。
+
+### 2026-10-14 第 3 项：投递失败后的重试语义（分支 `t05-attachment-retry`，选引导重建）
+
+设计决策：选 b 引导重建，不提供重投。理由：(1) 上传创建的 Session 零内容（不虚构首条消息），重投能保留的东西为空；新 requestId 重传 = 同协调 Task 下新空 Session，零损失。(2) 现实失败以永久性为主（Worker 撤销、session.create 被拒致 Session 在 Worker 上不存在），重投命令根本无法覆盖，必须新会话/换环境。(3) 同 commandId 重投需洗白终态 rejected 命令（command() 对已有 rejection 抛 409），违反 command-frame-authorization 语义；新 commandId 重投诚实但严格劣于重传（服务面新增端点/命令面，收益为空）。(4) 新 requestId 重传路径服务端已具备（内容寻址 blob 去重、协调 Task 复用），真实缺口只在 UI 引导。
+
+改动：`TeamCoordination.tsx` 投递失败态新增引导文案（`data-attachment-guidance="failed"`）+ 一键「原文件重新上传（新请求）」按钮（保留阶段一成功的 File，新 requestId=randomId()，不重放失败意图；环境失效时按钮不可用，用户改选下拉中仍在线的环境，与 taskSessionOptions 只列可用环境的诚实口径一致）。
+
+验收证据（本机，日志在 `/var/tmp/t06a-*.log`）：红→绿组件浏览器用例 `apps/web-next/src/components/__tests__/TeamCoordinationAttachments.test.mjs`（失败引导呈现、一键重传用新 requestId 且复用原文件、终态后引导与按钮消失）；server 契约锁定用例 `apps/server/src/test/team-coordination-attachments.test.ts`「投递失败后的重建路径」（旧意图重放只回放失败记录、新 requestId 同文件重传创建独立新投递且失败历史不改写）；真实整链 `node --import tsx apps/e2e/team-coordination-attachments.mjs` exit 0：撤权失败后注册第二个 Worker + 新工作区，同文件新 requestId 重传端到端 delivered 且落盘 sha256 一致，失败附件保持 failed。全量复验见分支提交记录。

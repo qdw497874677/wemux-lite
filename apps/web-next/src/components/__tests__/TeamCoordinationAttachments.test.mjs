@@ -126,6 +126,21 @@ test('Team coordination attachment upload gates on declared capability and repor
     await page.locator('[data-attachment-state="failed"]').waitFor()
     await page.getByText(/失败（工作节点已撤销授权，附件无法投递）/) .waitFor()
 
+    // 失败后的用户路径：明确引导重建（不重放旧意图），并提供一键新请求重传同一文件。
+    await page.locator('[data-attachment-guidance="failed"]').waitFor()
+    await page.getByText(/请用新请求重新上传/).waitFor()
+    const retryUpload = page.getByRole('button', { name: '原文件重新上传（新请求）' })
+    assert.equal(await retryUpload.isDisabled(), false)
+    await page.evaluate(() => { window.deliveryState = 'pending'; window.deliveryDetail = null })
+    await retryUpload.click()
+    await page.waitForFunction(() => window.uploads.length >= 3)
+    const rebuild = (await page.evaluate(() => window.uploads))[2]
+    assert.notEqual(rebuild.requestId, (await page.evaluate(() => window.uploads))[1].requestId, '重建必须用新请求，不重放失败意图')
+    assert.equal(rebuild.name, '笔记.txt', '一键重建复用原文件，免重新选文件')
+    assert.equal(rebuild.size, Buffer.byteLength('附件原始字节 hello 附件\n'))
+    assert.equal(rebuild.workspaceId, 'workspace-1')
+    await page.locator('[data-attachment-state="pending"]').waitFor()
+
     // 再次上传：新一轮两阶段跟踪，恢复后翻转为已投递。
     await page.evaluate(() => { window.workerOnline = true; window.deliveryState = 'pending'; window.deliveryDetail = null })
     await fileInput.setInputFiles({ name: '第二次.txt', mimeType: 'text/plain', buffer: Buffer.from('second attachment bytes') })
@@ -134,6 +149,9 @@ test('Team coordination attachment upload gates on declared capability and repor
     await page.evaluate(() => { window.deliveryState = 'delivered' })
     await page.locator('[data-attachment-state="delivered"]').waitFor()
     await page.getByText('已投递').waitFor()
+    // 终态已投递后不再呈现失败引导与重传入口。
+    assert.equal(await page.locator('[data-attachment-guidance="failed"]').count(), 0)
+    assert.equal(await retryUpload.count(), 0)
     assert.deepEqual(errors, [])
   } finally { await browser?.close(); server.close() }
 })

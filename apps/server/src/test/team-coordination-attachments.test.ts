@@ -207,6 +207,43 @@ test('事务失败不留孤儿：Session/Task/附件记录一起回滚', async (
   } finally { await f.close() }
 })
 
+test('投递失败后的重建路径：新 requestId 重传畅通且独立，旧意图重放只回放失败记录', async () => {
+  const f = await fixture()
+  try {
+    const first = await f.upload({ ...f.request })
+    assert.equal(first.status, 201)
+    const failedCommandId = first.data.attachment.delivery.commandId as CommandId
+    await f.app.store.transaction(tx => tx.commands.recordReceipt({ commandId: failedCommandId, status: 'rejected', error: { code: 'invalid-state', message: 'workspace placement is not ready', retryable: false } }, at))
+    const failedView = await f.call(`/teams/default-team/coordination/attachments/${first.data.attachment.id}`, undefined, contributor)
+    assert.equal(failedView.data.attachment.delivery.state, 'failed')
+
+    // 旧 requestId 重放：诚实回放失败 Session，不复活投递（UI 必须引导换新上传而不是重放）。
+    const replay = await f.upload({ ...f.request })
+    assert.equal(replay.status, 201)
+    assert.equal(replay.data.created, false)
+    assert.equal(replay.data.session.id, first.data.session.id)
+    assert.equal(replay.data.attachment.delivery.state, 'failed')
+
+    // 同文件新 requestId：重传路径畅通，同一协调 Task 下新 Session 与新投递命令，失败历史保留。
+    const rebuild = await f.upload({ ...f.request, requestId: 'upload-rebuild' })
+    assert.equal(rebuild.status, 201, JSON.stringify(rebuild.data))
+    assert.equal(rebuild.data.created, true)
+    assert.notEqual(rebuild.data.session.id, first.data.session.id)
+    assert.equal(rebuild.data.session.taskId, first.data.session.taskId, '同协调 Task 下重建会话')
+    assert.notEqual(rebuild.data.attachment.delivery.commandId, failedCommandId)
+    assert.equal(rebuild.data.attachment.delivery.state, 'pending', '新投递从待投递开始')
+    assert.equal(rebuild.data.attachment.sha256, first.data.attachment.sha256, '同文件内容寻址复用')
+    assert.notEqual(rebuild.data.attachment.id, first.data.attachment.id)
+
+    // 新投递成功后：新附件已投递，旧附件仍如实保持失败。
+    await f.app.store.transaction(tx => tx.commands.recordReceipt({ commandId: rebuild.data.attachment.delivery.commandId as CommandId, status: 'accepted' }, at))
+    const rebuiltView = await f.call(`/teams/default-team/coordination/attachments/${rebuild.data.attachment.id}`, undefined, contributor)
+    assert.equal(rebuiltView.data.attachment.delivery.state, 'delivered')
+    const stillFailed = await f.call(`/teams/default-team/coordination/attachments/${first.data.attachment.id}`, undefined, contributor)
+    assert.equal(stillFailed.data.attachment.delivery.state, 'failed', '失败历史不被重传改写')
+  } finally { await f.close() }
+})
+
 test('HTTP 边界：超限 413、类型不符 400、缺文件 400、非成员视图 404', async () => {
   const f = await fixture()
   try {
