@@ -15,7 +15,7 @@ import { buildCommandAssertionClaims, connectorAssertionScope, issueCommandAsser
 import type { AgentKey, ApprovalId, CommandId, EventSeq, Id, MessageId, ModelId, ProjectId, RuntimeOperationId, SessionId, TeamId, Timestamp, TurnId, UserId, WorkerId, WorkspaceId } from '@wemux/domain'
 import type { AuditResource, CommandProjection, Project, Session, Worker, Workspace, WorkspacePlacement } from '@wemux/server-domain'
 import type { WorkerCommand } from '@wemux/wire-protocol'
-import { assertionScopeMatches, assertionVersionAccepted, requiresCommandAssertion } from '@wemux/wire-protocol/command-assertion'
+import { assertionScopeMatches, assertionVersionAccepted, commandActorBinding, requiresCommandAssertion } from '@wemux/wire-protocol/command-assertion'
 import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
 import { AppError, requireValue } from './errors.ts'
 import { hashSecret } from './auth.ts'
@@ -106,7 +106,7 @@ export class ServerService {
         // replay may repair transport ordering, but must not authorize native work
         // on a Worker whose local command record has disappeared.
         if (projection?.status !== 'pending' && (kind === 'runtime.approval.resolve' || projection?.status !== 'accepted')) return { allowed: false }
-        const actorField = kind === 'session.enqueue' ? pending.command.message.sentByAccountId : kind === 'runtime.approval.resolve' ? pending.command.decidedByAccountId : claims.actorId
+        const binding = commandActorBinding(pending.command), actorField = binding.named ? binding.accountId : claims.actorId
         if (claims.commandId !== commandId || claims.workerId !== workerId || !assertionScopeMatches(claims, pending.command) || (claims.version >= 2 && claims.kind !== kind) || claims.actorId !== actorField || claims.commandDigest !== createHash('sha256').update(JSON.stringify(pending.command)).digest('hex')) return { allowed: false }
         const actor = await tx.identity.getUser(claims.actorId)
         if (!actor || (actor.status ?? 'active') !== 'active' || (actor.authVersion ?? 0) !== claims.actorAuthVersion) return { allowed: false }
@@ -203,7 +203,7 @@ export class ServerService {
       if (old.kind !== current.command.kind || old.keyId !== this.commandSigning!.keyId || old.commandId !== commandId || old.workerId !== workerId || !requiresCommandAssertion(current.command.kind)) return false
       const digest = createHash('sha256').update(JSON.stringify(current.command)).digest('hex')
       if (old.commandDigest !== digest) return false
-      const actorField = current.command.kind === 'session.enqueue' ? current.command.message.sentByAccountId : old.actorId
+      const binding = commandActorBinding(current.command), actorField = binding.named ? binding.accountId : old.actorId
       if (old.actorId !== actorField) return false
       const actor = await tx.identity.getUser(old.actorId)
       if (!actor || (actor.status ?? 'active') !== 'active' || (actor.authVersion ?? 0) !== old.actorAuthVersion) return false
