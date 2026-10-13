@@ -165,6 +165,34 @@ export class ServerService {
       return true
     })
   }
+  /** Called at a bounded delivery wakeup for every assertion-required command kind.
+   * Approvals keep their dedicated path; other kinds re-sign only when the original
+   * subject can still act (actor active, current grant checks pass, worker not revoked)
+   * and only the signing window changes. Denials keep the stale assertion so the
+   * Worker terminal-rejects honestly instead of laundering expired authority. */
+  async refreshPendingCommandAuthorization(workerId: WorkerId, commandId: CommandId): Promise<boolean> {
+    const pending = await this.store.commands.getPendingCommand(commandId)
+    if (!pending?.authorization || pending.workerId !== workerId) return false
+    if (pending.command.kind === 'runtime.approval.resolve') return this.refreshPendingApproval(workerId, commandId)
+    if (!this.commandSigning || !(await this.authorizeEnqueueLaunch(workerId, commandId)).allowed) return false
+    return this.store.transaction(async tx => {
+      const current = await tx.commands.getPendingCommand(commandId)
+      if (!current?.authorization || current.workerId !== workerId || (await tx.commands.get(commandId))?.status !== 'pending') return false
+      if (!this.commandSigning!.verify(current.authorization)) return false
+      const old = current.authorization.claims
+      if (old.kind !== current.command.kind || old.keyId !== this.commandSigning!.keyId || old.commandId !== commandId || old.workerId !== workerId || !requiresCommandAssertion(current.command.kind)) return false
+      const digest = createHash('sha256').update(JSON.stringify(current.command)).digest('hex')
+      if (old.commandDigest !== digest) return false
+      const actorField = current.command.kind === 'session.enqueue' ? current.command.message.sentByAccountId : old.actorId
+      if (old.actorId !== actorField) return false
+      const actor = await tx.identity.getUser(old.actorId)
+      if (!actor || (actor.status ?? 'active') !== 'active' || (actor.authVersion ?? 0) !== old.actorAuthVersion) return false
+      if ((await tx.resources.getWorker(workerId))?.connectionState === 'revoked') return false
+      if (Date.parse(old.expiresAt) > Date.now() + 30_000) return true
+      await tx.commands.refreshCommandAuthorization(commandId, this.commandSigning!.sign({ ...old, issuedAt: now(), expiresAt: new Date(Date.now() + 5 * 60_000).toISOString() }))
+      return true
+    })
+  }
   async listCommands(input: { workerId?: string; status?: string; limit?: number }) {
     const statuses: readonly CommandProjection['status'][] = ['pending', 'accepted', 'rejected', 'completed', 'failed', 'cancelled']
     const status = input.status === undefined ? undefined : statuses.find(value => value === input.status)

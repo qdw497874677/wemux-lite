@@ -18,7 +18,7 @@ Blocked by: 无（02 已 done；本票是 integration/web-next-coordination-clos
 
 ## 验收
 
-- [ ] 长离线（>5 分钟）场景有明确终态：补签后正常投递，或用户可见的诚实失败与恢复路径，UI 文案与行为一致
+- [x] 长离线（>5 分钟）场景有明确终态：补签后正常投递，或用户可见的诚实失败与恢复路径，UI 文案与行为一致
 - [ ] 手机视口两阶段上传 E2E 退出码记录入库
 - [ ] 附件投递失败后的用户路径明确（重投或引导重建），E2E 断言
 - [ ] coordination-command-transport e2e 连续多次首跑稳定或抖动有检测与重试
@@ -26,3 +26,11 @@ Blocked by: 无（02 已 done；本票是 integration/web-next-coordination-clos
 - [ ] 第 6 项重构若实施：行为不变，全量套件绿
 
 ## Comments
+
+### 2026-10-13 第 1 项：断言过期补签（分支 `t05-resign`，TDD 红→绿）
+
+设计取向：服务端补签而非降级。新增 `ServerService.refreshPendingCommandAuthorization`：先走 `authorizeEnqueueLaunch` 在线复核（主体 active 且 authVersion 一致、会话/工作区权限仍满足、Worker 未撤销、摘要与受众一致），通过后以原领域身份重签（同 commandId，仅更新 issuedAt/expiresAt）；存储层新增 `refreshCommandAuthorization`（拒绝任何身份字段变动，签名不可洗白）。网关在有界投递唤醒与重放阶段对过期非审批命令帧先补签再投递；已发送未被 Worker 处理的过期帧原位替换（同 directionSeq/messageId）；重签被拒时按原始字节投递，由 Worker 终态拒收（诚实失败，拒绝后果沿用票据 02 语义）。审批命令保持原 `refreshPendingApproval` 通道不变。撤销类 `turn.stop` 重签同样要求操作主体仍 active，主体停用即 fail-closed（残余：已排队 Turn 不被截停，已在验收文档写明）。无 ACK 驱动的重签，无忙循环风险。
+
+UI：`TeamCoordination.tsx` 文案改为“Worker 当前离线，恢复后自动续签投递；账号或权限失效时会改为失败并显示原因”，组件浏览器验收同步更新断言。文档：`docs/acceptance/command-frame-authorization.md` 已知限制一节改写为补签后的真实行为。
+
+验收证据（本机，日志退出码在 `/var/tmp/t05-*.log`）：红→绿 `apps/server/src/test/command-assertion-refresh.test.ts` 9/9（重签身份保持、窗口内不重复签发；主体停用/Worker 撤销/会话删除负例；篡改不洗白；turn.stop 主体停用 fail-closed；审批通道回归；传输层屏障与原位替换单测；真实 WS 重连重签投递；已发送未处理帧原位替换重投；拒绝后终态回执落库）。全量 `@wemux/server` / `@wemux/worker` 套件绿；`npm run build:packages` / `npm run typecheck` 0 错误；组件浏览器验收 `TeamCoordinationAttachments.test.mjs` 1/1、`TeamCoordination.test.mjs` 1/1。

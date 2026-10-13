@@ -53,17 +53,18 @@ Review 修复后复跑（基线 `893061f`，`t02-review-fixes`）：
 - 新增用例：`TMPDIR=/var/tmp node --import tsx --test apps/server/src/test/account-revocation-signing.test.ts` 2/2；`apps/server/src/test/ticket06-evidence.test.ts` 12/12（含新增 v3 刷新用例）；`apps/server/src/test/task-runs.test.ts` 126/126（含新增未签名取消用例）。三个修复均先在未修复代码上观察到红（断言缺失、`Approval authorization identity changed`、`UNIQUE constraint failed: commands.id`）。
 - 全量：`npm run build:packages` 0 错误；`npm run typecheck` 0 错误（全部 workspace）；`@wemux/worker` 532 tests / 527 pass / 5 skipped（本机环境相关的既有跳过项）/ 0 fail；`@wemux/server` 968 tests / 968 pass / 0 fail（新增 4 条用例后的全量）。
 
-## 已知限制（断言 5 分钟有效期，Worker 离线）
+## 已知限制（断言 5 分钟有效期，Worker 离线；2026-10-13 票据 05 第 1 项更新）
 
-行为核查（未改动实现，票据声明范围外）：
+原版本节记录的行为已在票据 05 第 1 项部分修正：pending 命令的断言过期现在有补签路径，终态语义不变。当前行为：
 
-- 有效期窗口：签发时 `ASSERTION_WINDOW_MS` 5 分钟，Worker 验证为 `SIGNATURE_WINDOW_MS` 5 分钟加 `CLOCK_SKEW_MS` 30 秒。
-- 只有 `runtime.approval.resolve` 有重签路径：`refreshPendingApproval` 在有界投递唤醒时按原身份重签（网关重试退避 2 秒起步上限 30 秒）。其余类型无补签机制。
-- 首次收帧时断言已过期：终态拒收回执（`retryable: false`，通用文案 `Command authorization unavailable`），原因码 `authorization_expired` 经 `appendAuthorizationDenial` 持久化，无本地副作用。已收帧落地过回执的记录按启动语义复验，容忍过期窗口（仅复验签名与身份，不新增副作用）。
-- Server 侧收到拒绝回执后的后果（无自动重发，均为终态）：`session.enqueue` 拒绝则消息出队并通知会话，用户重发走新 commandId 新断言；Run 创建命令拒绝则 Run 置 failed，后续 enqueue 一并取消；Run 取消命令拒绝则 Run 记 `cancel_rejected` 失败，可显式重试（新 commandId）；`workspace.provision` 拒绝则放置置 failed，重试走新命令。
-- 撤销类 `turn.stop` 断言过期（Worker 离线超过窗口）：停止命令终态拒绝，Turn 继续跑到自然结束；停用本身幂等（按状态判定，命令行已存在且为 rejected，不再重发）；账号停用本身仍生效（登录/新命令被拒），残余风险仅是已排队的 Turn 不被截停。独立会话的 `session.create` 过期后拒绝，会话在 Server 有行而 Worker 无实现，后续 enqueue 在 Worker 校验 `Session not found`，该会话永久不可用（规避：新建会话）。
-- 旧命令补签/重签不在本票范围，另开后续票据处理。
+- 有效期窗口：签发时 `ASSERTION_WINDOW_MS` 5 分钟，Worker 验证为 `SIGNATURE_WINDOW_MS` 5 分钟加 `CLOCK_SKEW_MS` 30 秒。窗口剩余超过 30 秒时不会无谓重签。
+- 补签路径：除既有 `runtime.approval.resolve`（`refreshPendingApproval`，行为不变）外，其余全部需断言类型的 pending 命令现在也有重签：`ServerService.refreshPendingCommandAuthorization` 在有界投递唤醒（hello/重连/新命令/应用层收据，不含纯传输 ACK）与重放阶段先走 `authorizeEnqueueLaunch` 在线复核（主体 active 且 authVersion 一致、会话/工作区权限仍满足、Worker 未撤销、摘要与受众一致），通过后以原领域身份重签（同 commandId，仅更新 issuedAt/expiresAt；存储层 `refreshCommandAuthorization` 拒绝任何其他字段变动，签名不匹配不可洗白）。重放阶段对已发送但未被 Worker 处理的过期帧做原位替换（同 directionSeq/messageId，Worker 按序号去重）；`pending()` 在不含过期帧的读取路径（`gateway.send` 直发）对过期命令帧设屏障。测试 `apps/server/src/test/command-assertion-refresh.test.ts` 9/9（集成重签投递、主体停用/Worker 撤销/会话删除负例、替换后重投、拒绝后终态回执落库）。
+- 重签被拒（主体停用、权限丧失如会话已删除、Worker 已撤销、验签不通过）：不重签，按原始字节投递，Worker 终态拒收（`retryable: false`，通用文案 `Command authorization unavailable`），原因码 `authorization_expired` 经 `appendAuthorizationDenial` 持久化，无本地副作用。Server 侧收到拒绝回执后的后果不变（均为终态）：`session.enqueue` 拒绝则消息出队并通知会话，用户重发走新 commandId 新断言；Run 创建命令拒绝则 Run 置 failed，后续 enqueue 一并取消；Run 取消命令拒绝则 Run 记 `cancel_rejected` 失败，可显式重试（新 commandId）；`workspace.provision` 拒绝则放置置 failed，重试走新命令。
+- 撤销类 `turn.stop`：重签同样要求操作主体仍 active；主体已停用时保持 fail-closed（终态拒绝，Turn 继续跑到自然结束；停用本身幂等，按状态判定，命令行已存在且为 rejected 不再重发；账号停用本身仍生效，登录/新命令被拒），残余风险仅是已排队的 Turn 不被截停。
+- 会话不再有“断言过期即永久不可用”：`session.create` 过期后经重签正常投递即可用；仅当重签条件（主体/权限/Worker）不再满足时按诚实失败终止。
+- 首次收帧时断言已过期且重签同样被拒的终态语义同上一条；已收帧落地过回执的记录按启动语义复验，容忍过期窗口（仅复验签名与身份，不新增副作用）。
+- 历史已终态的旧命令（此前版本已拒绝入库的）不做补签迁移，仍按终态处理；本票只针对 pending 命令。
 
 ## 范围外（未做，票据亦声明）
 
-生产混合版本升级、旧命令补签/迁移、旧备份显式对账、密钥轮换与防回滚、操作员解除流程；`workspace.delete` 仍不支持（保留拒绝）。撤销类停止命令（成员撤销、账号停用）不做主体在线复核（turn.stop 在 Worker 无 authorizeLaunch 回查，仅验签与窗口），签名主体为操作主体；无活跃签发主体或无签名能力时降为不签名，不签名帧不投递且 Worker 拒收。断言过期的离线重签路径见“已知限制”，另开后续票据。
+生产混合版本升级、历史终态命令补签/迁移、旧备份显式对账、密钥轮换与防回滚、操作员解除流程；`workspace.delete` 仍不支持（保留拒绝）。撤销类停止命令（成员撤销、账号停用）不做主体在线复核（turn.stop 在 Worker 无 authorizeLaunch 回查，仅验签与窗口），签名主体为操作主体；无活跃签发主体或无签名能力时降为不签名，不签名帧不投递且 Worker 拒收。断言过期的离线重签路径见“已知限制”（票据 05 第 1 项已实现 pending 命令重签）。

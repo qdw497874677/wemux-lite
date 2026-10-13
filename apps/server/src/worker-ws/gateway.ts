@@ -3,6 +3,7 @@ import type { Server } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { WebSocket, WebSocketServer } from 'ws'
 import type { WorkerId } from '@wemux/domain'
+import { requiresCommandAssertion } from '@wemux/wire-protocol/command-assertion'
 import { FS_WRITE_ADMISSION_V1, isFileWriteAdmissionType, supportsFileWriteAdmission, parseWorkerTransportFrame, type ServerPayload, type ServerToWorkerFrame, type WorkerHelloFrame } from '@wemux/wire-protocol'
 import { parseVerifiedWorkerFileWriteFrame } from '@wemux/wire-protocol/file-admission-node'
 import { FileWriteResultUnavailableError, fileWriteWireAdmission } from '../application/file-write-results.ts'
@@ -90,6 +91,12 @@ export class WorkerGateway {
             const updated = (await this.service.deliverable(workerId)).find(item => item.type === 'command' && item.commandId === command.commandId)
             if (updated) this.transport.enqueue(workerId, updated)
             retryApproval(command.commandId)
+          } else if (command.type === 'command' && command.authorization && requiresCommandAssertion(command.command.kind)) {
+            // 在线重授权：投递唤醒时窗口已过期的断言按当前主体权限重签，只换窗口不换身份。
+            // 主体已停用、权限不再满足或 Worker 已撤销时按原样投递，由 Worker 终态拒收（诚实失败）。
+            if (!(this.approvals && await this.approvals.refreshPendingCommandAuthorization(workerId, command.commandId))) { this.transport.enqueue(workerId, command); continue }
+            const updated = (await this.service.deliverable(workerId)).find(item => item.type === 'command' && item.commandId === command.commandId)
+            this.transport.enqueue(workerId, updated ?? command)
           } else this.transport.enqueue(workerId, command)
         }
         if (!current()) return
@@ -131,6 +138,21 @@ export class WorkerGateway {
               break
             }
             retryApproval(approvalId)
+          }
+          // 非审批命令的过期断言：重签成功则原位替换后重发（同序列同 messageId，Worker 按序号去重）；
+          // 重签被拒（主体停用/权限丧失/Worker 撤销）时按原始字节重发，由 Worker 终态拒收。
+          if (frame.payload.type === 'command' && requiresCommandAssertion(frame.payload.command.kind) && frame.payload.authorization) {
+            const staleId = frame.payload.commandId
+            const expiresAt = Date.parse(frame.payload.authorization.claims.expiresAt)
+            if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+              if (this.approvals && await this.approvals.refreshPendingCommandAuthorization(workerId, staleId)) {
+                const updated = (await this.service.deliverable(workerId)).find(item => item.type === 'command' && item.commandId === staleId)
+                if (updated && JSON.stringify(updated) !== JSON.stringify(frame.payload) && this.transport.refreshStaleCommand(workerId, frame, updated)) {
+                  send({ ...frame, payload: updated }); this.transport.sent(workerId, frame)
+                  continue
+                }
+              }
+            }
           }
           send(frame); this.transport.sent(workerId, frame)
         }

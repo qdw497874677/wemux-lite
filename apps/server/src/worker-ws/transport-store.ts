@@ -4,6 +4,7 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import type { MessageId, Timestamp, WorkerId } from '@wemux/domain'
+import { requiresCommandAssertion } from '@wemux/wire-protocol/command-assertion'
 import type {
   FileWriteResultAckPayload,
   FileWriteResultPayload,
@@ -143,6 +144,17 @@ export class ServerTransportStore {
     return result.changes === 1
   }
 
+  /** Replace a stale non-approval command frame in place, sent or not, keeping its
+   * sequence and message identity. The Worker dedups by sequence/message id, and a
+   * frame it already processed re-acks without re-executing, so a sent row may adopt
+   * a re-signed window; a frame it never received gets the fresh window on arrival. */
+  refreshStaleCommand(workerId: WorkerId, frame: Extract<ServerDataFrame, { readonly durability: 'durable' }>, payload: ServerPayload): boolean {
+    if (payload.type !== 'command' || payload.command.kind === 'runtime.approval.resolve' || !requiresCommandAssertion(payload.command.kind)) return false
+    if (frame.payload.type !== 'command' || frame.payload.commandId !== payload.commandId || frame.payload.command.kind !== payload.command.kind) return false
+    const result = this.db.prepare('UPDATE transport_outbox SET payload_json=? WHERE worker_id=? AND delivery_epoch=? AND seq=? AND payload_json=?').run(JSON.stringify(payload), workerId, frame.deliveryEpoch, frame.directionSeq, JSON.stringify(frame.payload))
+    return result.changes === 1
+  }
+
   /** A sent frame may be replayed byte-identically to recover a lost transport ACK.
    * The Worker ACKs an expired, otherwise valid signed approval without executing it. */
   sentApproval(workerId: WorkerId, frame: Extract<ServerDataFrame, { readonly durability: 'durable' }>): boolean {
@@ -163,7 +175,8 @@ export class ServerTransportStore {
     for (const row of rows) {
       const payload = JSON.parse(row.payload_json) as ServerPayload
       if (payload.type === 'command' && (payload.command.kind === 'session.enqueue' || payload.command.kind === 'runtime.approval.resolve') && !payload.authorization) break
-      if (!includeExpiredApprovals && payload.type === 'command' && payload.command.kind === 'runtime.approval.resolve' && (!Number.isFinite(Date.parse(payload.authorization!.claims.expiresAt)) || Date.parse(payload.authorization!.claims.expiresAt) <= Date.now())) break
+      if (!includeExpiredApprovals && payload.type === 'command' && requiresCommandAssertion(payload.command.kind) && payload.authorization &&
+        (!Number.isFinite(Date.parse(payload.authorization.claims.expiresAt)) || Date.parse(payload.authorization.claims.expiresAt) <= Date.now())) break
       frames.push({ frameType: 'data', durability: 'durable', deliveryEpoch: epoch, directionSeq: row.seq, messageId: row.message_id as MessageId, lane: 'command', payloadVersion: 'wemux.server.payload.v1', expiresAt: null, payload })
     }
     return frames

@@ -1,5 +1,6 @@
 import { validReviewMetadata } from '@wemux/web-contract/task-platform'
 import { parseFileWriteResult } from '@wemux/wire-protocol/file-admission-node'
+import { requiresCommandAssertion } from '@wemux/wire-protocol/command-assertion'
 import { FileWriteResultRejectedError, validateFileWriteResult, fileWriteWireAdmission, snapshotFileWriteResult } from '../../application/file-write-results.ts'
 import type { FileWriteAdmission } from '../../application/ports/file-write-admission.ts'
 import type { DatabaseSync } from 'node:sqlite'
@@ -656,6 +657,16 @@ export class SqliteServerStore implements ServerStore {
         if (pending.command.kind !== 'runtime.approval.resolve' || !pending.authorization) throw new AppError(409, 'Cannot refresh unsigned or non-approval command')
         const original = pending.authorization.claims, refreshed = authorization.claims
         if ((original.version !== 2 && original.version !== 3) || original.version !== refreshed.version || original.kind !== refreshed.kind || original.keyId !== refreshed.keyId || original.commandId !== refreshed.commandId || original.workerId !== refreshed.workerId || original.sessionId !== refreshed.sessionId || original.projectId !== refreshed.projectId || original.workspaceId !== refreshed.workspaceId || original.taskId !== refreshed.taskId || original.actorId !== refreshed.actorId || original.actorAuthVersion !== refreshed.actorAuthVersion || original.commandDigest !== refreshed.commandDigest) throw new AppError(409, 'Approval authorization identity changed')
+        this.db.prepare("UPDATE commands SET data=? WHERE id=? AND status='pending'").run(JSON.stringify({ ...pending, authorization }), id)
+      },
+      // 与审批重签同构的通用断言重签入口：只允许带断言的非审批命令，身份逐字段比对，仅换窗口。
+      refreshCommandAuthorization: async (id, authorization) => {
+        const row = this.db.prepare("SELECT data FROM commands WHERE id=? AND status='pending'").get(id)
+        if (!row) throw new AppError(409, 'Command is no longer pending')
+        const pending = JSON.parse(String(row.data)) as PendingCommand
+        if (pending.command.kind === 'runtime.approval.resolve' || !pending.authorization || !requiresCommandAssertion(pending.command.kind)) throw new AppError(409, 'Cannot refresh approval-kind, unsigned or non-command authorization')
+        const original = pending.authorization.claims, refreshed = authorization.claims
+        if (original.version !== refreshed.version || original.kind !== refreshed.kind || original.keyId !== refreshed.keyId || original.commandId !== refreshed.commandId || original.workerId !== refreshed.workerId || original.sessionId !== refreshed.sessionId || original.projectId !== refreshed.projectId || original.workspaceId !== refreshed.workspaceId || original.taskId !== refreshed.taskId || original.actorId !== refreshed.actorId || original.actorAuthVersion !== refreshed.actorAuthVersion || original.commandDigest !== refreshed.commandDigest) throw new AppError(409, 'Command authorization identity changed')
         this.db.prepare("UPDATE commands SET data=? WHERE id=? AND status='pending'").run(JSON.stringify({ ...pending, authorization }), id)
       },
       recordReceipt: async (receipt, at) => {
