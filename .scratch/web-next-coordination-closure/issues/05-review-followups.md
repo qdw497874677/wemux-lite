@@ -19,7 +19,7 @@ Blocked by: 无（02 已 done；本票是 integration/web-next-coordination-clos
 ## 验收
 
 - [ ] 长离线（>5 分钟）场景有明确终态：补签后正常投递，或用户可见的诚实失败与恢复路径，UI 文案与行为一致
-- [ ] 手机视口两阶段上传 E2E 退出码记录入库
+- [x] 手机视口两阶段上传 E2E 退出码记录入库（2026-10-12 `t05-mobile-upload-e2e` 新增 `apps/e2e/team-coordination-attachments-mobile.mjs`：playwright-core 真实 Chromium 手机视口 390×844（isMobile/hasTouch）走完整两阶段上传——选文件 → 阶段一 Server 有界收件 + 协调 Task/Session 原子绑定 + Worker 离线「待投递/恢复后自动继续」如实呈现 + 不虚构首条消息 → 阶段二 Worker 重启后 UI 轮询翻转为「已投递」且工作区落盘 sha256 字节精确 → 同一手机会话 read-file 回显 sha256/size → 刷新恢复同一 Task 历史；裸跑（缺 env）exit 1 by design；同候选连续两次 exit 0，原始 JSON 日志在 `/var/tmp/wemux-t05b-evidence/attachments-mobile-run{1,2}.log`，不入库）
 - [ ] 附件投递失败后的用户路径明确（重投或引导重建），E2E 断言
 - [ ] coordination-command-transport e2e 连续多次首跑稳定或抖动有检测与重试
 - [ ] apps/web 全量测试在本机可运行且通过（无硬编码绝对路径）
