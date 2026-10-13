@@ -119,7 +119,7 @@ test('Team coordination attachment upload gates on declared capability and repor
     // 阶段二轮询：Worker 离线时如实提示，仍在待投递期间持续跟踪。
     await page.evaluate(() => { window.workerOnline = false })
     await page.waitForFunction(() => window.views.length > 0)
-    await page.getByText('Worker 当前离线，恢复后自动继续').waitFor()
+    await page.getByText('Worker 当前离线，恢复后自动续签投递；账号或权限失效时会改为失败并显示原因').waitFor()
 
     // 撤销场景：待投递期间撤权，视图翻转为失败并展示原因，不伪装完成。
     await page.evaluate(() => { window.deliveryState = 'failed'; window.deliveryDetail = '工作节点已撤销授权，附件无法投递' })

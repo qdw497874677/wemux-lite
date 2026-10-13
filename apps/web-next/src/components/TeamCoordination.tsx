@@ -116,7 +116,7 @@ export function TeamCoordination({ api, teamId }: { api: ProjectClient; teamId: 
     {choice && !choice.agentAttachments && <p role="status">所选 Agent 未声明附件读取能力，上传入口未开启。</p>}
     {pendingUpload.current && <p role="status">上次上传结果未知；只能按原附件重试，不能修改文件或切换会话。</p>}
     <Button disabled={uploadBusy || busy || !!pending.current || !choice || !choice.agentAttachments || (!pendingUpload.current && !file)} onClick={() => void upload()}>{pendingUpload.current ? '重试原附件上传' : '上传附件并创建会话'}</Button>
-    {attachment && <p role="status" data-attachment-state={attachment.delivery.state}>附件两阶段：Server 已收件「{attachment.filename}」（{attachment.size} 字节）；投递到 Worker：{attachment.delivery.state === 'pending' ? '待投递' : attachment.delivery.state === 'delivered' ? '已投递' : `失败（${attachment.delivery.detail ?? '原因未知'}）`}{attachment.delivery.state === 'pending' && attachment.delivery.workerConnectionState !== 'online' ? '，Worker 当前离线，恢复后自动继续' : ''}。工作区内路径 {attachment.subpath}。</p>}
+    {attachment && <p role="status" data-attachment-state={attachment.delivery.state}>附件两阶段：Server 已收件「{attachment.filename}」（{attachment.size} 字节）；投递到 Worker：{attachment.delivery.state === 'pending' ? '待投递' : attachment.delivery.state === 'delivered' ? '已投递' : `失败（${attachment.delivery.detail ?? '原因未知'}）`}{attachment.delivery.state === 'pending' && attachment.delivery.workerConnectionState !== 'online' ? '，Worker 当前离线，恢复后自动续签投递；账号或权限失效时会改为失败并显示原因' : ''}。工作区内路径 {attachment.subpath}。</p>}
     {pending.current && <p role="status">上次发送结果未知；只能按原请求重试，不能修改首条消息或切换会话。</p>}
     <Button disabled={busy || (!pending.current && (!choice || !content.trim()))} onClick={() => void send()}>{pending.current ? '重试原首条消息' : '发送并创建会话'}</Button>
     {resources && !options.length && <p role="status">暂无获权且已就绪的工作区与可用 Agent。</p>}

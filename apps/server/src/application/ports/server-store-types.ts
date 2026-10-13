@@ -333,6 +333,8 @@ export interface ServerCommandWriter {
   insertPending(command: PendingCommand): Promise<void>
   /** Replace only the signing window of an unchanged pending approval. */
   refreshApprovalAuthorization(commandId: CommandId, authorization: NonNullable<PendingCommand['authorization']>): Promise<void>
+  /** Replace only the signing window of an unchanged pending non-approval command assertion. */
+  refreshCommandAuthorization(commandId: CommandId, authorization: NonNullable<PendingCommand['authorization']>): Promise<void>
   recordReceipt(receipt: CommandReceipt, recordedAt: Timestamp): Promise<void>
   /** Cancel a still-pending command; resolves false when it is missing or no longer pending. */
   cancelPending(commandId: CommandId, cancelledAt: Timestamp): Promise<boolean>
