@@ -346,7 +346,7 @@ test('post-admission actor revocation denies admission replay but does not disca
     id: f.a.sessionId, projectId, taskId: task.id, runId: null, ownerId: owner, workspaceId: f.a.binding.workspaceId,
     title: 'Fixture', shareScope: 'project', runtimeState: 'idle', deletedAt: null, binding: f.a.binding,
   }))
-  const service = new ServerService(f.store, new Notifications(), undefined, undefined, undefined, new SessionAccessService(f.store, new ProjectAccessService(f.store)))
+  const service = new ServerService(f.store, new Notifications(), { sessionAccess: new SessionAccessService(f.store, new ProjectAccessService(f.store)) })
   const input = { requestId: 'authorized', subpath: f.a.subpath, base64Content: f.a.base64Content }
   const admitted = await service.admitFileWrite(f.a.sessionId, actor, input)
   await f.store.transaction(tx => tx.identity.saveProjectGrant({ projectId, userId: actor, role: 'viewer' }))

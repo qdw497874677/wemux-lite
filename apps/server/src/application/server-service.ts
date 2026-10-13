@@ -57,6 +57,15 @@ export interface ForkTargetSessionInput {
   readonly requestId: string
 }
 
+export interface ServerServiceOptions {
+  readonly capabilities?: CapabilityService
+  readonly workerAccess?: WorkerAccessService
+  readonly projectAccess?: ProjectAccessService
+  readonly sessionAccess?: SessionAccessService
+  readonly commandSigning?: CommandSigningIdentity
+  readonly attachmentBlobs?: ResourceBlobStore
+}
+
 export class ServerService {
   private readonly store: ServerStore
     readonly notifications: Notifications
@@ -64,7 +73,18 @@ export class ServerService {
   private readonly workerAccess?: WorkerAccessService
   private readonly projectAccess?: ProjectAccessService
   private readonly sessionAccess?: SessionAccessService
-  constructor(store: ServerStore, notifications: Notifications, capabilities?: CapabilityService, workerAccess?: WorkerAccessService, projectAccess?: ProjectAccessService, sessionAccess?: SessionAccessService, private readonly commandSigning?: CommandSigningIdentity, private readonly attachmentBlobs?: ResourceBlobStore) { this.store = store; this.notifications = notifications; this.capabilities = capabilities; this.workerAccess = workerAccess; this.projectAccess = projectAccess; this.sessionAccess = sessionAccess;}
+  private readonly commandSigning?: CommandSigningIdentity
+  private readonly attachmentBlobs?: ResourceBlobStore
+  constructor(store: ServerStore, notifications: Notifications, options: ServerServiceOptions = {}) {
+    this.store = store
+    this.notifications = notifications
+    this.capabilities = options.capabilities
+    this.workerAccess = options.workerAccess
+    this.projectAccess = options.projectAccess
+    this.sessionAccess = options.sessionAccess
+    this.commandSigning = options.commandSigning
+    this.attachmentBlobs = options.attachmentBlobs
+  }
   async requireWorkerUseInTx(tx: ServerStoreTx, actor: UserId, workerId: WorkerId) {
     return this.workerAccess ? this.workerAccess.requireInTx(tx, actor, workerId) : requireValue(await tx.resources.getWorker(workerId))
   }

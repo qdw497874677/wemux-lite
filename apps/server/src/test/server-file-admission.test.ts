@@ -20,7 +20,7 @@ import { migrationCount } from '../storage/sqlite/migrations.ts'
 const owner = 'owner' as UserId, member = 'member' as UserId, admin = 'admin' as UserId
 const teamId = 'team' as TeamId, projectId = 'project' as ProjectId, sessionId = 'session' as SessionId
 const input = () => ({ requestId: 'request', subpath: 'folder/file.txt', base64Content: 'YQ==' })
-const makeService = (store: ServerStore) => new ServerService(store, new Notifications(), undefined, undefined, undefined, new SessionAccessService(store, new ProjectAccessService(store)))
+const makeService = (store: ServerStore) => new ServerService(store, new Notifications(), { sessionAccess: new SessionAccessService(store, new ProjectAccessService(store)) })
 const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done }); return { promise, resolve } }
 
 async function fixture() {

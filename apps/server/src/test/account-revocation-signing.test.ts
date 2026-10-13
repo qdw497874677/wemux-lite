@@ -33,7 +33,7 @@ async function fixture() {
   const store = new SqliteServerStore(database)
   const commandSigning = new CommandSigningIdentity(database.connection)
   const signals = new Notifications()
-  const server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning)
+  const server = new ServerService(store, signals, { commandSigning: commandSigning })
   await seedOperator(store, server)
   const { worker } = await server.enroll({ token: (await server.createEnrollment({})).token, name: 'Revocation worker' })
   await store.transaction(tx => tx.resources.saveWorker({ ...worker, connectionState: 'online', capabilities: [{ agentKey: 'test' as AgentKey, displayName: 'Test', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' as ModelId, displayName: 'Model', source: 'configured' }] }] }))
@@ -82,7 +82,7 @@ test('account disable signs the revocation stop with the acting administrator an
   assert.equal(claims.commandDigest, digestOf(pending.command))
   assert.ok(f.commandSigning.verify(pending.authorization!), 'stop assertion verifies against the pinned key')
   // 签名实例的投递过滤不得拦截撤销停止帧（历史回归点）
-  const strict = await new WorkerService(f.store, f.signals, undefined, undefined, null, null, null, true).deliverable(f.worker.id)
+  const strict = await new WorkerService(f.store, f.signals, { signingConfigured: true }).deliverable(f.worker.id)
   assert.ok(strict.some(frame => frame.type === 'command' && frame.commandId === commandId && frame.authorization), 'signed instance delivers the signed stop')
   // 兼容装配（无签名能力）下同一服务仍落未签名停止并照常投递
   const legacyStore = f.store
@@ -104,6 +104,6 @@ test('account deletion request signs its own revocation stop while the account i
   assert.equal(claims.kind, 'turn.stop')
   assert.equal(claims.actorId, f.member.id, 'authority is the requesting account, captured before the status change commits')
   assert.ok(f.commandSigning.verify(pending.authorization!), 'self-deletion stop assertion verifies')
-  const strict = await new WorkerService(f.store, f.signals, undefined, undefined, null, null, null, true).deliverable(f.worker.id)
+  const strict = await new WorkerService(f.store, f.signals, { signingConfigured: true }).deliverable(f.worker.id)
   assert.ok(strict.some(frame => frame.type === 'command' && frame.commandId === commandId), 'signed instance delivers the self-deletion stop')
 })

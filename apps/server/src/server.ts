@@ -156,7 +156,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const capabilities = new CapabilityService(store, now, new CapabilityTokenService(capabilitySecret, now), connectorRepository)
   // 内容寻址收件存储：协调附件阶段一先落盘，阶段二命令投递后再由 Worker 落盘。
   const resourceBlobs = new ResourceBlobStore(options.databasePath === ':memory:' ? join(process.cwd(), 'data', 'resource-blobs') : join(dirname(options.databasePath), 'resource-blobs'))
-  const service = new ServerService(store, notifications, capabilities, workerAccess, projects, sessionAccess, commandSigning, resourceBlobs)
+  const service = new ServerService(store, notifications, { capabilities: capabilities, workerAccess: workerAccess, projectAccess: projects, sessionAccess: sessionAccess, commandSigning: commandSigning, attachmentBlobs: resourceBlobs })
   const delegationRepository = new SqliteDelegationRepository(database)
   const delegations = new DelegationApplicationService(
     delegationRepository,
@@ -201,7 +201,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const channelOutbox = new ChannelOutbox(channelRepository, projects, sessionAccess, workerAccess, store, { deploymentAllowsPrivateNetwork: process.env.WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK === 'true', connectorAllowsPrivateNetwork: true }, options.channelFetch, kind => adapters.get(kind)!)
   const resourceRepository = new SqliteResourceRepository(database)
   let resources: ResourceService
-  const workers = new WorkerService(store, notifications, (workerId, report) => connectors.report(workerId, report), async (sessionId, events) => { await channelOutbox.projectJournal(sessionId, events); setImmediate(() => void channelOutbox.drain().catch(() => undefined)) }, null, resourceBlobs, tx => service.clusterCommandIssuer(tx), true)
+  const workers = new WorkerService(store, notifications, { reportConnector: (workerId, report) => connectors.report(workerId, report), projectJournal: async (sessionId, events) => { await channelOutbox.projectJournal(sessionId, events); setImmediate(() => void channelOutbox.drain().catch(() => undefined)) }, resourceBlobs, issueClusterCommand: tx => service.clusterCommandIssuer(tx), signingConfigured: true })
   const workerGateway = { send: (workerId: import('@wemux/domain').WorkerId, payload: import('@wemux/wire-protocol').ServerPayload) => {
     if (!gateway) throw new Error('Worker gateway is not ready')
     return gateway.send(workerId, payload)

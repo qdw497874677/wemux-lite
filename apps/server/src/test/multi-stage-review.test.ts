@@ -21,7 +21,7 @@ const context = { actor: instanceOperatorId, requestId: 'trace' }
 async function fixture() {
   const database = new SharedSqliteDatabase(':memory:')
   const store = new SqliteServerStore(database)
-  const server = new ServerService(store, new Notifications(), undefined, undefined, undefined, undefined, new CommandSigningIdentity(database.connection))
+  const server = new ServerService(store, new Notifications(), { commandSigning: new CommandSigningIdentity(database.connection) })
   await seedOperator(store, server)
   const enrollment = await server.createEnrollment({})
   const { worker } = await server.enroll({ token: enrollment.token, name: 'Stage worker' })

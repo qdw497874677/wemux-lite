@@ -14,7 +14,7 @@ test('unchanged Worker heads do not invalidate conversation or redeliver command
   const database = new SharedSqliteDatabase(':memory:')
   const store = new SqliteServerStore(database); t.after(() => store.close())
   const commandSigning = new CommandSigningIdentity(database.connection)
-  const signals = new Notifications(), server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning)
+  const signals = new Notifications(), server = new ServerService(store, signals, { commandSigning: commandSigning })
   await seedOperator(store, server)
   const { worker } = await server.enroll({ token: (await server.createEnrollment({})).token, name: 'Head fixture' })
   await store.transaction(tx => tx.resources.saveWorker({ ...worker, connectionState: 'online', capabilities: [{ agentKey: 'test' as AgentKey, displayName: 'Test', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' as ModelId, displayName: 'Model', source: 'configured' }] }] }))

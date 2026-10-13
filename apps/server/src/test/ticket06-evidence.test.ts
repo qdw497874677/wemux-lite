@@ -31,7 +31,7 @@ function signedStore(path: string) {
 }
 async function fixture(path: string, cancel = true) {
   const { database, store, commandSigning } = signedStore(path), signals = new Notifications()
-  const server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning)
+  const server = new ServerService(store, signals, { commandSigning: commandSigning })
   await seedOperator(store, server)
   const { worker } = await server.enroll({ token: (await server.createEnrollment({})).token, name: 'Evidence worker' })
   await store.transaction(tx => tx.resources.saveWorker({ ...worker, connectionState: 'online', capabilities: [{ agentKey: 'test' as AgentKey, displayName: 'Test', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' as ModelId, displayName: 'Model', source: 'configured' }] }] }))
@@ -103,8 +103,7 @@ test('signed approval reaches deliverable transport with current access despite 
   const dir = await mkdtemp(join(tmpdir(), 'ticket02-positive-approval-')), path = join(dir, 'server.db')
   const f = await fixture(path)
   t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
-  const service = new ServerService(f.store, f.signals, undefined, undefined, undefined,
-    new SessionAccessService(f.store, new ProjectAccessService(f.store)), f.commandSigning)
+  const service = new ServerService(f.store, f.signals, { sessionAccess: new SessionAccessService(f.store, new ProjectAccessService(f.store)), commandSigning: f.commandSigning })
   const commandId = 'positive-approval' as CommandId
   await service.resolveRuntimeApproval(f.independent.id, 'approval' as never, { commandId, turnId: 'worker-turn-not-in-cache', decision: 'approve' }, instanceOperatorId)
   assert.deepEqual(await service.authorizeEnqueueLaunch(f.worker.id, commandId), { allowed: true })
@@ -116,8 +115,7 @@ test('expired approval refresh preserves identity and requires current authority
   const dir = await mkdtemp(join(tmpdir(), 'ticket02-refresh-')), path = join(dir, 'server.db')
   const f = await fixture(path)
   t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
-  const service = new ServerService(f.store, f.signals, undefined, undefined, undefined,
-    new SessionAccessService(f.store, new ProjectAccessService(f.store)), f.commandSigning)
+  const service = new ServerService(f.store, f.signals, { sessionAccess: new SessionAccessService(f.store, new ProjectAccessService(f.store)), commandSigning: f.commandSigning })
   const id = 'refresh-approval' as CommandId
   await service.resolveRuntimeApproval(f.independent.id, 'approval' as never, { commandId: id, turnId: 'worker-turn', decision: 'approve' }, instanceOperatorId)
   const original = (await f.store.commands.getPendingCommand(id))!.authorization!
@@ -146,8 +144,7 @@ test('v3 approval refresh keeps identity and window instead of failing the versi
   const dir = await mkdtemp(join(tmpdir(), 'ticket02-v3-refresh-')), path = join(dir, 'server.db')
   const f = await fixture(path)
   t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
-  const service = new ServerService(f.store, f.signals, undefined, undefined, undefined,
-    new SessionAccessService(f.store, new ProjectAccessService(f.store)), f.commandSigning)
+  const service = new ServerService(f.store, f.signals, { sessionAccess: new SessionAccessService(f.store, new ProjectAccessService(f.store)), commandSigning: f.commandSigning })
   const id = 'v3-refresh-approval' as CommandId
   await service.resolveRuntimeApproval(f.independent.id, 'approval' as never, { commandId: id, turnId: 'worker-turn', decision: 'approve' }, instanceOperatorId)
   const original = (await f.store.commands.getPendingCommand(id))!.authorization!
@@ -372,7 +369,7 @@ test('Ticket06 composed constructive recovery emits only first committed dispatc
     })
     f.database.close()
     const { database, store, commandSigning } = signedStore(path), signals = new Notifications()
-    const server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning)
+    const server = new ServerService(store, signals, { commandSigning: commandSigning })
     const tasks = new TaskService(store, event => signals.project(event), server), workers = new WorkerService(store, signals)
     const seen: string[] = []
     signals.onCommands(f.worker.id, () => { seen.push(`commands:${f.worker.id}`) })
@@ -489,7 +486,7 @@ test('Ticket06 exact notification recipient/type/count matrix with durable resta
     const beforeRestart = (await store.tasks.run(f.run.id))!
     database.close(); ({ database, store, commandSigning } = signedStore(path))
     assert.equal(commandSigning.keyId, f.commandSigning.keyId, 'restart retains instance signing identity')
-    signals = new Notifications(); server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning)
+    signals = new Notifications(); server = new ServerService(store, signals, { commandSigning: commandSigning })
     tasks = new TaskService(store, event => signals.project(event), server); workers = new WorkerService(store, signals); subscribe()
     await check('restart reconciliation twice', async () => { await workers.recoverRuns(); await workers.recoverRuns() }, [])
     await check('restart terminal request replay', () => cancel('retry'), [])
@@ -529,7 +526,7 @@ test('Ticket06 exact notification recipient/type/count matrix with durable resta
     const deletedRun = await store.tasks.run(f.run.id), deletedActivities = await store.tasks.activity(f.task.id, 0)
     database.close(); ({ database, store, commandSigning } = signedStore(path))
     assert.equal(commandSigning.keyId, f.commandSigning.keyId, 'restart retains instance signing identity')
-    signals = new Notifications(); server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning); workers = new WorkerService(store, signals); subscribe()
+    signals = new Notifications(); server = new ServerService(store, signals, { commandSigning: commandSigning }); workers = new WorkerService(store, signals); subscribe()
     await check('deleted restart reconciliation', () => workers.recoverRuns(), [])
     await check('deleted late/out-of-order events', async () => { await receive(third); await receive(terminal); await receive(second) }, [])
     await check('deleted late head', () => workers.receive(workerId, { type: 'sync', kind: 'heads', complete: true, heads: [{ sessionId, lastSeq: 10 as EventSeq }] }), [])
