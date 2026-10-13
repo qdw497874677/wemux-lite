@@ -114,12 +114,12 @@ try {
   const pendingText = await pendingStatus.textContent()
   assert.ok(pendingText?.includes(`Server 已收件「手机笔记.txt」（${bytes.length} 字节）`), `阶段一收件文案：${pendingText}`)
   assert.ok(pendingText?.includes('待投递'), `Worker 离线待投递：${pendingText}`)
-  assert.ok(pendingText?.includes('Worker 当前离线，恢复后自动继续'), `Worker 离线如实提示：${pendingText}`)
+  assert.ok(pendingText?.includes('Worker 当前离线，恢复后自动续签投递'), `Worker 离线如实提示：${pendingText}`)
   const subpathMatch = /工作区内路径 (\S+)。/.exec(pendingText ?? '')
   assert.ok(subpathMatch, `subpath 可从手机状态文案提取：${pendingText}`)
   const subpath = subpathMatch[1]
   assert.match(subpath, /^attachments\//)
-  checks.push('阶段一：手机选文件上传，Worker 离线时如实「待投递」与「恢复后自动继续」')
+  checks.push('阶段一：手机选文件上传，Worker 离线时如实「待投递」与「恢复后自动续签投递」')
 
   step = '阶段一绑定协调 Task/Session 且不虚构首条消息'
   const conversation = page.getByRole('region', { name: '任务会话对话' })

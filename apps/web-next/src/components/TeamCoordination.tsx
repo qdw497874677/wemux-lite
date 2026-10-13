@@ -16,6 +16,8 @@ export function TeamCoordination({ api, teamId }: { api: ProjectClient; teamId: 
   const [error, setError] = useState(''), [busy, setBusy] = useState(false)
   const [file, setFile] = useState<File | null>(null), [uploadBusy, setUploadBusy] = useState(false)
   const [attachment, setAttachment] = useState<CoordinationAttachmentView | null>(null)
+  // 阶段一成功后保留原 File：投递失败时可一键用新请求重传同一文件（引导重建，不重放失败意图）。
+  const attachmentFile = useRef<File | null>(null)
   const pendingUpload = useRef<{ teamId: string; requestId: string; file: File; workspaceId: string; workerId: string; agentKey: string; modelId: string } | null>(null)
   const pending = useRef<{ body: { requestId: string; commandId: string; workspaceId: string; workerId: string; agentKey: string; modelId: string; content: string }; teamId: string } | null>(null)
   const generation = useRef(0)
@@ -36,7 +38,7 @@ export function TeamCoordination({ api, teamId }: { api: ProjectClient; teamId: 
   useLayoutEffect(() => {
     const ticket = ++generation.current
     accepted.current = []
-    setResources(null); setSessions([]); setSelected(''); setTarget(''); setReopenTaskId(''); setBusy(false); pending.current = null; setError(''); setFile(null); setUploadBusy(false); setAttachment(null); pendingUpload.current = null
+    setResources(null); setSessions([]); setSelected(''); setTarget(''); setReopenTaskId(''); setBusy(false); pending.current = null; setError(''); setFile(null); setUploadBusy(false); setAttachment(null); pendingUpload.current = null; attachmentFile.current = null
     void refresh(teamId, ticket).catch(cause => { if (generation.current === ticket) setError(accountError(cause)) })
     return () => { generation.current++ }
   }, [api, teamId])
@@ -70,16 +72,16 @@ export function TeamCoordination({ api, teamId }: { api: ProjectClient; teamId: 
     } catch (cause) { if (generation.current === ticket) setError(accountError(cause)) }
     finally { if (generation.current === ticket) setBusy(false) }
   }
-  async function upload() {
-    if (uploadBusy || (!pendingUpload.current && (!choice || !file))) return
+  async function upload(retryFile: File | null = null) {
+    if (uploadBusy || (!pendingUpload.current && (!choice || (!file && !retryFile)))) return
     const ticket = generation.current
-    const intent = pendingUpload.current?.teamId === teamId ? pendingUpload.current : { teamId, requestId: randomId(), file: file!, workspaceId: choice!.workspaceId, workerId: choice!.workerId, agentKey: choice!.agentKey, modelId: choice!.modelId }
+    const intent = pendingUpload.current?.teamId === teamId ? pendingUpload.current : { teamId, requestId: randomId(), file: (retryFile ?? file)!, workspaceId: choice!.workspaceId, workerId: choice!.workerId, agentKey: choice!.agentKey, modelId: choice!.modelId }
     if (intent.file.size > 1024 * 1024) { setError('附件超过 1 MiB 上限，请压缩后再试。'); return }
     pendingUpload.current = intent; setUploadBusy(true); setError('')
     try {
       const result = await api.uploadTeamCoordinationAttachment(teamId, { file: intent.file, requestId: intent.requestId, workspaceId: intent.workspaceId, workerId: intent.workerId, agentKey: intent.agentKey, modelId: intent.modelId })
       if (generation.current !== ticket) return
-      pendingUpload.current = null; setFile(null); setAttachment(result.attachment); setSelected(result.session.id); setReopenTaskId('')
+      pendingUpload.current = null; setFile(null); setAttachment(result.attachment); attachmentFile.current = intent.file; setSelected(result.session.id); setReopenTaskId('')
       if (!accepted.current.some(item => item.id === result.session.id)) accepted.current = [result.session, ...accepted.current]
       setSessions(current => current.some(item => item.id === result.session.id) ? current : [result.session, ...current])
       try { await refresh(teamId, ticket) }
@@ -117,6 +119,8 @@ export function TeamCoordination({ api, teamId }: { api: ProjectClient; teamId: 
     {pendingUpload.current && <p role="status">上次上传结果未知；只能按原附件重试，不能修改文件或切换会话。</p>}
     <Button disabled={uploadBusy || busy || !!pending.current || !choice || !choice.agentAttachments || (!pendingUpload.current && !file)} onClick={() => void upload()}>{pendingUpload.current ? '重试原附件上传' : '上传附件并创建会话'}</Button>
     {attachment && <p role="status" data-attachment-state={attachment.delivery.state}>附件两阶段：Server 已收件「{attachment.filename}」（{attachment.size} 字节）；投递到 Worker：{attachment.delivery.state === 'pending' ? '待投递' : attachment.delivery.state === 'delivered' ? '已投递' : `失败（${attachment.delivery.detail ?? '原因未知'}）`}{attachment.delivery.state === 'pending' && attachment.delivery.workerConnectionState !== 'online' ? '，Worker 当前离线，恢复后自动续签投递；账号或权限失效时会改为失败并显示原因' : ''}。工作区内路径 {attachment.subpath}。</p>}
+    {attachment?.delivery.state === 'failed' && <p role="status" data-attachment-guidance="failed">投递失败后原请求不可重投：重放原请求只会返回失败记录。请用新请求重新上传同一文件，或更换执行环境后重新上传；原失败记录保留。</p>}
+    {attachment?.delivery.state === 'failed' && attachmentFile.current && <Button variant="outline" disabled={uploadBusy || busy || !!pending.current || !!pendingUpload.current || !choice || !choice.agentAttachments} onClick={() => void upload(attachmentFile.current)}>原文件重新上传（新请求）</Button>}
     {pending.current && <p role="status">上次发送结果未知；只能按原请求重试，不能修改首条消息或切换会话。</p>}
     <Button disabled={busy || (!pending.current && (!choice || !content.trim()))} onClick={() => void send()}>{pending.current ? '重试原首条消息' : '发送并创建会话'}</Button>
     {resources && !options.length && <p role="status">暂无获权且已就绪的工作区与可用 Agent。</p>}

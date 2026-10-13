@@ -5,6 +5,8 @@
  * - 阶段一：Server 有界收件 + Task/Session 元数据原子绑定（Worker 离线时如实「待投递」）。
  * - 阶段二：Worker 恢复后按依赖顺序投递，附件落盘为原字节，Test Agent read-file fixture 实际读取并回显摘要。
  * - 负例：同一意图幂等重放、冲突拒绝、撤权后新上传拒绝且在途投递投影为失败。
+ * - 失败后的用户路径（票据 05 第 3 项，引导重建）：失败附件原意图重放只回放失败记录不复活；
+ *   同文件换新 requestId、换可用节点重传畅通且端到端落盘成功，失败历史保留。
  */
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
@@ -136,7 +138,8 @@ try {
   step = '撤权：在途投递失败、新上传拒绝'
   await stopWorker(worker)
   worker = null
-  const second = await upload({ ...intent, requestId: randomUUID() }, { name: '第二份.txt', bytes: Buffer.from('pending attachment') })
+  const secondIntent = { ...intent, requestId: randomUUID() }
+  const second = await upload(secondIntent, { name: '第二份.txt', bytes: Buffer.from('pending attachment') })
   assert.equal(second.status, 201)
   assert.equal(second.data.attachment.delivery.state, 'pending')
   await api(`/workers/${workerId}/revoke`, 'POST', {})
@@ -147,6 +150,35 @@ try {
   assert.match(failedView.attachment.delivery.detail ?? '', /撤销/)
   const deliveredStill = await view()
   assert.equal(deliveredStill.attachment.delivery.state, 'delivered', '已投递的历史事实不被撤权改写')
+
+  step = '失败后的用户路径：原意图重放只回放失败记录，同文件新请求重传畅通'
+  const failedReplay = await upload(secondIntent, { name: '第二份.txt', bytes: Buffer.from('pending attachment') })
+  assert.equal(failedReplay.status, 201, JSON.stringify(failedReplay.data))
+  assert.equal(failedReplay.data.created, false, '失败意图重放幂等回原 Session，不重复入队')
+  assert.equal(failedReplay.data.attachment.id, second.data.attachment.id)
+  assert.equal(failedReplay.data.attachment.delivery.state, 'failed', '重放不复活失败投递，UI 必须引导换新上传')
+
+  const secondEnrollment = await api('/enrollment-tokens', 'POST', {})
+  const homeB = join(directory, 'worker-b')
+  const registeredB = await launch(['register', '--home', homeB, `--token=${secondEnrollment.token}`, '--name', 'Owned Attachment Worker B'], origin).done
+  assert.equal(registeredB.code, 0, `Worker B registration: ${registeredB.stderr}`)
+  const workerIdB = JSON.parse(registeredB.stdout).workerId
+  worker = launch(['start', '--home', homeB], origin)
+  await eventually(() => api(`/workers/${workerIdB}/capabilities`), value => value.capabilities.some(agent => agent.agentKey === 'test' && agent.availability.status === 'available'), 'Worker B Test Agent online')
+  const provisionB = await api('/workspaces', 'POST', { projectId: project.id, workerId: workerIdB, name: 'Attachment Workspace B', source: 'empty', requestId: randomUUID() })
+  await eventually(() => api(`/workspaces/${provisionB.workspace.id}`), space => space.placements.some(placement => placement.workerId === workerIdB && placement.status === 'ready'), 'ready placement on Worker B')
+  const rebuild = await upload({ ...intent, requestId: randomUUID(), workspaceId: provisionB.workspace.id, workerId: workerIdB }, { name: '笔记.txt', bytes })
+  assert.equal(rebuild.status, 201, JSON.stringify(rebuild.data))
+  assert.equal(rebuild.data.created, true, '失败后同文件新请求重传畅通，不被 409 挡死')
+  assert.notEqual(rebuild.data.session.id, session.id, '重建创建新会话，不复活失败会话')
+  assert.equal(rebuild.data.attachment.sha256, sha256, '同文件内容寻址复用')
+  await eventually(() => api(`/teams/default-team/coordination/attachments/${rebuild.data.attachment.id}`), value => value.attachment.delivery.state === 'delivered', 'rebuilt attachment delivered on Worker B')
+  const onDiskB = await findWorkspaceFile(join(homeB, 'workspaces'), rebuild.data.attachment.subpath)
+  assert.equal(digestOf(await readFile(onDiskB)), sha256, '重传落盘仍是原字节')
+  const failedStill = await api(`/teams/default-team/coordination/attachments/${second.data.attachment.id}`)
+  assert.equal(failedStill.attachment.delivery.state, 'failed', '失败历史保留，不被重传改写')
+  assert.match(failedStill.attachment.delivery.detail ?? '', /撤销/, '失败原因可见，支撑 UI 引导')
+
   await stat(database)
   console.log(JSON.stringify({
     status: 'pass',
@@ -157,8 +189,10 @@ try {
       '阶段二：Worker 重启后按依赖顺序投递原字节到工作区',
       'Agent read-file 实际读取原字节并回显 sha256/size',
       '撤权：在途投递失败、新上传拒绝、已投递事实不被改写',
+      '失败后的用户路径：失败意图重放只回放失败记录；同文件新请求换节点重传端到端成功且失败历史保留',
     ],
     attachment: { id: first.data.attachment.id, subpath, sha256, size: bytes.length, deliveredFile: onDisk },
+    rebuilt: { attachmentId: rebuild.data.attachment.id, deliveredFile: onDiskB },
   }))
 } catch (error) {
   console.error(`Attachment e2e ${step}: ${error.stack ?? error}; Worker: ${JSON.stringify(worker?.logs())}`)
