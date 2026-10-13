@@ -158,7 +158,16 @@ test('native approval bypasses a different Session connector with the same appro
   })
   const pending = barrier()
   let connectorCalls = 0
-  connector = new WorkerConnectorRuntime(f.store, {
+  connector = new WorkerConnectorRuntime(f.store, { verifyBinding: async (turn, workerId) => {
+      const session = await f.store.sessions.get(turn.sessionId)
+      const workspace = session && await f.store.workspaces.get(session.binding.workspaceId)
+      const persisted = await f.store.sessions.getTurn(turn.id)
+      return workspace?.workerId === workerId && persisted?.state === 'running' ? { projectId: workspace.projectId, workspaceId: workspace.id } : null
+    }, verifyLocalOrigin: async (turn, workerId) => {
+      const session = await f.store.sessions.get(turn.sessionId)
+      const workspace = session && await f.store.workspaces.get(session.binding.workspaceId)
+      return workerId === f.workerId && session?.storageMode === 'local' && workspace?.projectId === 'local'
+    },
     onApproval(event) { if (event.kind === 'requested') pending.release() },
     lookup: async () => [{ address: '8.8.8.8', family: 4 }],
     fetch: async () => { connectorCalls++; return new Response('{}', { headers: { 'content-type': 'application/json' } }) },
@@ -174,7 +183,7 @@ test('native approval bypasses a different Session connector with the same appro
       createdAt: timestamp(), updatedAt: timestamp(),
     })
     const a = await f.start(), b = await f.start()
-    const registered = await connector.registerTurn((await f.store.sessions.getTurn(a.turnId))!, f.workerId)
+    const registered = await connector.registerTurn((await f.store.sessions.getTurn(a.turnId))!, f.workerId, 'local')
     const operation = connector.handle('http.call', registered.token, { connectorId: 'collision-http', connectorRevision: 1, operationId: 'create', requestId: 'http-request', toolCallId: 'approval', input: { body: {} } })
     try {
       await pending.promise
@@ -232,7 +241,7 @@ test('approval queued body is snapshotted; receipt replay still checks host', as
   await f.runtime.receive({ type: 'command', commandId: 'snapshot' as never, command: f.body(target) })
   assert.equal(f.calls.length, 1)
   const ack = f.sent.findLast(message => message.type === 'ack')
-  assert.ok(ack?.type === 'ack'); rejected(ack.receipt, /host scope mismatch/)
+  assert.ok(ack?.type === 'ack'); rejected(ack.receipt, /Command authorization unavailable/)
   assert.equal((await f.store.commands.get('snapshot' as never))?.command.kind, 'runtime.approval.resolve')
 })
 

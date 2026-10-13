@@ -344,7 +344,7 @@ test('SQL immutable insert/update/delete guards resist OR REPLACE with recursive
   assert.deepEqual(await f.store.fileWrites.get(a.requestId), { admission: a, result: r, acknowledged: true })
 })
 
-test('schema5 upgrade appends schema7 without changing Session/queue/journal/credential state; diagnostics do not migrate', async t => {
+test('schema5 upgrade appends current schema without changing Session/queue/journal/credential state; diagnostics do not migrate', async t => {
   const f = await fixture(t), a = admission()
   await f.store.transaction(async tx => {
     await tx.sessions.createSession(a.sessionId, a.binding)
@@ -377,7 +377,7 @@ test('schema5 upgrade appends schema7 without changing Session/queue/journal/cre
   assert.deepEqual(snapshot(), before)
   const upgraded = new SqliteWorkerStore(f.path)
   try {
-    assert.equal(f.observer.prepare('PRAGMA user_version').get()!.user_version, 7)
+    assert.equal(f.observer.prepare('PRAGMA user_version').get()!.user_version, 8)
     assert.deepEqual(snapshot(), before)
     assert.equal((await upgraded.transaction(tx => tx.fileWrites.reserve(a))).status, 'execute')
     await upgraded.transaction(tx => tx.fileWrites.retainResult(result(a)))
@@ -528,7 +528,7 @@ test('schema6 reopen installs only appended rowid guards, preserves bytes/order 
   assert.deepEqual(f.observer.prepare('SELECT name,sql FROM sqlite_master ORDER BY name').all(), schema)
   for (let reopen = 0; reopen < 2; reopen++) {
     f.reopen()
-    assert.equal(f.observer.prepare('PRAGMA user_version').get()!.user_version, 7)
+    assert.equal(f.observer.prepare('PRAGMA user_version').get()!.user_version, 8)
     for (const object of schema) assert.deepEqual(f.observer.prepare('SELECT name,sql FROM sqlite_master WHERE name=?').get(object.name!), object)
     assert.deepEqual(rawFileRows(f.observer), before)
     assert.equal((await f.store.transaction(tx => tx.fileWrites.reserve(a))).status, 'await-existing')
@@ -574,7 +574,7 @@ test('out-of-band schema6 max rowid -2 may open but reserved automatic -1 alloca
   f.observer.prepare('INSERT INTO worker_file_admissions(rowid,request_id,admission_json) VALUES(-2,?,?)').run(a.requestId, JSON.stringify(a))
   const before = rawFileRows(f.observer)
   f.reopen()
-  assert.equal(f.observer.prepare('PRAGMA user_version').get()!.user_version, 7)
+  assert.equal(f.observer.prepare('PRAGMA user_version').get()!.user_version, 8)
   await assert.rejects(f.store.transaction(tx => tx.fileWrites.reserve(b)), /rowid -1 is reserved/)
   assert.deepEqual(rawFileRows(f.observer), before)
   assert.equal(await f.store.fileWrites.get(b.requestId), null)

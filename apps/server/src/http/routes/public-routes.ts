@@ -24,6 +24,14 @@ export const publicRoutes: readonly RouteDescriptor[] = [
   },
   { method: 'POST', pattern: '/workers/enroll', auth: 'public', handler: async ({ service, readBody, json }) => json(201, await service.enroll(await readBody())) },
   {
+    method: 'POST', pattern: '/workers/:workerId/commands/:commandId/authorize-launch', auth: 'worker', handler: async ({ request, auth, service, params, json }) => {
+      const token = request.headers.authorization?.startsWith('Bearer ') ? request.headers.authorization.slice(7) : undefined
+      const workerId = await auth.authenticateWorker(token)
+      if (workerId !== params.workerId) throw new AppError(403, 'Forbidden')
+      return json(200, await service.authorizeEnqueueLaunch(workerId, params.commandId as import('@wemux/domain').CommandId))
+    },
+  },
+  {
     method: 'DELETE', pattern: '/workers/:workerId/enrollment', auth: 'worker', handler: async ({ request, auth, service, control, params, response }) => {
       const header = request.headers.authorization
       const token = header?.startsWith('Bearer ') ? header.slice(7) : undefined
@@ -39,9 +47,18 @@ export const publicRoutes: readonly RouteDescriptor[] = [
       const header = request.headers.authorization
       const token = header?.startsWith('Bearer ') ? header.slice(7) : undefined
       if (!token) throw new AppError(401, 'Missing capability token')
-      const operation = params.operation as CapabilityToolName
+      const operation = params.operation
       const input = await readBody() as any
-      const claims = await capabilities.verify(token, operation)
+      if (operation === 'grant.verify') {
+        if (!['mcp.list_tools', 'mcp.call', 'http.call'].includes(input?.requiredTool)) throw new AppError(400, 'Invalid Connector grant operation')
+        await capabilities.verify(token, input.requiredTool)
+        return json(200, { valid: true })
+      }
+      if (operation === 'connector.identity') {
+        const claims = await capabilities.verifyConnectorIdentity(token)
+        return json(200, { projectId: claims.projectId, workspaceId: claims.workspaceId, sessionId: claims.sessionId, turnId: claims.turnId })
+      }
+      const claims = await capabilities.verify(token, operation as CapabilityToolName)
       let result: unknown
       try { result = operation === 'session.info' ? await capabilities.sessionInfo(claims)
         : operation === 'project.list' ? await capabilities.listProjects(claims)

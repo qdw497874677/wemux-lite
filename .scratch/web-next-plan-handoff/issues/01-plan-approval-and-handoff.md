@@ -1,7 +1,7 @@
 # 01: 项目管理工具、按需计划批准与执行交接
 
 Status: ready-for-agent
-Blocked by: 合同与受控测试无未完成票前置；协调入口开放及真实协调验收须通过[协调人工开门](../../web-next-coordination-closure/issues/04-coordination-acceptance.md)。新增自动派发取决于[任务派发 01](../../web-next-task-dispatch/issues/01-placement-claim-dispatch.md)；既有指定机器路径可先实现。
+Blocked by: 合同与受控测试无未完成票前置；真实协调验收须通过[协调聊天功能验收](../../web-next-coordination-closure/issues/04-coordination-acceptance.md)，不以隔离风险接受为前置。新增自动派发取决于[任务派发 01](../../web-next-task-dispatch/issues/01-placement-claim-dispatch.md)；既有指定机器路径可先实现。
 
 **Spec:** [计划修订、批准与交接](../spec.md)
 **合并来源:** `43966aa` 的原票 01、02。

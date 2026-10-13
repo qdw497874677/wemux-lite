@@ -17,6 +17,7 @@ export interface AgentDTO {
   agentCommands?: string[]
   compactMode?: 'native' | 'slash-command'
   modelSwap?: boolean
+  attachments?: boolean
   models: { modelId: string; displayName: string; source: 'detected' | 'configured' }[]
 }
 
@@ -34,8 +35,8 @@ export interface LoginSessionDTO {
 }
 
 export type RegistrationPolicyDTO = 'open' | 'invite_only' | 'closed'
-/** Team 协调入口可用性投影（票 05）：状态与禁用原因唯一来自服务端资格门。 */
-export type TeamCoordinationAvailabilityDTO = { status: 'disabled' | 'enabled'; gate: { verdict: 'FAIL' | 'PASS'; reasons: readonly string[]; evidencePath: string; remediationSection: string; reopenConditions: readonly string[] } }
+/** Team 协调入口可用性投影：服务端根据实际功能合同返回；不代表 NEXT-05 已整票验收。 */
+export type TeamCoordinationAvailabilityDTO = { status: 'enabled' }
 
 export interface RegistrationCapabilitiesDTO {
   registrationPolicy: RegistrationPolicyDTO

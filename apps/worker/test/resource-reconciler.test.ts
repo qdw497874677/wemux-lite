@@ -358,7 +358,7 @@ test('Invocation 固定已授权 revision，撤销后新 Invocation 不注入', 
     await f.reconciler.reconcile(scoped)
     const provider = new FilesystemAgentLaunchContextProvider(f.home, null, undefined,
       (projectId, agentKey) => f.reconciler.skillsForLaunch(projectId, agentKey),
-      async () => ({ projectId: 'project-1' as never, agentKey: 'pi' as never }))
+      async () => ({ projectId: 'project-1' as never, workspaceId: 'workspace-1', rootPath: f.home, agentKey: 'pi' as never }))
     const turn = (id: string, projectId = 'project-1') => ({
       id, sessionId: id, capabilitySnapshot: { id, sessionId: id, projectId, workspaceId: 'workspace-1', version: 1, assets: [], allowedTools: [], allowedConnectorIds: [], createdAt: new Date().toISOString() }, capabilityToken: null,
     }) as Turn

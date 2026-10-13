@@ -39,7 +39,7 @@ Team → 协调对话 Task → Session → 经授权交接 Project 内普通 Tas
 
 ### 协调讨论与测试对话
 
-所有 Session 必须绑定 Task。平台协调入口自动提供 Team 级专用 Task，用于讨论、研究、计划和受权交接；项目内测试也自动提供专用 Task，不要求用户先填任务表单。协调执行者可以位于任意获授权 Worker，不要求 Server 本机执行。协调入口目前保持关闭。已选择 L1 会话配置及平台中介工具授权收口，不承诺 OS 文件/网络隔离；开门须真实证据及部署者书面残余风险接受，见[协调 spec](../.scratch/web-next-coordination-closure/spec.md)。
+所有 Session 必须绑定 Task。平台协调入口自动提供 Team 级专用 Task，用于讨论、研究、计划和受权交接；项目内测试也自动提供专用 Task，不要求用户先填任务表单。协调执行者可以位于任意获授权 Worker，不要求 Server 本机执行。协调入口现已提供 Team Task/Session 首次发送、同任务会话复用、历史恢复与普通 Agent 对话；浏览器桌面/手机 Test Agent 链路通过，显式在原 Task 下重开新 Session 已通过 Test Agent 双视口验证；Pi `5.3-flash` 已完成真实回复和一次按 Turn 验证的文件创建/工具读回，另一次第二 Turn 失败待诊断，审批批准/拒绝与停止已通过 Test Agent 浏览器验证，上传及其他验收缺口仍待完成，NEXT-05 未签收。用户已决定协调 Agent 按普通 Agent 的获权范围运行，不额外限制文件、终端或网络，隔离需求后续单列，且不要求书面残余风险接受才能启用。账号、Team、Worker、Workspace 和 Project/Task 授权及既有审批照常生效；见[ADR 0008](adr/0008-coordination-chat-ordinary-runtime-permissions.md)与[协调 spec](../.scratch/web-next-coordination-closure/spec.md)。
 
 ### 任务协作
 

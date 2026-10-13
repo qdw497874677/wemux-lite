@@ -83,6 +83,7 @@ export interface PendingCommand {
   readonly commandId: CommandId
   readonly workerId: WorkerId
   readonly command: WorkerCommand
+  readonly authorization?: import('@wemux/wire-protocol/command-assertion').SignedEnqueueAuthorization
   readonly payloadFingerprint: string
   readonly createdAt: Timestamp
 }
@@ -263,6 +264,8 @@ export interface ServerResourceReader {
   listCapabilityAssets(projectId: ProjectId): Promise<readonly CapabilityAsset[]>
   listAgentInboxMessages(sessionId: SessionId, unreadOnly?: boolean): Promise<readonly AgentInboxMessage[]>
   getAgentInboxMessage(messageId: string): Promise<AgentInboxMessage | null>
+  getSessionAttachment(attachmentId: string): Promise<SessionAttachmentRecord | null>
+  listSessionAttachments(sessionId: SessionId): Promise<readonly SessionAttachmentRecord[]>
 }
 
 export interface ServerResourceWriter {
@@ -283,6 +286,23 @@ export interface ServerResourceWriter {
   replaceCapabilityAssets(projectId: ProjectId, assets: readonly CapabilityAsset[]): Promise<void>
   createAgentInboxMessage(input: AgentInboxMessageInput): Promise<AgentInboxMessage>
   markAgentInboxMessageRead(messageId: string, readAt: Timestamp): Promise<AgentInboxMessage | null>
+  saveSessionAttachment(record: SessionAttachmentRecord): Promise<void>
+}
+
+/** 阶段一收件的附件元数据：与 Task/Session 同事务提交；阶段二状态由 deliverCommandId 的命令投影推导。 */
+export interface SessionAttachmentRecord {
+  readonly id: string
+  readonly sessionId: SessionId
+  readonly taskId: string
+  readonly workerId: WorkerId
+  readonly filename: string
+  readonly subpath: string
+  readonly contentType: string | null
+  readonly size: number
+  readonly sha256: string
+  readonly uploadedBy: UserId
+  readonly createdAt: Timestamp
+  readonly deliverCommandId: CommandId
 }
 
 export interface ServerCommandRejection {
@@ -294,6 +314,8 @@ export interface ServerCommandRejection {
 export interface ServerCommandReader {
   /** Durable non-admission fence, never a deliverable Worker command. */
   getRejection(commandId: CommandId): Promise<ServerCommandRejection | null>
+  /** Full receipt persisted by recordReceipt; rejected receipts carry the Worker-visible error detail. */
+  getReceipt(commandId: CommandId): Promise<CommandReceipt | null>
   getPendingCommand(commandId: CommandId): Promise<PendingCommand | null>
   get(commandId: CommandId): Promise<CommandProjection | null>
   /** Includes pending and terminal history, even for legacy Workspaces without attempt metadata. */
@@ -309,6 +331,8 @@ export interface ServerCommandWriter {
   rejectAdmission(rejection: ServerCommandRejection): Promise<void>
   depend(commandId: CommandId, prerequisiteId: CommandId): Promise<void>
   insertPending(command: PendingCommand): Promise<void>
+  /** Replace only the signing window of an unchanged pending approval. */
+  refreshApprovalAuthorization(commandId: CommandId, authorization: NonNullable<PendingCommand['authorization']>): Promise<void>
   recordReceipt(receipt: CommandReceipt, recordedAt: Timestamp): Promise<void>
   /** Cancel a still-pending command; resolves false when it is missing or no longer pending. */
   cancelPending(commandId: CommandId, cancelledAt: Timestamp): Promise<boolean>

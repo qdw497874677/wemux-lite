@@ -1,5 +1,7 @@
 import type { TeamId, UserId } from '@wemux/domain'
-import { assertCoordinationGateOpen, coordinationAvailability } from '../../application/coordination-gate.ts'
+import { coordinationAvailability } from '../../application/coordination-gate.ts'
+import { ATTACHMENT_MULTIPART_OVERHEAD_BYTES, MAX_ATTACHMENT_UPLOAD_BYTES } from '../../application/coordination-attachments.ts'
+import { parseMultipart } from '../multipart.ts'
 import { AppError } from '../../application/errors.ts'
 import { sendTeamInvitationMail } from '../../application/team-invitation-mail.ts'
 import type { RouteDescriptor } from './types.ts'
@@ -38,13 +40,32 @@ export const teamRoutes: readonly RouteDescriptor[] = [
     await teams.members(await context.actor(), teamId)
     context.json(200, coordinationAvailability())
   } },
+  { method: 'GET', pattern: '/teams/:teamId/coordination/sessions', auth: 'authenticated', handler: async context => {
+    const teamId = context.params.teamId as TeamId, actor = await context.actor()
+    await requireTeams(context.teams).members(actor, teamId)
+    context.json(200, { items: await context.service.listTeamCoordinationSessions(teamId, actor) })
+  } },
   { method: 'POST', pattern: '/teams/:teamId/coordination/sessions', auth: 'authenticated', handler: async context => {
-    const teams = requireTeams(context.teams), teamId = context.params.teamId as TeamId
-    // 成员资格先于资格门：非成员无法探测任何 Team 的协调状态。
-    await teams.members(await context.actor(), teamId)
-    await context.readBody()
-    assertCoordinationGateOpen()
-    // 资格门重开后的真实协调会话创建属于 Ticket 06 范围，不在此预留可用路径。
-    throw new AppError(501, '协调会话创建尚未实现（Ticket 06 范围）', 'not_implemented')
+    const teamId = context.params.teamId as TeamId, actor = await context.actor()
+    await requireTeams(context.teams).members(actor, teamId)
+    context.json(201, await context.service.createTeamCoordinationSession(teamId, actor, await context.readBody()))
+  } },
+  { method: 'POST', pattern: '/teams/:teamId/coordination/attachments', auth: 'authenticated', handler: async context => {
+    const teamId = context.params.teamId as TeamId, actor = await context.actor()
+    await requireTeams(context.teams).members(actor, teamId)
+    // multipart 二进制收件：读原始字节后交给领域服务，不经过 JSON 化的 readBody。
+    const body = await context.readRawBody(MAX_ATTACHMENT_UPLOAD_BYTES + ATTACHMENT_MULTIPART_OVERHEAD_BYTES)
+    const parts = parseMultipart(body, context.request?.headers?.['content-type'])
+    const file = parts.find(part => part.filename !== null)
+    if (!file || !file.filename) throw new AppError(400, 'multipart form must include a file part', 'multipart_file_required')
+    const field = (name: string) => parts.find(part => part.name === name && part.filename === null)?.data.toString('utf8').trim() ?? ''
+    const requestId = field('requestId'), workspaceId = field('workspaceId'), workerId = field('workerId'), agentKey = field('agentKey')
+    if (!requestId || !workspaceId || !workerId || !agentKey) throw new AppError(400, 'requestId, workspaceId, workerId and agentKey are required')
+    context.json(201, await context.service.createTeamCoordinationAttachment(teamId, actor, { requestId, workspaceId, workerId, agentKey, modelId: field('modelId') || null, title: field('title'), filename: file.filename, contentType: file.contentType, bytes: file.data }))
+  } },
+  { method: 'GET', pattern: '/teams/:teamId/coordination/attachments/:attachmentId', auth: 'authenticated', handler: async context => {
+    const teamId = context.params.teamId as TeamId, actor = await context.actor()
+    await requireTeams(context.teams).members(actor, teamId)
+    context.json(200, await context.service.coordinationAttachmentView(teamId, actor, context.params.attachmentId))
   } },
 ]

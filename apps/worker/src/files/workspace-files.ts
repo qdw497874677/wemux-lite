@@ -184,6 +184,9 @@ const decodeBase64 = (content: string): Buffer => {
   return bytes
 }
 
+/** Strict base64 decode with the workspace write byte limit; shared by uploads and delivery. */
+export const decodeFileBase64 = (content: string): Buffer => decodeBase64(content)
+
 export async function writeWorkspaceFile(workspaceRoot: string, subpath: string, base64Content: string): Promise<WorkspaceFileWrite> {
   if (typeof subpath !== 'string' || !subpath || subpath.includes('\0') || isAbsolute(subpath)) throw new Error('Invalid workspace path')
   const root = await realpath(workspaceRoot)

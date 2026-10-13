@@ -1,3 +1,4 @@
+import { createHash, generateKeyPairSync } from 'node:crypto'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -6,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
 import { WebSocketServer, type WebSocket } from 'ws'
-import type { Timestamp, WorkerId } from '@wemux/domain'
+import type { Timestamp, WorkerId, ProjectId, WorkspaceId, SessionId, CommandId, MessageId, CapabilitySnapshot } from '@wemux/domain'
 import { SqliteWorkerStore } from '../src/storage/sqlite-store.js'
 import { ensureLocalInstallation } from '../src/application/local-installation.js'
 import { createLocalWorkbenchService } from '../src/application/local-workbench.js'
@@ -53,6 +54,65 @@ async function waitFor(predicate: () => boolean | Promise<boolean>) {
   }
   throw new Error('condition timed out')
 }
+
+test('production cluster verifier denies registration before Connector writes when Server rejects the grant', async t => {
+  const f = await fixture()
+  try {
+    const workerId = 'cluster-worker' as WorkerId
+    const projectId = 'cluster-project' as ProjectId
+    const workspaceId = 'cluster-workspace' as WorkspaceId
+    const sessionId = 'cluster-session' as SessionId
+    const timestamp = new Date().toISOString() as Timestamp
+    const definition = { id: 'fixture-connector' as never, projectId, kind: 'mcp' as const, name: 'Fixture', description: null, revision: 1, enabled: true, allowedWorkerIds: [], credentialRef: null, credentialAvailability: 'unconfigured' as const, riskDefaults: { requireApprovalForRead: false, allowMcpReadOnlyHint: true }, config: { transport: 'stdio' as const, command: process.execPath, args: ['--version'], cwd: null, publicEnvironment: {}, secretEnvironmentNames: [] }, createdAt: timestamp, updatedAt: timestamp }
+    await f.store.saveConnectorDefinition(definition)
+    const snapshot: CapabilitySnapshot = { id: 'snapshot', sessionId, projectId, workspaceId, version: 1, assets: [], allowedTools: ['mcp.call'], allowedConnectorIds: [definition.id], connectors: [{ ...definition, credentialAvailability: 'available' }], createdAt: timestamp }
+    await f.store.transaction(async tx => {
+      await tx.workspaces.save({ id: workspaceId, workerId, projectId, spec: { kind: 'composite', memberWorkspaceIds: [] }, rootPath: f.home, status: 'ready', failureReason: null, updatedAt: timestamp })
+      await tx.sessions.createSession(sessionId, { workspaceId, agent: { workerId, agentKey: 'test' }, modelId: null })
+      await tx.sessions.enqueue({ sessionId, submissionCommandId: 'cluster-command' as CommandId, message: { messageId: 'cluster-message' as MessageId, content: 'hello' }, queuedAt: timestamp, capabilities: { snapshot, token: 'server-token', grant: { turnId: 'fixture-turn' } } } as Parameters<typeof tx.sessions.enqueue>[0])
+    })
+    const turn = await f.store.transaction(tx => tx.sessions.claimNext(sessionId))
+    assert.ok(turn)
+    f.identity('ws://127.0.0.1:1/ws/worker')
+    // Exercise the production verifier with a rejected Server response, not
+    // an injected verifyServerGrant:true stub.
+    const lifecycle = f.lifecycle as unknown as { clusterGrantUrl: string | null; connectors: import('../src/connectors/runtime.js').WorkerConnectorRuntime }
+    lifecycle.clusterGrantUrl = 'ws://127.0.0.1:1/ws/worker'
+    let checks = 0
+    t.mock.method(globalThis, 'fetch', async (input: URL | string, init: RequestInit) => {
+      checks++
+      assert.equal(String(input), 'http://127.0.0.1:1/agent-capabilities/connector.identity')
+      assert.equal(init.redirect, 'error')
+      assert.equal(init.headers && (init.headers as Record<string, string>).authorization, 'Bearer server-token')
+      assert.deepEqual(JSON.parse(String(init.body)), {})
+      return new Response('{}', { status: 403 })
+    })
+    await assert.rejects(lifecycle.connectors.registerTurn(turn, workerId, 'cluster'), /connector_cluster_grant_unverified/)
+    assert.equal(checks, 1)
+    assert.deepEqual(await f.store.getConnectorDefinition(definition.id), definition)
+    t.mock.restoreAll()
+    let grantChecks = 0
+    t.mock.method(globalThis, 'fetch', async (input: URL | string, init: RequestInit) => {
+      grantChecks++
+      assert.equal(String(input), 'http://127.0.0.1:1/agent-capabilities/connector.identity')
+      assert.equal(init.redirect, 'error')
+      return Response.json({ projectId, workspaceId, sessionId, turnId: 'other-turn' })
+    })
+    await assert.rejects(lifecycle.connectors.registerTurn(turn, workerId, 'cluster'), /connector_cluster_grant_unverified/)
+    assert.equal(grantChecks, 1, 'identity mismatch rejects before checking a tool grant')
+    assert.deepEqual(await f.store.getConnectorDefinition(definition.id), definition)
+  } finally { await f.close() }
+})
+
+test('cluster grant verification fails closed without a bound server, local provenance remains independent', async () => {
+  const f = await fixture()
+  try {
+    // Exercise the injected verifier: a cluster grant cannot be accepted
+    // merely because the local runtime has no server URL.
+    const lifecycle = f.lifecycle as unknown as { connectors: { gateway: { verifier: { verifyCurrentGrant: (token: string, operation: 'http.call') => Promise<boolean> } } } }
+    assert.equal(await lifecycle.connectors.gateway.verifier.verifyCurrentGrant('retained-token', 'http.call'), false)
+  } finally { await f.close() }
+})
 
 for (const protocol of ['ws', 'wss']) test(`leave converts ${protocol} identity to HTTP(S) origin and bounds revocation`, async t => {
   const f = await fixture()
@@ -156,6 +216,60 @@ test('failed cluster runtime initialization is cleaned up and restores local run
   } finally { await f.close() }
 })
 
+test('connected local workbench Turn mints a verified local Connector context without a Server token', async t => {
+  const f = await fixture()
+  const server = createServer()
+  const sockets = new WebSocketServer({ server })
+  sockets.on('connection', acceptTransportV2)
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    f.identity(`ws://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}/ws/worker`)
+    await writeFile(join(f.home, 'credential'), 'secret')
+    await f.lifecycle.connect()
+    const workbench = createLocalWorkbenchService(f.store, f.lifecycle)
+    const directory = await workbench.addDirectory(f.home)
+    const session = await workbench.createSession({ workspaceId: directory.workspaceId, agentKey: 'test', modelId: 'test' })
+    await workbench.enqueue(session.sessionId, 'connected local turn')
+    await waitFor(async () => (await workbench.journal(session.sessionId, 1, 200)).events.some(event => event.payload.kind === 'turn.finished'))
+    const events = (await workbench.journal(session.sessionId, 1, 200)).events
+    assert.ok(events.some(event => event.payload.kind === 'assistant.text.delta'))
+    assert.ok(events.some(event => event.payload.kind === 'turn.finished' && event.payload.outcome === 'completed'), JSON.stringify(events))
+    assert.equal((await f.store.sessions.getTurn((await f.store.sessions.get(session.sessionId))!.activeTurnId!))?.capabilityToken ?? null, null)
+    // A connected Worker still owns local Sessions; exercise the real Connector
+    // gateway with a locally minted token, not only Turn registration.
+    const localSession = (await f.store.sessions.get(session.sessionId))!
+    const localWorkerId = localSession.binding.agent.workerId
+    const now = new Date().toISOString() as Timestamp
+    const connector = { id: 'local-http' as never, projectId: 'local' as never, kind: 'http' as const, name: 'Local HTTP', description: null, revision: 1, enabled: true, allowedWorkerIds: [], credentialRef: null, credentialAvailability: 'not_required' as const, riskDefaults: { requireApprovalForRead: false, allowMcpReadOnlyHint: false }, config: { baseUrl: 'https://fixture.example.test', authentication: 'none' as const, publicHeaders: {}, allowedOperations: [{ id: 'read', method: 'GET' as const, pathTemplate: '/items', allowedQueryNames: [], allowedRequestHeaderNames: [], requestContentTypes: [] }], allowPrivateNetwork: false }, createdAt: now, updatedAt: now }
+    await f.store.saveConnectorDefinition(connector)
+    await f.store.transaction(tx => tx.sessions.enqueue({ sessionId: session.sessionId, submissionCommandId: 'local-connector-command' as CommandId, message: { messageId: 'local-connector-message' as MessageId, content: 'invoke' }, queuedAt: now }))
+    const localTurn = await f.store.transaction(tx => tx.sessions.claimNext(session.sessionId))
+    assert.ok(localTurn)
+    const runtime = (f.lifecycle as unknown as { connectors: import('../src/connectors/runtime.js').WorkerConnectorRuntime }).connectors
+    const registration = await runtime.registerTurn(localTurn, localWorkerId, 'local')
+    assert.equal(registration.snapshot.allowedConnectorIds.includes(connector.id), true)
+    let calls = 0
+    // Intercept the outbound executor boundary; authorization and gateway
+    // dispatch remain real, without contacting an external endpoint.
+    t.mock.method(runtime.http, 'execute', async (...args: Parameters<typeof runtime.http.execute>) => {
+      calls++
+      assert.equal(args[0].id, connector.id)
+      assert.equal(args[1].operationId, 'read')
+      return { output: { ok: true }, agentSummary: { ok: true }, journalSummary: { ok: true }, retryAfterMs: null }
+    })
+    const result = await runtime.handle('http.call', registration.token, { connectorId: connector.id, connectorRevision: 1, operationId: 'read', requestId: 'local-connector-request', toolCallId: 'local-connector-tool', input: {} })
+    assert.equal(result?.status, 200)
+    assert.equal((result?.body as { ok: boolean }).ok, true, JSON.stringify(result))
+    assert.equal(calls, 1)
+    await registration.release()
+  } finally {
+    await f.close()
+    for (const socket of sockets.clients) socket.terminate()
+    await new Promise<void>(resolve => sockets.close(() => resolve()))
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+})
+
 test('concurrent initialization and connect calls have one runtime and connection owner', async t => {
   const f = await fixture()
   let initialized = 0
@@ -183,13 +297,16 @@ test('concurrent initialization and connect calls have one runtime and connectio
   }
 })
 
+const signingPublicKey = generateKeyPairSync('ed25519').publicKey.export({ format: 'pem', type: 'spki' }).toString()
+const enrollmentSigningKey = { publicKey: signingPublicKey, keyId: createHash('sha256').update(signingPublicKey).digest('hex') }
+
 test('concurrent enroll and connect serialize identity exchange and reject duplicate enrollment', async t => {
   const f = await fixture()
   let requests = 0
   t.mock.method(globalThis, 'fetch', async () => {
     requests++
     await new Promise(resolve => setTimeout(resolve, 20))
-    return Response.json({ workerId: 'cluster-worker', credential: 'secret' })
+    return Response.json({ workerId: 'cluster-worker', credential: 'secret', commandSigningKey: enrollmentSigningKey })
   })
   try {
     const input = { serverUrl: 'http://127.0.0.1:1', token: 'token' }
@@ -228,9 +345,9 @@ test('CLI persisted identity startup uses ClusterLifecycle as its single owner',
   }
 })
 
-test('connect proceeds when previous runtime shutdown hangs on a stuck agent turn', async t => {
-  // 回归：local runtime 上有一个永不结束的 turn（provider 子进程挂死、stop/close 均无响应）时，
-  // connect() 不得被 previous.shutdown() 永久阻塞：先同步强杀，再限时等待旧 runtime 收尾。
+test('replacement quarantines an outstanding read even when stop and close resolve', async t => {
+  // A resolved stop/close and a synchronous kill request cannot prove that
+  // the outstanding next() settled; replacement must never launch this Session.
   const f = await fixture()
   const server = createServer()
   const sockets = new WebSocketServer({ server })
@@ -238,23 +355,26 @@ test('connect proceeds when previous runtime shutdown hangs on a stuck agent tur
   sockets.on('connection', socket => { connections++; acceptTransportV2(socket) })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const closeAttempts: string[] = []
+  let executions = 0
   let executeStarted = false
-  let releaseProcess!: () => void
-  const processExited = new Promise<void>(resolve => { releaseProcess = resolve })
+  const processExited = new Promise<void>(() => {})
   const stuckSession = {
     execute: async () => {
       executeStarted = true
       return {
         signals: (async function* () { await processExited })(),
-        stop: async () => { await processExited },
+        stop: async () => {},
       }
     },
     command: async () => {},
     resolveApproval: async () => {},
-    close: async () => { closeAttempts.push('close'); await new Promise(() => {}) },
-    kill: () => { closeAttempts.push('kill'); releaseProcess() },
+    close: async () => { closeAttempts.push('close') },
+    kill: () => { closeAttempts.push('kill') },
   }
-  t.mock.method(TestRuntimeSessionAdapter.prototype, 'openSession', async () => stuckSession)
+  t.mock.method(TestRuntimeSessionAdapter.prototype, 'openSession', async () => {
+    executions++
+    return stuckSession
+  })
   try {
     await f.lifecycle.initializeLocalRuntime()
     const workbench = createLocalWorkbenchService(f.store, f.lifecycle)
@@ -274,13 +394,49 @@ test('connect proceeds when previous runtime shutdown hangs on a stuck agent tur
     ])
     assert.equal(raced, 'connected', 'connect() must not block on a hung previous runtime shutdown')
     await waitFor(() => connections > 0 && f.lifecycle.connection().phase === 'online')
-    assert.deepEqual(closeAttempts.slice(0, 1), ['kill'], 'runtime replacement must synchronously kill the stuck provider')
+    assert.equal(closeAttempts.includes('kill'), true, 'runtime replacement requests child termination')
+    const fresh = (f.lifecycle as unknown as { runtime: { executeLocal(commandId: string, command: unknown): Promise<unknown> } }).runtime
+    await fresh.executeLocal('cmd-second', { kind: 'session.enqueue', sessionId: session.sessionId, message: { messageId: 'msg-second', content: 'must not launch' } })
+    await new Promise(resolve => setTimeout(resolve, 80))
+    assert.equal(executions, 1, 'new runtime must not open the uncertain Session')
+    await f.lifecycle.pause() // bounded shutdown of replacement, then local fallback
+    const fallback = (f.lifecycle as unknown as { runtime: { executeLocal(commandId: string, command: unknown): Promise<unknown> } }).runtime
+    await fallback.executeLocal('cmd-third', { kind: 'session.enqueue', sessionId: session.sessionId, message: { messageId: 'msg-third', content: 'still fenced' } })
+    await new Promise(resolve => setTimeout(resolve, 80))
+    assert.equal(executions, 1, 'fallback cannot reopen a Session with an outstanding read')
   } finally {
     for (const socket of sockets.clients) socket.terminate()
     await new Promise<void>(resolve => sockets.close(() => resolve()))
     await new Promise<void>(resolve => server.close(() => resolve()))
     await f.close().catch(() => {})
   }
+})
+
+test('pause keeps Session quarantined when shutdown close resolves but read is pending', async t => {
+  const f = await fixture()
+  let opened = 0
+  t.mock.method(TestRuntimeSessionAdapter.prototype, 'openSession', async () => {
+    opened++
+    return {
+      execute: async () => ({ signals: (async function* () { await new Promise<void>(() => {}) })(), stop: async () => {} }),
+      close: async () => {},
+      kill: () => {},
+    }
+  })
+  try {
+    await f.lifecycle.initializeLocalRuntime()
+    const workbench = createLocalWorkbenchService(f.store, f.lifecycle)
+    const directory = await workbench.addDirectory(f.home)
+    const session = await workbench.createSession({ workspaceId: directory.workspaceId, agentKey: 'test', modelId: 'test' })
+    const current = (f.lifecycle as unknown as { runtime: { executeLocal(commandId: string, command: unknown): Promise<unknown> } }).runtime
+    await current.executeLocal('cmd-pending', { kind: 'session.enqueue', sessionId: session.sessionId, message: { messageId: 'msg-pending', content: 'pending' } })
+    await waitFor(() => opened === 1)
+    await f.lifecycle.pause()
+    const fresh = (f.lifecycle as unknown as { runtime: { executeLocal(commandId: string, command: unknown): Promise<unknown> } }).runtime
+    await fresh.executeLocal('cmd-after-pause', { kind: 'session.enqueue', sessionId: session.sessionId, message: { messageId: 'msg-after-pause', content: 'must stay fenced' } })
+    await new Promise(resolve => setTimeout(resolve, 80))
+    assert.equal(opened, 1)
+  } finally { await f.close() }
 })
 
 test('real capability gateway journals Connector expiry before local Turn cleanup and reopens durably', { timeout: 10000 }, async t => {
@@ -419,7 +575,7 @@ test('register refuses to silently no-op on an existing identity and --force rep
   const args = ['register', '--home', f.home, '--server', 'http://127.0.0.1:1', '--token', 'enrollment-token']
   try {
     await assert.rejects(() => main(args), /--force/)
-    t.mock.method(globalThis, 'fetch', async () => Response.json({ workerId: 'replacement-worker', credential: 'fresh-credential' }))
+    t.mock.method(globalThis, 'fetch', async () => Response.json({ workerId: 'replacement-worker', credential: 'fresh-credential', commandSigningKey: enrollmentSigningKey }))
     await main([...args, '--force'])
     const store = new SqliteWorkerStore(join(f.home, 'worker.sqlite'))
     try {
@@ -428,4 +584,40 @@ test('register refuses to silently no-op on an existing identity and --force rep
       await assert.rejects(() => readFile(join(f.home, 'transport.sqlite'), 'utf8'), /ENOENT/)
     } finally { store.close() }
   } finally { await f.close() }
+})
+
+test('connected competitor takes queued Turn after owner shuts down during preparation', async t => {
+  const f = await fixture()
+  let releasePrepare!: () => void
+  const preparing = new Promise<void>(resolve => { releasePrepare = resolve })
+  let entered!: () => void
+  const started = new Promise<void>(resolve => { entered = resolve })
+  let executions = 0
+  t.mock.method(TestRuntimeSessionAdapter.prototype, 'openSession', async () => {
+    executions++
+    return { execute: async () => ({ signals: (async function* () { yield { kind: 'finished' as const, outcome: { status: 'completed' as const } } })(), stop: async () => {} }), command: async () => {}, resolveApproval: async () => {}, close: async () => {} }
+  })
+  let competitor: WorkerRuntime | undefined
+  try {
+    await f.lifecycle.initializeLocalRuntime()
+    const workbench = createLocalWorkbenchService(f.store, f.lifecycle)
+    const directory = await workbench.addDirectory(f.home)
+    const session = await workbench.createSession({ workspaceId: directory.workspaceId, agentKey: 'test', modelId: 'test' })
+    const owner = (f.lifecycle as unknown as { runtime: WorkerRuntime }).runtime
+    const original = (owner as unknown as { launchContexts: { prepare: (turn: unknown) => Promise<unknown> } }).launchContexts
+    ;(owner as unknown as { launchContexts: { prepare: (turn: unknown) => Promise<unknown> } }).launchContexts = { ...original, async prepare(turn: unknown) { entered(); await preparing; return original.prepare(turn) } }
+    await workbench.enqueue(session.sessionId, 'owner turn')
+    await started
+    await workbench.enqueue(session.sessionId, 'competitor turn')
+    const ownership = (f.lifecycle as unknown as { ownership: import('../src/application/session-ownership.ts').SessionOwnership }).ownership
+    competitor = new WorkerRuntime(f.store, { provision: async () => { throw new Error('unused') } }, [new TestAgent(1)], { send: () => {} }, session.binding.agent.workerId, 'competitor', undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, ownership)
+    await competitor.initialize()
+    assert.equal((await f.store.sessions.listQueued(session.sessionId)).length, 1)
+    assert.equal(executions, 0)
+    const shutdown = owner.shutdown()
+    releasePrepare()
+    await shutdown
+    await waitFor(async () => (await f.store.journal.read({ sessionId: session.sessionId, fromSeq: 1 as never, limit: 100 })).events.filter(event => event.payload.kind === 'turn.finished').length === 2)
+    assert.equal(executions, 1, 'owner never launched; competitor handles the queued Turn')
+  } finally { releasePrepare?.(); await competitor?.shutdown(); await f.close() }
 })

@@ -99,6 +99,14 @@ export interface Session {
     readonly requestId: string
     readonly fingerprint: string
     readonly commandId: string
+    /** First-send identity includes the message and enqueue command, not only Session binding. */
+    readonly coordinationIntentFingerprint?: string
+    readonly coordinationMessageCommandId?: string
+    readonly coordinationMessageId?: string
+    /** Upload intent identity: fingerprint covers file bytes plus binding; attachment + deliver command ids are replay anchors. */
+    readonly coordinationAttachmentFingerprint?: string
+    readonly coordinationAttachmentId?: string
+    readonly coordinationDeliverCommandId?: string
   }
   readonly id: SessionId
   readonly projectId: ProjectId

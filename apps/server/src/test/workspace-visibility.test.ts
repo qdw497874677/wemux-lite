@@ -117,7 +117,7 @@ test('visibility migration upgrades existing Workspace records without rewriting
     const before = db.prepare("SELECT data FROM records WHERE kind='workspace' AND id=?").get(f.workspaceId)?.data
     assert.ok(before)
     db.exec('DROP TABLE workspace_account_visibility')
-    db.prepare('DELETE FROM schema_migrations WHERE version=?').run(migrationCount)
+    db.prepare('DELETE FROM schema_migrations WHERE version=?').run(migrationCount - 1)
     db.close()
     const upgraded = new SqliteServerStore(path)
     try {

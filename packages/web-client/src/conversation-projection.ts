@@ -7,7 +7,7 @@ export type ConversationTurnOutcome = 'completed' | 'cancelled' | 'failed'
 export interface ConversationTurnFailure {
   readonly code: 'interrupted' | 'agent-unavailable' | 'agent-error' | 'internal-error'
   readonly message: string
-  readonly abortReason?: 'user_stop' | 'executor_disconnected' | 'control_plane_disconnect' | 'timeout' | 'provider_error' | 'cancelled' | 'unknown'
+  readonly abortReason?: 'user_stop' | 'executor_disconnected' | 'control_plane_disconnect' | 'timeout' | 'provider_error' | 'authorization_unavailable' | 'cancelled' | 'unknown'
   readonly failureReason?: `agent_error.${'context_overflow' | 'missing_config' | 'provider_auth_or_access' | 'provider_quota_limit' | 'provider_capacity_or_rate_limit' | 'provider_server_error' | 'provider_network' | 'model_not_found_or_unavailable' | 'empty_or_unparseable_output' | 'agent_timeout' | 'runtime_missing_executable' | 'runtime_version_unsupported' | 'process_failure' | 'unknown'}`
   readonly retryable?: boolean
 }
@@ -152,7 +152,7 @@ const usage = shape({
 })
 const failure = shape({
   code: member('interrupted', 'agent-unavailable', 'agent-error', 'internal-error'), message: text,
-  abortReason: optional(member('user_stop', 'executor_disconnected', 'control_plane_disconnect', 'timeout', 'provider_error', 'cancelled', 'unknown')),
+  abortReason: optional(member('user_stop', 'executor_disconnected', 'control_plane_disconnect', 'timeout', 'provider_error', 'authorization_unavailable', 'cancelled', 'unknown')),
   failureReason: optional(member(...['context_overflow', 'missing_config', 'provider_auth_or_access', 'provider_quota_limit', 'provider_capacity_or_rate_limit', 'provider_server_error', 'provider_network', 'model_not_found_or_unavailable', 'empty_or_unparseable_output', 'agent_timeout', 'runtime_missing_executable', 'runtime_version_unsupported', 'process_failure', 'unknown'].map(reason => `agent_error.${reason}`))),
   retryable: optional(v => typeof v === 'boolean'),
 })

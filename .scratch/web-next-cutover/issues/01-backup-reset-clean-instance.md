@@ -10,7 +10,7 @@ Blocked by: runbook 及隔离副本恢复演练可先准备；真实干净实例
 ## 执行计划
 
 1. 先交参数化停服/备份/恢复 runbook，在隔离副本演练；列 Server/Worker 库、身份、outbox、预约及在途执行，不含外部源码/全局认证。
-2. 恢复使用[命令授权票](../../web-next-coordination-closure/issues/02-command-frame-authorization.md)提供的受控对账启动方式，先禁止 Agent/工具/provisioning 执行及 outbox 发送，再对账 Worker 实际执行。能力未提供时只做离线检查，不以普通启动或断网代替；确认解除后旧备份不复活旧执行权或重复派发，演练失败停止后续操作。
+2. 正式备份恢复的对账启动方式已从[开发期命令授权票](../../web-next-coordination-closure/issues/02-command-frame-authorization.md)后置；切根前必须另行设计、实现并验收：先禁止 Agent/工具/provisioning 执行及 outbox 发送，再对账 Worker 实际执行。能力未提供时只做离线检查，不以普通启动或断网代替，也不得宣称恢复演练通过；确认解除后旧备份不复活旧执行权或重复派发，演练失败停止后续操作。
 3. 按已确认 D5 核验全部前置后，人工逐项确认目标实例和重置范围，跑干净实例全链路；付费/外发仍各自授权。
 4. 留可复查日志并交 02 go/no-go，不自动切根。
 
@@ -30,7 +30,7 @@ Blocked by: runbook 及隔离副本恢复演练可先准备；真实干净实例
 
 - [ ] 干净实例上完成注册、邮件验证、登录
 - [ ] Worker 入群并可对话
-- [ ] 协调会话可用（协调入口资格门通过并获人工开门授权后）
+- [ ] 协调会话可用（Team/Worker/Workspace 授权及真实对话链路经功能验收，不以隔离风险签收为门）
 - [ ] 按需计划批准与获权交接可用；D5 纳入的新能力逐项验证
 - [ ] 协作界面与双宿主流程可用
 - [ ] 截图与断言输出留档，脱敏摘要入 `docs/acceptance/`

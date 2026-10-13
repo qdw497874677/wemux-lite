@@ -9,13 +9,17 @@ import { createServer } from 'node:http'
 import { WebSocketServer, type WebSocket } from 'ws'
 import type { CommandId, EventSeq, SessionId, Timestamp, WorkerId, WorkspaceProvisionSpec } from '@wemux/domain'
 import { WEMUX_ADK_PROFILE_V1, parseWorkerTransportFrame, type ServerToWorkerFrame, type WorkerCommand, type WorkerPayload, type WorkerTransportHello } from '@wemux/wire-protocol'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { authorizationBytes, type EnqueueAuthorization } from '@wemux/wire-protocol/command-assertion'
+import { clusterCommandAssertion } from './fixtures/cluster-signing.ts'
 import { SqliteWorkerStore } from '../src/storage/sqlite-store.js'
 import { WorkerRuntime } from '../src/application/runtime.js'
+import type { WorkerAgentRunner } from '../src/application/agent-runner.js'
 import { TestAgent } from '../src/agents/test-agent.js'
 import type { AgentAdapter } from '../src/application/ports/agent-adapter.js'
 import type { RuntimeSessionAdapter } from '../src/application/ports/runtime-session.js'
 import { LocalProvisioner } from '../src/workspaces/local-provisioner.js'
+import { SessionOwnership } from '../src/application/session-ownership.js'
 import { WebSocketTransport } from '../src/transport/websocket.js'
 import { WorkerTransportStore } from '../src/transport/transport-store.js'
 import { parseServerMessage } from '../src/transport/validation.js'
@@ -26,7 +30,18 @@ const workerId = 'worker' as WorkerId
 const sessionId = 'session' as SessionId
 const workspace = JSON.parse(JSON.stringify({ workspace: { id: '../workspace', workerId, projectId: 'project', name: 'empty', spec: { kind: 'composite', memberWorkspaceIds: [] }, status: 'pending', failureReason: null }, repositories: [] })) as WorkspaceProvisionSpec
 const create = JSON.parse(JSON.stringify({ kind: 'session.create', session: { sessionId, binding: { workspaceId: workspace.workspace.id, agent: { workerId, agentKey: 'test' }, modelId: 'test' } } })) as WorkerCommand
-const enqueue = (id: string): WorkerCommand => JSON.parse(JSON.stringify({ kind: 'session.enqueue', sessionId, message: { messageId: id, content: id } })) as WorkerCommand
+const enqueue = (id: string): WorkerCommand => JSON.parse(JSON.stringify({ kind: 'session.enqueue', sessionId, message: { messageId: id, content: id, sentByAccountId: 'actor' } })) as WorkerCommand
+const signingKeys = generateKeyPairSync('ed25519')
+const signingPublicKey = signingKeys.publicKey.export({ format: 'pem', type: 'spki' }).toString()
+const signingKeyId = createHash('sha256').update(signingPublicKey).digest('hex')
+const signingIdentity = { workerId, serverUrl: 'ws://localhost/ws', credentialRef: 'credential' as const, enrolledAt: new Date().toISOString() as Timestamp, commandSigningKey: { keyId: signingKeyId, publicKey: signingPublicKey } }
+function frame(id: string, command: WorkerCommand): { type: 'command'; commandId: CommandId; command: WorkerCommand; authorization?: { claims: EnqueueAuthorization; signature: string } } {
+  const commandId = id as CommandId
+  if (command.kind !== 'session.enqueue' && command.kind !== 'workspace.provision' && command.kind !== 'session.create' && command.kind !== 'session.delete' && command.kind !== 'turn.stop' && command.kind !== 'session.cancel-queued' && command.kind !== 'runtime.command') return { type: 'command', commandId, command }
+  const authorization = clusterCommandAssertion(signingKeys.privateKey, signingKeyId, { workerId, projectId: 'project' as never, workspaceId: workspace.workspace.id }, id, command)
+  return { type: 'command', commandId, command, authorization }
+}
+
 
 test('Session cleanup protects queued work, deletes Journal and survives restart without resurrection', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'session-cleanup-'))
@@ -76,18 +91,261 @@ async function until(predicate: () => boolean | Promise<boolean>) {
   for (let i = 0; i < 500; i++) { if (await predicate()) return; await delay(10) }
   assert.fail('Timed out waiting for condition')
 }
-async function fixture() {
+async function fixture(options?: { ownership?: SessionOwnership; prepare?: () => Promise<void>; send?: (message: WorkerToServer) => void; authorize?: (id: CommandId) => Promise<boolean>; runtimeAdapters?: ReadonlyMap<string, RuntimeSessionAdapter> }) {
   const home = await mkdtemp(join(tmpdir(), 'wemux-lite-worker-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
+  store.saveIdentity(signingIdentity)
   const events: WorkerToServer[] = []
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [new TestAgent(15)], { send: message => events.push(message) }, workerId, 'test')
+  // Fixture setup provisions the workspace before tests; its launch gate must not
+  // consume a test-provided authorization hook (tests count its invocations).
+  const authorizeHook = options?.authorize ? (async (id: CommandId) => id === ('provision' as CommandId) ? true : options.authorize!(id)) : (async () => true)
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [new TestAgent(15)], { send: message => { options?.send?.(message); events.push(message) } }, workerId, 'test', options?.prepare ? { prepare: async () => { await options.prepare!(); return { context: null, cleanup: async () => undefined } } } : undefined, undefined, options?.runtimeAdapters, null, undefined, undefined, undefined, authorizeHook, options?.ownership)
   await runtime.initialize()
-  const send = (id: string, command: WorkerCommand) => runtime.receive({ type: 'command', commandId: id as CommandId, command })
+  const send = (id: string, command: WorkerCommand) => runtime.receive(frame(id, command))
   await send('provision', { kind: 'workspace.provision', workspace })
   await until(async () => (await store.workspaces.get(workspace.workspace.id))?.status === 'ready')
   await send('create', create)
   return { home, store, runtime, events, send, cleanup: async () => { await runtime.shutdown(); store.close(); await rm(home, { recursive: true, force: true }) } }
 }
+
+test('publication failure and failed terminal transaction retain ownership until durable recovery, then wake same-home competitor', async () => {
+  const ownership = new SessionOwnership()
+  let failPublication = true
+  const f = await fixture({ ownership, send: message => {
+    if (failPublication && message.type === 'event' && message.scope === 'session' && message.event.payload.kind === 'turn.started') {
+      failPublication = false
+      throw new Error('publication fault')
+    }
+  } })
+  const competitorStore = new SqliteWorkerStore(join(f.home, 'worker.sqlite'))
+  const competitor = new WorkerRuntime(competitorStore, new LocalProvisioner(join(f.home, 'workspaces')), [new TestAgent(15)], { send() {} }, workerId, 'competitor', undefined, undefined, undefined, null, undefined, undefined, undefined, async () => true, ownership)
+  const transaction = f.store.transaction.bind(f.store)
+  let release!: () => void
+  const blocked = new Promise<void>(resolve => { release = resolve })
+  let failed = false
+  let activeAtFailure = false
+  let finalizationBlocked = false
+  f.store.transaction = work => transaction(async tx => work({ ...tx, sessions: { ...tx.sessions, finishTurn: async result => {
+    if (!failed) {
+      activeAtFailure = Boolean((await tx.sessions.get(sessionId))?.activeTurnId)
+      failed = true
+      throw new Error('finalization fault')
+    }
+    finalizationBlocked = true
+    await blocked
+    return tx.sessions.finishTurn(result)
+  } } }))
+  try {
+    await f.send('fault-first', enqueue('fault-first'))
+    await until(() => failed)
+    assert.equal(ownership.occupied(sessionId), true)
+    assert.equal(activeAtFailure, true)
+    const secondSend = f.send('fault-second', enqueue('fault-second'))
+    await until(() => finalizationBlocked)
+    assert.equal(ownership.occupied(sessionId), true)
+    release()
+    await secondSend
+    await competitor.connected()
+    assert.equal((await f.store.sessions.listQueued(sessionId)).length, 1)
+    await until(async () => (await f.store.sessions.listQueued(sessionId)).length === 0)
+    await until(() => !ownership.occupied(sessionId))
+    const turns = await f.store.listSessions()
+    assert.equal(turns[0]?.activeTurnId, null)
+  } finally { release(); f.store.transaction = transaction; await competitor.shutdown(); competitorStore.close(); await f.cleanup() }
+})
+
+test('execution finalization transaction failure never reexecutes an active Turn', async () => {
+  const ownership = new SessionOwnership()
+  const f = await fixture({ ownership })
+  const transaction = f.store.transaction.bind(f.store)
+  let release!: () => void
+  const blocked = new Promise<void>(resolve => { release = resolve })
+  let failed = false
+  let activeAtFailure = false
+  let finalizationBlocked = false
+  f.store.transaction = work => transaction(async tx => work({ ...tx, sessions: { ...tx.sessions, finishTurn: async result => {
+    if (!failed) {
+      activeAtFailure = Boolean((await tx.sessions.get(sessionId))?.activeTurnId)
+      failed = true
+      throw new Error('finalization fault')
+    }
+    finalizationBlocked = true
+    await blocked
+    return tx.sessions.finishTurn(result)
+  } } }))
+  try {
+    await f.send('execution-first', enqueue('execution-first'))
+    await until(() => failed)
+    assert.equal(ownership.occupied(sessionId), true)
+    assert.equal(activeAtFailure, true)
+    const secondSend = f.send('execution-second', enqueue('execution-second'))
+    await until(() => finalizationBlocked)
+    assert.equal(ownership.occupied(sessionId), true)
+    release()
+    await secondSend
+    assert.equal((await f.store.commands.get('execution-second' as CommandId))?.state, 'completed')
+    await until(async () => (await f.store.sessions.listQueued(sessionId)).length === 0)
+    await until(async () => !(await f.store.sessions.get(sessionId))?.activeTurnId)
+    const first = (await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events
+    assert.equal(first.filter(event => event.payload.kind === 'turn.started').length, 2)
+  } finally { release(); f.store.transaction = transaction; await f.cleanup() }
+})
+
+test('competing Runtimes cannot claim another Turn while the first owner prepares a claimed Turn', async () => {
+  const ownership = new SessionOwnership()
+  let resume!: () => void
+  const gate = new Promise<void>(resolve => { resume = resolve })
+  const f = await fixture({ ownership, prepare: () => gate })
+  const competitorStore = new SqliteWorkerStore(join(f.home, 'worker.sqlite'))
+  const competitor = new WorkerRuntime(competitorStore, new LocalProvisioner(join(f.home, 'workspaces')), [new TestAgent(15)], { send() {} }, workerId, 'competitor', undefined, undefined, undefined, null, undefined, undefined, undefined, async () => true, ownership)
+  try {
+    await f.send('first', enqueue('first'))
+    await until(async () => Boolean((await f.store.sessions.get(sessionId))?.activeTurnId))
+    const first = (await f.store.sessions.get(sessionId))?.activeTurnId
+    assert.equal(ownership.occupied(sessionId), true, 'reservation must precede adapter preparation and first iterator read')
+    await f.send('second', enqueue('second'))
+    await competitor.connected()
+    assert.equal((await f.store.sessions.listQueued(sessionId)).length, 1, 'loser must leave queued Turn unclaimed')
+    assert.equal((await f.store.sessions.get(sessionId))?.activeTurnId, first)
+    resume()
+    await until(async () => (await f.store.sessions.listQueued(sessionId)).length === 0)
+  } finally { resume(); await competitor.shutdown(); competitorStore.close(); await f.cleanup() }
+})
+
+test('cluster approval without a signed binding is rejected before journal or native resolution', async () => {
+  const f = await fixture()
+  try {
+    const target = { kind: 'runtime.approval.resolve', sessionId, turnId: 'turn' as never, approvalId: 'approval' as never, decision: 'approve' as const, decidedByAccountId: 'actor' as never }
+    const before = await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })
+    await f.runtime.receive({ type: 'command', commandId: 'unsigned-approval' as CommandId, command: target })
+    const ack = f.events.filter(event => event.type === 'ack').at(-1)
+    assert.equal(ack?.type, 'ack')
+    if (ack?.type === 'ack') assert.deepEqual(ack.receipt, { commandId: 'unsigned-approval', status: 'rejected', error: { code: 'invalid-input', message: 'Command authorization unavailable', retryable: false } })
+    assert.equal((await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events.length, before.events.length)
+    assert.equal(await f.store.commands.get('unsigned-approval' as CommandId), null)
+  } finally { await f.cleanup() }
+})
+
+test('cluster approval rejects forged signature, wrong audience and expired binding before online check', async () => {
+  const f = await fixture()
+  try {
+    const command: WorkerCommand = { kind: 'runtime.approval.resolve', sessionId, turnId: 'turn' as never, approvalId: 'approval' as never, decision: 'approve', decidedByAccountId: 'actor' as never }
+    const signFrame = (id: string) => {
+      const commandId = id as CommandId
+      const claims: EnqueueAuthorization = { version: 2, kind: 'runtime.approval.resolve', keyId: signingKeyId, commandId, workerId, sessionId, projectId: 'project' as never, workspaceId: workspace.workspace.id, taskId: null, actorId: 'actor' as never, actorAuthVersion: 0, commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
+      return { type: 'command' as const, commandId, command, authorization: { claims, signature: sign(null, authorizationBytes(claims), signingKeys.privateKey).toString('base64url') } }
+    }
+    for (const [id, change] of [
+      ['forged', (frame: ReturnType<typeof signFrame>) => ({ ...frame, authorization: { ...frame.authorization, signature: 'forged' } })],
+      ['audience', (frame: ReturnType<typeof signFrame>) => ({ ...frame, authorization: { ...frame.authorization, claims: { ...frame.authorization.claims, workerId: 'other' as WorkerId } } })],
+      ['expired', (frame: ReturnType<typeof signFrame>) => ({ ...frame, authorization: { ...frame.authorization, claims: { ...frame.authorization.claims, expiresAt: new Date(Date.now() - 1000).toISOString() } } })],
+    ] as const) {
+      await f.runtime.receive(change(signFrame(id)))
+      const ack = f.events.filter(event => event.type === 'ack').at(-1)
+      assert.equal(ack?.type, 'ack')
+      if (ack?.type === 'ack') assert.equal(ack.receipt.status, 'rejected')
+      assert.equal(await f.store.commands.get(id as CommandId), null)
+    }
+    await f.runtime.receive(signFrame('signed'))
+    const ack = f.events.filter(event => event.type === 'ack').at(-1)
+    assert.equal(ack?.type, 'ack')
+    if (ack?.type === 'ack' && ack.receipt.status === 'rejected') assert.match(ack.receipt.error.message, /Turn is not active/)
+  } finally { await f.cleanup() }
+})
+
+test('approval revoked during asynchronous validation never reaches native resolution', async () => {
+  let checks = 0
+  const f = await fixture({ authorize: async () => ++checks === 1 })
+  const journalRead = f.store.journal.read.bind(f.store.journal)
+  let reached!: () => void, resume!: () => void
+  const entered = new Promise<void>(resolve => { reached = resolve })
+  const gate = new Promise<void>(resolve => { resume = resolve })
+  const commandId = 'revoked-during-validation' as CommandId
+  try {
+    await f.store.transaction(async tx => {
+      await tx.sessions.enqueue({ sessionId, submissionCommandId: 'test-active' as CommandId, message: { messageId: 'test-active' as never, content: 'test' }, queuedAt: new Date().toISOString() as Timestamp })
+      await tx.sessions.claimNext(sessionId)
+    })
+    const turnId = (await f.store.sessions.get(sessionId))!.activeTurnId!
+    const command: WorkerCommand = { kind: 'runtime.approval.resolve', sessionId, turnId, approvalId: 'approval' as never, decision: 'approve', decidedByAccountId: 'actor' as never }
+    await f.store.transaction(tx => tx.appendJournal(sessionId, [{ occurredAt: new Date().toISOString() as Timestamp, payload: { kind: 'approval.requested', turnId, approvalId: 'approval' as never, action: { tool: 'test' } } }]))
+    const claims: EnqueueAuthorization = { version: 2, kind: 'runtime.approval.resolve', keyId: signingKeyId, commandId, workerId, sessionId, projectId: 'project' as never, workspaceId: workspace.workspace.id, taskId: null, actorId: 'actor' as never, actorAuthVersion: 0, commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
+    f.store.journal.read = async input => { reached(); await gate; return journalRead(input) }
+    const delivery = f.runtime.receive({ type: 'command', commandId, command, authorization: { claims, signature: sign(null, authorizationBytes(claims), signingKeys.privateKey).toString('base64url') } })
+    await entered
+    // Authorization callback revokes while the first online check has passed,
+    // but the actual approval validation still awaits the journal reader.
+    resume()
+    await delivery
+    assert.equal(checks, 2, `receipt=${JSON.stringify(f.events.filter(e => e.type === 'ack' && e.receipt.commandId === commandId))}`)
+    assert.equal(await f.store.commands.get(commandId), null)
+    assert.equal((await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events.filter(e => e.payload.kind === 'approval.resolved').length, 0)
+    assert.equal(f.events.some(e => e.type === 'ack' && e.receipt.commandId === commandId), false)
+  } finally { resume(); f.store.journal.read = journalRead; await f.cleanup() }
+})
+
+for (const denial of ['false', 'throws'] as const) test(`cluster approval reauthorizes after native session lock queue (${denial})`, async () => {
+  let checks = 0, revoked = false, nativeCalls = 0
+  let commandEntered!: () => void, releaseCommand!: () => void, releaseTurn!: () => void
+  const entered = new Promise<void>(resolve => { commandEntered = resolve })
+  const commandGate = new Promise<void>(resolve => { releaseCommand = resolve })
+  const turnGate = new Promise<void>(resolve => { releaseTurn = resolve })
+  const adapter: RuntimeSessionAdapter = { async openSession() { return {
+    async execute() { return { signals: (async function* () { await turnGate; yield { kind: 'finished' as const, outcome: { status: 'completed' as const } } })(), async stop() { releaseTurn() } } },
+    async command() { commandEntered(); await commandGate },
+    async resolveApproval() { nativeCalls++ },
+    async close() {},
+  } } }
+  const f = await fixture({ runtimeAdapters: new Map([['test', adapter]]), authorize: async () => { checks++; if (revoked && denial === 'throws') throw new Error('authorization service unavailable'); return !revoked } })
+  const commandId = 'queued-revocation' as CommandId
+  try {
+    await f.send('active-turn', enqueue('active-turn'))
+    await until(async () => Boolean((await f.store.sessions.get(sessionId))?.activeTurnId))
+    const turnId = (await f.store.sessions.get(sessionId))!.activeTurnId!
+    await f.store.transaction(tx => tx.appendJournal(sessionId, [{ occurredAt: new Date().toISOString() as Timestamp, payload: { kind: 'approval.requested', turnId, approvalId: 'approval' as never, action: { tool: 'test' } } }]))
+    const runner = (f.runtime as unknown as { agentRunner: WorkerAgentRunner }).agentRunner
+    let approvalQueued!: () => void
+    const queued = new Promise<void>(resolve => { approvalQueued = resolve })
+    const originalResolve = runner.resolveApproval.bind(runner)
+    runner.resolveApproval = async (...args) => { const result = originalResolve(...args); approvalQueued(); return result }
+    const blocked = runner.command({ sessionId, invocationId: turnId, name: 'blocked', arguments: {} })
+    await entered
+    checks = 0
+    const command: WorkerCommand = { kind: 'runtime.approval.resolve', sessionId, turnId, approvalId: 'approval' as never, decision: 'approve', decidedByAccountId: 'actor' as never }
+    const claims: EnqueueAuthorization = { version: 2, kind: 'runtime.approval.resolve', keyId: signingKeyId, commandId, workerId, sessionId, projectId: 'project' as never, workspaceId: workspace.workspace.id, taskId: null, actorId: 'actor' as never, actorAuthVersion: 0, commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
+    const delivery = f.runtime.receive({ type: 'command', commandId, command, authorization: { claims, signature: sign(null, authorizationBytes(claims), signingKeys.privateKey).toString('base64url') } })
+    await queued
+    assert.equal(checks, 2, 'queued native resolution has not passed its inside-lock authorization')
+    assert.equal(nativeCalls, 0, 'approval waits for the manager lock')
+    revoked = true
+    releaseCommand()
+    await blocked
+    await delivery
+    assert.equal(checks, 3, 'authorization must run inside the lock after the queued command')
+    assert.equal(nativeCalls, 0)
+    assert.equal(await f.store.commands.get(commandId), null, 'temporary denial has no settled receipt')
+    assert.equal(f.events.some(event => event.type === 'ack' && event.receipt.commandId === commandId), false)
+    assert.equal((await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events.filter(event => event.payload.kind === 'approval.resolved').length, 0)
+  } finally { releaseCommand(); releaseTurn(); await f.cleanup() }
+})
+
+test('signed cluster approval cannot resolve while online reauthorization is unavailable', async () => {
+  const f = await fixture()
+  try {
+    const command: WorkerCommand = { kind: 'runtime.approval.resolve', sessionId, turnId: 'turn' as never, approvalId: 'approval' as never, decision: 'approve', decidedByAccountId: 'actor' as never }
+    const commandId = 'offline-approval' as CommandId
+    const claims: EnqueueAuthorization = { version: 2, kind: 'runtime.approval.resolve', keyId: signingKeyId, commandId, workerId, sessionId, projectId: 'project' as never, workspaceId: workspace.workspace.id, taskId: null, actorId: 'actor' as never, actorAuthVersion: 0, commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'), issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 120000).toISOString() }
+    const journal = await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })
+    // No active approval is available, so a successful online check would reach validation.
+    // This test exercises a runtime lacking a fresh authorization callback.
+    const offline = new WorkerRuntime(f.store, new LocalProvisioner(join(f.home, 'workspaces')), [new TestAgent(1)], { send: message => f.events.push(message) }, workerId, 'offline')
+    await offline.receive({ type: 'command', commandId, command, authorization: { claims, signature: sign(null, authorizationBytes(claims), signingKeys.privateKey).toString('base64url') } })
+    assert.equal(f.events.filter(event => event.type === 'ack' && event.receipt.commandId === commandId).length, 0, 'temporary online denial cannot issue a terminal application receipt')
+    assert.equal(await f.store.commands.get(commandId), null)
+    assert.equal((await f.store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 100 })).events.length, journal.events.length)
+    await offline.shutdown()
+  } finally { await f.cleanup() }
+})
 
 test('FIFO, durable ACK, idempotency conflict, cancellation, stop and stream/tool events', async () => {
   const f = await fixture()
@@ -123,7 +381,7 @@ test('cancel versus claim ordering, duplicate commands and late stop keep the ne
   const f = await fixture()
   try {
     // Hold execution of the first Turn so the two orderings are observable.
-    await f.send('hold', { kind: 'session.enqueue', sessionId, message: { messageId: 'hold' as never, content: '[test-agent:pause-ms=60000] hold' } })
+    await f.send('hold', { kind: 'session.enqueue', sessionId, message: { messageId: 'hold' as never, content: '[test-agent:pause-ms=60000] hold', sentByAccountId: 'actor' as never } })
     await until(async () => Boolean((await f.store.sessions.get(sessionId))?.activeTurnId))
     const holdId = (await f.store.sessions.get(sessionId))!.activeTurnId!
     await f.send('before', enqueue('before'))
@@ -155,6 +413,7 @@ test('cancel versus claim ordering, duplicate commands and late stop keep the ne
 test('a silent agent turn fails durably instead of leaving the session running forever', async () => {
   const home = await mkdtemp(join(tmpdir(), 'wemux-silent-agent-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
+  store.saveIdentity(signingIdentity)
   const silentAgent: AgentAdapter = {
     agentKey: 'test' as any,
     mode: 'execution',
@@ -167,8 +426,8 @@ test('a silent agent turn fails durably instead of leaving the session running f
       }
     },
   }
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [silentAgent], { send() {} }, workerId, 'silent', undefined, { idleMs: 30, maxMs: 100 })
-  const send = (id: string, command: WorkerCommand) => runtime.receive({ type: 'command', commandId: id as CommandId, command })
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [silentAgent], { send() {} }, workerId, 'silent', undefined, { idleMs: 30, maxMs: 100 }, undefined, null, undefined, undefined, undefined, async () => true)
+  const send = (id: string, command: WorkerCommand) => runtime.receive(frame(id, command))
   try {
     await runtime.initialize()
     await send('provision', { kind: 'workspace.provision', workspace })
@@ -187,6 +446,7 @@ test('a silent agent turn fails durably instead of leaving the session running f
 test('max runtime deadline after a published event does not request a second iterator result', async t => {
   const home = await mkdtemp(join(tmpdir(), 'wemux-max-deadline-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
+  store.saveIdentity(signingIdentity)
   let sawFirst = false, secondNext = 0
   const agent: AgentAdapter = {
     agentKey: 'test' as any, mode: 'execution',
@@ -205,8 +465,8 @@ test('max runtime deadline after a published event does not request a second ite
     if (sawFirst) await delay(80)
     return transaction(...args)
   })
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send() {} }, workerId, 'deadline', undefined, { idleMs: 1000, maxMs: 40 }, new Map([[agent.agentKey, adapter]]))
-  const send = (id: string, command: WorkerCommand) => runtime.receive({ type: 'command', commandId: id as CommandId, command })
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send() {} }, workerId, 'deadline', undefined, { idleMs: 1000, maxMs: 40 }, new Map([[agent.agentKey, adapter]]), null, undefined, undefined, undefined, async () => true)
+  const send = (id: string, command: WorkerCommand) => runtime.receive(frame(id, command))
   try {
     await runtime.initialize()
     await send('provision', { kind: 'workspace.provision', workspace })
@@ -232,6 +492,7 @@ test('max runtime deadline after a published event does not request a second ite
 test('explicit stop does not convert a non-Pi adapter abort into cancelled', async () => {
   const home = await mkdtemp(join(tmpdir(), 'wemux-abort-stop-'))
   const store = new SqliteWorkerStore(join(home, 'worker.sqlite'))
+  store.saveIdentity(signingIdentity)
   let fail!: (error: Error) => void
   let started!: () => void
   const executing = new Promise<void>(resolve => { started = resolve })
@@ -245,8 +506,8 @@ test('explicit stop does not convert a non-Pi adapter abort into cancelled', asy
     async execute() { return { signals: { async *[Symbol.asyncIterator]() { started(); await gate } }, async stop() { fail(new Error('This operation was aborted')) } } },
     async command() {}, async resolveApproval() {}, async close() {},
   } } }
-  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send() {} }, workerId, 'abort-stop', undefined, undefined, new Map([[agent.agentKey, adapter]]))
-  const send = (id: string, command: WorkerCommand) => runtime.receive({ type: 'command', commandId: id as CommandId, command })
+  const runtime = new WorkerRuntime(store, new LocalProvisioner(join(home, 'workspaces')), [agent], { send() {} }, workerId, 'abort-stop', undefined, undefined, new Map([[agent.agentKey, adapter]]), null, undefined, undefined, undefined, async () => true)
+  const send = (id: string, command: WorkerCommand) => runtime.receive(frame(id, command))
   try {
     await runtime.initialize()
     await send('provision', { kind: 'workspace.provision', workspace })
@@ -284,18 +545,22 @@ test('SQLite rollback, restart interruption, queued recovery and persistent iden
   const path = join(home, 'db')
   let store = new SqliteWorkerStore(path)
   try {
-    store.saveIdentity({ workerId, serverUrl: 'ws://localhost', credentialRef: 'credential', enrolledAt: new Date().toISOString() as Timestamp })
+    store.saveIdentity(signingIdentity)
     await assert.rejects(store.transaction(async tx => { await tx.sessions.createSession(sessionId, (create as Extract<WorkerCommand,{kind:'session.create'}>).session.binding); throw new Error('rollback') }))
     assert.equal(await store.sessions.get(sessionId), null)
     await store.transaction(async tx => {
       await tx.workspaces.save({ ...workspace.workspace, rootPath: home, updatedAt: new Date().toISOString() as Timestamp, status: 'ready' })
       await tx.sessions.createSession(sessionId, (create as Extract<WorkerCommand,{kind:'session.create'}>).session.binding)
-      for (const id of ['one', 'two']) await tx.sessions.enqueue({ sessionId, submissionCommandId: id as CommandId, message: (enqueue(id) as Extract<WorkerCommand,{kind:'session.enqueue'}>).message, queuedAt: new Date().toISOString() as Timestamp })
+      for (const id of ['one', 'two']) {
+        const signed = frame(id, enqueue(id))
+        await tx.commands.record({ commandId: signed.commandId, command: signed.command, payloadFingerprint: id, authorization: signed.authorization }, { commandId: signed.commandId, status: 'accepted' })
+        await tx.sessions.enqueue({ sessionId, submissionCommandId: id as CommandId, message: (enqueue(id) as Extract<WorkerCommand,{kind:'session.enqueue'}>).message, queuedAt: new Date().toISOString() as Timestamp })
+      }
       await tx.sessions.claimNext(sessionId)
     })
     store.close(); store = new SqliteWorkerStore(path)
     assert.equal(store.identity()?.workerId, workerId)
-    const runtime = new WorkerRuntime(store, new LocalProvisioner(home), [new TestAgent(1)], { send() {} }, workerId, 'recovery')
+    const runtime = new WorkerRuntime(store, new LocalProvisioner(home), [new TestAgent(1)], { send() {} }, workerId, 'recovery', undefined, undefined, undefined, null, undefined, undefined, undefined, async () => true)
     await runtime.initialize()
     await until(async () => (await store.sessions.get(sessionId))?.runtimeState === 'idle')
     const page = await store.journal.read({ sessionId, fromSeq: 1 as EventSeq, limit: 1000 })
@@ -341,7 +606,7 @@ test('real transport-v2 ws connection authenticates, handshakes, delivers comman
       }
     })
   })
-  const runtime = new WorkerRuntime(f.store, new LocalProvisioner(join(f.home, 'workspaces')), [new TestAgent(1)], { send: message => transport.send(message) }, workerId, 'network')
+  const runtime = new WorkerRuntime(f.store, new LocalProvisioner(join(f.home, 'workspaces')), [new TestAgent(1)], { send: message => transport.send(message) }, workerId, 'network', undefined, undefined, undefined, null, undefined, undefined, undefined, async () => true)
   const transport = new WebSocketTransport({
     url: `ws://127.0.0.1:${address.port}`, authToken: 'secret', workerId, workerVersion: 'test', name: 'network', platform: 'linux', architecture: 'x64',
     store: new WorkerTransportStore(join(f.home, 'transport.sqlite')), onMessage: message => { void runtime.receive(message) }, onConnected: () => { void runtime.connected() }, random: () => 0,
@@ -356,7 +621,7 @@ test('real transport-v2 ws connection authenticates, handshakes, delivers comman
   try {
     await runtime.initialize(); transport.start()
     await until(() => messages.some(m => m.type === 'capability'))
-    await send({ type: 'command', commandId: 'network' as CommandId, command: enqueue('network') })
+    await send(frame('network', enqueue('network')))
     await until(() => messages.some(m => m.type === 'event' && m.scope === 'session' && m.event.payload.kind === 'turn.finished'))
     peer!.terminate()
     await until(() => connections === 2 && messages.filter(m => m.type === 'sync' && m.kind === 'heads').length === 2)
@@ -411,7 +676,8 @@ test('enrollment exchanges token without persisting or reusing it as credential'
     assert.equal(request.url, '/api/worker-enrollments')
     assert.equal(request.headers.authorization, 'Bearer once')
     response.setHeader('Content-Type', 'application/json')
-    response.end(JSON.stringify({ workerId, credential: 'long-lived' }))
+    const publicKey = generateKeyPairSync('ed25519').publicKey.export({ format: 'pem', type: 'spki' }).toString()
+    response.end(JSON.stringify({ workerId, credential: 'long-lived', commandSigningKey: { publicKey, keyId: createHash('sha256').update(publicKey).digest('hex') } }))
   })
   server.listen(0, '127.0.0.1')
   await new Promise<void>(resolve => server.once('listening', resolve))

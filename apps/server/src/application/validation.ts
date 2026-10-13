@@ -67,7 +67,7 @@ export function validateEvent(value: unknown): JournalEvent {
       if (p.failure !== null) {
         const f = object(p.failure)
         oneOf(f.code, ['interrupted', 'agent-unavailable', 'agent-error', 'internal-error']); text(f.message, 'failure')
-        if (f.abortReason !== undefined) oneOf(f.abortReason, ['user_stop', 'executor_disconnected', 'control_plane_disconnect', 'timeout', 'provider_error', 'cancelled', 'unknown'])
+        if (f.abortReason !== undefined) oneOf(f.abortReason, ['user_stop', 'executor_disconnected', 'control_plane_disconnect', 'timeout', 'provider_error', 'authorization_unavailable', 'cancelled', 'unknown'])
         if (f.failureReason !== undefined) oneOf(f.failureReason, ['agent_error.context_overflow', 'agent_error.missing_config', 'agent_error.provider_auth_or_access', 'agent_error.provider_quota_limit', 'agent_error.provider_capacity_or_rate_limit', 'agent_error.provider_server_error', 'agent_error.provider_network', 'agent_error.model_not_found_or_unavailable', 'agent_error.empty_or_unparseable_output', 'agent_error.agent_timeout', 'agent_error.runtime_missing_executable', 'agent_error.runtime_version_unsupported', 'agent_error.process_failure', 'agent_error.unknown'])
         if (f.retryable !== undefined) boolean(f.retryable)
       }
@@ -85,6 +85,7 @@ function capability(value: unknown): AgentCapability {
   const a = object(c.availability); oneOf(a.status, ['available', 'unavailable', 'authentication-required'])
   if (a.status !== 'available') text(a.reason, 'reason')
   if (c.modelSwap !== undefined) boolean(c.modelSwap)
+  if (c.attachments !== undefined) boolean(c.attachments)
   if (c.authorization !== undefined) {
     const authorization = object(c.authorization)
     oneOf(authorization.state, ['unknown', 'authorized', 'unauthorized', 'expired'])

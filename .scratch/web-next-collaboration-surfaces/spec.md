@@ -64,12 +64,12 @@ Status: ready-for-agent
 1. 01 复用关系与权限投影，补固定 cursor Fork 和血缘查询；真实多用户浏览器验证列表、流与受控缓存撤权清理，已下载副本不列入回收承诺。
 2. 02 盘点已有文件/终端服务，补 CAS 修改、路径权限、终端重连清理和成果引用；共享 Placement 的文件行为实测，不拿 Session 私有冒充文件隔离。
 3. 03 复用连接器/渠道端口，补配置、审批、撤权、投递结果与死信 UI；明确失败和未知结果分开，不盲重试未知副作用。
-4. 后端合同与受控测试可独立实施；新增写能力开放仍以协调安全签收为门，最终界面验收需要 01/02/03 齐备。看板派发另由[任务派发 spec](../web-next-task-dispatch/spec.md)覆盖，画布不是看板替代品。
+4. 后端合同与受控测试可独立实施；新增写能力按自身账号/资源权限与审批验收，不再以协调隔离签收为门，最终界面验收需要 01/02/03 齐备。看板派发另由[任务派发 spec](../web-next-task-dispatch/spec.md)覆盖，画布不是看板替代品。
 
 ## Testing Decisions
 
 - 复用现有 seam：web-next 会话界面与投影 API、实时流通道、连接器投递端口、文件与终端执行边界、现有 e2e 骨架。
-- 只测外部行为：撤权后各出口不可见、Secret 不回显、审批阻断外发、死信去重与未知结果暂停重试、终端生命周期结束无悬挂、协调无实施写权。
+- 只测外部行为：撤权后各出口不可见、Secret 不回显、审批阻断外发、死信去重与未知结果暂停重试、终端生命周期结束无悬挂、协调对话与普通会话按相同资源授权执行工具。
 - Prior art：现有画布与连接器模块契约文档及测试、写通道矩阵探针、会话权限测试。
 - 真实浏览器验收覆盖桌面与移动视口的主要流程。
 
@@ -89,10 +89,10 @@ Status: ready-for-agent
 | [02 文件、Diff、终端与成果](issues/02-files-terminal-artifacts.md) | 02、03 |
 | [03 连接器、渠道与签收](issues/03-connector-channel-acceptance.md) | 04、05 |
 
-02、03 的独立后端与受控测试可先行；界面联调依赖 01，写能力开放仍需协调安全签收，03 的同候选验收与关闭另须 02 完成。签收并入 03，证据准备完成后转 `ready-for-human`；用户确认前不关闭该 ticket、不认定本 spec 验收通过、不勾选 NEXT-09 / NEXT-10 / NEXT-12。
+02、03 的独立后端与受控测试可先行；界面联调依赖 01，写能力按自身账号/资源权限与审批合同验收，不再等待协调身份隔离签收；03 的同候选验收与关闭另须 02 完成。签收并入 03，证据准备完成后转 `ready-for-human`；用户确认前不关闭该 ticket、不认定本 spec 验收通过、不勾选 NEXT-09 / NEXT-10 / NEXT-12。
 
 ## Further Notes
 
 - 依据 `docs/design/session-collaboration-canvas.md`、`docs/design/session-canvas-module-contracts.md`、`docs/design/connector-module-contracts.md`、`docs/design/connector-module-borrow-and-hexagon-boundaries.md`。
-- 01 复用已验证的账号授权与 Task Session 基线，不等待计划交接。02、03 开放实施写能力前依赖[协调入口人工签收与开门](../web-next-coordination-closure/issues/04-coordination-acceptance.md)，保留协调无实施写权和既有写通道关闭裁定。
+- 01 复用已验证的账号授权与 Task Session 基线，不等待计划交接。02、03 的写能力遵守各自授权/审批，不以[协调聊天功能验收](../web-next-coordination-closure/issues/04-coordination-acceptance.md)或隔离风险接受为前置；历史写通道关闭裁定只说明旧候选状态。
 - 新增能力后必须重跑写通道矩阵；已交付的受限交接/启动操作也须纳入复核，不因移除无关串行依赖而跳过任何授权边界。

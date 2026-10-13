@@ -277,6 +277,8 @@ export class SqliteServerStore implements ServerStore {
     listCapabilityAssets: async projectId => this.get<CapabilityAsset[]>('capability-assets', projectId) ?? [],
     listAgentInboxMessages: async (sessionId, unreadOnly) => this.list<AgentInboxMessage>('agent-inbox').filter(message => message.toSessionId === sessionId && (!unreadOnly || message.status !== 'read')),
     getAgentInboxMessage: async messageId => this.get('agent-inbox', messageId),
+    getSessionAttachment: async id => this.get<import('../../application/ports/server-store-types.js').SessionAttachmentRecord>('session-attachment', id),
+    listSessionAttachments: async sessionId => this.list<import('../../application/ports/server-store-types.js').SessionAttachmentRecord>('session-attachment').filter(record => record.sessionId === sessionId),
   }
   readonly resources = this.committed(this.resourceReader)
   private commandProjection(id: string): CommandProjection | null {
@@ -289,11 +291,12 @@ export class SqliteServerStore implements ServerStore {
       return row ? JSON.parse(String(row.data)) : null
     },
     getPendingCommand: async id => { const row = this.db.prepare('SELECT data FROM commands WHERE id=?').get(id); return row ? JSON.parse(String(row.data)) : null },
+    getReceipt: async id => this.get('receipt', id),
     get: async id => this.commandProjection(id),
     listWorkspaceProvisions: async id => this.db.prepare("SELECT data FROM commands WHERE json_extract(data,'$.command.kind')='workspace.provision' AND json_extract(data,'$.command.workspace.workspace.id')=? ORDER BY rowid").all(id).map(row => JSON.parse(String(row.data)) as PendingCommand),
     hasProvisionAttempt: async id => Boolean(this.db.prepare("SELECT 1 FROM commands WHERE json_extract(data,'$.command.kind')='workspace.provision' AND json_extract(data,'$.command.workspace.workspace.id')=? LIMIT 1").get(id)),
     listUnsettledEnqueues: async id => this.db.prepare("SELECT data FROM commands WHERE json_extract(data,'$.command.sessionId')=? AND json_extract(data,'$.command.kind')='session.enqueue' AND status IN ('pending','accepted')").all(id).map(row => JSON.parse(String(row.data)) as PendingCommand),
-    listDeliverable: async (id, limit) => this.db.prepare("SELECT data FROM commands WHERE worker_id=? AND status='pending' AND NOT EXISTS (SELECT 1 FROM command_dependencies d JOIN commands p ON p.id=d.prerequisite_id WHERE d.command_id=commands.id AND p.status<>'accepted') ORDER BY rowid LIMIT ?").all(id, limit).map(row => JSON.parse(String(row.data)) as PendingCommand),
+    listDeliverable: async (id, limit) => this.db.prepare("SELECT data FROM commands WHERE worker_id=? AND status='pending' AND (json_extract(data,'$.command.kind') NOT IN ('session.enqueue','runtime.approval.resolve') OR json_type(data,'$.authorization')='object') AND NOT EXISTS (SELECT 1 FROM command_dependencies d JOIN commands p ON p.id=d.prerequisite_id WHERE d.command_id=commands.id AND p.status<>'accepted') ORDER BY rowid LIMIT ?").all(id, limit).map(row => JSON.parse(String(row.data)) as PendingCommand),
     list: async ({ workerId, status, limit }) => {
       const clauses: string[] = [], params: (string | number)[] = []
       if (workerId) { clauses.push('worker_id=?'); params.push(workerId) }
@@ -608,6 +611,7 @@ export class SqliteServerStore implements ServerStore {
       saveCreateRequest: async (key, record) => this.put('create-request', key, record),
       saveWorker: async r => this.put('worker', r.id, r), saveProject: async r => this.put('project', r.id, r),
       saveRepository: async r => this.put('repository', r.id, r), saveWorkspace: async r => this.put('workspace', r.id, r), saveSession: async r => this.put('session', r.id, r),
+      saveSessionAttachment: async r => this.put('session-attachment', r.id, r),
       saveSessionFork: async fork => {
         const index = forkRequestIndexId(fork.projectId, fork.creation.requestId), indexed = this.get<string>('session-fork-request', index)
         // Index and row are written together: a second Fork claiming the same requestId in one
@@ -644,6 +648,15 @@ export class SqliteServerStore implements ServerStore {
       insertPending: async r => {
         const projection: CommandProjection = { commandId: r.commandId, workerId: r.workerId, payloadFingerprint: r.payloadFingerprint, status: 'pending', createdAt: r.createdAt, updatedAt: r.createdAt }
         this.db.prepare('INSERT INTO commands VALUES(?,?,?,?,?)').run(r.commandId, r.workerId, 'pending', JSON.stringify(r), JSON.stringify(projection))
+      },
+      refreshApprovalAuthorization: async (id, authorization) => {
+        const row = this.db.prepare("SELECT data FROM commands WHERE id=? AND status='pending'").get(id)
+        if (!row) throw new AppError(409, 'Approval command is no longer pending')
+        const pending = JSON.parse(String(row.data)) as PendingCommand
+        if (pending.command.kind !== 'runtime.approval.resolve' || !pending.authorization) throw new AppError(409, 'Cannot refresh unsigned or non-approval command')
+        const original = pending.authorization.claims, refreshed = authorization.claims
+        if ((original.version !== 2 && original.version !== 3) || original.version !== refreshed.version || original.kind !== refreshed.kind || original.keyId !== refreshed.keyId || original.commandId !== refreshed.commandId || original.workerId !== refreshed.workerId || original.sessionId !== refreshed.sessionId || original.projectId !== refreshed.projectId || original.workspaceId !== refreshed.workspaceId || original.taskId !== refreshed.taskId || original.actorId !== refreshed.actorId || original.actorAuthVersion !== refreshed.actorAuthVersion || original.commandDigest !== refreshed.commandDigest) throw new AppError(409, 'Approval authorization identity changed')
+        this.db.prepare("UPDATE commands SET data=? WHERE id=? AND status='pending'").run(JSON.stringify({ ...pending, authorization }), id)
       },
       recordReceipt: async (receipt, at) => {
         const p = this.commandProjection(receipt.commandId)

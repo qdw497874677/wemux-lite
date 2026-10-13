@@ -233,8 +233,8 @@ test('attention ordering indexes migrate existing rows and replay without changi
     f.insertRuns()
     f.deadLetter('existing-delivery', 'project-a', recent)
     f.db.exec('DROP INDEX attention_failed_runs_order; DROP INDEX attention_dead_letters_order; DROP INDEX attention_human_reviews_order')
-    // The two attention indexes precede the human review index and personal visibility migration.
-    for (const version of [migrationCount - 1, migrationCount - 2]) {
+    // The two attention indexes precede the human review, personal visibility and Team coordination migrations.
+    for (const version of [migrationCount - 2, migrationCount - 3]) {
       f.db.prepare('DELETE FROM schema_migrations WHERE version=?').run(version)
     }
     migrate(f.db)

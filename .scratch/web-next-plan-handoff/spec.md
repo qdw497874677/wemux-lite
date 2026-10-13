@@ -87,8 +87,8 @@ Status: ready-for-agent
 ## Further Notes
 
 - 依据 `docs/design/task-platform-contract-decisions.md`、`docs/design/agent-collaboration-p2-architecture.md`。
-- 前置：[协调入口人工签收与开门](../web-next-coordination-closure/issues/04-coordination-acceptance.md)通过；这是协调交接的功能前提，不是按 spec 排列顺序串行执行。
-- 本 spec 会扩展受控项目管理能力面，因此必须同步重跑并更新写通道矩阵，不得沿用开放前的“协调全只读”表述。L1 仅限制平台中介路径，不承诺 OS 隔离。
+- 真实协调交接的功能前置：[协调聊天 API](../web-next-coordination-closure/issues/03-gate-standard-reprobe.md)和 [Web 功能验收](../web-next-coordination-closure/issues/04-coordination-acceptance.md)；不再要求隔离风险接受，合同/受控测试可独立实施。
+- 本 spec 的项目管理能力须按 Team/Project/Task 与操作级权限鉴权；协调聊天不再被强制只读，但可运行文件/终端不等于可跳过项目管理授权。历史“协调全只读”写通道矩阵只保留为旧候选证据，不再是此功能的开门标准。
 - 本轮修正依据：[需求基线](../../docs/specs/ai-workbench-requirements-alignment.md)及 ADR 0007 原有“范围已明确不重复确认”规则；历史合并验收项在本轮按需求校正，不再机械保留错误的强制审批解释。
 
 ## 实现计划

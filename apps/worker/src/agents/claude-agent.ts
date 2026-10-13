@@ -2,6 +2,7 @@ import { access } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
+import { agentEnvironment } from './launch-environment.js'
 import type { AgentKey, ModelId, NativeSessionRef, ToolCallId } from '@wemux/domain'
 import type { AgentAdapter, AgentSignal, AgentTurnInput, LocalAgentDetection } from '../application/ports/agent-adapter.js'
 
@@ -39,7 +40,7 @@ export class ClaudeAgent implements Extract<AgentAdapter, { mode: 'execution' }>
       args.push('--mcp-config', JSON.stringify({ mcpServers: { wemux: { command: process.execPath, args: [mcpCommand] } } }))
     }
     if (input.resume) args.push('--resume', input.resume)
-    const child = spawn(this.command, args, { cwd: input.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ...input.launchContext?.environment } })
+    const child = spawn(this.command, args, { cwd: input.cwd, stdio: ['pipe', 'pipe', 'pipe'], env: agentEnvironment(input.launchContext) })
     const queue = new SignalQueue()
     let stopped = false
     let stderr = Buffer.alloc(0)

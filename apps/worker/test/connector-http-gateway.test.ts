@@ -19,7 +19,7 @@ function definition(overrides: Partial<HttpConnectorDefinition> = {}): HttpConne
   return { id: 'connector-http' as never, projectId: ids.projectId as never, kind: 'http', name: 'HTTP fixture', description: null, revision: 1, enabled: true, allowedWorkerIds: [], credentialRef: null, credentialAvailability: 'not_required', riskDefaults: { requireApprovalForRead: false, allowMcpReadOnlyHint: false }, config: { baseUrl: 'https://fixture.example.test', authentication: 'none', publicHeaders: {}, allowedOperations: [{ id: 'create', method: 'POST', pathTemplate: '/items', allowedQueryNames: [], allowedRequestHeaderNames: [], requestContentTypes: ['application/json'] }], allowPrivateNetwork: false }, createdAt: timestamp as never, updatedAt: timestamp as never, ...overrides }
 }
 
-async function harness(t: test.TestContext, options: { approval?: 'approve' | 'deny'; fetch?: typeof fetch } = {}) {
+async function harness(t: test.TestContext, options: { approval?: 'approve' | 'deny'; approvalRequest?: () => Promise<'approve' | 'deny'>; fetch?: typeof fetch; verifyCurrentGrant?: () => Promise<boolean> | boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'wemux-http-gateway-'))
   const store = new SqliteWorkerStore(join(directory, 'worker.sqlite'))
   const credentials = new WorkerCredentialStore(store)
@@ -32,10 +32,25 @@ async function harness(t: test.TestContext, options: { approval?: 'approve' | 'd
   let calls = 0
   const fetchImpl = options.fetch ?? (async () => { calls++; return new Response(JSON.stringify({ created: true }), { status: 201, headers: { 'content-type': 'application/json' } }) }) as typeof fetch
   const http = new HttpConnectorExecutor(credentials, { fetch: fetchImpl, lookup: async () => [{ address: '8.8.8.8', family: 4 }] })
-  const gateway = new ToolExecutionGateway(store, credentials, mcp, { verify: () => claims }, options.approval ? { request: async () => options.approval! } : undefined, http)
+  const gateway = new ToolExecutionGateway(store, credentials, mcp, { verify: () => claims, verifyCurrentGrant: options.verifyCurrentGrant ? async () => options.verifyCurrentGrant!() : undefined }, options.approval || options.approvalRequest ? { request: async () => options.approvalRequest ? options.approvalRequest() : options.approval! } : undefined, http)
   t.after(async () => { await mcp.shutdown(); store.close(); await rm(directory, { recursive: true, force: true }) })
-  return { gateway, store, connector, snapshot, calls: () => calls, common: { token: 'token', snapshot, currentTurn: ids, connectorId: connector.id, connectorRevision: connector.revision, agentSupportsApproval: true, operationId: 'create', input: { body: { title: 'created by Pi' } }, requestId: 'request-http', toolCallId: 'tool-http' as never } }
+  return { gateway, store, connector, snapshot, claims, calls: () => calls, common: { token: 'token', snapshot, currentTurn: ids, connectorId: connector.id, connectorRevision: connector.revision, agentSupportsApproval: true, operationId: 'create', input: { body: { title: 'created by Pi' } }, requestId: 'request-http', toolCallId: 'tool-http' as never } }
 }
+
+test('audit write failure cannot override denial or strand an already started execution', async t => {
+  const h = await harness(t, { approvalRequest: async () => { throw new Error('approval unavailable') } })
+  h.store.recordConnectorDenial = async () => { throw new Error('audit unavailable') }
+  const denied = await h.gateway.executeHttp({ ...h.common, snapshot: { ...h.snapshot, allowedTools: [] }, requestId: 'audit-denied' })
+  assert.equal(denied.ok, false)
+  if (!denied.ok) assert.equal(denied.error.code, 'scope_denied')
+  assert.equal(h.calls(), 0)
+  const failed = await h.gateway.executeHttp(h.common)
+  assert.equal(failed.ok, false)
+  if (!failed.ok) assert.equal(failed.error.code, 'upstream_error')
+  const replay = await h.gateway.executeHttp(h.common)
+  assert.deepEqual(replay, failed)
+  assert.equal(h.calls(), 0)
+})
 
 test('http_call executes through ToolExecutionGateway and replays an idempotent result', async t => {
   const h = await harness(t, { approval: 'approve' })
@@ -97,4 +112,128 @@ test('http_call enforces response limits and request id fingerprint conflicts', 
   assert.equal((await idempotent.gateway.executeHttp(idempotent.common)).ok, true)
   const conflict = await idempotent.gateway.executeHttp({ ...idempotent.common, input: { body: { title: 'different' } } })
   assert.equal(conflict.ok, false); if (!conflict.ok) assert.equal(conflict.error.code, 'idempotency_conflict')
+})
+
+test('gateway rejects missing tool permission and mismatched project/worker/pinned revision without outbound effects', async t => {
+  const h = await harness(t, { approval: 'approve' })
+  for (const [name, changes] of [
+    ['tool', { snapshot: { ...h.snapshot, allowedTools: [] } }],
+    ['project', { currentTurn: { ...ids, projectId: 'other' } }],
+    ['worker', { snapshot: { ...h.snapshot, connectors: [definition({ allowedWorkerIds: ['other' as never] })] } }],
+    ['revision', { snapshot: { ...h.snapshot, connectors: [definition({ revision: 2 })] } }],
+  ] as const) {
+    const result = await h.gateway.executeHttp({ ...h.common, ...changes, requestId: `denied-${name}` })
+    assert.equal(result.ok, false, name)
+    if (!result.ok) assert.equal(result.error.code, 'scope_denied', name)
+  }
+  assert.equal(h.calls(), 0)
+  assert.deepEqual(await h.store.listConnectorJournal(ids.sessionId), [])
+})
+
+test('cached result is fenced after token revocation and approval is rechecked before dispatch', async t => {
+  const h = await harness(t, { approval: 'approve' })
+  const first = await h.gateway.executeHttp(h.common)
+  assert.equal(first.ok, true)
+  const revoked = await h.gateway.executeHttp({ ...h.common, snapshot: { ...h.snapshot, allowedTools: [] } })
+  assert.equal(revoked.ok, false)
+  if (!revoked.ok) assert.equal(revoked.error.code, 'scope_denied')
+  assert.equal(h.calls(), 1)
+})
+
+test('forged and expired gateway credentials reject without invoking a connector', async t => {
+  const h = await harness(t, { approval: 'approve' })
+  const credentials = new WorkerCredentialStore(h.store)
+  const mcp = new WorkerMcpClient({ supervisor: new McpProcessSupervisor() })
+  t.after(() => mcp.shutdown())
+  const gateway = new ToolExecutionGateway(h.store, credentials, mcp, {
+    verify: token => {
+      if (token !== 'signed-token') throw new Error('Signature mismatch')
+      return { ...h.claims, expiresAt: '2000-01-01T00:00:00.000Z' }
+    },
+  }, { request: async () => 'approve' }, new HttpConnectorExecutor(credentials, {
+    fetch: (async () => { throw new Error('unexpected outbound call') }) as typeof fetch,
+    lookup: async () => [{ address: '8.8.8.8', family: 4 }],
+  }))
+  for (const [token, requestId] of [['tampered-token', 'forged'], ['signed-token', 'expired']] as const) {
+    const result = await gateway.executeHttp({ ...h.common, token, requestId })
+    assert.equal(result.ok, false)
+    if (!result.ok) assert.equal(result.error.code, 'scope_denied')
+  }
+  const records = await h.store.listConnectorDenials()
+  assert.deepEqual(records.slice(-2).map(record => record.reasonCode), ['scope_denied', 'scope_denied'])
+  assert.equal(h.calls(), 0)
+})
+
+test('approval granted after capability revocation cannot dispatch an HTTP write', async t => {
+  const h = await harness(t)
+  const credentials = new WorkerCredentialStore(h.store)
+  const mcp = new WorkerMcpClient({ supervisor: new McpProcessSupervisor() })
+  t.after(() => mcp.shutdown())
+  let revoked = false
+  const gateway = new ToolExecutionGateway(h.store, credentials, mcp, { verify: token => {
+    if (revoked || token !== 'valid') throw new Error('revoked')
+    return { id: 'grant', sessionId: ids.sessionId as never, turnId: ids.turnId as never, actorAgentId: ids.sessionId as never, projectId: ids.projectId as never, workspaceId: ids.workspaceId as never, allowedTools: ['http.call'], allowedConnectorIds: [h.connector.id], issuedAt: timestamp, expiresAt: '2099-01-01T00:00:00.000Z' }
+  } }, { request: async () => { revoked = true; return 'approve' } }, new HttpConnectorExecutor(credentials, { fetch: (async () => { throw new Error('outbound side effect') }) as typeof fetch, lookup: async () => [{ address: '8.8.8.8', family: 4 }] }))
+  const result = await gateway.executeHttp({ ...h.common, token: 'valid', requestId: 'revocation-before-dispatch' })
+  assert.equal(result.ok, false)
+  if (!result.ok) assert.equal(result.error.code, 'scope_denied')
+  const replay = await gateway.executeHttp({ ...h.common, token: 'valid', requestId: 'revocation-before-dispatch' })
+  assert.equal(replay.ok, false)
+  assert.equal((await h.store.listConnectorDenials()).at(-1)?.reasonCode, 'scope_denied')
+})
+
+test('server-current grant fences cached replay and expiry even when the Turn lease remains live', async t => {
+  let live = true
+  const h = await harness(t, { approval: 'approve', verifyCurrentGrant: () => live })
+  assert.equal((await h.gateway.executeHttp(h.common)).ok, true)
+  live = false
+  const denied = await h.gateway.executeHttp(h.common)
+  assert.equal(denied.ok, false)
+  if (!denied.ok) assert.equal(denied.error.code, 'scope_denied')
+  assert.equal(h.calls(), 1)
+  assert.equal((await h.store.listConnectorDenials()).at(-1)?.reasonCode, 'scope_denied')
+  live = true
+  h.claims.expiresAt = '2000-01-01T00:00:00.000Z'
+  const expired = await h.gateway.executeHttp(h.common)
+  assert.equal(expired.ok, false)
+  if (!expired.ok) assert.equal(expired.error.code, 'scope_denied')
+})
+
+test('server revocation during approval wait denies dispatch after approval resolves', async t => {
+  let live = true
+  let approve!: (decision: 'approve') => void
+  let waiting!: () => void
+  const requested = new Promise<void>(resolve => { waiting = resolve })
+  const h = await harness(t, { verifyCurrentGrant: () => live, approvalRequest: () => {
+    waiting()
+    return new Promise(resolve => { approve = resolve })
+  } })
+  const pending = h.gateway.executeHttp(h.common)
+  await requested
+  live = false
+  approve('approve')
+  const result = await pending
+  assert.equal(result.ok, false)
+  if (!result.ok) assert.equal(result.error.code, 'scope_denied')
+  assert.equal(h.calls(), 0)
+  assert.equal((await h.store.listConnectorDenials()).at(-1)?.reasonCode, 'scope_denied')
+})
+
+test('denial audit covers direct request, revision, idempotency and approval returns', async t => {
+  const h = await harness(t, { approval: 'deny' })
+  let denials = 0
+  const record = h.store.recordConnectorDenial.bind(h.store)
+  h.store.recordConnectorDenial = async input => { denials++; return record(input) }
+  const reject = async (input: typeof h.common, code: string) => {
+    const before = denials
+    const result = await h.gateway.executeHttp(input)
+    assert.equal(result.ok, false)
+    if (!result.ok) assert.equal(result.error.code, code)
+    assert.equal(denials, before + 1)
+  }
+  await reject({ ...h.common, requestId: '' }, 'invalid_input')
+  await reject({ ...h.common, requestId: 'wrong-revision', connectorRevision: 2 }, 'revision_conflict')
+  await reject(h.common, 'approval_denied')
+  await reject({ ...h.common, input: { body: { title: 'other' } } }, 'idempotency_conflict')
+  assert.equal(h.calls(), 0)
 })

@@ -1,13 +1,17 @@
 import { createHash } from 'node:crypto'
-import type { CommandId, EventSeq, SessionId, Timestamp, TurnId, WorkerId } from '@wemux/domain'
+import type { CommandId, EventSeq, ProjectId, SessionId, Timestamp, TurnId, WorkerId, WorkspaceId } from '@wemux/domain'
 import type { WorkerCommand } from '@wemux/wire-protocol'
 import type { Run, TaskActivity } from '@wemux/web-contract/task-platform'
 import type { ServerStoreTx } from './ports/server-store.ts'
+import type { CommandAssertionScope } from './command-assertion-issuer.ts'
 
 export const isActiveRun = (run: Pick<Run, 'status'>) => ['pending', 'running', 'cancelling'].includes(run.status)
 
+/** Optional signing hook so cancellation frames carry fresh cluster authority. */
+export type ClusterCommandIssue = (workerId: WorkerId, command: WorkerCommand, scope: CommandAssertionScope, commandId?: CommandId) => Promise<CommandId | undefined>
+
 /** Stable target identity makes replay and queued/start races idempotent. */
-export async function ensureRunCancel(tx: ServerStoreTx, run: Run, retryRequestId?: string): Promise<Run> {
+export async function ensureRunCancel(tx: ServerStoreTx, run: Run, retryRequestId?: string, issue?: ClusterCommandIssue): Promise<Run> {
   const target = `run-cancel:${run.id}:${run.turnId ?? 'queued'}`
   const recorded = [...run.cancelCommandIds].reverse().find(id => id === target || id.startsWith(`${target}:retry:`))
   const commandId = (retryRequestId ? `${target}:retry:${createHash('sha256').update(retryRequestId).digest('hex')}` : recorded ?? target) as CommandId
@@ -15,7 +19,8 @@ export async function ensureRunCancel(tx: ServerStoreTx, run: Run, retryRequestI
   const command: WorkerCommand = run.turnId
     ? { kind: 'turn.stop', sessionId: run.sessionId as SessionId, turnId: run.turnId as TurnId }
     : { kind: 'session.cancel-queued', sessionId: run.sessionId as SessionId, submissionCommandId: run.enqueueCommandId as CommandId }
-  await tx.commands.insertPending({ commandId, workerId: run.snapshot.workerId as WorkerId, command, payloadFingerprint: createHash('sha256').update(JSON.stringify(command)).digest('hex'), createdAt: new Date().toISOString() as Timestamp })
+  const issued = issue ? await issue(run.snapshot.workerId as WorkerId, command, { sessionId: run.sessionId as SessionId, projectId: run.projectId as ProjectId, workspaceId: run.snapshot.workspaceId as WorkspaceId, taskId: run.taskId }, commandId) : undefined
+  if (issued === undefined) await tx.commands.insertPending({ commandId, workerId: run.snapshot.workerId as WorkerId, command, payloadFingerprint: createHash('sha256').update(JSON.stringify(command)).digest('hex'), createdAt: new Date().toISOString() as Timestamp })
   if (!run.turnId) await tx.commands.depend(commandId, run.enqueueCommandId as CommandId)
   return { ...run, cancelCommandIds: run.cancelCommandIds.includes(commandId) ? run.cancelCommandIds : [...run.cancelCommandIds, commandId] }
 }
@@ -30,7 +35,7 @@ export async function saveRunProjection(tx: ServerStoreTx, run: Run, type?: Task
   if (type) await tx.tasks.append({ taskId: run.taskId, projectId: run.projectId, type, actor: 'server', requestId: run.requestId, occurredAt: at, payload: { runId: run.id, status: run.status, resultSummary: run.resultSummary, failure: run.failure } }, `${run.id}:${type}`)
 }
 
-export async function projectRuns(tx: ServerStoreTx, sessionId: SessionId) {
+export async function projectRuns(tx: ServerStoreTx, sessionId: SessionId, issue?: ClusterCommandIssue) {
   const session = await tx.resources.getSession(sessionId)
   if (!session) return
   // Historical Runs survive unbinding and rebinding to another Task.
@@ -49,7 +54,7 @@ export async function projectRuns(tx: ServerStoreTx, sessionId: SessionId) {
             if (p.kind === 'message.queued' && p.commandId === run.enqueueCommandId && run.messageId === null) run = { ...run, messageId: p.messageId }
             if (p.kind === 'turn.started' && run.messageId !== null && p.messageId === run.messageId && run.turnId === null) {
               run = { ...run, turnId: p.turnId, startedAt: event.occurredAt, status: run.cancelRequestedAt ? 'cancelling' : 'running' }; type = 'run.started'
-              if (run.cancelRequestedAt) run = await ensureRunCancel(tx, run)
+              if (run.cancelRequestedAt) run = await ensureRunCancel(tx, run, undefined, issue)
             }
             if (p.kind === 'message.cancelled' && p.commandId === run.enqueueCommandId && run.cancelRequestedAt) {
               run = { ...run, status: 'cancelled', finishedAt: event.occurredAt }; type = 'run.finished'
@@ -68,7 +73,7 @@ export async function projectRuns(tx: ServerStoreTx, sessionId: SessionId) {
       // Startup may have no new Journal events, but accepted cancellation intent
       // must still have a durable target. Never replace a rejected target here.
       if (isActiveRun(run) && run.cancelRequestedAt && !session.deletedAt) {
-        const reconciled = await ensureRunCancel(tx, run)
+        const reconciled = await ensureRunCancel(tx, run, undefined, issue)
         if (reconciled !== run) await saveRunProjection(tx, reconciled)
       }
     }

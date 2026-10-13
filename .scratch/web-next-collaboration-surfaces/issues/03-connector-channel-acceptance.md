@@ -1,7 +1,7 @@
 # 03: 连接器、渠道与协作界面验收
 
 Status: ready-for-agent
-Blocked by: 独立连接器合同与受控测试可先行；界面联调需 [01](01-canvas-fork.md)，新增写能力开放仍需[协调安全签收](../../web-next-coordination-closure/issues/04-coordination-acceptance.md)；最终同候选验收另需 [02](02-files-terminal-artifacts.md)。
+Blocked by: 独立连接器合同与受控测试可先行；界面联调需 [01](01-canvas-fork.md)，新增写能力按本票账号/资源授权和审批验收，不再依赖协调隔离风险签收；最终同候选验收另需 [02](02-files-terminal-artifacts.md)。
 
 **Spec:** [会话协作界面](../spec.md)
 **合并来源:** `43966aa` 的原票 04、05。

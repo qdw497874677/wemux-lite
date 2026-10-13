@@ -3,8 +3,8 @@ import test from 'node:test'
 import { createWemuxServer } from '../server.ts'
 import { administratorEmail, seedLocalAccount } from './fixtures/administrator.ts'
 
-/** 真实 HTTP 入口验证：可用性投影的鉴权与脱敏、enqueue 关闭态不可绕过（T-2-05/T-2-06）。 */
-test('team coordination availability projection and closed enqueue gate', async () => {
+/** 真实 HTTP 入口验证：成员身份、可用性投影、CSRF 与必填载荷。 */
+test('team coordination availability projection and authenticated first-send validation', async () => {
   const app = createWemuxServer({ databasePath: ':memory:', administratorEmails: [administratorEmail] })
   try {
     await seedLocalAccount(app.store, { username: 'coordination-owner', email: 'coord-owner@example.test', password: 'coordination-owner-password' })
@@ -32,30 +32,22 @@ test('team coordination availability projection and closed enqueue gate', async 
     assert.ok(outsiderBody.includes('team_membership_required'))
     assert.equal(outsiderBody.includes(created.id), false)
 
-    // 成员：200，固定投影（disabled + FAIL 摘要 + 证据路径 + 解除条件）。
+    // 成员：开放入口但依旧由现有身份、权限及环境检查裁决。
     const memberResponse = await fetch(availability, { headers: { cookie: owner } })
     assert.equal(memberResponse.status, 200)
-    const projection = await memberResponse.json() as { status: string; gate: { verdict: string; reasons: string[]; evidencePath: string; remediationSection: string; reopenConditions: string[] } }
-    assert.equal(projection.status, 'disabled')
-    assert.equal(projection.gate.verdict, 'FAIL')
-    assert.equal(projection.gate.evidencePath, '.scratch/web-next-project-agent-platform/evidence/ticket-05-runtime-isolation-gate.md')
-    assert.equal(projection.gate.remediationSection, '五')
-    assert.equal(projection.gate.reasons.length, 2)
-    assert.equal(projection.gate.reopenConditions.length, 3)
+    const projection = await memberResponse.json() as { status: string }
+    assert.deepEqual(projection, { status: 'enabled' })
     // 诊断信息不泄漏凭据或敏感内容（T-2-06）。
     const projectionText = JSON.stringify(projection)
     for (const forbidden of ['password', 'token', 'secret', 'cookie', 'authorization', base]) assert.equal(projectionText.toLowerCase().includes(forbidden), false, `投影不得包含 ${forbidden}`)
 
-    // enqueue 关闭态：成员也是 403 coordination_gate_closed；缺 CSRF 先被拒（csrf_rejected），带完整凭据绕过 UI 直接 HTTP 同样被资格门拒绝。
+    // 缺 CSRF 先拒绝；完整凭据但缺少必填字段得到 400，无任务/会话写入。
     const noCsrf = await fetch(enqueue, { method: 'POST', headers: { 'content-type': 'application/json', cookie: owner }, body: '{}' })
     assert.equal(noCsrf.status, 403)
     assert.ok((await noCsrf.text()).includes('csrf_rejected'))
     const enqueueResponse = await fetch(enqueue, { method: 'POST', headers: { 'content-type': 'application/json', cookie: owner, 'x-csrf-token': csrfToken }, body: '{}' })
-    assert.equal(enqueueResponse.status, 403)
-    const enqueueBody = await enqueueResponse.json() as { error: { code: string; message: string } }
-    assert.equal(enqueueBody.error.code, 'coordination_gate_closed')
-    assert.ok(enqueueBody.error.message.includes('ticket-05-runtime-isolation-gate.md'), '错误信息包含证据路径')
-    // 非成员 enqueue：成员资格先于资格门，得 team_membership_required 而非 coordination_gate_closed。
+    assert.equal(enqueueResponse.status, 400)
+    // 非成员 enqueue：成员资格先于载荷校验。
     const outsiderEnqueue = await fetch(enqueue, { method: 'POST', headers: { 'content-type': 'application/json', cookie: outsider, 'x-csrf-token': ((await (await fetch(`${base}/api/auth/me`, { headers: { cookie: outsider } })).json()) as { csrfToken: string }).csrfToken }, body: '{}' })
     assert.equal(outsiderEnqueue.status, 403)
     assert.ok((await outsiderEnqueue.text()).includes('team_membership_required'))

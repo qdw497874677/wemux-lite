@@ -23,5 +23,6 @@ export interface WorkerConnectorStore {
   getConnectorExecution(requestId: string): Promise<ConnectorExecutionRecord | null>
   beginConnectorExecution(record: ConnectorExecutionRecord): Promise<'inserted' | 'exists'>
   finishConnectorExecution(requestId: string, result: ExecutionResult, journalSummary: unknown): Promise<void>
+  recordConnectorDenial?(event: { actor: string; operation: string; projectId: string; workspaceId: string; workerId: string; connectorId: string; toolName: string; reasonCode: string }): Promise<void>
   listConnectorJournal(sessionId: string): Promise<readonly ConnectorExecutionRecord[]>
 }

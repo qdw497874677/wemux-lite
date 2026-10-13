@@ -2,6 +2,7 @@ import { isActiveRun, projectRuns, saveRunProjection } from './run-projection.ts
 import type { CommandId, EventSeq, JournalEvent, ModelId, SessionId, WorkerId } from '@wemux/domain'
 import type { ProjectEvent } from '@wemux/web-contract/task-platform'
 import type { ConnectorRevisionReport, FileResponsePayload, ServerToWorker, TerminalResponsePayload, WorkerToServer } from '@wemux/wire-protocol'
+import { requiresCommandAssertion } from '@wemux/wire-protocol/command-assertion'
 import type { ResourceService } from './resource-service.ts'
 import type { ResourceBlobStore } from '../storage/resource-blob-store.ts'
 import type { ServerStore } from './ports/server-store.ts'
@@ -21,6 +22,8 @@ export class WorkerService {
   private readonly projectJournal: (sessionId: SessionId, events: readonly JournalEvent[]) => void | Promise<void>
   private resources: ResourceService | null
   private readonly resourceBlobs: ResourceBlobStore | null
+  private readonly issueClusterCommand: ((tx: import('./ports/server-store.ts').ServerStoreTx) => import('./run-projection.ts').ClusterCommandIssue) | null
+  private readonly signingConfigured: boolean
   constructor(
     store: ServerStore,
     notifications: Notifications,
@@ -28,7 +31,9 @@ export class WorkerService {
     projectJournal: (sessionId: SessionId, events: readonly JournalEvent[]) => void | Promise<void> = () => {},
     resources: ResourceService | null = null,
     resourceBlobs: ResourceBlobStore | null = null,
-  ) { this.store = store; this.notifications = notifications; this.reportConnector = reportConnector; this.projectJournal = projectJournal; this.resources = resources; this.resourceBlobs = resourceBlobs }
+    issueClusterCommand: ((tx: import('./ports/server-store.ts').ServerStoreTx) => import('./run-projection.ts').ClusterCommandIssue) | null = null,
+    signingConfigured = false,
+  ) { this.store = store; this.notifications = notifications; this.reportConnector = reportConnector; this.projectJournal = projectJournal; this.resources = resources; this.resourceBlobs = resourceBlobs; this.issueClusterCommand = issueClusterCommand; this.signingConfigured = signingConfigured }
   attachResources(resources: ResourceService): void { this.resources = resources }
   registerFileRequest(requestId: string, workerId: WorkerId): { readonly promise: Promise<FileResponsePayload>; readonly cancel: () => void } {
     if (this.fileRequests.has(requestId)) throw new AppError(409, 'Duplicate file request')
@@ -51,7 +56,7 @@ export class WorkerService {
         const tasks = await tx.tasks.list(session.projectId)
         const before = new Map<string, string>()
         for (const task of tasks) for (const run of await tx.tasks.runs(task.id)) if (run.sessionId === session.id) before.set(run.id, JSON.stringify(run))
-        await projectRuns(tx, session.id)
+        await projectRuns(tx, session.id, this.issueClusterCommand?.(tx))
         for (const task of tasks) for (const run of await tx.tasks.runs(task.id)) {
           if (before.has(run.id) && before.get(run.id) !== JSON.stringify(run)) changed.push({ workerId: run.snapshot.workerId as WorkerId, projectId: run.projectId, taskId: run.taskId, runId: run.id })
         }
@@ -90,12 +95,19 @@ export class WorkerService {
     for (const session of await this.store.resources.listSessions()) if (session.binding.agent.workerId === workerId) this.notifications.session(session.id)
   }
   async deliverable(workerId: WorkerId): Promise<readonly ServerToWorker[]> {
-    return (await this.store.commands.listDeliverable(workerId, 100)).map(p => ({ type: 'command', commandId: p.commandId, command: p.command }))
+    // Unsigned side-effecting commands never leave the instance once signing is
+    // configured: they are pre-contract records that Workers must not execute,
+    // so blocking delivery (rather than rejecting) keeps replay bounded.
+    const signingInstance = this.signingConfigured
+    return (await this.store.commands.listDeliverable(workerId, 100)).filter(p => !requiresCommandAssertion(p.command.kind) || (!signingInstance && p.command.kind !== 'session.enqueue' && p.command.kind !== 'runtime.approval.resolve') || Boolean(p.authorization)).map(p => ({ type: 'command', commandId: p.commandId, command: p.command, ...(p.authorization ? { authorization: p.authorization } : {}) }))
   }
   private request(sessionId: SessionId, seq: number): ServerToWorker {
     return { type: 'sync', kind: 'request', sessionId, fromSeq: (seq + 1) as EventSeq, limit: 500 }
   }
   async receive(workerId: WorkerId, message: WorkerToServer): Promise<readonly ServerToWorker[]> {
+    // Cluster-run cancellations re-sign stops at issue time; the hoisted helper is
+    // bound before any journal projection below can reference it.
+    const issueClusterCommand = this.issueClusterCommand
     const replies: ServerToWorker[] = [], changed = new Set<SessionId>()
     let commandsChanged = false
     const projectEvents = new Map<string, ProjectEvent>()
@@ -312,7 +324,7 @@ export class WorkerService {
         const tasks = await tx.tasks.list(session.projectId)
         const before = new Map<string, string>()
         for (const task of tasks) for (const run of await tx.tasks.runs(task.id)) if (run.sessionId === sessionId) before.set(run.id, JSON.stringify(run))
-        await projectRuns(tx, sessionId)
+        await projectRuns(tx, sessionId, issueClusterCommand?.(tx))
         for (const task of tasks) for (const run of await tx.tasks.runs(task.id)) {
           if (before.has(run.id) && before.get(run.id) !== JSON.stringify(run)) runChanged(run)
         }

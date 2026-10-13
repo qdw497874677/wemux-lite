@@ -3,6 +3,7 @@ import { createServer } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { SqliteServerStore } from './storage/sqlite/store.ts'
+import { CommandSigningIdentity } from './application/command-signing.ts'
 import { SharedSqliteDatabase } from './storage/sqlite/shared-database.ts'
 import { AuthenticationService } from './application/auth.ts'
 import { AdministratorDirectory, parseAdministratorEmails } from './application/administrator-directory.ts'
@@ -118,6 +119,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   // 主库仓储共用单连接与 FIFO；presenceReset 仍只由真正拥有 Worker 连接的 Server 启动入口触发。
   const database = new SharedSqliteDatabase(options.databasePath)
   const store = new SqliteServerStore(database, { presenceReset: true })
+  const commandSigning = new CommandSigningIdentity(database.connection)
   const administrators = new AdministratorDirectory(store.identity, parseAdministratorEmails(options.administratorEmails ?? process.env.WEMUX_ADMIN_EMAILS))
   const auth = new AuthenticationService(store, administrators)
   // 浏览器会话策略只有一份：账号安全里的强认证窗口与撤销语义必须和登录态完全一致。
@@ -131,14 +133,14 @@ export function createWemuxServer(options: WemuxServerOptions) {
     WEMUX_MAIL_OUTBOX: process.env.WEMUX_MAIL_OUTBOX,
   })
   const notifications = new Notifications()
-  const teams = new TeamService(store, notifications)
+  const teams = new TeamService(store, notifications, commandSigning)
   const projects = new ProjectAccessService(store, notifications)
   const workerAccess = new WorkerAccessService(store, notifications)
   const sessionAccess = new SessionAccessService(store, projects, notifications)
   const canvasCollaboration = new CanvasCollaborationService(projects, sessionAccess, notifications)
   const canvasCollaborationStreams = new CanvasCollaborationStreams(canvasCollaboration, notifications)
   const personalAccessTokens = new PersonalAccessTokenService(store)
-  const lifecycle = new AccountLifecycleService(store, administrators, identity, notifications)
+  const lifecycle = new AccountLifecycleService(store, administrators, identity, notifications, undefined, commandSigning)
   const registration = new EmailRegistrationService({ store, identity, settings, mail: mail.settings, mailReason: mail.reason, teams })
   // Google 的半配置会抛错：设计上宁可部署启动失败，也不要等用户点击后才发现回调地址不存在。
   const googleSettings = resolveGoogleSettings(options.google ?? {
@@ -152,7 +154,9 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const capabilitySecret = options.capabilitySecret ?? process.env.WEMUX_CAPABILITY_SECRET ?? randomCapabilitySecret()
   const connectorRepository = new SqliteConnectorRepository(database)
   const capabilities = new CapabilityService(store, now, new CapabilityTokenService(capabilitySecret, now), connectorRepository)
-  const service = new ServerService(store, notifications, capabilities, workerAccess, projects, sessionAccess)
+  // 内容寻址收件存储：协调附件阶段一先落盘，阶段二命令投递后再由 Worker 落盘。
+  const resourceBlobs = new ResourceBlobStore(options.databasePath === ':memory:' ? join(process.cwd(), 'data', 'resource-blobs') : join(dirname(options.databasePath), 'resource-blobs'))
+  const service = new ServerService(store, notifications, capabilities, workerAccess, projects, sessionAccess, commandSigning, resourceBlobs)
   const delegationRepository = new SqliteDelegationRepository(database)
   const delegations = new DelegationApplicationService(
     delegationRepository,
@@ -183,7 +187,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const canvasLayouts = new CanvasLayoutService(store, new SqliteCanvasLayoutRepository(store), projects, lineage)
   const projectStreams = new ProjectStreams(notifications)
   let gateway: WorkerGateway | undefined
-  const connectors = new ConnectorService(connectorRepository, store, projects, workerAccess, notifications)
+  const connectors = new ConnectorService(connectorRepository, store, projects, workerAccess, notifications, commandSigning)
   const channelRepository = new SqliteChannelRepository(database)
   const encryptionKey = options.channelEncryptionKey?.trim() || process.env.WEMUX_CONNECTOR_ENCRYPTION_KEY?.trim()
   const channelCodec = encryptionKey ? new AesGcmSecretCodec({ currentKey: encryptionKey, previousKeys: process.env.WEMUX_CONNECTOR_ENCRYPTION_PREVIOUS_KEYS?.split(',').map(value => value.trim()).filter(Boolean) }) : null
@@ -196,9 +200,8 @@ export function createWemuxServer(options: WemuxServerOptions) {
   const channels = new ChannelService(channelRepository, channelCodec, projects, sessionAccess, workerAccess, kind => adapters.get(kind))
   const channelOutbox = new ChannelOutbox(channelRepository, projects, sessionAccess, workerAccess, store, { deploymentAllowsPrivateNetwork: process.env.WEMUX_CONNECTOR_ALLOW_PRIVATE_NETWORK === 'true', connectorAllowsPrivateNetwork: true }, options.channelFetch, kind => adapters.get(kind)!)
   const resourceRepository = new SqliteResourceRepository(database)
-  const resourceBlobs = new ResourceBlobStore(options.databasePath === ':memory:' ? join(process.cwd(), 'data', 'resource-blobs') : join(dirname(options.databasePath), 'resource-blobs'))
   let resources: ResourceService
-  const workers = new WorkerService(store, notifications, (workerId, report) => connectors.report(workerId, report), async (sessionId, events) => { await channelOutbox.projectJournal(sessionId, events); setImmediate(() => void channelOutbox.drain().catch(() => undefined)) }, null, resourceBlobs)
+  const workers = new WorkerService(store, notifications, (workerId, report) => connectors.report(workerId, report), async (sessionId, events) => { await channelOutbox.projectJournal(sessionId, events); setImmediate(() => void channelOutbox.drain().catch(() => undefined)) }, null, resourceBlobs, tx => service.clusterCommandIssuer(tx), true)
   const workerGateway = { send: (workerId: import('@wemux/domain').WorkerId, payload: import('@wemux/wire-protocol').ServerPayload) => {
     if (!gateway) throw new Error('Worker gateway is not ready')
     return gateway.send(workerId, payload)
@@ -255,7 +258,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
     artifacts,
     resources,
   }))
-  gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`))
+  gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`), undefined, service)
   let closed = false
   return {
     server,

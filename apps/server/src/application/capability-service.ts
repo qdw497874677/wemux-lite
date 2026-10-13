@@ -130,17 +130,20 @@ export class CapabilityService {
     readonly turnId: CapabilityGrantClaims['turnId']
     readonly actorId?: import('@wemux/domain').UserId
     readonly allowedTools?: readonly CapabilityToolName[]
-  }, readers: Pick<ServerStore, 'identity' | 'resources'> = this.store): Promise<{ readonly runtime: CapabilityRuntimePayload; readonly token: string }> {
+  }, readers: Pick<ServerStore, 'identity' | 'resources' | 'tasks'> = this.store): Promise<{ readonly runtime: CapabilityRuntimePayload; readonly token: string }> {
     const { identity, resources } = readers
     const session = await this.requireSession(input.sessionId, resources)
     const workspace = await resources.getWorkspace(session.workspaceId)
     if (!workspace) throw new CapabilityError('not-found', 'Workspace not found')
     const actorAccount = input.actorId ? await identity.getUser(input.actorId) : null
     if (input.actorId && (!actorAccount || actorAccount.status !== 'active')) throw new CapabilityError('forbidden', 'Capability actor is not active')
+    const task = session.taskId ? await readers.tasks.get(session.taskId) : null
+    if (session.taskId && (!task || task.deletedAt != null)) throw new CapabilityError('forbidden', 'Capability Task is unavailable')
+    if (task && (task.teamCoordination ? (task.projectId !== `team:${task.teamCoordination.teamId}` || task.teamCoordination.ownerId !== session.ownerId || task.teamCoordination.workerId !== session.binding.agent.workerId || task.teamCoordination.agentKey !== session.binding.agent.agentKey || (await resources.getProject(session.projectId))?.teamId !== task.teamCoordination.teamId) : task.projectId !== session.projectId)) throw new CapabilityError('forbidden', 'Capability Task and Session coordination binding disagree')
     const assets = await resources.listCapabilityAssets(session.projectId)
     const connectors = await this.resolveConnectors(session, input, identity, resources)
     const allowedConnectorIds = connectors.map(connector => connector.id)
-    const allowedTools = input.allowedTools ?? [
+    const ordinaryTools: readonly CapabilityToolName[] = [
       'session.info',
       ...(input.actorId ? ['project.list', 'project.get', 'project.resources', 'task.list', 'task.get', 'task.create', 'task.sessions', 'session.get', 'session.events'] as const : []),
       'agent.list',
@@ -154,6 +157,7 @@ export class CapabilityService {
       'mcp.call',
       'http.call',
     ]
+    const allowedTools = input.allowedTools ? input.allowedTools.filter(tool => ordinaryTools.includes(tool)) : ordinaryTools
     const now = this.now()
     const sessions = await resources.listSessions()
     const roster = sessions
@@ -218,11 +222,35 @@ export class CapabilityService {
     }
   }
 
+  async verifyConnectorIdentity(token: string): Promise<CapabilityGrantClaims> {
+    const claims = this.tokens.verify(token)
+    const tool = (['mcp.list_tools', 'mcp.call', 'http.call'] as const).find(item => claims.allowedTools.includes(item))
+    if (!tool) throw new CapabilityError('forbidden', 'Connector grant is not allowed')
+    return this.verify(token, tool)
+  }
+
   async verify(token: string, requiredTool: CapabilityToolName): Promise<CapabilityGrantClaims> {
     const claims = this.tokens.verify(token)
     if (!claims.allowedTools.includes(requiredTool)) throw new CapabilityError('forbidden', `Capability ${requiredTool} is not allowed`)
     const session = await this.store.resources.getSession(claims.sessionId)
     if (!session || session.deletedAt !== null || session.projectId !== claims.projectId || session.workspaceId !== claims.workspaceId) throw new CapabilityError('forbidden', 'Capability session is no longer active')
+    const task = session.taskId ? await this.store.tasks.get(session.taskId) : null
+    if (session.taskId && (!task || task.deletedAt != null)) throw new CapabilityError('forbidden', 'Capability Task is unavailable')
+    if (task && (task.teamCoordination ? (task.projectId !== `team:${task.teamCoordination.teamId}` || task.teamCoordination.ownerId !== session.ownerId || task.teamCoordination.workerId !== session.binding.agent.workerId || task.teamCoordination.agentKey !== session.binding.agent.agentKey || (await this.store.resources.getProject(session.projectId))?.teamId !== task.teamCoordination.teamId) : task.projectId !== session.projectId)) throw new CapabilityError('forbidden', 'Capability Task and Session coordination binding disagree')
+    // Actor revocation must fence Connector dispatch too, not only Project queries.
+    if (claims.actorUserId) {
+      const account = await this.store.identity.getUser(claims.actorUserId)
+      if (!account || account.status !== 'active' || (account.authVersion ?? 0) !== claims.actorAuthVersion) throw new CapabilityError('forbidden', 'Capability actor is no longer active')
+      if (!this.sessionQueries || !this.projectQueries) throw new CapabilityError('forbidden', 'Capability access checks are unavailable')
+      await this.sessionQueries.require(claims.actorUserId, claims.sessionId)
+      await this.projectQueries.require(claims.actorUserId, claims.projectId)
+    }
+    if (requiredTool === 'mcp.call' || requiredTool === 'mcp.list_tools' || requiredTool === 'http.call') {
+      if (!claims.actorUserId) throw new CapabilityError('forbidden', 'Connector capabilities require a trusted actor')
+      // Connector grants cannot outlive the current Session/Project/Worker authority.
+      if (!this.workerQueries) throw new CapabilityError('forbidden', 'Worker access checks are unavailable')
+      await this.workerQueries.require(claims.actorUserId, session.binding.agent.workerId)
+    }
     if (requiredTool === 'project.list' || requiredTool === 'project.get' || requiredTool === 'project.resources' || requiredTool === 'session.get' || requiredTool === 'task.list' || requiredTool === 'task.get' || requiredTool === 'task.create' || requiredTool === 'task.sessions' || requiredTool === 'session.events') {
       if (!claims.actorUserId || !Number.isSafeInteger(claims.actorAuthVersion) || !this.sessionQueries || !this.projectQueries) throw new CapabilityError('forbidden', 'Project queries require a trusted actor')
       const account = await this.store.identity.getUser(claims.actorUserId)

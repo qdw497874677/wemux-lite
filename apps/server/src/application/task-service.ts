@@ -469,7 +469,7 @@ export class TaskService {
       const previous = await tx.tasks.cancelRequest(runId, b.requestId as string)
       if (!isActiveRun(run)) return { run, changed: false }
       if (run.cancelRequestedAt) {
-        const reconciled = await ensureRunCancel(tx, run)
+        const reconciled = await ensureRunCancel(tx, run, undefined, this.server?.clusterCommandIssuer(tx, context.actor))
         if (reconciled !== run) {
           if (!previous) await tx.tasks.saveCancelRequest(runId, b.requestId as string, run.sessionId)
           await saveRunProjection(tx, reconciled)
@@ -482,7 +482,7 @@ export class TaskService {
         const last = run.cancelCommandIds.at(-1)
         if (!last || (await tx.commands.get(last as import('@wemux/domain').CommandId))?.status !== 'rejected') return { run, changed: false }
       }
-      const next = await ensureRunCancel(tx, { ...run, failure: null, status: 'cancelling', cancelRequestedAt: run.cancelRequestedAt ?? new Date().toISOString() }, run.cancelRequestedAt ? b.requestId as string : undefined)
+      const next = await ensureRunCancel(tx, { ...run, failure: null, status: 'cancelling', cancelRequestedAt: run.cancelRequestedAt ?? new Date().toISOString() }, run.cancelRequestedAt ? b.requestId as string : undefined, this.server?.clusterCommandIssuer(tx, context.actor))
       await saveRunProjection(tx, next)
       await tx.audit.append({ id: randomUUID() as import('@wemux/domain').Id<'AuditEntryId'>, actorId: context.actor, action: 'run.cancel', resource: { kind: 'session', id: run.sessionId as SessionId }, result: 'succeeded', occurredAt: new Date().toISOString() as import('@wemux/domain').Timestamp, metadata: { runId, requestId: b.requestId as string } })
       return { run: next, changed: true }

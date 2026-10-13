@@ -1,4 +1,6 @@
-/** 02-02 受控浏览器双视口验收：真实 Server + 真实账号 + Chromium desktop/mobile。
+/** 历史 02-02 禁用态候选专用探针，ADR 0008 后不再是当前发布门。
+ * 当前功能浏览器测试为 apps/e2e/team-coordination-real-browser.mjs；勿改写本历史证据。
+ * 02-02 受控浏览器双视口验收：真实 Server + 真实账号 + Chromium desktop/mobile。
  * Team 范围协调入口必须可见但处于可诊断禁用态；无任何发送/上传控件；
  * 直接 HTTP enqueue 在资格门 FAIL 下必须得到 403 coordination_gate_closed。
  * 不涉及真实 Worker 或任何协调执行（02-04 才做配对观测）。

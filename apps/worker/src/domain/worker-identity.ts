@@ -8,6 +8,7 @@ export interface WorkerIdentity {
   readonly serverUrls?: readonly string[]
   /** 注册时上报的名称；start 时优先使用，避免 hostname 覆盖。 */
   readonly name?: string
+  readonly commandSigningKey?: { readonly keyId: string; readonly publicKey: string }
   readonly credentialRef: string
   readonly enrolledAt: Timestamp
 }

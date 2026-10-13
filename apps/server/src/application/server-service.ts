@@ -4,11 +4,18 @@ import { FileWriteResultRejectedError, FileWriteResultUnavailableError, fileWrit
 import { assertSessionTaskMutable } from './task-lifecycle.ts'
 import { createRequest, replayCreate, recordCreate } from './create-request.ts'
 import { dedicatedConversationTask } from './dedicated-conversation-task.ts'
+import { teamCoordinationTask, coordinationAnchor } from './team-coordination-task.ts'
+import { attachmentDeliveryView, attachmentSafeFilename, coordinationUploadRequestId, validateAttachmentUpload, type AttachmentDeliveryView, type AttachmentUploadInput } from './coordination-attachments.ts'
+import type { SessionAttachmentRecord } from './ports/server-store-types.js'
+import type { ResourceBlobStore } from '../storage/resource-blob-store.ts'
 import { sessionIdleReason } from './session-idle.ts'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import type { CommandSigningIdentity } from './command-signing.ts'
+import { buildCommandAssertionClaims, connectorAssertionScope, issueCommandAssertion, provisionAssertionScope, sessionAssertionScope, type CommandAssertionScope } from './command-assertion-issuer.ts'
 import type { AgentKey, ApprovalId, CommandId, EventSeq, Id, MessageId, ModelId, ProjectId, RuntimeOperationId, SessionId, TeamId, Timestamp, TurnId, UserId, WorkerId, WorkspaceId } from '@wemux/domain'
 import type { AuditResource, CommandProjection, Project, Session, Worker, Workspace, WorkspacePlacement } from '@wemux/server-domain'
 import type { WorkerCommand } from '@wemux/wire-protocol'
+import { assertionScopeMatches, assertionVersionAccepted, requiresCommandAssertion } from '@wemux/wire-protocol/command-assertion'
 import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
 import { AppError, requireValue } from './errors.ts'
 import { hashSecret } from './auth.ts'
@@ -57,13 +64,107 @@ export class ServerService {
   private readonly workerAccess?: WorkerAccessService
   private readonly projectAccess?: ProjectAccessService
   private readonly sessionAccess?: SessionAccessService
-  constructor(store: ServerStore, notifications: Notifications, capabilities?: CapabilityService, workerAccess?: WorkerAccessService, projectAccess?: ProjectAccessService, sessionAccess?: SessionAccessService) { this.store = store; this.notifications = notifications; this.capabilities = capabilities; this.workerAccess = workerAccess; this.projectAccess = projectAccess; this.sessionAccess = sessionAccess;}
+  constructor(store: ServerStore, notifications: Notifications, capabilities?: CapabilityService, workerAccess?: WorkerAccessService, projectAccess?: ProjectAccessService, sessionAccess?: SessionAccessService, private readonly commandSigning?: CommandSigningIdentity, private readonly attachmentBlobs?: ResourceBlobStore) { this.store = store; this.notifications = notifications; this.capabilities = capabilities; this.workerAccess = workerAccess; this.projectAccess = projectAccess; this.sessionAccess = sessionAccess;}
   async requireWorkerUseInTx(tx: ServerStoreTx, actor: UserId, workerId: WorkerId) {
     return this.workerAccess ? this.workerAccess.requireInTx(tx, actor, workerId) : requireValue(await tx.resources.getWorker(workerId))
   }
   async listWorkers() { return this.store.resources.listWorkers() }
   async getWorker(id: WorkerId) { return requireValue(await this.store.resources.getWorker(id)) }
   async getCommand(id: CommandId) { return requireValue(await this.store.commands.get(id)) }
+  /** A signed assertion proves origin, but never substitutes for current grant checks. */
+  async authorizeEnqueueLaunch(workerId: WorkerId, commandId: CommandId): Promise<{ allowed: boolean }> {
+    try {
+      return await this.store.transaction(async tx => {
+        const pending = await tx.commands.getPendingCommand(commandId)
+        if (!pending?.authorization || pending.workerId !== workerId) return { allowed: false }
+        const kind = pending.command.kind
+        if (!requiresCommandAssertion(kind) || !assertionVersionAccepted(kind, pending.authorization.claims.version)) return { allowed: false }
+        if (!this.commandSigning?.verify(pending.authorization)) return { allowed: false }
+        const claims = pending.authorization.claims
+        const projection = await tx.commands.get(commandId)
+        // An accepted approval has already produced an application receipt. A
+        // replay may repair transport ordering, but must not authorize native work
+        // on a Worker whose local command record has disappeared.
+        if (projection?.status !== 'pending' && (kind === 'runtime.approval.resolve' || projection?.status !== 'accepted')) return { allowed: false }
+        const actorField = kind === 'session.enqueue' ? pending.command.message.sentByAccountId : kind === 'runtime.approval.resolve' ? pending.command.decidedByAccountId : claims.actorId
+        if (claims.commandId !== commandId || claims.workerId !== workerId || !assertionScopeMatches(claims, pending.command) || (claims.version >= 2 && claims.kind !== kind) || claims.actorId !== actorField || claims.commandDigest !== createHash('sha256').update(JSON.stringify(pending.command)).digest('hex')) return { allowed: false }
+        const actor = await tx.identity.getUser(claims.actorId)
+        if (!actor || (actor.status ?? 'active') !== 'active' || (actor.authVersion ?? 0) !== claims.actorAuthVersion) return { allowed: false }
+        const worker = await tx.resources.getWorker(workerId)
+        if (!worker || worker.connectionState === 'revoked') return { allowed: false }
+        if (kind === 'session.enqueue' || kind === 'session.create' || kind === 'runtime.command' || kind === 'runtime.approval.resolve') {
+          if (!claims.sessionId || !this.sessionAccess) return { allowed: false }
+          const session = await this.sessionAccess.requireInTx(tx, claims.actorId, claims.sessionId, 'write')
+          if (!session || session.binding.agent.workerId !== workerId || session.projectId !== claims.projectId || session.workspaceId !== claims.workspaceId || (session.taskId ?? null) !== claims.taskId) return { allowed: false }
+          await assertSessionTaskMutable(tx, session)
+          if (kind === 'runtime.approval.resolve') {
+            // A decision needs control access unless it belongs to the active Turn owner.
+            const state = await this.executionState(tx, claims.sessionId)
+            // Cache events can lag the Worker journal. The Worker checks the actual
+            // pending approval before executing; never terminally reject on a stale projection.
+            if (state.activeTurnId !== pending.command.turnId || state.activeTurnOwnerId !== claims.actorId) await this.sessionAccess?.requireInTx(tx, claims.actorId, claims.sessionId, 'control')
+          }
+        } else if (kind === 'workspace.provision') {
+          if (!claims.workspaceId || !this.projectAccess) return { allowed: false }
+          const workspace = await tx.resources.getWorkspace(claims.workspaceId)
+          if (!workspace || workspace.deletedAt || workspace.projectId !== claims.projectId || !workspace.placements.some(placement => placement.workerId === workerId)) return { allowed: false }
+          try { await this.projectAccess.requireInTx(tx, claims.actorId, claims.projectId, 'contributor') }
+          catch { if ((await this.operator(undefined, tx).catch(() => null)) !== claims.actorId) return { allowed: false } }
+        }
+        return { allowed: true }
+      })
+    } catch { return { allowed: false } }
+  }
+  /** Replaying sent bytes recovers transport sequence only; it still requires the
+   * original signature and current actor authority before reaching the Worker. */
+  async authorizeApprovalReplay(workerId: WorkerId, commandId: CommandId, authorization: import('@wemux/wire-protocol/command-assertion').SignedEnqueueAuthorization): Promise<boolean> {
+    if (!this.commandSigning?.verify(authorization) || !(await this.authorizeEnqueueLaunch(workerId, commandId)).allowed) return false
+    const pending = await this.store.commands.getPendingCommand(commandId)
+    if (pending?.command.kind !== 'runtime.approval.resolve' || !pending.authorization || !this.commandSigning.verify(pending.authorization)) return false
+    const { issuedAt: _issued, expiresAt: _expires, ...original } = authorization.claims
+    const { issuedAt: _currentIssued, expiresAt: _currentExpires, ...current } = pending.authorization.claims
+    return JSON.stringify(original) === JSON.stringify(current)
+  }
+  /** A committed receipt proves application processing, even if its transport ACK
+   * was lost. Replay the identical sent frame solely to fill the receiver's sequence
+   * hole; never use this path for a command still eligible for native execution. */
+  async authorizeSettledApprovalReplay(workerId: WorkerId, commandId: CommandId, authorization: import('@wemux/wire-protocol/command-assertion').SignedEnqueueAuthorization): Promise<boolean> {
+    if (!this.commandSigning?.verify(authorization)) return false
+    const pending = await this.store.commands.getPendingCommand(commandId)
+    const projection = await this.store.commands.get(commandId)
+    if (!pending || pending.workerId !== workerId || pending.command.kind !== 'runtime.approval.resolve' ||
+        (projection?.status !== 'accepted' && projection?.status !== 'rejected') || !pending.authorization ||
+        !this.commandSigning.verify(pending.authorization)) return false
+    const { issuedAt: _sentAt, expiresAt: _sentExpiry, ...sentIdentity } = authorization.claims
+    const { issuedAt: _storedAt, expiresAt: _storedExpiry, ...storedIdentity } = pending.authorization.claims
+    return JSON.stringify(sentIdentity) === JSON.stringify(storedIdentity)
+  }
+  /** Called at a bounded delivery wakeup. Expired windows are replaced only for the
+   * original actor/version and only while current access still permits execution. */
+  async refreshPendingApproval(workerId: WorkerId, commandId: CommandId): Promise<boolean> {
+    if (!this.commandSigning || !(await this.authorizeEnqueueLaunch(workerId, commandId)).allowed) return false
+    return this.store.transaction(async tx => {
+      const pending = await tx.commands.getPendingCommand(commandId)
+      if (!pending?.authorization || pending.workerId !== workerId || pending.command.kind !== 'runtime.approval.resolve' || (await tx.commands.get(commandId))?.status !== 'pending') return false
+      if (!this.commandSigning!.verify(pending.authorization)) return false
+      const old = pending.authorization.claims
+      if ((old.version !== 2 && old.version !== 3) || old.kind !== pending.command.kind || old.keyId !== this.commandSigning!.keyId || old.commandId !== commandId || old.workerId !== workerId || old.actorId !== pending.command.decidedByAccountId || old.commandDigest !== createHash('sha256').update(JSON.stringify(pending.command)).digest('hex')) return false
+      const actor = await tx.identity.getUser(old.actorId)
+      if (!actor || (actor.status ?? 'active') !== 'active' || (actor.authVersion ?? 0) !== old.actorAuthVersion) return false
+      const session = this.sessionAccess && old.sessionId ? await this.sessionAccess.requireInTx(tx, old.actorId, old.sessionId, 'write').catch(() => null) : null
+      if (!session || !old.sessionId || session.binding.agent.workerId !== workerId || session.projectId !== old.projectId || session.workspaceId !== old.workspaceId || (session.taskId ?? null) !== old.taskId) return false
+      try {
+        await assertSessionTaskMutable(tx, session)
+        const state = await this.executionState(tx, session.id)
+        if (state.activeTurnId !== pending.command.turnId || state.activeTurnOwnerId !== old.actorId) await this.sessionAccess?.requireInTx(tx, old.actorId, old.sessionId, 'control')
+      } catch { return false }
+      if ((await tx.resources.getWorker(workerId))?.connectionState === 'revoked') return false
+      if (Date.parse(old.expiresAt) > Date.now() + 30_000) return true
+      const issuedAt = now()
+      await tx.commands.refreshApprovalAuthorization(commandId, this.commandSigning!.sign({ ...old, version: old.version, kind: old.kind, issuedAt, expiresAt: new Date(Date.now() + 5 * 60_000).toISOString() }))
+      return true
+    })
+  }
   async listCommands(input: { workerId?: string; status?: string; limit?: number }) {
     const statuses: readonly CommandProjection['status'][] = ['pending', 'accepted', 'rejected', 'completed', 'failed', 'cancelled']
     const status = input.status === undefined ? undefined : statuses.find(value => value === input.status)
@@ -151,7 +252,7 @@ export class ServerService {
     // Legacy status/receipt-only attempts remain unknown, even when retry is allowed.
     if (placement) await this.preserveCurrentPreparationProof(tx, workspace, placement)
     const replacedAttempt = previous !== undefined || await tx.commands.hasProvisionAttempt(id)
-    const commandId = await this.command(tx, worker.id, { kind: 'workspace.provision', workspace: { workspace: this.workspaceDefinition(workspace), repositories } })
+    const commandId = await this.issueClusterCommand(tx, actor ?? await this.operator(undefined, tx).catch(() => undefined), worker.id, { kind: 'workspace.provision', workspace: { workspace: this.workspaceDefinition(workspace), repositories } }, provisionAssertionScope(workspace))
     const nextPlacement: WorkspacePlacement = { workerId: worker.id, status: 'stopped', failureReason: null, location: null, provisioning: { commandId, startedAt: now(), replacedAttempt, requests: { ...previous?.requests, [requestId]: commandId } } }
     const next = this.replacePlacement(workspace, nextPlacement)
     await tx.resources.saveWorkspace(next)
@@ -184,7 +285,8 @@ export class ServerService {
    * 没有管理员账号时直接失败，不再伪造 `bootstrap-admin` 这类合成用户；多管理员逐请求归属随团队授权一起做。
    * 已经在事务里的调用方必须传 `tx`，否则读到的是事务外的快照（存储层会直接报错，不静默漂移）。
    */
-  private async operator(explicit?: UserId, tx?: ServerStoreTx): Promise<UserId> {
+  /** First instance administrator by assignment order; the default cluster authority. */
+  async operator(explicit?: UserId, tx?: ServerStoreTx): Promise<UserId> {
     if (explicit) return explicit
     const readers = tx ?? this.store
     const roster = [...await readers.identity.listInstanceAdministrators()].sort((a, b) => a.assignedAt.localeCompare(b.assignedAt))
@@ -239,7 +341,7 @@ export class ServerService {
       await this.audit(tx, 'worker.enroll', { kind: 'worker', id })
       return worker
     })
-    return { worker, workerId: id, credential }
+    return { worker, workerId: id, credential, ...(this.commandSigning ? { commandSigningKey: { keyId: this.commandSigning.keyId, publicKey: this.commandSigning.publicKey } } : {}) }
   }
   async getProject(id: ProjectId, resources = this.store.resources): Promise<Project> {
     const p = requireValue(await resources.getProject(id))
@@ -479,7 +581,7 @@ export class ServerService {
       return project
     })
   }
-  private async command(tx: ServerStoreTx, workerId: WorkerId, command: WorkerCommand, id = newId<'CommandId'>()) {
+  private async command(tx: ServerStoreTx, workerId: WorkerId, command: WorkerCommand, id = newId<'CommandId'>(), authorization?: import('@wemux/wire-protocol/command-assertion').SignedEnqueueAuthorization) {
     const fingerprint = canonicalFingerprint(command)
     if (await tx.commands.getRejection(id)) throw new AppError(409, 'Conflicting commandId')
     const existing = await tx.commands.get(id)
@@ -487,8 +589,36 @@ export class ServerService {
       if (existing.workerId !== workerId || existing.payloadFingerprint !== fingerprint) throw new AppError(409, 'Conflicting commandId')
       return id
     }
-    await tx.commands.insertPending({ commandId: id, workerId, command, payloadFingerprint: fingerprint, createdAt: now() })
+    await tx.commands.insertPending({ commandId: id, workerId, command, payloadFingerprint: fingerprint, createdAt: now(), ...(authorization ? { authorization } : {}) })
     return id
+  }
+  /**
+   * Issue a cluster command with a signed v3 assertion when this instance has a
+   * signing identity and an acting user. Signing mirrors enqueue rules: a
+   * signing instance always requires an actor (403), an actor without signing is
+   * an operator-visible outage (503). Assemblies without either stay unsigned.
+   */
+  private async issueClusterCommand(tx: ServerStoreTx, authority: UserId | undefined, workerId: WorkerId, command: WorkerCommand, scope: CommandAssertionScope, id = newId<'CommandId'>()) {
+    if (!this.commandSigning) return await this.command(tx, workerId, command, id)
+    if (!authority) throw new AppError(403, 'Command authority actor is unavailable', 'command_actor_unavailable')
+    const authorization = await issueCommandAssertion(tx, this.commandSigning, authority, { commandId: id, command, workerId, scope })
+    return await this.command(tx, workerId, command, id, authorization)
+  }
+  /**
+   * Cluster assertion issuer for composing services (runs, teams, connectors)
+   * that enqueue Worker commands inside transactions owned here. The authority
+   * is the acting user when known, otherwise the instance operator. Unsigned
+   * assemblies still insert and return the command id so idempotent composers
+   * (run cancellation) never re-insert the same identity.
+   */
+  clusterCommandIssuer(tx: ServerStoreTx, actor?: UserId): (workerId: WorkerId, command: WorkerCommand, scope: CommandAssertionScope, commandId?: CommandId) => Promise<CommandId | undefined> {
+    return async (workerId, command, scope, commandId) => {
+      const authority = actor ?? await this.operator(undefined, tx).catch(() => undefined)
+      if (!this.commandSigning) return await this.command(tx, workerId, command, commandId ?? newId<'CommandId'>())
+      if (!authority) return undefined
+      const authorization = await issueCommandAssertion(tx, this.commandSigning, authority, { commandId: commandId ?? newId<'CommandId'>(), command, workerId, scope })
+      return await this.command(tx, workerId, command, commandId ?? newId<'CommandId'>(), authorization)
+    }
   }
   async createWorkspace(input: unknown, actor?: UserId): Promise<{ workspace: Workspace & { revision: string }; workerId: WorkerId; commandId: CommandId } | { workspace: Workspace & { revision: string }; workerId: undefined; commandId: undefined }> {
     const result = await this.store.transaction(tx => this.createWorkspaceInTx(tx, input, actor))
@@ -523,13 +653,138 @@ export class ServerService {
       return result
     }
     const repositories = repository ? [{ repositoryId: repository.id, gitUrl: repository.gitUrl, revision: repository.defaultBranch }] : []
-    const commandId = await this.command(tx, worker.id, { kind: 'workspace.provision', workspace: { workspace: this.workspaceDefinition(workspace), repositories } })
+    const commandId = await this.issueClusterCommand(tx, actor ?? p.ownerId, worker.id, { kind: 'workspace.provision', workspace: { workspace: this.workspaceDefinition(workspace), repositories } }, provisionAssertionScope(workspace))
     const stopped = this.replacePlacement(workspace, { workerId: worker.id, status: 'stopped', failureReason: null, location: null, provisioning: { commandId, startedAt: now(), replacedAttempt: false, requests: {} } })
     await tx.resources.saveWorkspace(stopped)
     await this.audit(tx, 'workspace.create', { kind: 'workspace', id: workspace.id })
     const result = { workspace: this.workspaceSnapshot({ ...stopped, workerId: worker.id, status: 'stopped' as const, failureReason: null, provisioning: stopped.placements[0].provisioning, location: null }), workerId: worker.id, commandId }
     await recordCreate(tx, request, result)
     return result
+  }
+  /** Team first-send is atomic: no orphan Session/Task or unsent first message on failure. */
+  async createTeamCoordinationSession(team: TeamId, actor: UserId, input: unknown) {
+    const b = object(input)
+    const workspaceId = text(b.workspaceId, 'workspaceId') as WorkspaceId
+    const workerId = text(b.workerId, 'workerId') as WorkerId
+    const agentKey = text(b.agentKey, 'agentKey') as AgentKey
+    const requestId = text(b.requestId, 'requestId', 180)
+    const content = text(b.content, 'content', 100000)
+    const modelId = b.modelId === undefined ? null : text(b.modelId, 'modelId')
+    const commandId = b.commandId === undefined ? `coordination:${createHash('sha256').update(canonicalCommand([actor, team, requestId])).digest('hex')}` : text(b.commandId, 'commandId', 200)
+    if (!requestId || !content.trim()) throw new AppError(400, 'requestId and content are required')
+    if (Object.keys(b).some(key => !['workspaceId', 'workerId', 'agentKey', 'modelId', 'title', 'requestId', 'commandId', 'content'].includes(key))) throw new AppError(400, 'Invalid coordination request')
+    const title = b.title === undefined ? '团队协调' : text(b.title, 'title')
+    const result = await this.store.transaction(async tx => {
+      const membership = (await tx.identity.getIdentityRecords({ userId: actor, teamId: team })).membership
+      if (!membership) throw new AppError(403, 'Team membership required', 'team_membership_required')
+      const fingerprint = createHash('sha256').update(canonicalCommand({ actor, team, workspaceId, workerId, agentKey, modelId, title, content, commandId })).digest('hex')
+      // Check the durable first-send receipt before revalidating mutable placement or
+      // Agent availability. A retry must neither enqueue a second message nor create a Task.
+      let previous: Awaited<ReturnType<typeof tx.resources.getSession>> = null
+      for (const session of await tx.resources.listSessions()) {
+        if (session.ownerId !== actor || session.creation?.requestId !== `coordination:${requestId}` || !session.taskId?.startsWith('coordination:')) continue
+        const task = await tx.tasks.get(session.taskId)
+        if (task?.teamCoordination?.teamId === team) { previous = session; break }
+      }
+      if (previous) {
+        if (previous.creation?.coordinationIntentFingerprint !== fingerprint || !previous.creation.coordinationMessageCommandId || previous.deletedAt) throw new AppError(409, 'requestId already belongs to a different coordination first send', 'request_id_conflict')
+        await this.requireSessionAccessInTx(tx, actor, previous.id, 'write')
+        return { session: previous, commandId: previous.creation.commandId as CommandId, created: false, messageCommandId: previous.creation.coordinationMessageCommandId, messageId: previous.creation.coordinationMessageId ?? previous.creation.coordinationMessageCommandId }
+      }
+      const workspace = await this.authorizedWorkspaceInTx(tx, workspaceId, actor)
+      const worker = await this.requireWorkerUseInTx(tx, actor, workerId)
+      if (worker.teamId !== team || (await tx.resources.getProject(workspace.projectId))?.teamId !== team) throw new AppError(404, 'Workspace or Worker not found', 'workspace_not_found')
+      const taskId = await teamCoordinationTask(tx, { teamId: team, ownerId: actor, workerId, agentKey }, requestId)
+      const created = await this.createSessionInTx(tx, { workspaceId, workerId, agentKey, modelId: modelId ?? undefined, title, requestId: `coordination:${requestId}` }, { ownerId: actor, taskId, runId: null })
+      const sent = await this.enqueueInTx(tx, created.session.id, { commandId, content }, actor)
+      const session = { ...created.session, creation: { ...created.session.creation!, coordinationIntentFingerprint: fingerprint, coordinationMessageCommandId: sent.commandId, coordinationMessageId: sent.messageId } }
+      await tx.resources.saveSession(session)
+      return { ...created, session, messageCommandId: sent.commandId, messageId: sent.messageId }
+    })
+    this.notifications.commands(workerId)
+    return result
+  }
+  async listTeamCoordinationSessions(team: TeamId, actor: UserId) {
+    const membership = (await this.store.identity.getIdentityRecords({ userId: actor, teamId: team })).membership
+    if (!membership) throw new AppError(403, 'Team membership required', 'team_membership_required')
+    const sessions = await this.store.resources.listSessions()
+    return Promise.all(sessions.filter(session => session.ownerId === actor && !session.deletedAt && !!session.taskId).map(async session => {
+      const task = await this.store.tasks.get(session.taskId!)
+      if (!task?.teamCoordination || task.deletedAt || task.projectId !== coordinationAnchor(team) || task.teamCoordination.ownerId !== actor || task.teamCoordination.workerId !== session.binding.agent.workerId || task.teamCoordination.agentKey !== session.binding.agent.agentKey) return null
+      try { await this.sessionAccess?.require(actor, session.id) } catch { return null }
+      return this.sessionView(session.id, actor)
+    })).then(items => items.filter((item): item is NonNullable<typeof item> => item !== null))
+  }
+  /** Team attachment upload is two-phase and atomic per phase: phase one stores bytes and binds
+   * Task/Session/attachment metadata in one transaction with a dependent delivery command; phase
+   * two is the Worker command projection. No first message is fabricated. */
+  async createTeamCoordinationAttachment(team: TeamId, actor: UserId, input: AttachmentUploadInput) {
+    if (!this.attachmentBlobs) throw new AppError(503, 'Attachment storage is not configured', 'attachment_storage_unavailable')
+    const intent = validateAttachmentUpload(actor, team, input)
+    // 阶段一收件先落盘：内容寻址，失败/冲突只可能留下不可见的去重 blob，不产生可见孤儿。
+    await this.attachmentBlobs.put(input.bytes, intent.sha256)
+    const createdRequest = coordinationUploadRequestId(input.requestId)
+    const result = await this.store.transaction(async tx => {
+      const membership = (await tx.identity.getIdentityRecords({ userId: actor, teamId: team })).membership
+      if (!membership) throw new AppError(403, 'Team membership required', 'team_membership_required')
+      // 幂等重放：同一意图返回原 Session/附件；不同载荷的同一 requestId 拒绝。
+      let previous: Awaited<ReturnType<typeof tx.resources.getSession>> = null
+      for (const session of await tx.resources.listSessions()) {
+        if (session.ownerId !== actor || session.creation?.requestId !== createdRequest || !session.taskId?.startsWith('coordination:')) continue
+        const task = await tx.tasks.get(session.taskId)
+        if (task?.teamCoordination?.teamId === team) { previous = session; break }
+      }
+      if (previous) {
+        if (previous.creation?.coordinationAttachmentFingerprint !== intent.fingerprint || !previous.creation.coordinationAttachmentId || previous.deletedAt) throw new AppError(409, 'requestId already belongs to a different coordination upload', 'request_id_conflict')
+        await this.requireSessionAccessInTx(tx, actor, previous.id, 'write')
+        const record = await tx.resources.getSessionAttachment(previous.creation.coordinationAttachmentId)
+        if (!record) throw new AppError(409, 'Attachment record missing for replayed upload', 'request_id_conflict')
+        return { session: previous, attachment: record, created: false }
+      }
+      const workspace = await this.authorizedWorkspaceInTx(tx, input.workspaceId as WorkspaceId, actor)
+      const worker = await this.requireWorkerUseInTx(tx, actor, input.workerId as WorkerId)
+      if (worker.teamId !== team || (await tx.resources.getProject(workspace.projectId))?.teamId !== team) throw new AppError(404, 'Workspace or Worker not found', 'workspace_not_found')
+      const capability = worker.capabilities.find(item => item.agentKey === (input.agentKey as AgentKey))
+      // 能力如实声明：未声明可读附件的 Agent 不接受上传，不以 Server 收件冒充可用。
+      if (!capability || capability.mode !== 'execution' || capability.attachments !== true) throw new AppError(409, '所选 Agent 未声明附件读取能力', 'attachment_capability_missing')
+      const taskId = await teamCoordinationTask(tx, { teamId: team, ownerId: actor, workerId: input.workerId as WorkerId, agentKey: input.agentKey as AgentKey }, input.requestId)
+      const created = await this.createSessionInTx(tx, { workspaceId: input.workspaceId as WorkspaceId, workerId: input.workerId as WorkerId, agentKey: input.agentKey as AgentKey, modelId: (input.modelId ?? undefined) as ModelId | undefined, title: input.title || '团队协调', requestId: createdRequest }, { ownerId: actor, taskId, runId: null })
+      const attachment: SessionAttachmentRecord = { id: newId<'AttachmentId'>(), sessionId: created.session.id, taskId, workerId: worker.id, filename: attachmentSafeFilename(input.filename), subpath: intent.subpath, contentType: input.contentType, size: input.bytes.length, sha256: intent.sha256, uploadedBy: actor, createdAt: now(), deliverCommandId: intent.commandId }
+      const deliverCommandId = await this.issueClusterCommand(tx, actor, worker.id, { kind: 'session.attachment.deliver', sessionId: created.session.id, attachment: { attachmentId: attachment.id, filename: attachment.filename, subpath: attachment.subpath, size: attachment.size, sha256: attachment.sha256, base64Content: input.bytes.toString('base64') } }, sessionAssertionScope(created.session), intent.commandId)
+      // 投递必须等待 Session 创建命令被 Worker 确认，同一事务内声明依赖。
+      await tx.commands.depend(deliverCommandId, created.commandId)
+      const session = { ...created.session, creation: { ...created.session.creation!, coordinationAttachmentFingerprint: intent.fingerprint, coordinationAttachmentId: attachment.id, coordinationDeliverCommandId: deliverCommandId } }
+      await tx.resources.saveSession(session)
+      await tx.resources.saveSessionAttachment(attachment)
+      return { session, attachment, created: true }
+    })
+    this.notifications.commands(input.workerId as WorkerId)
+    return { created: result.created, session: await this.sessionView(result.session.id, actor), attachment: await this.attachmentViewRecord(team, actor, result.attachment) }
+  }
+  async coordinationAttachmentView(team: TeamId, actor: UserId, attachmentId: string) {
+    const membership = (await this.store.identity.getIdentityRecords({ userId: actor, teamId: team })).membership
+    if (!membership) throw new AppError(403, 'Team membership required', 'team_membership_required')
+    const record = await this.store.resources.getSessionAttachment(attachmentId)
+    if (!record) throw new AppError(404, 'Attachment not found')
+    const task = await this.store.tasks.get(record.taskId)
+    if (!task?.teamCoordination || task.teamCoordination.teamId !== team) throw new AppError(404, 'Attachment not found')
+    try { await this.sessionAccess?.require(actor, record.sessionId) } catch { throw new AppError(404, 'Attachment not found') }
+    return { attachment: await this.attachmentViewRecord(team, actor, record) }
+  }
+  private async attachmentViewRecord(_team: TeamId, _actor: UserId, record: SessionAttachmentRecord) {
+    const command = await this.store.commands.get(record.deliverCommandId)
+    const worker = await this.store.resources.getWorker(record.workerId)
+    const receipt = command?.status === 'rejected' ? await this.store.commands.getReceipt(record.deliverCommandId) : null
+    const rejectionDetail = receipt && receipt.status === 'rejected' ? `${receipt.error.message}（${receipt.error.code}）` : null
+    const delivery: AttachmentDeliveryView = attachmentDeliveryView(record, command, worker?.connectionState ?? null, rejectionDetail)
+    return {
+      id: record.id, sessionId: record.sessionId, taskId: record.taskId, workerId: record.workerId,
+      filename: record.filename, subpath: record.subpath, contentType: record.contentType,
+      size: record.size, sha256: record.sha256, uploadedBy: record.uploadedBy, createdAt: record.createdAt,
+      // 阶段一：Server 收件（有界文件已存档）；阶段二：选定 Worker 的投递状态。
+      upload: { receivedAt: record.createdAt },
+      delivery,
+    }
   }
   async createSession(input: unknown, actor?: UserId) {
     const result = await this.store.transaction(tx => this.createSessionInTx(tx, input, actor ? { ownerId: actor } : undefined))
@@ -566,7 +821,7 @@ export class ServerService {
     let dedicated: import('@wemux/web-contract').Task['dedicatedConversation']
     if (source?.taskId) {
       const task = await tx.tasks.get(source.taskId)
-      if (!task || task.projectId !== workspace.projectId) throw new AppError(404, 'Task not found')
+      if (!task || (task.teamCoordination ? task.projectId !== coordinationAnchor((await tx.resources.getProject(workspace.projectId))?.teamId ?? '') || task.teamCoordination.ownerId !== provenance?.ownerId || task.teamCoordination.workerId !== b.workerId || task.teamCoordination.agentKey !== b.agentKey : task.projectId !== workspace.projectId)) throw new AppError(404, 'Task not found')
       if (task.deletedAt) throw new AppError(410, 'Task is permanently deleted', 'task_deleted')
       dedicated = task.dedicatedConversation
     }
@@ -599,6 +854,7 @@ export class ServerService {
     }
     const previous = requestId ? await tx.resources.getSessionByCreateRequest(ownerId, workspace.projectId, requestId) : null
     if (previous) {
+      if (source && (previous.taskId !== source.taskId || previous.runId !== source.runId)) throw new AppError(409, 'requestId belongs to a different Task', 'request_id_conflict')
       if (provenance?.ownerId) await this.requireSessionAccessInTx(tx, provenance.ownerId, previous.id, 'write')
       else await this.getSession(previous.id, tx.resources)
       await assertSessionTaskMutable(tx, previous)
@@ -624,7 +880,7 @@ export class ServerService {
     const sessionId = newId<'SessionId'>(), commandId = newId<'CommandId'>()
     const session: Session = { id: sessionId, projectId: workspace.projectId, ownerId, workspaceId: workspace.id, title, shareScope, storageMode: 'local', binding: { workspaceId: workspace.id, agent: { workerId: worker.id, agentKey }, modelId }, runtimeState: 'idle', archivedAt: null, deletedAt: null, ...(requestId ? { creation: { requestId, fingerprint, commandId } } : {}), ...source }
     await tx.resources.saveSession(session)
-    await this.command(tx, worker.id, { kind: 'session.create', session: { sessionId: session.id, binding: session.binding, storageMode: session.storageMode ?? 'local' } }, commandId)
+    await this.issueClusterCommand(tx, ownerId, worker.id, { kind: 'session.create', session: { sessionId: session.id, binding: session.binding, storageMode: session.storageMode ?? 'local' } }, sessionAssertionScope(session), commandId)
     await this.audit(tx, 'session.create', { kind: 'session', id: session.id })
     return { session, commandId, created: true }
   }
@@ -650,7 +906,14 @@ export class ServerService {
     const prepared = this.capabilities ? await this.capabilities.prepareTurn({ sessionId: id, turnId: newId<'TurnId'>(), actorId: capabilityActor }, tx) : null
     const command: WorkerCommand = { kind: 'session.enqueue', sessionId: id, message: { messageId, content, ...(actor ? { sentByAccountId: actor } : {}) }, ...(prepared ? { capabilities: prepared.runtime } : {}) }
     if (new TextEncoder().encode(JSON.stringify({ type: 'command', commandId, command })).byteLength > 900 * 1024) throw new AppError(413, 'Message and capability assets exceed the worker transport limit')
-    await this.command(tx, session.binding.agent.workerId, command, commandId)
+    // A production Server with a signing identity must never commit an unsigned
+    // cluster enqueue, including internal composition calls without an actor.
+    if ((this.commandSigning || actor) && !actor) throw new AppError(403, 'Cluster enqueue requires an authenticated actor', 'enqueue_actor_required')
+    if (actor && !this.commandSigning) throw new AppError(503, 'Cluster enqueue signing is unavailable', 'enqueue_signing_unavailable')
+    const user = actor ? await tx.identity.getUser(actor) : null
+    if (actor && (!user || (user.status ?? 'active') !== 'active')) throw new AppError(403, 'Cluster enqueue actor is unavailable', 'enqueue_actor_unavailable')
+    const claims = actor && user && this.commandSigning ? buildCommandAssertionClaims({ keyId: this.commandSigning.keyId, commandId, command, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session), actorId: actor, actorAuthVersion: user.authVersion ?? 0 }) : null
+    await this.command(tx, session.binding.agent.workerId, command, commandId, claims ? this.commandSigning!.sign(claims) : undefined)
     await this.audit(tx, 'session.enqueue', { kind: 'session', id }, actor)
     return { commandId, messageId, workerId: session.binding.agent.workerId }
   }
@@ -687,7 +950,35 @@ export class ServerService {
       const command = await build(tx)
       if (command === null) return null // Commit a durable non-admission fence before responding.
       const existing = await tx.commands.get(commandId)
-      await this.command(tx, session.binding.agent.workerId, command, commandId)
+      if (command.kind === 'runtime.approval.resolve' && existing && !(await tx.commands.getPendingCommand(commandId))?.authorization) {
+        // Historical unsigned intent cannot be silently upgraded to a new approval.
+        throw new AppError(409, 'Historical unsigned approval requires a new commandId', 'unsigned_approval_retry')
+      }
+      let authorization: import('@wemux/wire-protocol/command-assertion').SignedEnqueueAuthorization | undefined
+      if (command.kind === 'runtime.approval.resolve') {
+        if (!actor) throw new AppError(403, 'Cluster approval requires an authenticated actor', 'command_actor_required')
+        if (!this.commandSigning) throw new AppError(503, 'Cluster command signing is unavailable', 'command_signing_unavailable')
+        const user = await tx.identity.getUser(actor)
+        if (!user || (user.status ?? 'active') !== 'active') throw new AppError(403, 'Cluster command actor is unavailable', 'command_actor_unavailable')
+        authorization = this.commandSigning.sign({
+          version: 2, kind: command.kind, keyId: this.commandSigning.keyId, commandId,
+          workerId: session.binding.agent.workerId, sessionId: id, projectId: session.projectId,
+          workspaceId: session.workspaceId, taskId: session.taskId ?? null, actorId: actor,
+          actorAuthVersion: user.authVersion ?? 0,
+          commandDigest: createHash('sha256').update(JSON.stringify(command)).digest('hex'),
+          issuedAt: now(), expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+        })
+      } else {
+        // Other cluster session controls sign with the acting user, falling back to
+        // the Session owner for operator-driven flows. Reducing commands stay
+        // deliverable when signing is absent (revocation stops must survive).
+        const authority = actor ?? session.ownerId
+        if (this.commandSigning && authority) {
+          const user = await tx.identity.getUser(authority)
+          if (user && (user.status ?? 'active') === 'active') authorization = await issueCommandAssertion(tx, this.commandSigning, authority, { commandId, command, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) })
+        }
+      }
+      await this.command(tx, session.binding.agent.workerId, command, commandId, authorization)
       if (!existing) await this.audit(tx, command.kind, { kind: 'session', id }, actor)
       return session.binding.agent.workerId
     })
@@ -751,7 +1042,7 @@ export class ServerService {
       if (session.projectId !== projectId) throw new AppError(404, 'Approval not found', 'approval_not_found')
       if (session.taskId) {
         const task = await tx.tasks.get(session.taskId)
-        if (!task || task.projectId !== projectId) throw new AppError(404, 'Approval not found', 'approval_not_found')
+        if (!task || (task.teamCoordination ? task.projectId !== coordinationAnchor((await tx.resources.getProject(projectId))?.teamId ?? '') || task.teamCoordination.ownerId !== session.ownerId || task.teamCoordination.workerId !== session.binding.agent.workerId || task.teamCoordination.agentKey !== session.binding.agent.agentKey : task.projectId !== projectId)) throw new AppError(404, 'Approval not found', 'approval_not_found')
       }
       // Root-created Sessions legitimately have no Task/Run provenance. Validate
       // recorded bindings, but do not invent one just to retrieve a receipt.
@@ -824,7 +1115,14 @@ export class ServerService {
           await tx.tasks.append({ taskId: task.id, projectId: session.projectId, type: 'task.updated', actor: session.ownerId, requestId: `session-delete:${session.id}`, occurredAt: deletedAt, payload: { action: 'session.deleted', sessionId: session.id } }, `session-delete:${session.id}`)
         }
         await tx.cache.deleteSessionHistory(session.id)
-        await this.command(tx, session.binding.agent.workerId, { kind: 'session.delete', sessionId: session.id }, `session-delete:${session.id}` as CommandId)
+        const deleteAuthority = actor ?? session.ownerId
+        if (this.commandSigning && deleteAuthority) {
+          const user = await tx.identity.getUser(deleteAuthority)
+          if (user && (user.status ?? 'active') === 'active') {
+            const authorization = await issueCommandAssertion(tx, this.commandSigning, deleteAuthority, { commandId: `session-delete:${session.id}` as CommandId, command: { kind: 'session.delete', sessionId: session.id }, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) })
+            await this.command(tx, session.binding.agent.workerId, { kind: 'session.delete', sessionId: session.id }, `session-delete:${session.id}` as CommandId, authorization)
+          } else await this.command(tx, session.binding.agent.workerId, { kind: 'session.delete', sessionId: session.id }, `session-delete:${session.id}` as CommandId)
+        } else await this.command(tx, session.binding.agent.workerId, { kind: 'session.delete', sessionId: session.id }, `session-delete:${session.id}` as CommandId)
       }
       else {
         await this.getWorkspace(id as WorkspaceId, tx.resources)

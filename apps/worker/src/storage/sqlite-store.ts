@@ -6,7 +6,7 @@ import { retentionDestinationInvariants, retentionInvariants } from './retention
 import { randomUUID } from 'node:crypto'
 import type { AgentEvent, AgentSession, SessionKey, SessionStore } from '@wemux/agent-interchange'
 import type { EventSeq, JournalEvent, JournalEventDraft, QueuedMessage, SessionId, Timestamp, Turn, TurnId } from '@wemux/domain'
-import type { WorkerStore, WorkerStoreTx } from '../application/ports/worker-store.ts'
+import type { CommandAuthorizationDenial, WorkerStore, WorkerStoreTx } from '../application/ports/worker-store.ts'
 import type { LocalState } from '../application/ports/local-state.ts'
 import type { CommandRecord, SessionExecution } from '../domain/session-execution.ts'
 import type { LocalWorkspace, RepositoryCheckout } from '../domain/local-workspace.ts'
@@ -27,17 +27,17 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
     // Diagnostic callers must never change journal mode, schema or identities.
     if (options.readOnly) {
       const version = this.db.prepare('PRAGMA user_version').get()?.user_version
-      if (![1, 2, 3, 4, 5, 6, 7].includes(Number(version))) { this.db.close(); throw new Error('Unsupported Worker database schema') }
+      if (![1, 2, 3, 4, 5, 6, 7, 8].includes(Number(version))) { this.db.close(); throw new Error('Unsupported Worker database schema') }
       return
     }
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;')
     const version = this.db.prepare('PRAGMA user_version').get()?.user_version
-    if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7) { this.db.close(); throw new Error('Unsupported Worker database schema') }
+    if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8) { this.db.close(); throw new Error('Unsupported Worker database schema') }
     if (version === 0) this.db.exec(`BEGIN;
       CREATE TABLE documents (bucket TEXT NOT NULL, id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(bucket,id));
       CREATE TABLE journal (session_id TEXT NOT NULL, seq INTEGER NOT NULL, body TEXT NOT NULL, PRIMARY KEY(session_id,seq));
       PRAGMA user_version=1; COMMIT;`)
-    if (version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7) {
+    if (version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8) {
       this.db.exec('BEGIN IMMEDIATE')
       try {
         if (version !== 2) this.db.exec(retentionInvariants)
@@ -46,24 +46,25 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
       }
       catch (error) { this.db.exec('ROLLBACK'); this.db.close(); throw error }
     }
-    if (version !== 4 && version !== 5 && version !== 6 && version !== 7) {
+    if (version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8) {
       this.db.exec(`BEGIN IMMEDIATE;
         CREATE TABLE IF NOT EXISTS connector_credentials (id TEXT PRIMARY KEY, owner_kind TEXT NOT NULL CHECK(owner_kind='connector'), owner_id TEXT NOT NULL, auth_type TEXT NOT NULL, ciphertext TEXT NOT NULL, profile_json TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS connector_executions (request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, state TEXT NOT NULL, session_id TEXT NOT NULL, body TEXT NOT NULL, journal_summary TEXT, created_at TEXT NOT NULL, completed_at TEXT);
         CREATE INDEX IF NOT EXISTS connector_execution_session ON connector_executions(session_id, created_at);
         PRAGMA user_version=4; COMMIT;`)
     }
-    if (version !== 5 && version !== 6 && version !== 7) {
+    // Schema 8 installs denial retention transactionally (older schemas had an unversioned table).
+    if (version !== 5 && version !== 6 && version !== 7 && version !== 8) {
       this.db.exec(`BEGIN IMMEDIATE;
         CREATE TABLE provider_credentials (id TEXT PRIMARY KEY, owner_kind TEXT NOT NULL CHECK(owner_kind='model-provider'), variable_names_json TEXT NOT NULL, ciphertext TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         PRAGMA user_version=5; COMMIT;`)
     }
-    if (version !== 6 && version !== 7) {
+    if (version !== 6 && version !== 7 && version !== 8) {
       this.db.exec('BEGIN IMMEDIATE')
       try { this.db.exec(fileWriteInvariants); this.db.exec('PRAGMA user_version=6; COMMIT') }
       catch (error) { this.db.exec('ROLLBACK'); this.db.close(); throw error }
     }
-    if (version !== 7) {
+    if (version !== 7 && version !== 8) {
       this.db.exec('BEGIN IMMEDIATE')
       try {
         for (const table of fileWriteRowidTables) {
@@ -73,6 +74,14 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
         }
         this.db.exec(fileWriteRowidInvariants)
         this.db.exec('PRAGMA user_version=7; COMMIT')
+      } catch (error) { this.db.exec('ROLLBACK'); this.db.close(); throw error }
+    }
+    if (version !== 8) {
+      this.db.exec('BEGIN IMMEDIATE')
+      try {
+        this.db.exec('CREATE TABLE IF NOT EXISTS connector_denials (id INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at TEXT NOT NULL, body TEXT NOT NULL)')
+        this.db.exec('DELETE FROM connector_denials WHERE id NOT IN (SELECT id FROM connector_denials ORDER BY id DESC LIMIT 10000)')
+        this.db.exec('PRAGMA user_version=8; COMMIT')
       } catch (error) { this.db.exec('ROLLBACK'); this.db.close(); throw error }
     }
   }
@@ -147,6 +156,17 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
   identity: LocalState['identity'] = () => this.getDocument('identity', 'worker')
   saveIdentity: LocalState['saveIdentity'] = identity => this.put('identity', 'worker', identity)
   clearIdentity: LocalState['clearIdentity'] = () => { this.db.prepare('DELETE FROM documents WHERE bucket=? AND id=?').run('identity', 'worker') }
+  private denialSequence = 0
+  async appendAuthorizationDenial(entry: CommandAuthorizationDenial): Promise<void> {
+    await this.tail
+    const sequence = String(Date.now()).padStart(14, '0') + '-' + String(this.denialSequence++).padStart(6, '0')
+    this.put('authorization-denials', sequence, entry)
+  }
+  /** Test/audit seam: denials ordered oldest first. */
+  async listAuthorizationDenials(): Promise<readonly CommandAuthorizationDenial[]> {
+    await this.tail
+    return this.list<CommandAuthorizationDenial>('authorization-denials')
+  }
   localInstallation: LocalState['localInstallation'] = () => this.getDocument<LocalInstallationIdentity>('identity', 'installation')
   saveLocalInstallation: LocalState['saveLocalInstallation'] = identity => this.put('identity', 'installation', identity)
   localAdmin: LocalState['localAdmin'] = () => this.getDocument<LocalAdminRecord>('identity', 'local-admin')
@@ -219,6 +239,19 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
     const current = JSON.parse(String(row.body)) as ConnectorExecutionRecord
     const record: ConnectorExecutionRecord = { ...current, state: 'completed', result, journalSummary, completedAt: result.completedAt }
     this.db.prepare('UPDATE connector_executions SET state=?,body=?,journal_summary=?,completed_at=? WHERE request_id=?').run('completed', JSON.stringify(record), JSON.stringify(journalSummary), result.completedAt, requestId)
+  }
+  async recordConnectorDenial(event: { actor: string; operation: string; projectId: string; workspaceId: string; workerId: string; connectorId: string; toolName: string; reasonCode: string }): Promise<void> {
+    await this.tail
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare('INSERT INTO connector_denials (occurred_at, body) VALUES (?, ?)').run(new Date().toISOString(), JSON.stringify(event))
+      this.db.exec('DELETE FROM connector_denials WHERE id NOT IN (SELECT id FROM connector_denials ORDER BY id DESC LIMIT 10000)')
+      this.db.exec('COMMIT')
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+  async listConnectorDenials(): Promise<readonly { actor: string; operation: string; projectId: string; workspaceId: string; workerId: string; connectorId: string; toolName: string; reasonCode: string }[]> {
+    await this.tail
+    return (this.db.prepare('SELECT body FROM connector_denials ORDER BY id').all() as { body: string }[]).map(row => JSON.parse(row.body))
   }
   async listConnectorJournal(sessionId: string): Promise<readonly ConnectorExecutionRecord[]> {
     await this.tail
@@ -319,6 +352,8 @@ export class SqliteWorkerStore implements WorkerStore, LocalState, SessionStore,
   private tx: Omit<WorkerStoreTx, 'fileWrites'> = {
     journal: { read: async input => this.readJournal(input) },
     workspaces: {
+      // Direct read without the tail chain: safe inside an open transaction.
+      get: async id => this.getDocument('workspaces', id),
       save: async workspace => this.put('workspaces', workspace.id, workspace),
       saveRepositoryCheckouts: async items => { for (const item of items) this.put('checkouts', `${item.workspaceId}:${item.repositoryId}`, item) },
       remove: async id => { this.db.prepare('DELETE FROM documents WHERE bucket=? AND id=?').run('workspaces', id) },

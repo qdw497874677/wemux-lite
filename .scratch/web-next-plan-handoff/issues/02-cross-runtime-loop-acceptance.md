@@ -1,7 +1,7 @@
 # 02: 跨 Runtime 闭环与交接验收
 
 Status: ready-for-agent
-Blocked by: [01](01-plan-approval-and-handoff.md)；真实协调流程还需[协调人工开门](../../web-next-coordination-closure/issues/04-coordination-acceptance.md)。分项 B 的 D6 首版范围已确认，自动截止/金额硬上限后续独立交付、不构成本票前置；任务不设自动失败重试次数；仅分项 B 的新增多候选派发验收另需[派发 02](../../web-next-task-dispatch/issues/02-capacity-team-board-acceptance.md)，不阻塞已有指定机器的测试准备。
+Blocked by: [01](01-plan-approval-and-handoff.md)；真实协调流程还需[协调聊天功能验收](../../web-next-coordination-closure/issues/04-coordination-acceptance.md)。分项 B 的 D6 首版范围已确认，自动截止/金额硬上限后续独立交付、不构成本票前置；任务不设自动失败重试次数；仅分项 B 的新增多候选派发验收另需[派发 02](../../web-next-task-dispatch/issues/02-capacity-team-board-acceptance.md)，不阻塞已有指定机器的测试准备。
 
 **Spec:** [计划修订、批准与交接](../spec.md)
 **合并来源:** `43966aa` 的原票 03、04。

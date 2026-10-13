@@ -5,6 +5,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentKey, ModelId, UserId, SessionId, EventSeq, JournalEvent, Timestamp, MessageId, CommandId, TurnId } from '@wemux/domain'
+import { SharedSqliteDatabase } from '../storage/sqlite/shared-database.js'
+import { CommandSigningIdentity } from '../application/command-signing.js'
 import { SqliteServerStore } from '../storage/sqlite/store.js'
 import { ServerService } from '../application/server-service.js'
 import { TaskService, TaskError } from '../application/task-service.js'
@@ -46,7 +48,7 @@ const cases = [
 for (const [name, code, message] of cases) test(`public reuse rejection matrix: ${name}`, async () => {
   const at = '2025-01-01T00:00:00.000Z' as Timestamp
   const dir = await mkdtemp(join(tmpdir(), 'reuse-rejections-')), path = join(dir, 'server.db')
-  const store = new SqliteServerStore(path), signals = new Notifications(), server = new ServerService(store, signals)
+  const database = new SharedSqliteDatabase(path), store = new SqliteServerStore(database), signals = new Notifications(), server = new ServerService(store, signals, undefined, undefined, undefined, undefined, new CommandSigningIdentity(database.connection))
   const tasks = new TaskService(store, event => signals.project(event), server), db = new DatabaseSync(path)
   try {
     await seedOperator(store, server)
@@ -88,7 +90,7 @@ for (const [name, code, message] of cases) test(`public reuse rejection matrix: 
     // metadata either cannot be enqueued or violates SQL Run binding guards.
     const invalidRunBinding = ['workspace binding mismatch', 'agent binding mismatch', 'model binding mismatch', 'Worker binding mismatch'].includes(name)
     if (name !== 'unreferenced Task Session' && name !== 'missing Session' && name !== 'missing provenance' && name !== 'wrong project' && name !== 'deleted Session' && !invalidRunBinding) {
-      const queued = await server.enqueue(candidate.id, { content: 'Historical submission' })
+      const queued = await server.enqueue(candidate.id, { content: 'Historical submission' }, context.actor)
       await store.transaction(async tx => {
         await tx.commands.recordReceipt({ commandId: queued.commandId, status: 'rejected', error: { code: 'invalid-input', message: 'Not queued', retryable: false } }, at)
         const priorTaskId = candidate.taskId ?? task.id
@@ -104,7 +106,7 @@ for (const [name, code, message] of cases) test(`public reuse rejection matrix: 
     if (name === 'stale Journal') await store.transaction(tx => tx.cache.recordWorkerHead(candidate.id, 1 as EventSeq))
     if (name === 'gapped Journal') await store.transaction(async tx => { await tx.cache.applyEvents(candidate.id, [event(2, { kind: 'session.runtime.changed', state: 'idle', reason: null })]); await tx.cache.recordWorkerHead(candidate.id, 2 as EventSeq) })
     if (name.includes('enqueue beyond window')) {
-      const queued = await server.enqueue(candidate.id, { content: 'Unobserved independent enqueue' })
+      const queued = await server.enqueue(candidate.id, { content: 'Unobserved independent enqueue' }, context.actor)
       if (name.startsWith('accepted')) await store.transaction(tx => tx.commands.recordReceipt({ commandId: queued.commandId, status: 'accepted' }, at))
       db.prepare(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<100001)
         INSERT INTO commands SELECT 'window-'||x,worker_id,'completed',
@@ -158,5 +160,5 @@ for (const [name, code, message] of cases) test(`public reuse rejection matrix: 
       assert.equal(result.run.status, 'pending')
       assert.ok(seen.length > 0)
     }
-  } finally { db.close(); store.close(); await rm(dir, { recursive: true, force: true }) }
+  } finally { db.close(); database.close(); await rm(dir, { recursive: true, force: true }) }
 })

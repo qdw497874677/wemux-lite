@@ -21,7 +21,7 @@
 - 交接创建普通任务并附带计划、验收标准和来源，不把它当作对话的子任务或阻塞对话等待执行。保存初始计划与任务应具备一致性，不能先启动再补计划。
 - 普通任务显式提交完成，不以 Run/Turn 成功自动 done。项目默认不强制审查；任务继承项目策略，允许有管理权限的人覆盖为 Agent/人工/多阶段审查。执行 Agent 不可自行取消审查；执行中不隐式跟随项目默认值降低要求。
 - Worker 本地也管理 Task；加入集群不自动上传本地数据或授予集群权限。本地任务管理不等于平台协调权限。
-- 对话权限由运行时强制限制：读取/搜索/计划允许，代码修改、安装、部署及未授权外部写操作禁止。若 Runtime 无法可靠约束，不开放协调模式；不能只用 Skill 提示词伪装安全。
+- 协调聊天按普通 Agent Runtime 的获权 Workspace 与用户权限运行，不额外禁止文件、终端或联网；平台管理操作与外部写入仍依各自授权和审批，不因协调身份获得跨 Project 权限。隔离是未来独立能力，不把提示词当作安全边界。见 ADR 0008。
 
 ## 3. 内置 API 合同
 
@@ -55,7 +55,7 @@ Agent 调用上下文由宿主可信构建：实际操作者、当前 Task/Sessi
 | Task/Run/审查 | features/tasks、components/task-board | 列表/看板、详情、指派、活动、链接、Run取消、证据、可配置审查 | 待核验迁移及规则更新 |
 | Session | features/sessions、hosts/session-journal、features/panels | 历史、流式/工具、队列、停止、审批、恢复、模型切换、用量和错误处理 | 待核验迁移及规则更新 |
 | 画布/血缘 | features/session-canvas | 获权图、Fork、共享会话表面、布局、实时权限；Fork仍需任务归属 | 待核验迁移 |
-| 文件/终端/成果 | features/files、terminal、artifacts | 浏览编辑Diff、终端、成果与审查；讨论模式不可绕过写权限 | 待核验迁移 |
+| 文件/终端/成果 | features/files、terminal、artifacts | 浏览编辑Diff、终端、成果与审查；协调聊天按普通资源授权使用，不绕过平台管理操作审批 | 待核验迁移 |
 | 待办/审批/活动 | features/attention、approvals、timeline、projections | 真实数据聚合、分页、状态新鲜度、动作授权 | 待核验迁移 |
 | 集群/Runtime | cluster-page、worker-enrollment-dialog、features/agents | 注册、在线/失联、撤销、能力探测、安装说明 | 待核验迁移 |
 | Skill/Preset/Provider | features/skills、presets | 发布/版本、作用域绑定、分发收敛、未验证模型不冒充可用 | 待核验迁移 |

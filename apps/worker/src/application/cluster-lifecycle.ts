@@ -12,6 +12,7 @@ import { enroll, toSocketUrl } from '../transport/enrollment.js'
 import { WebSocketTransport } from '../transport/websocket.js'
 import type { StateChange } from '../transport/types.js'
 import { WorkerRuntime } from './runtime.js'
+import { ownershipForHome } from './session-ownership.js'
 import { LocalWorkbenchError } from './local-workbench.js'
 import { LocalProvisioner } from '../workspaces/local-provisioner.js'
 import { runtimeAdaptersFor } from './runtime-adapters.js'
@@ -19,7 +20,7 @@ import type { RuntimeSessionAdapter } from './ports/runtime-session.js'
 import { agentsForHome } from '../agents/detection.js'
 import { agentSelections, readAgentSettings, removeAgentSelection, runtimeKey } from '../config/agent-settings.js'
 import { installAgent, useAgent } from '../runtimes/management.js'
-import { CapabilityGateway } from '../capabilities/gateway.js'
+import { CapabilityGateway, httpOrigin } from '../capabilities/gateway.js'
 import { FilesystemAgentLaunchContextProvider } from './agent-launch-context-provider.js'
 import { serverUrl, type WorkerTransport } from '../config.js'
 import { defaultProbe, preflightServer, probeCli } from '../transport/tailscale.js'
@@ -72,6 +73,8 @@ export class ClusterLifecycle {
   private tunnelPool: TunnelPool | null = null
   private resources: ResourceReconciler | null = null
   private readonly connectors: WorkerConnectorRuntime
+  private readonly ownership: ReturnType<typeof ownershipForHome>
+  private clusterGrantUrl: string | null = null
   private transitions: Promise<unknown> = Promise.resolve()
   private state: WorkerConnectionState = { phase: 'offline', retryAt: null, failure: null }
   private installation: { key: string; phase: 'installing' | 'ready' | 'failed'; message: string } | null = null
@@ -80,7 +83,35 @@ export class ClusterLifecycle {
     private readonly store: WorkerStore & LocalState & SessionStore & ProviderCredentialRepository & WorkerConnectorStore,
     private agents: readonly AgentAdapter[],
     private readonly options: ClusterLifecycleOptions,
-  ) { this.connectors = new WorkerConnectorRuntime(store, { onApproval: event => this.publishConnectorApproval(event) }) }
+  ) { this.ownership = ownershipForHome(options.home); this.connectors = new WorkerConnectorRuntime(store, { onApproval: event => this.publishConnectorApproval(event), verifyLocalOrigin: async (turn, workerId) => {
+    // Only the local-host runtime supplies 'local'; check its persisted installation,
+    // Session, Workspace and running Turn rather than trusting a caller's label.
+    const installation = this.store.localInstallation()
+    const session = await this.store.sessions.get(turn.sessionId)
+    const workspace = session && await this.store.workspaces.get(session.binding.workspaceId)
+    const persisted = await this.store.sessions.getTurn(turn.id)
+    return !!installation && workerId === `local-${installation.installationId}`
+      && session?.binding.agent.workerId === workerId && session.storageMode === 'local'
+      && session.activeTurnId === turn.id
+      && workspace?.workerId === workerId && workspace.projectId === 'local'
+      && persisted?.sessionId === turn.sessionId && persisted.state === 'running'
+  }, verifyBinding: async (turn, workerId) => {
+    const session = await this.store.sessions.get(turn.sessionId)
+    const workspace = session && await this.store.workspaces.get(session.binding.workspaceId)
+    const persisted = await this.store.sessions.getTurn(turn.id)
+    return workspace && workspace.workerId === workerId && session?.binding.agent.workerId === workerId && persisted?.sessionId === turn.sessionId && persisted.state === 'running'
+      ? { projectId: workspace.projectId, workspaceId: workspace.id } : null
+  }, verifyServerGrant: async (token, operation, local, expected) => {
+    if (local) return true
+    if (!this.clusterGrantUrl) return false
+    try {
+      const result = await fetch(new URL(operation === 'connector.identity' ? '/agent-capabilities/connector.identity' : '/agent-capabilities/grant.verify', httpOrigin(this.clusterGrantUrl)), { method: 'POST', redirect: 'error', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(operation === 'connector.identity' ? {} : { requiredTool: operation }), signal: AbortSignal.timeout(5_000) })
+      if (!result.ok) return false
+      if (operation !== 'connector.identity') return true
+      const info = await result.json() as { projectId?: string; workspaceId?: string; sessionId?: string; turnId?: string }
+      return !!expected && info.projectId === expected.projectId && info.workspaceId === expected.workspaceId && info.sessionId === expected.sessionId && info.turnId === expected.turnId
+    } catch { return false }
+  } }) }
 
   connection() { return this.state }
 
@@ -206,6 +237,7 @@ export class ClusterLifecycle {
 
   private async initializeLocalRuntimeInternal() {
     if (this.runtime) return
+    this.clusterGrantUrl = null
     const installation = this.store.localInstallation()
     if (!installation) throw new Error('Worker local installation is not initialized')
     const selected = await readAgentSettings(this.options.home)
@@ -213,7 +245,11 @@ export class ClusterLifecycle {
     const gateway = this.gateway ?? new CapabilityGateway(null, this.connectors)
     const endpoint = await gateway.listen()
     this.gateway = gateway
-    const runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, { send: () => {} }, workerId, installation.name, new FilesystemAgentLaunchContextProvider(this.options.home, endpoint, turn => this.connectors.registerTurn(turn, workerId)), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), null, this.connectors)
+    const runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, { send: () => {} }, workerId, installation.name, new FilesystemAgentLaunchContextProvider(this.options.home, endpoint, turn => this.connectors.registerTurn(turn, workerId, 'local'), undefined, async turn => {
+      const session = await this.store.sessions.get(turn.sessionId)
+      const workspace = session && await this.store.workspaces.get(session.binding.workspaceId)
+      return workspace && workspace.workerId === workerId ? { projectId: workspace.projectId, workspaceId: workspace.id, rootPath: workspace.rootPath, agentKey: session!.binding.agent.agentKey } : null
+    }), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), null, this.connectors, undefined, undefined, undefined, this.ownership)
     try {
       await runtime.initialize()
       this.runtime = runtime
@@ -234,6 +270,7 @@ export class ClusterLifecycle {
     this.state = { phase: 'connecting', retryAt: null, failure: null }
     try {
       const identity = this.requireIdentity()
+      this.clusterGrantUrl = null
       if (this.options.transport === 'nc') {
         const cli = await probeCli(defaultProbe)
         if (!cli.available) throw new Error(`WEMUX_TRANSPORT=nc 需要本机 tailscale CLI（${cli.error}）`)
@@ -250,6 +287,8 @@ export class ClusterLifecycle {
       const originals = usable.concat(deferred)
       const pool = this.options.transport === 'nc' ? await openTunnels(originals) : null
       const urls = pool?.localUrls ?? originals
+      // Transport binds only urls[0]; preflight ordering is not runtime failover.
+      this.clusterGrantUrl = urls[0] ?? null
       this.tunnelPool = pool
       const credential = await readFile(join(this.options.home, identity.credentialRef), 'utf8')
       const selected = await readAgentSettings(this.options.home)
@@ -299,6 +338,7 @@ export class ClusterLifecycle {
             // 终态失败：释放这条连接，让重新注册后的 resume()/connect() 能重新建立，
             // 而不是留一个再也不会重连的 transport 把后续连接请求静默挡掉。
             this.transport = null
+            this.clusterGrantUrl = null
             transport.stop()
           }
           this.options.onStateChange?.(change)
@@ -306,9 +346,8 @@ export class ClusterLifecycle {
       })
       // Only replace the runtime once connection resources are ready. The failure
       // path restores a local runtime before allowing subsequent local commands.
-      // connect 会以新 runtime 接管同一个持久化 store。先同步强杀旧 provider，
-      // 再给旧 runtime 一个有上限的收尾窗口，尽量避免两个 runtime 并发写状态；
-      // 即使旧 close() 本身挂死，也不能永久阻塞新连接建立。
+      // A bounded close is not proof of child exit. The process-lifetime
+      // ownership fence is shared with replacement and local fallback.
       const previous = this.runtime
       this.runtime = null
       if (previous) {
@@ -319,11 +358,32 @@ export class ClusterLifecycle {
         ])
       }
       resources = new ResourceReconciler({ workerId: identity.workerId, home: this.options.home, databasePath: join(this.options.home, 'resources.sqlite'), transport, concurrency: Number(process.env.WEMUX_RESOURCE_CONCURRENCY ?? '2'), providerCredentials: WorkerProviderCredentialStore.fromEnvironment(this.store) })
-      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint, turn => this.connectors.registerTurn(turn, identity.workerId), (projectId, agentKey) => resources!.skillsForLaunch(projectId, agentKey), async turn => {
+      runtime = new WorkerRuntime(this.store, new LocalProvisioner(join(this.options.home, 'workspaces')), this.agents, transport, identity.workerId, identity.name ?? this.options.name, new FilesystemAgentLaunchContextProvider(this.options.home, capabilityEndpoint, async turn => {
+        // Provenance is the persisted Session/Workspace/Turn binding, never the
+        // presence (or absence) of a capability token on the supplied Turn.
+        const installation = this.store.localInstallation()
+        const session = await this.store.sessions.get(turn.sessionId)
+        const workspace = session && await this.store.workspaces.get(session.binding.workspaceId)
+        const persisted = await this.store.sessions.getTurn(turn.id)
+        const localId = installation && `local-${installation.installationId}`
+        const local = !!localId && session?.storageMode === 'local'
+          && session.binding.agent.workerId === localId && workspace?.workerId === localId
+          && workspace.projectId === 'local' && session.activeTurnId === turn.id
+          && persisted?.sessionId === turn.sessionId && persisted.state === 'running'
+        return this.connectors.registerTurn(turn, local ? localId! : identity.workerId, local ? 'local' : 'cluster')
+      }, (projectId, agentKey) => resources!.skillsForLaunch(projectId, agentKey), async turn => {
         const session = await this.store.sessions.get(turn.sessionId)
         const workspace = session ? await this.store.workspaces.get(session.binding.workspaceId) : null
-        return session && workspace ? { projectId: workspace.projectId, agentKey: session.binding.agent.agentKey } : null
-      }), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), await loadNodePty(), this.connectors, (projectId, modelId) => resources!.piProviderForLaunch(projectId, modelId))
+        return session && workspace && workspace.workerId === session.binding.agent.workerId && (workspace.workerId === identity.workerId || workspace.workerId === `local-${this.store.localInstallation()?.installationId}`) ? { projectId: workspace.projectId, workspaceId: workspace.id, rootPath: workspace.rootPath, agentKey: session.binding.agent.agentKey } : null
+      }), undefined, this.options.runtimeAdapters ?? runtimeAdaptersFor(this.agents, { pi: selected.pi?.executable, opencode: selected.opencode?.executable, claude: selected['claude-code']?.executable }), await loadNodePty(), this.connectors, (projectId, modelId) => resources!.piProviderForLaunch(projectId, modelId), undefined, async commandId => {
+        if (this.transport !== transport || this.state.phase !== 'online') return false
+        const base = serverUrl(urls[0])
+        base.protocol = ['https:', 'wss:'].includes(base.protocol) ? 'https:' : 'http:'
+        try {
+          const response = await fetch(new URL(`/api/workers/${encodeURIComponent(identity.workerId)}/commands/${encodeURIComponent(commandId)}/authorize-launch`, base.origin), { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(5000), headers: { authorization: `Bearer ${credential}` } })
+          return this.transport === transport && this.state.phase === 'online' && response.ok && (await response.json() as { allowed?: boolean }).allowed === true
+        } catch { return false }
+      }, this.ownership)
       this.runtime = runtime
       this.resources = resources
       await runtime.initialize()
@@ -395,6 +455,7 @@ export class ClusterLifecycle {
     const transport = this.transport
     this.runtime?.providerDisconnected()
     this.transport = null
+    this.clusterGrantUrl = null
     transport?.stop()
     const runtime = this.runtime
     this.runtime = null

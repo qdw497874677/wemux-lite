@@ -8,8 +8,12 @@ import { createServer } from 'node:http'
 import { once } from 'node:events'
 import type { AgentKey, CommandId, EventSeq, JournalEvent, MessageId, ModelId, SessionId, Timestamp, UserId, WorkerId } from '@wemux/domain'
 import { SqliteServerStore } from '../storage/sqlite/store.js'
+import { SharedSqliteDatabase } from '../storage/sqlite/shared-database.js'
+import { CommandSigningIdentity } from '../application/command-signing.js'
 import { migrate } from '../storage/sqlite/migrations.js'
 import { ServerService } from '../application/server-service.js'
+import { SessionAccessService } from '../application/session-access-service.js'
+import { ProjectAccessService } from '../application/project-access-service.js'
 import { TaskService } from '../application/task-service.js'
 import { WorkerService } from '../application/worker-service.js'
 import { Notifications } from '../application/notifications.js'
@@ -19,9 +23,15 @@ import { SessionStreams } from '../http/sse.js'
 import { administratorDirectory, administratorToken, instanceOperatorId, seedOperator } from './fixtures/administrator.js'
 
 const context = { actor: instanceOperatorId, requestId: 'ticket06-evidence' }
+function signedStore(path: string) {
+  const database = new SharedSqliteDatabase(path)
+  const store = new SqliteServerStore(database)
+  const commandSigning = new CommandSigningIdentity(database.connection)
+  return { database, store, commandSigning }
+}
 async function fixture(path: string, cancel = true) {
-  const store = new SqliteServerStore(path), signals = new Notifications()
-  const server = new ServerService(store, signals)
+  const { database, store, commandSigning } = signedStore(path), signals = new Notifications()
+  const server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning)
   await seedOperator(store, server)
   const { worker } = await server.enroll({ token: (await server.createEnrollment({})).token, name: 'Evidence worker' })
   await store.transaction(tx => tx.resources.saveWorker({ ...worker, connectionState: 'online', capabilities: [{ agentKey: 'test' as AgentKey, displayName: 'Test', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' as ModelId, displayName: 'Model', source: 'configured' }] }] }))
@@ -34,19 +44,145 @@ async function fixture(path: string, cancel = true) {
   const { session: independent } = await tasks.createSession(task.projectId, task.id, { title: 'Independent', requestId: 'independent-session' }, context)
   const { run } = await tasks.launch(task.projectId, task.id, { requestId: 'launch', mode: 'new', reuseSessionId: null, prompt: 'Evidence', assignment }, context)
   if (cancel) await tasks.cancelRun(task.projectId, task.id, run.id, { runId: run.id, sessionId: run.sessionId, requestId: 'cancel' }, context)
-  return { store, server, tasks, signals, task, worker, run: (await store.tasks.run(run.id))!, independent }
+  return { database, store, commandSigning, server, tasks, signals, task, worker, run: (await store.tasks.run(run.id))!, independent }
 }
 
 function snapshot(db: DatabaseSync) {
   return db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => ({ name: row.name, rows: db.prepare(`SELECT * FROM "${String(row.name).replaceAll('"', '""')}" ORDER BY rowid`).all() }))
 }
 
+test('approval without a trusted actor fails closed without a command or notification', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ticket02-missing-actor-')), path = join(dir, 'server.db')
+  const f = await fixture(path)
+  t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
+  const commandId = 'unsigned-approval' as CommandId
+  let wakes = 0
+  const unsubscribe = f.signals.onCommands(f.worker.id, () => { wakes++ })
+  t.after(unsubscribe)
+  const input = { commandId, turnId: 'turn', decision: 'approve' }
+  await assert.rejects(f.server.resolveRuntimeApproval(f.independent.id, 'approval' as never, input), { status: 403, code: 'command_actor_required' })
+  assert.equal(await f.store.commands.get(commandId), null)
+  assert.equal((await f.store.commands.listDeliverable(f.worker.id, 100)).some(item => item.commandId === commandId), false)
+  assert.equal(wakes, 0)
+})
+
+test('cluster approval decision is signed and bound to issuer, target and worker before dispatch', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ticket02-approval-')), path = join(dir, 'server.db')
+  const f = await fixture(path)
+  t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
+  const sessionId = f.independent.id
+  const commandId = 'ticket02-approval' as CommandId
+  await f.server.resolveRuntimeApproval(sessionId, 'approval' as never, { commandId, turnId: 'turn', decision: 'approve' }, instanceOperatorId)
+  const pending = await f.store.commands.getPendingCommand(commandId)
+  assert.equal(pending?.command.kind, 'runtime.approval.resolve')
+  assert.equal(pending?.authorization?.claims.version, 2)
+  assert.equal(pending?.authorization?.claims.kind, 'runtime.approval.resolve')
+  assert.equal(pending?.authorization?.claims.actorId, instanceOperatorId)
+  assert.equal(pending?.authorization?.claims.workerId, f.worker.id)
+  assert.equal(pending?.authorization?.claims.sessionId, sessionId)
+  assert.equal((await f.store.commands.listDeliverable(f.worker.id, 100)).some(item => item.commandId === commandId), true)
+  // No active Turn matches this forged target; a signed assertion is not fresh authority.
+  assert.deepEqual(await f.server.authorizeEnqueueLaunch(f.worker.id, commandId), { allowed: false })
+  assert.deepEqual(await f.server.authorizeEnqueueLaunch('another-worker' as WorkerId, commandId), { allowed: false })
+})
+
+test('unsigned historical approval retry stays unsigned and requires a new commandId', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ticket02-unsigned-retry-')), path = join(dir, 'server.db')
+  const f = await fixture(path)
+  t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
+  const commandId = 'historical-approval' as CommandId
+  const command = { kind: 'runtime.approval.resolve' as const, sessionId: f.independent.id, turnId: 'turn' as never, approvalId: 'approval' as never, decision: 'approve' as const, decidedByAccountId: instanceOperatorId }
+  const { createHash } = await import('node:crypto')
+  await f.store.transaction(tx => tx.commands.insertPending({ commandId, workerId: f.worker.id, command, payloadFingerprint: createHash('sha256').update(JSON.stringify(command)).digest('hex'), createdAt: new Date().toISOString() as Timestamp }))
+  await assert.rejects(f.server.resolveRuntimeApproval(f.independent.id, command.approvalId, { commandId, turnId: 'turn', decision: 'approve' }, instanceOperatorId), { status: 409, code: 'unsigned_approval_retry' })
+  assert.equal((await f.store.commands.getPendingCommand(commandId))?.authorization, undefined)
+  assert.equal((await new WorkerService(f.store, f.signals).deliverable(f.worker.id)).some(item => item.type === 'command' && item.commandId === commandId), false)
+})
+
+test('signed approval reaches deliverable transport with current access despite lagging Turn projection', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ticket02-positive-approval-')), path = join(dir, 'server.db')
+  const f = await fixture(path)
+  t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
+  const service = new ServerService(f.store, f.signals, undefined, undefined, undefined,
+    new SessionAccessService(f.store, new ProjectAccessService(f.store)), f.commandSigning)
+  const commandId = 'positive-approval' as CommandId
+  await service.resolveRuntimeApproval(f.independent.id, 'approval' as never, { commandId, turnId: 'worker-turn-not-in-cache', decision: 'approve' }, instanceOperatorId)
+  assert.deepEqual(await service.authorizeEnqueueLaunch(f.worker.id, commandId), { allowed: true })
+  const frames = await new WorkerService(f.store, f.signals).deliverable(f.worker.id)
+  assert.ok(frames.some(frame => frame.type === 'command' && frame.commandId === commandId && frame.authorization?.claims.kind === 'runtime.approval.resolve'))
+})
+
+test('expired approval refresh preserves identity and requires current authority', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ticket02-refresh-')), path = join(dir, 'server.db')
+  const f = await fixture(path)
+  t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
+  const service = new ServerService(f.store, f.signals, undefined, undefined, undefined,
+    new SessionAccessService(f.store, new ProjectAccessService(f.store)), f.commandSigning)
+  const id = 'refresh-approval' as CommandId
+  await service.resolveRuntimeApproval(f.independent.id, 'approval' as never, { commandId: id, turnId: 'worker-turn', decision: 'approve' }, instanceOperatorId)
+  const original = (await f.store.commands.getPendingCommand(id))!.authorization!
+  const expired = f.commandSigning.sign({ ...original.claims, issuedAt: new Date(Date.now() - 360_000).toISOString(), expiresAt: new Date(Date.now() - 60_000).toISOString() })
+  await f.store.transaction(tx => tx.commands.refreshApprovalAuthorization(id, expired))
+  assert.equal(await service.refreshPendingApproval(f.worker.id, id), true)
+  const fresh = (await f.store.commands.getPendingCommand(id))!.authorization!
+  assert.deepEqual(Object.fromEntries(Object.entries(fresh.claims).filter(([key]) => key !== 'issuedAt' && key !== 'expiresAt')), Object.fromEntries(Object.entries(original.claims).filter(([key]) => key !== 'issuedAt' && key !== 'expiresAt')))
+  assert.ok(Date.parse(fresh.claims.expiresAt) > Date.now())
+  assert.equal(await service.authorizeApprovalReplay(f.worker.id, id, expired), true, 'signed original can recover lost transport ACK')
+  assert.equal(await service.authorizeApprovalReplay(f.worker.id, id, { ...expired, signature: 'invalid' }), false, 'invalid original must never replay')
+  const tampered = { ...expired, claims: { ...expired.claims, expiresAt: new Date(Date.now() + 60_000).toISOString() } }
+  await f.store.transaction(tx => tx.commands.refreshApprovalAuthorization(id, tampered))
+  assert.equal(await service.refreshPendingApproval(f.worker.id, id), false, 'tampered persisted signature must not be laundered into a valid window')
+  assert.deepEqual((await f.store.commands.getPendingCommand(id))!.authorization, tampered)
+  await f.store.transaction(tx => tx.commands.refreshApprovalAuthorization(id, expired))
+  const actor = (await f.store.identity.getUser(instanceOperatorId))!
+  await f.store.transaction(tx => tx.identity.saveUser({ ...actor, authVersion: (actor.authVersion ?? 0) + 1 }))
+  await f.store.transaction(tx => tx.commands.refreshApprovalAuthorization(id, expired))
+  assert.equal(await service.refreshPendingApproval(f.worker.id, id), false)
+  assert.deepEqual((await f.store.commands.getPendingCommand(id))!.authorization, expired)
+  assert.equal(await service.authorizeApprovalReplay(f.worker.id, id, expired), false, 'revoked actor version must block sent original')
+})
+
+test('v3 approval refresh keeps identity and window instead of failing the version gate', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ticket02-v3-refresh-')), path = join(dir, 'server.db')
+  const f = await fixture(path)
+  t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
+  const service = new ServerService(f.store, f.signals, undefined, undefined, undefined,
+    new SessionAccessService(f.store, new ProjectAccessService(f.store)), f.commandSigning)
+  const id = 'v3-refresh-approval' as CommandId
+  await service.resolveRuntimeApproval(f.independent.id, 'approval' as never, { commandId: id, turnId: 'worker-turn', decision: 'approve' }, instanceOperatorId)
+  const original = (await f.store.commands.getPendingCommand(id))!.authorization!
+  assert.equal(original.claims.version, 2, 'sessionControl issues v2 approvals today')
+  // 直接把存储断言替换为同一身份的 v3 并使窗口过期：模拟 v3 审批（升级/后续版本签发）在投递唤醒时的重签
+  const expired = f.commandSigning.sign({ ...original.claims, version: 3, issuedAt: new Date(Date.now() - 360_000).toISOString(), expiresAt: new Date(Date.now() - 60_000).toISOString() })
+  const row = f.database.connection.prepare('SELECT data FROM commands WHERE id=?').get(id) as { data: string }
+  f.database.connection.prepare('UPDATE commands SET data=? WHERE id=?').run(JSON.stringify({ ...JSON.parse(row.data), authorization: expired }), id)
+  assert.equal(await service.refreshPendingApproval(f.worker.id, id), true, 'refreshPendingAccept claims v2|v3; the store must not 409 on v3')
+  const fresh = (await f.store.commands.getPendingCommand(id))!.authorization!
+  assert.equal(fresh.claims.version, 3, 'refresh preserves the original version')
+  assert.ok(Date.parse(fresh.claims.expiresAt) > Date.now())
+  assert.deepEqual(Object.fromEntries(Object.entries(fresh.claims).filter(([key]) => key !== 'issuedAt' && key !== 'expiresAt')), Object.fromEntries(Object.entries(expired.claims).filter(([key]) => key !== 'issuedAt' && key !== 'expiresAt')))
+})
+
+test('unsigned backlog does not starve later signed approvals', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'ticket02-deliverable-window-')), path = join(dir, 'server.db')
+  const f = await fixture(path)
+  t.after(async () => { f.database.close(); await rm(dir, { recursive: true, force: true }) })
+  for (let i = 0; i < 101; i++) {
+    const commandId = `old-${i}` as CommandId
+    const command = { kind: 'runtime.approval.resolve' as const, sessionId: f.independent.id, turnId: 'turn' as never, approvalId: 'approval' as never, decision: 'approve' as const }
+    await f.store.transaction(tx => tx.commands.insertPending({ commandId, workerId: f.worker.id, command, payloadFingerprint: `old-${i}`, createdAt: new Date().toISOString() as Timestamp }))
+  }
+  const commandId = 'later-signed' as CommandId
+  await f.server.resolveRuntimeApproval(f.independent.id, 'approval' as never, { commandId, turnId: 'turn', decision: 'approve' }, instanceOperatorId)
+  assert.ok((await new WorkerService(f.store, f.signals).deliverable(f.worker.id)).some(item => item.type === 'command' && item.commandId === commandId))
+})
+
 // Direct SQL failures must leave both the statement and enclosing transaction atomic.
 test('Ticket06 direct SQLite insert/update/delete matrix, exact errors and all-table rollback across restart', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'ticket06-matrix-')), path = join(dir, 'server.db')
   const f = await fixture(path)
   const source = (await f.store.resources.getSession(f.run.sessionId as SessionId))!
-  f.store.close()
+  f.database.close()
   try {
     for (let restart = 0; restart < 2; restart++) {
       const reopened = new SqliteServerStore(path)
@@ -185,7 +321,7 @@ test('Ticket06 v7 migration preserves valid JSON and rejects invalid legacy rows
   const dir = await mkdtemp(join(tmpdir(), 'ticket06-upgrade-')), path = join(dir, 'server.db')
   const f = await fixture(path)
   const source = (await f.store.resources.getSession(f.run.sessionId as SessionId))!
-  f.store.close()
+  f.database.close()
   const db = new DatabaseSync(path)
   try {
     // Reconstruct the immediately preceding schema, without changing domain rows.
@@ -234,8 +370,9 @@ test('Ticket06 composed constructive recovery emits only first committed dispatc
       await tx.tasks.saveCancelRequest(f.run.id, 'recover', f.run.sessionId)
       await tx.tasks.saveRun({ ...f.run, status: 'cancelling', cancelRequestedAt: f.run.createdAt, cancelCommandIds: [] })
     })
-    f.store.close()
-    const store = new SqliteServerStore(path), signals = new Notifications(), server = new ServerService(store, signals)
+    f.database.close()
+    const { database, store, commandSigning } = signedStore(path), signals = new Notifications()
+    const server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning)
     const tasks = new TaskService(store, event => signals.project(event), server), workers = new WorkerService(store, signals)
     const seen: string[] = []
     signals.onCommands(f.worker.id, () => { seen.push(`commands:${f.worker.id}`) })
@@ -255,13 +392,13 @@ test('Ticket06 composed constructive recovery emits only first committed dispatc
       await Promise.all([workers.recoverRuns(), workers.recoverRuns(), cancel(), cancel()])
       assert.deepEqual(seen, [])
       assert.deepEqual(await store.tasks.run(f.run.id), recovered)
-    } finally { store.close(); await rm(dir, { recursive: true, force: true }) }
+    } finally { database.close(); await rm(dir, { recursive: true, force: true }) }
   }
 })
 
 test('Ticket06 v8 retention backfill is transactional and remains enforced after restart', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'server-retention-')), path = join(dir, 'server.db')
-  const f = await fixture(path, false); f.store.close()
+  const f = await fixture(path, false); f.database.close()
   const db = new DatabaseSync(path)
   try {
     for (const name of ['cancel_request_retention', 'session_record_retention', 'session_record_identity', 'session_tombstone_update', 'session_tombstone_insert', 'deleted_session_event_insert', 'deleted_session_event_update']) db.exec(`DROP TRIGGER ${name}`)
@@ -296,7 +433,7 @@ test('Ticket06 v8 retention backfill is transactional and remains enforced after
 test('Ticket06 exact notification recipient/type/count matrix with durable restart and HTTP zero effects', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'ticket06-notifications-')), path = join(dir, 'server.db')
   const f = await fixture(path, false)
-  let store = f.store, signals = f.signals, server = f.server, tasks = f.tasks
+  let database = f.database, store = f.store, commandSigning = f.commandSigning, signals = f.signals, server = f.server, tasks = f.tasks
   const sessionId = f.run.sessionId as SessionId, workerId = f.worker.id
   let workers = new WorkerService(store, signals)
   const seen: string[] = []
@@ -350,8 +487,9 @@ test('Ticket06 exact notification recipient/type/count matrix with durable resta
     assert.deepEqual(await store.tasks.activity(f.task.id, 0), finished)
     assert.equal(finished.filter(a => a.type === 'run.finished').length, 1)
     const beforeRestart = (await store.tasks.run(f.run.id))!
-    store.close(); store = new SqliteServerStore(path)
-    signals = new Notifications(); server = new ServerService(store, signals)
+    database.close(); ({ database, store, commandSigning } = signedStore(path))
+    assert.equal(commandSigning.keyId, f.commandSigning.keyId, 'restart retains instance signing identity')
+    signals = new Notifications(); server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning)
     tasks = new TaskService(store, event => signals.project(event), server); workers = new WorkerService(store, signals); subscribe()
     await check('restart reconciliation twice', async () => { await workers.recoverRuns(); await workers.recoverRuns() }, [])
     await check('restart terminal request replay', () => cancel('retry'), [])
@@ -389,8 +527,9 @@ test('Ticket06 exact notification recipient/type/count matrix with durable resta
     await check('delete Session', () => server.delete('sessions', sessionId), [session, command])
     await check('delete replay rejected', () => assert.rejects(server.delete('sessions', sessionId)), [])
     const deletedRun = await store.tasks.run(f.run.id), deletedActivities = await store.tasks.activity(f.task.id, 0)
-    store.close(); store = new SqliteServerStore(path)
-    signals = new Notifications(); server = new ServerService(store, signals); workers = new WorkerService(store, signals); subscribe()
+    database.close(); ({ database, store, commandSigning } = signedStore(path))
+    assert.equal(commandSigning.keyId, f.commandSigning.keyId, 'restart retains instance signing identity')
+    signals = new Notifications(); server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning); workers = new WorkerService(store, signals); subscribe()
     await check('deleted restart reconciliation', () => workers.recoverRuns(), [])
     await check('deleted late/out-of-order events', async () => { await receive(third); await receive(terminal); await receive(second) }, [])
     await check('deleted late head', () => workers.receive(workerId, { type: 'sync', kind: 'heads', complete: true, heads: [{ sessionId, lastSeq: 10 as EventSeq }] }), [])
@@ -400,6 +539,6 @@ test('Ticket06 exact notification recipient/type/count matrix with durable resta
     assert.ok((await store.resources.getSession(sessionId))!.deletedAt)
   } finally {
     if (http) { http.closeAllConnections(); await new Promise<void>((resolve, reject) => http!.close(error => error ? reject(error) : resolve())) }
-    store.close(); await rm(dir, { recursive: true, force: true })
+    database.close(); await rm(dir, { recursive: true, force: true })
   }
 })
