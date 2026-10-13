@@ -16,8 +16,10 @@ import { ownedWorkerLaunch, removeOwnedServerDatabases } from './owned-worker-fi
 
 // Source: coordination-write-channel-probes.mjs. Proxy observes the real Upgrade/hello and
 // forwards every byte unchanged; only the negative cases inject RFC 6455 server-role frames.
+// Ticket 05 item 4: the proxy also audits authenticated WS link lifecycle (upgraded/dropped),
+// so delivery waits can distinguish "connection silently died" from "not delivered yet".
 function transportProxy(port) {
-  const links = [], seen = [], receipts = [], cursor = { epoch: null, next: 1 }
+  const links = [], seen = [], receipts = [], linkEvents = [], cursor = { epoch: null, next: 1 }
   const parse = buffer => {
     if (buffer.length < 2) return null
     const masked = Boolean(buffer[1] & 128)
@@ -35,10 +37,13 @@ function transportProxy(port) {
   }
   const server = createServer(client => {
     const upstream = connect(port, '127.0.0.1')
-    const link = { client, upstream, mode: 'head', head: Buffer.alloc(0), incoming: Buffer.alloc(0), outgoing: Buffer.alloc(0), upgraded: false }
+    const link = { client, upstream, mode: 'head', head: Buffer.alloc(0), incoming: Buffer.alloc(0), outgoing: Buffer.alloc(0), upgraded: false, dropped: false }
     links.push(link)
+    // A close on either half kills the peer half; count it once, and only for links that had
+    // completed a real Upgrade (authentication precedes Upgrade server-side).
+    const markDropped = () => { if (link.upgraded && !link.dropped) { link.dropped = true; linkEvents.push({ at: new Date().toISOString(), type: 'dropped' }) } }
     client.on('error', () => {}); upstream.on('error', () => {})
-    client.on('close', () => upstream.destroy()); upstream.on('close', () => client.destroy())
+    client.on('close', () => { markDropped(); upstream.destroy() }); upstream.on('close', () => { markDropped(); client.destroy() })
     client.on('data', chunk => {
       if (link.mode === 'raw') return upstream.write(chunk)
       if (link.mode === 'head') {
@@ -65,7 +70,7 @@ function transportProxy(port) {
       if (!link.upgraded) {
         const end = link.outgoing.indexOf('\r\n\r\n')
         if (end < 0) return
-        link.outgoing = link.outgoing.subarray(end + 4); link.upgraded = true
+        link.outgoing = link.outgoing.subarray(end + 4); link.upgraded = true; linkEvents.push({ at: new Date().toISOString(), type: 'upgraded' })
       }
       for (;;) {
         const frame = parse(link.outgoing); if (!frame) break
@@ -92,12 +97,38 @@ function transportProxy(port) {
     live[0].client.write(Buffer.concat([header, bytes]))
     return { epoch: frame.deliveryEpoch, seq: frame.directionSeq }
   }
-  return { server, inject, seen, receipts, close: async () => { for (const link of links) { link.client.destroy(); link.upstream.destroy() } await new Promise(resolve => server.close(resolve)) } }
+  const liveLinks = () => links.filter(l => l.upgraded && !l.client.destroyed && !l.upstream.destroyed).length
+  const drops = () => linkEvents.filter(event => event.type === 'dropped').length
+  return { server, inject, seen, receipts, linkEvents, liveLinks, drops, close: async () => { for (const link of links) { link.client.destroy(); link.upstream.destroy() } await new Promise(resolve => server.close(resolve)) } }
 }
 const eventually = async (read, accept, label, timeout = 30000) => {
   const until = Date.now() + timeout
   while (Date.now() < until) { const value = await read(); if (accept(value)) return value; await delay(50) }
   throw Error(`Timed out: ${label}`)
+}
+// Ticket 05 item 4: delivery waits must not classify the transport's by-design recovery as a
+// terminal timeout. A silently dead link self-heals via worker backoff (bounded 30s max) →
+// reconnect hello → outbox replay, while server-side dead-link detection alone can take
+// 60-75s (15s ping interval + 60s lastSeen threshold) - both beyond a fixed 30s budget.
+// While waiting we poll proxy link liveness: observing a drop (or zero live authenticated
+// links) grants ONE bounded recovery budget instead of failing mid-self-heal; definitive
+// terminal states fast-fail with their reason; expiry fails with a classified diagnostic.
+const waitForDelivery = async (read, accept, label, { timeout = 30000, recovery = 60000, terminal, probe, diagnose } = {}) => {
+  const startedAt = Date.now(), dropsAtStart = probe.drops()
+  let sawDeadLink = false, lastValue = 'unknown'
+  for (;;) {
+    const value = await read(); lastValue = value
+    if (accept(value)) return value
+    if (terminal?.(value)) throw Error(`${label}: definitive terminal state ${JSON.stringify(value)}`)
+    const live = probe.live(), drops = probe.drops() - dropsAtStart
+    if (!sawDeadLink && (drops > 0 || live === 0)) {
+      sawDeadLink = true
+      console.error(`[ticket05] ${label}: Worker WS link down during wait (drops=${drops}, live=${live}); granting ${recovery}ms self-heal budget for reconnect + outbox replay`)
+    }
+    const deadline = startedAt + timeout + (sawDeadLink ? recovery : 0)
+    if (Date.now() >= deadline) throw Error(`Timed out: ${label}（waited ${Math.round((Date.now() - startedAt) / 1000)}s; link=${live === 0 ? 'dead' : 'alive'}, drops_in_wait=${drops}, last=${JSON.stringify(lastValue)}${diagnose ? `; ${await diagnose()}` : ''}）`)
+    await delay(50)
+  }
 }
 const data = await mkdtemp(join(tmpdir(), 'wemux-ticket02-'))
 const home = join(data, 'worker'), database = join(data, 'server.sqlite')
@@ -139,6 +170,9 @@ try {
   const registration = await launch(['register', '--home', home, `--token=${token.token}`, '--name', 'Ticket02 Owned Worker'], via).done
   assert.equal(registration.code, 0, `register Worker: ${registration.stderr}`)
   const workerId = JSON.parse(registration.stdout).workerId
+  const linkProbe = { live: () => proxy.liveLinks(), drops: () => proxy.drops() }
+  const diagnoseLink = async () => `worker=${(await api('/workers').catch(() => null))?.items?.find(w => w.id === workerId)?.connectionState ?? 'unreachable'}, linkEvents=${JSON.stringify(proxy.linkEvents)}`
+  const commandReceipt = (commandId, label) => waitForDelivery(() => api(`/commands/${commandId}`), v => v.status === 'accepted', label, { terminal: v => ['rejected', 'failed', 'cancelled'].includes(v.status), probe: linkProbe, diagnose: diagnoseLink })
   const start = () => { worker = launch(['start', '--home', home, '--name', 'Ticket02 Owned Worker'], via) }
   start()
   await eventually(() => api(`/workers/${workerId}/capabilities`), v => v.capabilities.some(c => c.agentKey === 'test' && c.availability.status === 'available'), 'real Worker Test Agent capability')
@@ -146,15 +180,15 @@ try {
   const task = await api(`/projects/${project.id}/tasks`, 'POST', { title: 'Ticket02 会话', requestId: 'ticket02-task' })
   const provision = await api('/workspaces', 'POST', { projectId: project.id, workerId, name: 'Ticket02 空目录', source: 'empty', requestId: 'ticket02-workspace' })
   const workspaceId = provision.workspace.id
-  await eventually(() => api(`/workspaces/${workspaceId}`), v => v.placements.some(p => p.workerId === workerId && p.status === 'ready'), 'real provision through WS')
+  await waitForDelivery(() => api(`/workspaces/${workspaceId}`), v => v.placements.some(p => p.workerId === workerId && p.status === 'ready'), 'real provision through WS', { terminal: v => v.placements.some(p => p.workerId === workerId && p.status === 'failed'), probe: linkProbe, diagnose: diagnoseLink })
   const created = await api(`/projects/${project.id}/tasks/${task.id}/sessions`, 'POST', { workerId, agentKey: 'test', modelId: 'test', workspaceId, title: 'Ticket02 Task Session', requestId: 'ticket02-session' })
-  await eventually(() => api(`/commands/${created.commandId}`), v => v.status === 'accepted', 'real session.create receipt')
+  await commandReceipt(created.commandId, 'real session.create receipt')
   await eventually(() => Promise.resolve(workerDocument('sessions', created.session.id)), Boolean, 'real Worker Session row')
   const id = created.session.id
   const journal = () => api(`/sessions/${id}/events?fromSeq=1&limit=1000`)
   const send = (content, commandId) => api(`/sessions/${id}/messages`, 'POST', { content, commandId })
   const echo = await send('ticket02-positive-echo', 'ticket02-positive')
-  await eventually(() => api(`/commands/${echo.commandId}`), v => v.status === 'accepted', 'real enqueue receipt')
+  await commandReceipt(echo.commandId, 'real enqueue receipt')
   await eventually(journal, v => v.events.some(e => e.payload.kind === 'turn.finished' && e.payload.outcome === 'completed') && v.events.filter(e => e.payload.kind === 'assistant.text.delta').map(e => e.payload.text).join('').includes('ticket02-positive-echo'), 'actual Test Agent echo, not only command ACK')
   for (const commandId of [provision.commandId, created.commandId, echo.commandId]) {
     assert.ok(proxy.seen.some(f => f.commandId === commandId), `missing real WebSocket delivery ${commandId}`)
@@ -193,7 +227,7 @@ try {
   const priorStart = (await journal()).events.find(e => e.payload.kind === 'turn.started' && e.payload.messageId === slow.messageId)
   assert.ok(priorStart, 'prior Turn was running before revoke')
   const queued = await memberSession.api(`/sessions/${id}/messages`, 'POST', { content: 'ticket02-revoked-marker', commandId: 'ticket02-revoked' })
-  await eventually(() => api(`/commands/${queued.commandId}`), v => v.status === 'accepted', 'queued command delivered to Worker')
+  await commandReceipt(queued.commandId, 'queued command delivered to Worker')
   assert.ok(proxy.seen.some(f => f.commandId === queued.commandId), 'revoked-actor enqueue must traverse actual WS')
   await eventually(journal, v => v.events.some(e => e.payload.kind === 'message.queued' && e.payload.messageId === queued.messageId), 'queued message reached Worker journal')
   // Stop while the prior Test Agent is still paused; this simulates a same-home
