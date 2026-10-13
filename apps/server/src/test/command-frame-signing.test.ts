@@ -32,7 +32,7 @@ async function fixture(options: { launch?: boolean } = {}) {
   const store = new SqliteServerStore(database)
   const commandSigning = new CommandSigningIdentity(database.connection)
   const signals = new Notifications()
-  const server = new ServerService(store, signals, undefined, undefined, undefined, undefined, commandSigning)
+  const server = new ServerService(store, signals, { commandSigning: commandSigning })
   await seedOperator(store, server)
   const { worker } = await server.enroll({ token: (await server.createEnrollment({})).token, name: 'Signing worker' })
   await store.transaction(tx => tx.resources.saveWorker({ ...worker, connectionState: 'online', capabilities: [{ agentKey: 'test' as AgentKey, displayName: 'Test', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' as ModelId, displayName: 'Model', source: 'configured' }] }] }))
@@ -46,7 +46,7 @@ async function fixture(options: { launch?: boolean } = {}) {
   const launch = options.launch === false ? null : await tasks.launch(task.projectId, task.id, { requestId: 'launch', mode: 'new', reuseSessionId: null, prompt: 'Prompt', assignment }, context)
   // 显式排队消息：enqueue 帧在运行开始前即可直接签发（复用 enqueueInTx 公共入口）
   if (options.launch !== false) await server.enqueue(independent.id, { commandId: 'direct-enqueue', content: 'Direct' }, instanceOperatorId)
-  const withAccess = new ServerService(store, signals, undefined, undefined, new ProjectAccessService(store), new SessionAccessService(store, new ProjectAccessService(store)), commandSigning)
+  const withAccess = new ServerService(store, signals, { projectAccess: new ProjectAccessService(store), sessionAccess: new SessionAccessService(store, new ProjectAccessService(store)), commandSigning: commandSigning })
   return {
     dir, database, store, commandSigning, signals, server, tasks, task, worker, withAccess, independent, assignment, run: launch ? (await store.tasks.run(launch.run.id))! : null,
     async close() { database.close(); await rm(dir, { recursive: true, force: true }) },
@@ -176,7 +176,7 @@ test('deliverable blocks unsigned side-effecting frames once signing is configur
   assert.equal(legacy.some(frame => frame.type === 'command' && frame.commandId === stopId), true)
   assert.equal(legacy.some(frame => frame.type === 'command' && frame.commandId === enqueueId), false)
   // 生产装配：所有未签名的副作用命令都阻断投递，签名命令携带断言
-  const strict = await new WorkerService(f.store, f.signals, undefined, undefined, null, null, null, true).deliverable(f.worker.id)
+  const strict = await new WorkerService(f.store, f.signals, { signingConfigured: true }).deliverable(f.worker.id)
   assert.equal(strict.some(frame => frame.type === 'command' && frame.commandId === stopId), false)
   assert.equal(strict.some(frame => frame.type === 'command' && frame.commandId === enqueueId), false)
   assert.ok(strict.every(frame => frame.type !== 'command' || frame.authorization), 'delivered cluster frames carry assertions')

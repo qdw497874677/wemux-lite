@@ -26,7 +26,7 @@ async function fixture(t: test.TestContext) {
   const store = new SqliteServerStore(database)
   t.after(() => { database.close(); return rm(directory, { recursive: true, force: true }) })
   const baseCapabilities = new CapabilityService(store, now, new CapabilityTokenService('seed-secret'.repeat(4), now))
-  const service = new ServerService(store, new Notifications(), baseCapabilities)
+  const service = new ServerService(store, new Notifications(), { capabilities: baseCapabilities })
   const { project, user } = await seedOperator(store, service)
   const enrolled = await service.enroll({ token: (await service.createEnrollment({})).token, name: 'worker' })
   await store.transaction(tx => tx.resources.saveWorker({ ...enrolled.worker, capabilities: [{ agentKey: 'pi' as AgentKey, displayName: 'Pi', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'test' as ModelId, displayName: 'Test', source: 'detected' }] }] }))
@@ -38,7 +38,7 @@ async function fixture(t: test.TestContext) {
 
 test('signed cluster enqueue rejects missing actor and missing signer before persistence', async t => {
   const f = await fixture(t)
-  const signed = new ServerService(f.store, new Notifications(), undefined, undefined, undefined, undefined, f.signing)
+  const signed = new ServerService(f.store, new Notifications(), { commandSigning: f.signing })
   const unsigned = new ServerService(f.store, new Notifications())
   const before = (await f.store.commands.list({ limit: 100 })).length
   await assert.rejects(signed.enqueue(f.session.id, { content: 'missing actor' }), { code: 'enqueue_actor_required' })
@@ -80,7 +80,7 @@ test('session enqueue resolves connectors through transaction readers', async t 
   const f = await fixture(t)
   const visible = connector(f.project.id, { allowedWorkerIds: [f.workerId] })
   const capabilities = new CapabilityService(f.store, () => timestamp, new CapabilityTokenService('transaction-secret'.repeat(4), () => timestamp), { list: async () => [visible] })
-  const service = new ServerService(f.store, new Notifications(), capabilities, undefined, undefined, undefined, f.signing)
+  const service = new ServerService(f.store, new Notifications(), { capabilities: capabilities, commandSigning: f.signing })
   const result = await service.enqueue(f.session.id, { content: '使用连接器' }, f.user.id)
   const pending = await f.store.commands.getPendingCommand(result.commandId)
   assert.equal(pending?.command.kind, 'session.enqueue')
@@ -99,7 +99,7 @@ test('capability snapshot injects a versioned same-Worker collaboration roster a
   assert.match(first.runtime.snapshot.collaboration?.instructions ?? '', /delegation_request/)
   assert.match(first.runtime.snapshot.collaboration?.instructions ?? '', /\[SILENT\]/)
   const originalVersion = first.runtime.snapshot.collaboration?.version
-  const { session: secondSession } = await new ServerService(f.store, new Notifications(), capabilities).createSession({ requestId: 'capability-session-two', workspaceId: f.session.workspaceId, title: 'second', agentKey: 'pi', modelId: 'test' })
+  const { session: secondSession } = await new ServerService(f.store, new Notifications(), { capabilities: capabilities }).createSession({ requestId: 'capability-session-two', workspaceId: f.session.workspaceId, title: 'second', agentKey: 'pi', modelId: 'test' })
   const second = await capabilities.prepareTurn({ sessionId: f.session.id, turnId: 'turn-roster-2' as never, actorId: f.user.id })
   assert.equal(second.runtime.snapshot.collaboration?.roster.some(item => item.sessionId === secondSession.id), true)
   assert.notEqual(second.runtime.snapshot.collaboration?.version, originalVersion)

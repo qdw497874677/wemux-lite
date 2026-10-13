@@ -11,7 +11,7 @@ import type { WorkerAccessService } from './worker-access-service.ts'
 import type { ServerStore } from './ports/server-store.ts'
 import type { ConnectorRepository, ConnectorRequestRecord } from './ports/connector-repository.ts'
 import type { CommandSigningIdentity } from './command-signing.ts'
-import { connectorAssertionScope, issueCommandAssertion, withCommandAssertion } from './command-assertion-issuer.ts'
+import { connectorAssertionScope, issueReducingCommandAssertion, withCommandAssertion } from './command-assertion-issuer.ts'
 
 interface WriteInput { readonly projectId: ProjectId; readonly requestId: string; readonly fingerprint: string }
 interface DefinitionInput extends WriteInput { readonly definition: unknown }
@@ -144,8 +144,7 @@ export class ConnectorService {
     await this.store.transaction(async tx => {
       // Connector frames never block distribution on signing: an unavailable actor
       // or key degrades to the historical unsigned command instead of failing sync.
-      const actorUser = actorId ? await tx.identity.getUser(actorId) : undefined
-      const assertion = this.commandSigning && actorId && actorUser && (actorUser.status ?? 'active') === 'active' ? await issueCommandAssertion(tx, this.commandSigning, actorId, { commandId, command, workerId, scope: connectorAssertionScope(command.kind === 'connector.definition.sync' ? command.definition.projectId : command.kind === 'connector.test' ? command.projectId : (command as { projectId: ProjectId }).projectId) }) : undefined
+      const assertion = await issueReducingCommandAssertion(tx, this.commandSigning, actorId, { commandId, command, workerId, scope: connectorAssertionScope(command.kind === 'connector.definition.sync' ? command.definition.projectId : command.kind === 'connector.test' ? command.projectId : (command as { projectId: ProjectId }).projectId) })
       await tx.commands.insertPending(withCommandAssertion({ commandId, workerId, command, payloadFingerprint, createdAt: now() }, assertion))
     })
     return commandId

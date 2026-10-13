@@ -24,7 +24,7 @@ import { seedOperator, administratorDirectory, instanceOperatorId } from './fixt
 async function fixture(path = ':memory:') {
   const database = new SharedSqliteDatabase(path)
   const store = new SqliteServerStore(database)
-  const service = new ServerService(store, new Notifications(), undefined, undefined, undefined, new SessionAccessService(store, new ProjectAccessService(store)), new CommandSigningIdentity(database.connection))
+  const service = new ServerService(store, new Notifications(), { sessionAccess: new SessionAccessService(store, new ProjectAccessService(store)), commandSigning: new CommandSigningIdentity(database.connection) })
   const { project, token } = await seedOperator(store, service)
   const { worker } = await service.enroll({ token: (await service.createEnrollment({})).token, name: 'test' })
   await store.transaction(tx => tx.resources.saveWorker({ ...worker, capabilities: [{ agentKey: 'pi' as AgentKey, displayName: 'Pi', version: null, mode: 'execution', availability: { status: 'available' }, modelSwap: true, models: [{ modelId: 'test' as ModelId, displayName: 'Test', source: 'detected' }, { modelId: 'test-next' as ModelId, displayName: 'Test Next', source: 'detected' }] }] }))
@@ -158,7 +158,7 @@ async function retainedModelFixture(t: TestContext, { target = 'test', confirmed
   try { db.exec('DROP TRIGGER command_rejection_no_dispatch; DROP TABLE command_rejections'); db.exec('DROP INDEX IF EXISTS attention_failed_runs_order; DROP INDEX IF EXISTS attention_dead_letters_order; DROP INDEX IF EXISTS attention_human_reviews_order'); db.prepare('DELETE FROM schema_migrations WHERE version>=?').run(36) } finally { db.close() }
   const reopened = new SqliteServerStore(path)
   const access = new SessionAccessService(reopened, new ProjectAccessService(reopened))
-  const service = new ServerService(reopened, new Notifications(), undefined, undefined, undefined, access)
+  const service = new ServerService(reopened, new Notifications(), { sessionAccess: access })
   t.after(() => reopened.close())
   return { store: reopened, service, id, body, wire, workerId: f.session.binding.agent.workerId }
 }

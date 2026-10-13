@@ -8,7 +8,7 @@ import { systemClock } from './identity-service.ts'
 import type { Notifications } from './notifications.ts'
 import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
 import type { CommandSigningIdentity } from './command-signing.ts'
-import { issueCommandAssertion, sessionAssertionScope } from './command-assertion-issuer.ts'
+import { issueReducingCommandAssertion, sessionAssertionScope, withCommandAssertion } from './command-assertion-issuer.ts'
 
 export interface AccountLifecycleView {
   readonly status: UserStatus
@@ -193,9 +193,8 @@ export class AccountLifecycleService {
         // disabled: authority is the acting administrator (or the account itself
         // for self-deletion, captured before the status change commits), and a
         // missing actor row or signing identity degrades to the unsigned stop.
-        const authorityUser = await tx.identity.getUser(actorId)
-        const authorization = this.commandSigning && authorityUser && (authorityUser.status ?? 'active') === 'active' ? await issueCommandAssertion(tx, this.commandSigning, actorId, { commandId, command, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) }) : undefined
-        await tx.commands.insertPending({ commandId, workerId: session.binding.agent.workerId, command, payloadFingerprint: createHash('sha256').update(JSON.stringify(command)).digest('hex'), createdAt, ...(authorization ? { authorization } : {}) })
+        const authorization = await issueReducingCommandAssertion(tx, this.commandSigning, actorId, { commandId, command, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) })
+        await tx.commands.insertPending(withCommandAssertion({ commandId, workerId: session.binding.agent.workerId, command, payloadFingerprint: createHash('sha256').update(JSON.stringify(command)).digest('hex'), createdAt }, authorization))
       }
       workerIds.add(session.binding.agent.workerId)
     }

@@ -88,7 +88,7 @@ async function compose(directory: string, cleanup: Array<() => void | Promise<vo
   const binding = { workspaceId: 'integration-workspace' as never, agent: { workerId, agentKey: 'test-agent' as never }, modelId: null }
   await app.transaction(tx => tx.resources.saveSession({ id: sessionId, projectId, taskId: task.id, runId: null, ownerId: owner, workspaceId: binding.workspaceId, title: 'Test', shareScope: 'project', runtimeState: 'idle', deletedAt: null, binding }))
   const notifications = new Notifications()
-  const service = new ServerService(app, notifications, undefined, undefined, undefined, new SessionAccessService(app, new ProjectAccessService(app)))
+  const service = new ServerService(app, notifications, { sessionAccess: new SessionAccessService(app, new ProjectAccessService(app)) })
   const admission = await service.admitFileWrite(sessionId, owner, { requestId: 'test-client', subpath: 'notes/file.txt', base64Content: 'aGVsbG8=' })
   const wireAdmission = fileWriteWireAdmission(admission)
   const held = () => serverDb.prepare("SELECT kind,id,data FROM records WHERE kind IN ('file-write-admission','file-write-intent') ORDER BY kind,id").all()

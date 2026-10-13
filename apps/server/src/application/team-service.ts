@@ -7,7 +7,7 @@ import { AppError } from './errors.ts'
 import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
 import type { Notifications } from './notifications.ts'
 import type { CommandSigningIdentity } from './command-signing.ts'
-import { issueCommandAssertion, sessionAssertionScope } from './command-assertion-issuer.ts'
+import { issueReducingCommandAssertion, sessionAssertionScope, withCommandAssertion } from './command-assertion-issuer.ts'
 
 const now = (): Timestamp => new Date().toISOString() as Timestamp
 const invitationLifetimeMs = 7 * 24 * 60 * 60 * 1000
@@ -124,9 +124,8 @@ export class TeamService {
         } else {
           // Revocation stops stay reducing-signature: sign when possible, but never
           // block the stop itself on signing or actor availability.
-          const authorityUser = await tx.identity.getUser(actorId)
-          const authorization = this.commandSigning && authorityUser && (authorityUser.status ?? 'active') === 'active' ? await issueCommandAssertion(tx, this.commandSigning, actorId, { commandId, command, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) }) : undefined
-          await tx.commands.insertPending({ commandId, workerId: session.binding.agent.workerId, command, payloadFingerprint: commandFingerprint(command), createdAt: now(), ...(authorization ? { authorization } : {}) })
+          const authorization = await issueReducingCommandAssertion(tx, this.commandSigning, actorId, { commandId, command, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) })
+          await tx.commands.insertPending(withCommandAssertion({ commandId, workerId: session.binding.agent.workerId, command, payloadFingerprint: commandFingerprint(command), createdAt: now() }, authorization))
           stopCommands++
         }
         cancellationWorkers.add(session.binding.agent.workerId)

@@ -41,7 +41,7 @@ function signedStore(path: string) {
 async function serviceFixture(path: string) {
   const { database, store, commandSigning } = signedStore(path)
   const signals = new Notifications()
-  const server = new ServerService(store, signals, undefined, undefined, undefined, new SessionAccessService(store, new ProjectAccessService(store)), commandSigning)
+  const server = new ServerService(store, signals, { sessionAccess: new SessionAccessService(store, new ProjectAccessService(store)), commandSigning: commandSigning })
   await seedOperator(store, server)
   const { worker } = await server.enroll({ token: (await server.createEnrollment({})).token, name: 'Refresh worker' })
   await store.transaction(tx => tx.resources.saveWorker({ ...worker, connectionState: 'online', capabilities: [{ agentKey: 'test' as AgentKey, displayName: 'Test', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' as ModelId, displayName: 'Model', source: 'configured' }] }] }))
@@ -231,7 +231,7 @@ async function gatewayFixture(path: string) {
   const { database, store, commandSigning } = signedStore(join(path, 'server.db'))
   const transport = new ServerTransportStore(join(path, 'transport.sqlite'))
   const signals = new Notifications()
-  const server = new ServerService(store, signals, undefined, undefined, undefined, new SessionAccessService(store, new ProjectAccessService(store)), commandSigning)
+  const server = new ServerService(store, signals, { sessionAccess: new SessionAccessService(store, new ProjectAccessService(store)), commandSigning: commandSigning })
   await seedOperator(store, server)
   const { worker, credential } = await server.enroll({ token: (await server.createEnrollment({})).token, name: 'Gateway worker' })
   await store.transaction(tx => tx.resources.saveWorker({ ...worker, connectionState: 'offline', capabilities: [{ agentKey: 'test' as AgentKey, displayName: 'Test', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'model' as ModelId, displayName: 'Model', source: 'configured' }] }] }))
@@ -243,7 +243,7 @@ async function gatewayFixture(path: string) {
   const { session } = await tasks.createSession(task.projectId, task.id, { title: 'Gateway', requestId: 'gateway-session' }, context)
   const http = createServer(); http.listen(0, '127.0.0.1'); await once(http, 'listening')
   const port = (http.address() as { port: number }).port
-  const gateway = new WorkerGateway(http, new AuthenticationService(store, new AdministratorDirectory(store.identity)), new WorkerService(store, signals, undefined, undefined, null, null, undefined, true), signals, transport, undefined, server)
+  const gateway = new WorkerGateway(http, new AuthenticationService(store, new AdministratorDirectory(store.identity)), new WorkerService(store, signals, { signingConfigured: true }), signals, transport, undefined, server)
   const connect = async () => {
     const peer = new Peer(new WebSocket(`ws://127.0.0.1:${port}/worker/ws`, { headers: { authorization: `Bearer ${credential}` } }))
     await once(peer.ws, 'open')

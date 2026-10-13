@@ -11,11 +11,11 @@ import type { ResourceBlobStore } from '../storage/resource-blob-store.ts'
 import { sessionIdleReason } from './session-idle.ts'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { CommandSigningIdentity } from './command-signing.ts'
-import { buildCommandAssertionClaims, connectorAssertionScope, issueCommandAssertion, provisionAssertionScope, sessionAssertionScope, type CommandAssertionScope } from './command-assertion-issuer.ts'
+import { buildCommandAssertionClaims, connectorAssertionScope, issueCommandAssertion, issueReducingCommandAssertion, provisionAssertionScope, sessionAssertionScope, type CommandAssertionScope } from './command-assertion-issuer.ts'
 import type { AgentKey, ApprovalId, CommandId, EventSeq, Id, MessageId, ModelId, ProjectId, RuntimeOperationId, SessionId, TeamId, Timestamp, TurnId, UserId, WorkerId, WorkspaceId } from '@wemux/domain'
 import type { AuditResource, CommandProjection, Project, Session, Worker, Workspace, WorkspacePlacement } from '@wemux/server-domain'
 import type { WorkerCommand } from '@wemux/wire-protocol'
-import { assertionScopeMatches, assertionVersionAccepted, requiresCommandAssertion } from '@wemux/wire-protocol/command-assertion'
+import { assertionScopeMatches, assertionVersionAccepted, commandActorBinding, requiresCommandAssertion } from '@wemux/wire-protocol/command-assertion'
 import type { ServerStore, ServerStoreTx } from './ports/server-store.ts'
 import { AppError, requireValue } from './errors.ts'
 import { hashSecret } from './auth.ts'
@@ -57,6 +57,15 @@ export interface ForkTargetSessionInput {
   readonly requestId: string
 }
 
+export interface ServerServiceOptions {
+  readonly capabilities?: CapabilityService
+  readonly workerAccess?: WorkerAccessService
+  readonly projectAccess?: ProjectAccessService
+  readonly sessionAccess?: SessionAccessService
+  readonly commandSigning?: CommandSigningIdentity
+  readonly attachmentBlobs?: ResourceBlobStore
+}
+
 export class ServerService {
   private readonly store: ServerStore
     readonly notifications: Notifications
@@ -64,7 +73,18 @@ export class ServerService {
   private readonly workerAccess?: WorkerAccessService
   private readonly projectAccess?: ProjectAccessService
   private readonly sessionAccess?: SessionAccessService
-  constructor(store: ServerStore, notifications: Notifications, capabilities?: CapabilityService, workerAccess?: WorkerAccessService, projectAccess?: ProjectAccessService, sessionAccess?: SessionAccessService, private readonly commandSigning?: CommandSigningIdentity, private readonly attachmentBlobs?: ResourceBlobStore) { this.store = store; this.notifications = notifications; this.capabilities = capabilities; this.workerAccess = workerAccess; this.projectAccess = projectAccess; this.sessionAccess = sessionAccess;}
+  private readonly commandSigning?: CommandSigningIdentity
+  private readonly attachmentBlobs?: ResourceBlobStore
+  constructor(store: ServerStore, notifications: Notifications, options: ServerServiceOptions = {}) {
+    this.store = store
+    this.notifications = notifications
+    this.capabilities = options.capabilities
+    this.workerAccess = options.workerAccess
+    this.projectAccess = options.projectAccess
+    this.sessionAccess = options.sessionAccess
+    this.commandSigning = options.commandSigning
+    this.attachmentBlobs = options.attachmentBlobs
+  }
   async requireWorkerUseInTx(tx: ServerStoreTx, actor: UserId, workerId: WorkerId) {
     return this.workerAccess ? this.workerAccess.requireInTx(tx, actor, workerId) : requireValue(await tx.resources.getWorker(workerId))
   }
@@ -86,7 +106,7 @@ export class ServerService {
         // replay may repair transport ordering, but must not authorize native work
         // on a Worker whose local command record has disappeared.
         if (projection?.status !== 'pending' && (kind === 'runtime.approval.resolve' || projection?.status !== 'accepted')) return { allowed: false }
-        const actorField = kind === 'session.enqueue' ? pending.command.message.sentByAccountId : kind === 'runtime.approval.resolve' ? pending.command.decidedByAccountId : claims.actorId
+        const binding = commandActorBinding(pending.command), actorField = binding.named ? binding.accountId : claims.actorId
         if (claims.commandId !== commandId || claims.workerId !== workerId || !assertionScopeMatches(claims, pending.command) || (claims.version >= 2 && claims.kind !== kind) || claims.actorId !== actorField || claims.commandDigest !== createHash('sha256').update(JSON.stringify(pending.command)).digest('hex')) return { allowed: false }
         const actor = await tx.identity.getUser(claims.actorId)
         if (!actor || (actor.status ?? 'active') !== 'active' || (actor.authVersion ?? 0) !== claims.actorAuthVersion) return { allowed: false }
@@ -183,7 +203,7 @@ export class ServerService {
       if (old.kind !== current.command.kind || old.keyId !== this.commandSigning!.keyId || old.commandId !== commandId || old.workerId !== workerId || !requiresCommandAssertion(current.command.kind)) return false
       const digest = createHash('sha256').update(JSON.stringify(current.command)).digest('hex')
       if (old.commandDigest !== digest) return false
-      const actorField = current.command.kind === 'session.enqueue' ? current.command.message.sentByAccountId : old.actorId
+      const binding = commandActorBinding(current.command), actorField = binding.named ? binding.accountId : old.actorId
       if (old.actorId !== actorField) return false
       const actor = await tx.identity.getUser(old.actorId)
       if (!actor || (actor.status ?? 'active') !== 'active' || (actor.authVersion ?? 0) !== old.actorAuthVersion) return false
@@ -709,8 +729,8 @@ export class ServerService {
       // Check the durable first-send receipt before revalidating mutable placement or
       // Agent availability. A retry must neither enqueue a second message nor create a Task.
       let previous: Awaited<ReturnType<typeof tx.resources.getSession>> = null
-      for (const session of await tx.resources.listSessions()) {
-        if (session.ownerId !== actor || session.creation?.requestId !== `coordination:${requestId}` || !session.taskId?.startsWith('coordination:')) continue
+      for (const session of await tx.resources.listSessionsByCreationRequestId(`coordination:${requestId}`)) {
+        if (session.ownerId !== actor || !session.taskId?.startsWith('coordination:')) continue
         const task = await tx.tasks.get(session.taskId)
         if (task?.teamCoordination?.teamId === team) { previous = session; break }
       }
@@ -757,8 +777,8 @@ export class ServerService {
       if (!membership) throw new AppError(403, 'Team membership required', 'team_membership_required')
       // 幂等重放：同一意图返回原 Session/附件；不同载荷的同一 requestId 拒绝。
       let previous: Awaited<ReturnType<typeof tx.resources.getSession>> = null
-      for (const session of await tx.resources.listSessions()) {
-        if (session.ownerId !== actor || session.creation?.requestId !== createdRequest || !session.taskId?.startsWith('coordination:')) continue
+      for (const session of await tx.resources.listSessionsByCreationRequestId(createdRequest)) {
+        if (session.ownerId !== actor || !session.taskId?.startsWith('coordination:')) continue
         const task = await tx.tasks.get(session.taskId)
         if (task?.teamCoordination?.teamId === team) { previous = session; break }
       }
@@ -787,7 +807,7 @@ export class ServerService {
       return { session, attachment, created: true }
     })
     this.notifications.commands(input.workerId as WorkerId)
-    return { created: result.created, session: await this.sessionView(result.session.id, actor), attachment: await this.attachmentViewRecord(team, actor, result.attachment) }
+    return { created: result.created, session: await this.sessionView(result.session.id, actor), attachment: await this.attachmentViewRecord(result.attachment) }
   }
   async coordinationAttachmentView(team: TeamId, actor: UserId, attachmentId: string) {
     const membership = (await this.store.identity.getIdentityRecords({ userId: actor, teamId: team })).membership
@@ -797,9 +817,9 @@ export class ServerService {
     const task = await this.store.tasks.get(record.taskId)
     if (!task?.teamCoordination || task.teamCoordination.teamId !== team) throw new AppError(404, 'Attachment not found')
     try { await this.sessionAccess?.require(actor, record.sessionId) } catch { throw new AppError(404, 'Attachment not found') }
-    return { attachment: await this.attachmentViewRecord(team, actor, record) }
+    return { attachment: await this.attachmentViewRecord(record) }
   }
-  private async attachmentViewRecord(_team: TeamId, _actor: UserId, record: SessionAttachmentRecord) {
+  private async attachmentViewRecord(record: SessionAttachmentRecord) {
     const command = await this.store.commands.get(record.deliverCommandId)
     const worker = await this.store.resources.getWorker(record.workerId)
     const receipt = command?.status === 'rejected' ? await this.store.commands.getReceipt(record.deliverCommandId) : null
@@ -1001,10 +1021,7 @@ export class ServerService {
         // the Session owner for operator-driven flows. Reducing commands stay
         // deliverable when signing is absent (revocation stops must survive).
         const authority = actor ?? session.ownerId
-        if (this.commandSigning && authority) {
-          const user = await tx.identity.getUser(authority)
-          if (user && (user.status ?? 'active') === 'active') authorization = await issueCommandAssertion(tx, this.commandSigning, authority, { commandId, command, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) })
-        }
+        authorization = await issueReducingCommandAssertion(tx, this.commandSigning, authority, { commandId, command, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) })
       }
       await this.command(tx, session.binding.agent.workerId, command, commandId, authorization)
       if (!existing) await this.audit(tx, command.kind, { kind: 'session', id }, actor)
@@ -1144,13 +1161,8 @@ export class ServerService {
         }
         await tx.cache.deleteSessionHistory(session.id)
         const deleteAuthority = actor ?? session.ownerId
-        if (this.commandSigning && deleteAuthority) {
-          const user = await tx.identity.getUser(deleteAuthority)
-          if (user && (user.status ?? 'active') === 'active') {
-            const authorization = await issueCommandAssertion(tx, this.commandSigning, deleteAuthority, { commandId: `session-delete:${session.id}` as CommandId, command: { kind: 'session.delete', sessionId: session.id }, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) })
-            await this.command(tx, session.binding.agent.workerId, { kind: 'session.delete', sessionId: session.id }, `session-delete:${session.id}` as CommandId, authorization)
-          } else await this.command(tx, session.binding.agent.workerId, { kind: 'session.delete', sessionId: session.id }, `session-delete:${session.id}` as CommandId)
-        } else await this.command(tx, session.binding.agent.workerId, { kind: 'session.delete', sessionId: session.id }, `session-delete:${session.id}` as CommandId)
+        const authorization = await issueReducingCommandAssertion(tx, this.commandSigning, deleteAuthority, { commandId: `session-delete:${session.id}` as CommandId, command: { kind: 'session.delete', sessionId: session.id }, workerId: session.binding.agent.workerId, scope: sessionAssertionScope(session) })
+        await this.command(tx, session.binding.agent.workerId, { kind: 'session.delete', sessionId: session.id }, `session-delete:${session.id}` as CommandId, authorization)
       }
       else {
         await this.getWorkspace(id as WorkspaceId, tx.resources)

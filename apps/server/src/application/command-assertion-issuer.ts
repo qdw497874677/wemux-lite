@@ -86,6 +86,20 @@ export async function issueCommandAssertion(tx: ServerStoreTx, signing: CommandS
 }
 
 /**
+ * Reducing-signature variant of {@link issueCommandAssertion}: signs when the
+ * assembly has a signing identity and the authority actor exists and is
+ * active, and degrades to undefined (unsigned but still deliverable)
+ * otherwise. Revocation and lifecycle stops use this so distribution never
+ * blocks on signing or actor availability.
+ */
+export async function issueReducingCommandAssertion(tx: ServerStoreTx, signing: CommandSigningIdentity | undefined, actor: UserId | undefined, input: CommandIssueInput): Promise<SignedEnqueueAuthorization | undefined> {
+  if (!signing || !actor) return undefined
+  const user = await tx.identity.getUser(actor)
+  if (!user || (user.status ?? 'active') !== 'active') return undefined
+  return signing.sign(buildCommandAssertionClaims({ keyId: signing.keyId, ...input, actorId: actor, actorAuthVersion: user.authVersion ?? 0 }))
+}
+
+/**
  * Attaches a signed assertion to a pending command record. Call sites that
  * must not name the wire field directly (connector surfaces are scanned for
  * secret-sounding field names) go through this helper instead of a spread.

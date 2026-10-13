@@ -80,6 +80,21 @@ export function requiresCommandAssertion(kind: unknown): boolean {
   return typeof kind === 'string' && ASSERTION_REQUIRED_COMMAND_KINDS.includes(kind)
 }
 
+/** Actor account a command payload itself names, when its kind carries one:
+ * `session.enqueue` frames name the sending account, `runtime.approval.resolve`
+ * frames the deciding account. `named` distinguishes a kind that carries the
+ * field (an undefined `accountId` then means the payload omits it) from kinds
+ * that rely on the assertion actor alone. */
+export interface CommandActorBinding {
+  readonly named: boolean
+  readonly accountId: UserId | undefined
+}
+export function commandActorBinding(command: WorkerCommand): CommandActorBinding {
+  if (command.kind === 'session.enqueue') return { named: true, accountId: command.message.sentByAccountId }
+  if (command.kind === 'runtime.approval.resolve') return { named: true, accountId: command.decidedByAccountId }
+  return { named: false, accountId: undefined }
+}
+
 /**
  * Assertion versions accepted per command kind. `session.enqueue` keeps v1 and
  * `runtime.approval.resolve` keeps v2 so records signed before the v3 rollout

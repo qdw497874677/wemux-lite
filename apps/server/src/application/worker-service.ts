@@ -13,6 +13,15 @@ import { newId, now } from './server-service.ts'
 /** Worker ownership and journal consistency belong here, not in the WS adapter. */
 export const envelope = (): { readonly messageId: import('@wemux/domain').MessageId } => ({ messageId: newId<'MessageId'>() })
 
+export interface WorkerServiceOptions {
+  readonly reportConnector?: (workerId: WorkerId, report: ConnectorRevisionReport) => void | Promise<void>
+  readonly projectJournal?: (sessionId: SessionId, events: readonly JournalEvent[]) => void | Promise<void>
+  readonly resources?: ResourceService | null
+  readonly resourceBlobs?: ResourceBlobStore | null
+  readonly issueClusterCommand?: ((tx: import('./ports/server-store.ts').ServerStoreTx) => import('./run-projection.ts').ClusterCommandIssue) | null
+  readonly signingConfigured?: boolean
+}
+
 export class WorkerService {
   private readonly fileRequests = new Map<string, { readonly workerId: WorkerId; readonly resolve: (response: FileResponsePayload) => void }>()
   private readonly terminalRequests = new Map<string, { readonly workerId: WorkerId; readonly resolve: (response: TerminalResponsePayload) => void }>()
@@ -27,13 +36,17 @@ export class WorkerService {
   constructor(
     store: ServerStore,
     notifications: Notifications,
-    reportConnector: (workerId: WorkerId, report: ConnectorRevisionReport) => void | Promise<void> = () => {},
-    projectJournal: (sessionId: SessionId, events: readonly JournalEvent[]) => void | Promise<void> = () => {},
-    resources: ResourceService | null = null,
-    resourceBlobs: ResourceBlobStore | null = null,
-    issueClusterCommand: ((tx: import('./ports/server-store.ts').ServerStoreTx) => import('./run-projection.ts').ClusterCommandIssue) | null = null,
-    signingConfigured = false,
-  ) { this.store = store; this.notifications = notifications; this.reportConnector = reportConnector; this.projectJournal = projectJournal; this.resources = resources; this.resourceBlobs = resourceBlobs; this.issueClusterCommand = issueClusterCommand; this.signingConfigured = signingConfigured }
+    options: WorkerServiceOptions = {},
+  ) {
+    this.store = store
+    this.notifications = notifications
+    this.reportConnector = options.reportConnector ?? (() => {})
+    this.projectJournal = options.projectJournal ?? (() => {})
+    this.resources = options.resources ?? null
+    this.resourceBlobs = options.resourceBlobs ?? null
+    this.issueClusterCommand = options.issueClusterCommand ?? null
+    this.signingConfigured = options.signingConfigured ?? false
+  }
   attachResources(resources: ResourceService): void { this.resources = resources }
   registerFileRequest(requestId: string, workerId: WorkerId): { readonly promise: Promise<FileResponsePayload>; readonly cancel: () => void } {
     if (this.fileRequests.has(requestId)) throw new AppError(409, 'Duplicate file request')

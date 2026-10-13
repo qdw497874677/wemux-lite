@@ -47,7 +47,7 @@ async function fixture(path: SqliteDatabaseSource = ':memory:') {
   const database = typeof path === 'string' ? new SharedSqliteDatabase(path) : path
   const store = new SqliteServerStore(database)
   const commandSigning = new CommandSigningIdentity(database.connection)
-  const server = new ServerService(store, new Notifications(), undefined, undefined, undefined, undefined, commandSigning)
+  const server = new ServerService(store, new Notifications(), { commandSigning: commandSigning })
   await seedOperator(store, server)
   const enrollment = await server.createEnrollment({})
   const { worker, credential } = await server.enroll({ token: enrollment.token, name: 'Run worker' })
@@ -1279,7 +1279,7 @@ for (const point of ['saveSession:1', 'insertPending:1', 'insertPending:2', 'dep
       return async (...args: unknown[]) => { const result = await value(...args); const name = prefix ?? String(key); const n = (counts.get(name) ?? 0) + 1; counts.set(name, n); if (`${name}:${n}` === point) throw Error('injected'); return result }
     } })
     const store: import('../application/ports/server-store.js').ServerStore = { ...f.store, fileWrites: f.store.fileWrites, tasks: f.store.tasks, resources: f.store.resources, identity: f.store.identity, commands: f.store.commands, cache: f.store.cache, transaction: work => f.store.transaction(tx => work({ ...tx, resources: wrap(tx.resources), commands: wrap(tx.commands), tasks: wrap(tx.tasks), audit: wrap(tx.audit, 'audit') })) }
-    const tasks = new TaskService(store, () => { notifications++ }, new ServerService(store, signals, undefined, undefined, undefined, undefined, f.commandSigning))
+    const tasks = new TaskService(store, () => { notifications++ }, new ServerService(store, signals, { commandSigning: f.commandSigning }))
     const commands = await f.store.commands.list({ limit: 100 }), activity = await f.store.tasks.activity(f.task.id, 0), originalTask = await f.store.tasks.get(f.task.id)
     await assert.rejects(tasks.launch(f.task.projectId, f.task.id, f.request, context), /injected/)
     assert.equal(notifications, 0)
@@ -1732,7 +1732,7 @@ for (const rollback of [false, true]) test(`paused launch public Task/Run/delive
     const store = intercepted(f.store, tx => ({ ...tx, tasks: { ...tx.tasks, saveRun: async run => { runId = run.id; await tx.tasks.saveRun(run) }, append: async (...args) => {
       await tx.tasks.append(...args); entered(); await gate; if (rollback) throw Error('paused rollback')
     } } }))
-    const tasks = new TaskService(store, () => {}, new ServerService(store, new Notifications(), undefined, undefined, undefined, undefined, f.commandSigning))
+    const tasks = new TaskService(store, () => {}, new ServerService(store, new Notifications(), { commandSigning: f.commandSigning }))
     const launch = tasks.launch(f.task.projectId, f.task.id, f.request, context)
     const outcome = launch.then(value => value, error => error as Error)
     await paused

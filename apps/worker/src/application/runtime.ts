@@ -46,6 +46,8 @@ class AgentTimeoutError extends Error {}
 class LaunchAuthorizationDeniedError extends Error {}
 class ApprovalAuthorizationUnavailable extends Error { constructor() { super('Command authorization unavailable') } }
 class TurnStoppedBeforeLaunchError extends Error {}
+/** Bounded retry state shared by session launch and provision launch authorization. */
+interface LaunchRetryState { commandId: CommandId; attempts: number; timer: NodeJS.Timeout | null }
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`
   if (value && typeof value === 'object') return `{${Object.entries(value).sort(([a],[b]) => a.localeCompare(b)).map(([k,v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(',')}}`
@@ -59,8 +61,8 @@ export class WorkerRuntime {
   private readonly releaseWakes = new Set<SessionId>()
   private readonly finalizationRetries = new Map<SessionId, NodeJS.Timeout>()
   private readonly unsafeSessions = new Set<SessionId>()
-  private readonly launchRetries = new Map<SessionId, { commandId: CommandId; attempts: number; timer: NodeJS.Timeout | null }>()
-  private readonly provisionLaunchRetries = new Map<import('@wemux/domain').WorkspaceId, { commandId: CommandId; attempts: number; timer: NodeJS.Timeout | null }>()
+  private readonly launchRetries = new Map<SessionId, LaunchRetryState>()
+  private readonly provisionLaunchRetries = new Map<import('@wemux/domain').WorkspaceId, LaunchRetryState>()
   private readonly sent = new Map<SessionId, number>()
   private readonly provisions = new Map<import('@wemux/domain').WorkspaceId, Promise<void>>()
   private readonly agentRunner: WorkerAgentRunner
@@ -576,17 +578,7 @@ export class WorkerRuntime {
   }
 
   private retryProvisionLaunch(id: import('@wemux/domain').WorkspaceId, commandId: CommandId, command: Extract<WorkerCommand, { kind: 'workspace.provision' }>, stage: 'launch' | 'recovery') {
-    const prior = this.provisionLaunchRetries.get(id)
-    const attempts = prior?.commandId === commandId ? prior.attempts + 1 : 1
-    if (attempts > 4 || this.closing) { this.provisionLaunchRetries.set(id, { commandId, attempts, timer: null }); return }
-    const timer = setTimeout(() => {
-      const pending = this.provisionLaunchRetries.get(id)
-      if (pending?.timer !== timer || this.closing) return
-      this.provisionLaunchRetries.set(id, { ...pending, timer: null })
-      void this.authorizeProvisionLaunch(commandId, command, stage, false)
-    }, Math.min(250 * 2 ** (attempts - 1), 2000))
-    timer.unref()
-    this.provisionLaunchRetries.set(id, { commandId, attempts, timer })
+    this.scheduleLaunchRetry(this.provisionLaunchRetries, id, commandId, () => void this.authorizeProvisionLaunch(commandId, command, stage, false))
   }
 
   private startProvision(commandId: CommandId, command: Extract<WorkerCommand, { kind: 'workspace.provision' }>) {
@@ -743,26 +735,34 @@ export class WorkerRuntime {
     }
   }
   private retryLaunch(id: SessionId, commandId: CommandId) {
-    const prior = this.launchRetries.get(id)
+    this.scheduleLaunchRetry(this.launchRetries, id, commandId, () => this.schedule(id))
+  }
+  /** Shared bounded backoff for launch-authorization retries: counts attempts per command
+   * identity, tombstones without a timer after four denials or on close, otherwise re-arms
+   * the authorization check with exponential delay capped at two seconds. */
+  private scheduleLaunchRetry<K>(retries: Map<K, LaunchRetryState>, id: K, commandId: CommandId, wake: () => void) {
+    const prior = retries.get(id)
     const attempts = prior?.commandId === commandId ? prior.attempts + 1 : 1
     if (attempts > 4 || this.closing) {
-      this.launchRetries.set(id, { commandId, attempts, timer: null })
+      retries.set(id, { commandId, attempts, timer: null })
       return
     }
     const timer = setTimeout(() => {
-      const pending = this.launchRetries.get(id)
+      const pending = retries.get(id)
       if (pending?.timer !== timer || this.closing) return
-      this.launchRetries.set(id, { ...pending, timer: null })
-      this.schedule(id)
+      retries.set(id, { ...pending, timer: null })
+      wake()
     }, Math.min(250 * 2 ** (attempts - 1), 2000))
     timer.unref()
-    this.launchRetries.set(id, { commandId, attempts, timer })
+    retries.set(id, { commandId, attempts, timer })
   }
   private clearLaunchRetries() {
-    for (const retry of this.launchRetries.values()) if (retry.timer) clearTimeout(retry.timer)
-    this.launchRetries.clear()
-    for (const retry of this.provisionLaunchRetries.values()) if (retry.timer) clearTimeout(retry.timer)
-    this.provisionLaunchRetries.clear()
+    this.clearRetryTimers(this.launchRetries)
+    this.clearRetryTimers(this.provisionLaunchRetries)
+  }
+  private clearRetryTimers<K>(retries: Map<K, LaunchRetryState>) {
+    for (const retry of retries.values()) if (retry.timer) clearTimeout(retry.timer)
+    retries.clear()
   }
   private async execute(turn: Turn, clusterCommandId: CommandId | null | undefined, ownershipToken: symbol) {
     let outcome: AgentTurnOutcome = { status: 'failed', failure: { code: 'agent-error', message: 'Agent ended without a terminal event' } }

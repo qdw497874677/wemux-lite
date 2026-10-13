@@ -5,6 +5,7 @@ import {
   assertionScopeMatches,
   assertionVersionAccepted,
   authorizationBytes,
+  commandActorBinding,
   isWorkerCommandKind,
   type EnqueueAuthorization,
   type SignedEnqueueAuthorization,
@@ -54,13 +55,8 @@ export function commandAuthorizationFailure(
     if (!assertionScopeMatches(claims, command)) return 'authorization_invalid'
     // The command payload names the acting account for user-driven kinds; the
     // assertion must authorize exactly that actor.
-    const actorField =
-      command.kind === 'session.enqueue'
-        ? command.message.sentByAccountId
-        : command.kind === 'runtime.approval.resolve'
-          ? command.decidedByAccountId
-          : undefined
-    if (actorField !== undefined && claims.actorId !== actorField) return 'authorization_invalid'
+    const { accountId } = commandActorBinding(command)
+    if (accountId !== undefined && claims.actorId !== accountId) return 'authorization_invalid'
     if (!Number.isSafeInteger(claims.actorAuthVersion) || claims.actorAuthVersion < 0) return 'authorization_invalid'
     if (claims.commandDigest !== createHash('sha256').update(JSON.stringify(command)).digest('hex')) return 'authorization_invalid'
     const issuedAt = Date.parse(claims.issuedAt)

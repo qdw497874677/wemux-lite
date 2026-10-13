@@ -85,7 +85,7 @@ async function fixture(optIn = true) {
   const task = await new TaskService(store).create(projectId, { title: 'Fixture' }, { actor: owner, requestId: 'task' })
   await store.transaction(tx => tx.resources.saveSession({ id: sessionId, projectId, taskId: task.id, runId: null, ownerId: owner, workspaceId: 'workspace' as never, title: 'Fixture', shareScope: 'project', runtimeState: 'idle', deletedAt: null,
     binding: { workspaceId: 'workspace' as never, agent: { workerId: worker, agentKey: 'agent' as never }, modelId: null } }))
-  const service = () => new ServerService(store, notifications, undefined, undefined, undefined, new SessionAccessService(store, new ProjectAccessService(store)))
+  const service = () => new ServerService(store, notifications, { sessionAccess: new SessionAccessService(store, new ProjectAccessService(store)) })
   const a = await service().admitFileWrite(sessionId, owner, { requestId: 'client', subpath: 'folder/file.txt', base64Content: 'YQ==' })
   const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening')
   const port = (server.address() as { port: number }).port

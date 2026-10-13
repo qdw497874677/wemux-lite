@@ -48,7 +48,7 @@ const cases = [
 for (const [name, code, message] of cases) test(`public reuse rejection matrix: ${name}`, async () => {
   const at = '2025-01-01T00:00:00.000Z' as Timestamp
   const dir = await mkdtemp(join(tmpdir(), 'reuse-rejections-')), path = join(dir, 'server.db')
-  const database = new SharedSqliteDatabase(path), store = new SqliteServerStore(database), signals = new Notifications(), server = new ServerService(store, signals, undefined, undefined, undefined, undefined, new CommandSigningIdentity(database.connection))
+  const database = new SharedSqliteDatabase(path), store = new SqliteServerStore(database), signals = new Notifications(), server = new ServerService(store, signals, { commandSigning: new CommandSigningIdentity(database.connection) })
   const tasks = new TaskService(store, event => signals.project(event), server), db = new DatabaseSync(path)
   try {
     await seedOperator(store, server)
