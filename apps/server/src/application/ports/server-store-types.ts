@@ -250,6 +250,9 @@ export interface ServerResourceReader {
   listAccessibleProjectIds(actorId: UserId, scopedProjectId?: ProjectId): Promise<readonly ProjectId[]>
   listWorkspaces(): Promise<readonly Workspace[]>
   listSessions(): Promise<readonly Session[]>
+  /** Sessions whose creation requestId matches; narrows idempotent replay
+   * lookups so they do not scan the whole session table. */
+  listSessionsByCreationRequestId(requestId: string): Promise<readonly Session[]>
   getWorker(workerId: WorkerId): Promise<Worker | null>
   getProject(projectId: import('@wemux/domain').ProjectId): Promise<Project | null>
   getRepository(repositoryId: import('@wemux/domain').RepositoryId): Promise<Repository | null>

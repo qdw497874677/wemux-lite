@@ -275,6 +275,7 @@ export class SqliteServerStore implements ServerStore {
     listWorkers: async () => this.list('worker'), listProjects: async () => this.list('project'),
     listAccessibleProjectIds: async (actorId, scopedProjectId) => listAccessibleProjectIds(this.db, actorId, scopedProjectId),
     listWorkspaces: async () => this.workspaces(), listSessions: async () => this.list('session'),
+    listSessionsByCreationRequestId: async requestId => this.db.prepare("SELECT data FROM records WHERE kind='session' AND json_extract(data,'$.creation.requestId')=? ORDER BY rowid").all(requestId).map(row => JSON.parse(String(row.data)) as import('@wemux/server-domain').Session),
     listCapabilityAssets: async projectId => this.get<CapabilityAsset[]>('capability-assets', projectId) ?? [],
     listAgentInboxMessages: async (sessionId, unreadOnly) => this.list<AgentInboxMessage>('agent-inbox').filter(message => message.toSessionId === sessionId && (!unreadOnly || message.status !== 'read')),
     getAgentInboxMessage: async messageId => this.get('agent-inbox', messageId),

@@ -729,8 +729,8 @@ export class ServerService {
       // Check the durable first-send receipt before revalidating mutable placement or
       // Agent availability. A retry must neither enqueue a second message nor create a Task.
       let previous: Awaited<ReturnType<typeof tx.resources.getSession>> = null
-      for (const session of await tx.resources.listSessions()) {
-        if (session.ownerId !== actor || session.creation?.requestId !== `coordination:${requestId}` || !session.taskId?.startsWith('coordination:')) continue
+      for (const session of await tx.resources.listSessionsByCreationRequestId(`coordination:${requestId}`)) {
+        if (session.ownerId !== actor || !session.taskId?.startsWith('coordination:')) continue
         const task = await tx.tasks.get(session.taskId)
         if (task?.teamCoordination?.teamId === team) { previous = session; break }
       }
@@ -777,8 +777,8 @@ export class ServerService {
       if (!membership) throw new AppError(403, 'Team membership required', 'team_membership_required')
       // 幂等重放：同一意图返回原 Session/附件；不同载荷的同一 requestId 拒绝。
       let previous: Awaited<ReturnType<typeof tx.resources.getSession>> = null
-      for (const session of await tx.resources.listSessions()) {
-        if (session.ownerId !== actor || session.creation?.requestId !== createdRequest || !session.taskId?.startsWith('coordination:')) continue
+      for (const session of await tx.resources.listSessionsByCreationRequestId(createdRequest)) {
+        if (session.ownerId !== actor || !session.taskId?.startsWith('coordination:')) continue
         const task = await tx.tasks.get(session.taskId)
         if (task?.teamCoordination?.teamId === team) { previous = session; break }
       }
