@@ -2,6 +2,7 @@ import type { ResourceInventoryDTO, ResourceInventoryEntryDTO, ResourceStateAxis
 import type { ProjectClient } from './ProjectManagement.tsx'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from './primitives.tsx'
+import { ResourceWriteActions } from './ResourceWriteActions.tsx'
 import {
   authenticationLabels, axisTitles, classLabels, configurationLabels, distributionLabels, executionLabels, observation, type InventoryAxisName,
 } from '../lib/resource-labels.ts'
@@ -25,6 +26,9 @@ export function ResourceManagement({ api, administrator }: { api: ProjectClient;
   const confirmed = useRef<{ api: ProjectClient; inventory: ResourceInventoryDTO | null } | null>(null)
   const load = useRef<() => void>(() => {})
   const [revision, setRevision] = useState(0)
+  // 写入口是显式的管理员动作：默认不展开，非管理员与未点击时都不发起任何请求。
+  const [managing, setManaging] = useState(false)
+  useEffect(() => { setManaging(false) }, [api])
   useEffect(() => {
     if (!administrator) return
     // 已确认的投影在重新核验期间保留，避免把「正在刷新」显示成「没有资源」。
@@ -67,6 +71,10 @@ export function ResourceManagement({ api, administrator }: { api: ProjectClient;
     <h1>资源管理</h1>
     <p>四态彼此独立：已配置是 Server 的权威声明，已认证与可执行只来自 Worker 的真实探测，已分发是 Worker 的安装回执。探测缺失时如实显示未知，不用配置状态补齐。</p>
     <Button variant="outline" disabled={Boolean(current?.loading)} onClick={() => setRevision(value => value + 1)}>刷新资源清单</Button>
+    <Button variant="outline" aria-expanded={managing} aria-controls="resource-management-actions" disabled={!inventory} onClick={() => setManaging(value => !value)}>{managing ? '收起管理动作' : '管理动作'}</Button>
+    {managing && inventory && <div id="resource-management-actions">
+      <ResourceWriteActions api={api} inventory={inventory} onChanged={() => setRevision(value => value + 1)} />
+    </div>}
     {inventory && <p role="status">清单生成于 {new Date(inventory.generatedAt).toLocaleString('zh-CN')}</p>}
     {!current || current.loading ? <p role="status">正在加载资源清单…</p> : null}
     {current?.error && <p role="alert">{current.error}</p>}

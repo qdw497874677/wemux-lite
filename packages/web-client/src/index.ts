@@ -7,6 +7,8 @@ export type { ClusterTransportOptions, RequestMethod } from './cluster-transport
 export { anonymousSession, isSignedIn, toAccountSession, createClusterClient, clusterAccountOperations } from './cluster-client.ts'
 export { createLocalIdentityClient, createLocalTransport, localIdentityOperations } from './local-identity.ts'
 export { randomId } from './random.ts'
+export { resourceManagementOperations } from './resource-management.ts'
+export { isResourceWriteConflict, describeResourceWriteError } from './resource-errors.ts'
 export { copyText, selectElementText } from './clipboard.ts'
 export { taskSessionOperations } from './task-sessions.ts'
 export { sessionGraphOperations } from './session-graph.ts'
