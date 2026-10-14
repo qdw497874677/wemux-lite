@@ -385,8 +385,11 @@ export class SqliteServerStore implements ServerStore {
     dispatchIntents: async taskId => this.readDispatchIntents('task_id=? ORDER BY generation DESC', taskId),
     dispatchClaim: async id => this.readDispatchClaims('id=?', id)[0] ?? null,
     dispatchClaimByRequest: async (intentId, requestId) => this.readDispatchClaims('intent_id=? AND request_id=?', intentId, requestId)[0] ?? null,
+    lastDispatchClaim: async intentId => (await this.readDispatchClaims('intent_id=? ORDER BY rowid DESC LIMIT 1', intentId))[0] ?? null,
     activeDispatchClaim: async intentId => this.readDispatchClaims("intent_id=? AND state<>'released' ORDER BY rowid DESC LIMIT 1", intentId)[0] ?? null,
     dispatchQueue: async () => this.readDispatchIntents("state='pending' ORDER BY queue_order, id"),
+    dispatchClaimsByWorker: async workerId => this.readDispatchClaims('worker_id=? ORDER BY rowid', workerId),
+    nextDispatchQueueOrder: async () => Number((this.db.prepare('SELECT COALESCE(MAX(queue_order), 0) + 1 AS next FROM task_dispatch_intents').get() as { next: number }).next),
   }
   readonly tasks = this.committed(this.taskReader)
   private readonly fileWriteReader: ServerStore['fileWrites'] = {

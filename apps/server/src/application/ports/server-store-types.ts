@@ -84,8 +84,14 @@ export interface ServerTaskReader {
   dispatchClaimByRequest(intentId: string, requestId: string): Promise<DispatchClaimRecord | null>
   /** 当前仍占用该执行意图的承接（reserved/accepted/unknown）；已释放不算。 */
   activeDispatchClaim(intentId: string): Promise<DispatchClaimRecord | null>
+  /** 该意图上最后一次承接，含已释放记录：接手要绑定被接替的执行身份，不能只看进行中的承接。 */
+  lastDispatchClaim(intentId: string): Promise<DispatchClaimRecord | null>
   /** 待安排队列：按持久入队序号稳定排序，重放/重启不重排。 */
   dispatchQueue(): Promise<readonly DispatchIntentRecord[]>
+  /** 某台 Worker 上的全部承接，用于统计仍占用的执行槽位。 */
+  dispatchClaimsByWorker(workerId: string): Promise<readonly DispatchClaimRecord[]>
+  /** 下一个持久入队序号：单调递增，重放与重启都不得重排既有意图。 */
+  nextDispatchQueueOrder(): Promise<number>
 }
 export interface ServerTaskWriter {
   saveReview(review: import('@wemux/web-contract/task-platform').ReviewRequest): Promise<void>
