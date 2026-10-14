@@ -2,6 +2,7 @@ import { sessionConversationOperations } from './session-conversation.ts'
 import { sessionGraphOperations } from './session-graph.ts'
 import { taskSessionOperations } from './task-sessions.ts'
 import { projectManagementOperations } from './project-management.ts'
+import { agentInstallOperations } from './agent-install.ts'
 import { resourceManagementOperations } from './resource-management.ts'
 import type { AccountPayloadDTO, AccountSession, AccountViewDTO, AuthOptionsDTO, ProjectDTO } from '@wemux/web-contract/browser-host'
 import { accountManagementOperations } from './account-management.ts'
@@ -38,5 +39,5 @@ export function createClusterClient(config: AccountSession = anonymousSession(),
   // Bound only by the owner after verified login/me; never infer a server ID from username.
   const accountId = typeof authenticatedAccountId === 'string' && authenticatedAccountId.trim() && authenticatedAccountId.length <= 200 && !authenticatedAccountId.includes('\0') ? authenticatedAccountId : null
   const controlIdentity = Object.freeze({ accountId, signal: transport.signal })
-  return { controlIdentity, ...clusterAccountOperations(transport), ...accountManagementOperations(transport), ...projectManagementOperations(transport), ...resourceManagementOperations(transport), ...taskSessionOperations(transport), ...sessionGraphOperations(transport), ...sessionConversationOperations(transport), taskSessionScope: { host: new URL(options.origin ?? window.location.origin).origin, account: config.username, teamId: config.teamId }, dispose: transport.dispose }
+  return { controlIdentity, ...clusterAccountOperations(transport), ...accountManagementOperations(transport), ...projectManagementOperations(transport), ...resourceManagementOperations(transport), ...agentInstallOperations(transport), ...taskSessionOperations(transport), ...sessionGraphOperations(transport), ...sessionConversationOperations(transport), taskSessionScope: { host: new URL(options.origin ?? window.location.origin).origin, account: config.username, teamId: config.teamId }, dispose: transport.dispose }
 }

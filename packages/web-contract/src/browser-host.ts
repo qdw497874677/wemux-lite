@@ -160,3 +160,30 @@ export interface ResourceInventoryDTO {
   workers: ResourceInventoryEntryDTO[]; agents: ResourceInventoryEntryDTO[]; models: ResourceInventoryEntryDTO[]
   skills: ResourceInventoryEntryDTO[]; presets: ResourceInventoryEntryDTO[]; providers: ResourceInventoryEntryDTO[]
 }
+
+/**
+ * 托管 Agent 安装入口：固定版本目录来自 Server（与 Worker 共用同一份 @wemux/domain 清单），
+ * Worker 立即在线时走受审计的下发接口；离线或自托管时展示同一份清单推导出的一键命令。
+ * 「展示了命令」不等于「已安装」：只有 Worker 回执才能推进分发状态。
+ */
+export interface ManagedAgentCatalogEntryDTO {
+  key: string; packageName: string; packageVersion: string; bin: string; packageIntegrity: string
+}
+export interface ManagedAgentCatalogDTO {
+  schemaVersion: 1
+  registryOrigin: string
+  installerPath: string
+  manifestPath: string
+  installDirectoryRule: string
+  restartNotice: string
+  agents: ManagedAgentCatalogEntryDTO[]
+  generatedAt: string
+}
+export interface ManagedAgentInstallDTO {
+  agentKey: string
+  packageName: string
+  packageVersion: string
+  resourceId: string
+  resourceRevisionId: string
+  binding: { id: string; status: string; revision: number; updatedAt: string }
+}
