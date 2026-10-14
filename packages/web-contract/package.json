@@ -18,6 +18,10 @@
       "types": "./dist/channels.d.ts",
       "import": "./dist/channels.js"
     },
+    "./task-dispatch": {
+      "types": "./dist/task-dispatch.d.ts",
+      "import": "./dist/task-dispatch.js"
+    },
     "./task-platform": {
       "types": "./dist/task-platform.d.ts",
       "import": "./dist/task-platform.js"
