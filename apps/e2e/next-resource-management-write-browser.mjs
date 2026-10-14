@@ -154,7 +154,22 @@ try {
     await tempRow.getByRole('button', { name: '删除资源' }).click()
     await tempRow.waitFor({ state: 'detached' })
     assert.equal((await owner.raw(`/resources/${temp.id}`, 'GET')).status, 404, '删除后资源不可再读取')
-    written(step, `修改 ${skill.id}，删除 ${temp.id}（404）`)
+    // 其余可写资源类型（Agent 运行时、连接器配置）同样在管理面内建/删，覆盖四类可写资源的建与删。
+    for (const [kind, kindLabel] of [['agent-runtime', 'Agent 运行时'], ['connector-config', '连接器配置']]) {
+      const extraName = `${kindLabel}验收-${name}`
+      await create.getByLabel('资源类型').selectOption(kind)
+      await create.getByLabel('名称').fill(extraName)
+      await create.getByRole('button', { name: '新建资源' }).click()
+      await create.getByRole('status').filter({ hasText: `已创建${kindLabel}资源「${extraName}」` }).waitFor()
+      const extra = await eventually(async () => (await api('/resources')).items.find(item => item.name === extraName), Boolean, `${kind} resource created through the UI`)
+      assert.equal(extra.kind, kind)
+      const extraRow = page.getByRole('article', { name: `管理资源 ${extraName}` })
+      await extraRow.getByRole('button', { name: '删除资源' }).click()
+      await extraRow.waitFor({ state: 'detached' })
+      assert.equal((await owner.raw(`/resources/${extra.id}`, 'GET')).status, 404, `${kind} 删除后不可再读取`)
+    }
+    await create.getByLabel('资源类型').selectOption('skill')
+    written(step, `修改 ${skill.id}，删除 ${temp.id}（404），并验证 Agent 运行时与连接器配置可建可删`)
 
     step = `${name}: 发布技能修订，先按 sha256 上传 blob 再发布不可变修订`
     const content = `# ${skillName}\n\n写路径验收技能内容。`
