@@ -1,6 +1,7 @@
 import { PlacementRetryIntents } from '../lib/placement-retry-intents.ts'
 import { useOperationLifetime } from '../lib/operation-lifetime.ts'
-import { useRef, useState, useEffect } from 'react'
+import { useCreateIntent } from '../lib/create-intent.ts'
+import { useState, useEffect } from 'react'
 import { randomId } from '@wemux/web-client'
 import type { ProjectDTO } from '@wemux/web-contract/browser-host'
 import type { Application } from '../application.ts'
@@ -12,11 +13,7 @@ import { Button } from './primitives.tsx'
 import { confirmNavigation } from '../lib/unsaved-navigation.ts'
 import { navigate } from '../lib/navigation.ts'
 export type ProjectClient = NonNullable<ReturnType<Application['getClient']>>
-/** An uncertain retry retains its identity; a successful submission starts a new intent. */
-export function useCreateIntent() {
-  const intent = useRef({ body: '', id: randomId() })
-  return { id(body: unknown) { const encoded = JSON.stringify(body); if (intent.current.body !== encoded) intent.current = { body: encoded, id: randomId() }; return intent.current.id }, complete() { intent.current = { body: '', id: randomId() } } }
-}
+export { useCreateIntent } from '../lib/create-intent.ts'
 export function usePlacementRetryIntents() {
   const [intents] = useState(() => new PlacementRetryIntents(randomId))
   return intents
