@@ -15,7 +15,7 @@
 
 ## 验证命令与结果
 
-全部在 `/tmp/wemux-p01`（分支 `dispatch-01-placement`，基点 `8cf9bff`）执行，日志在 `/var/tmp/wemux-p01-logs/`。
+全部在 `/tmp/wemux-p01`（分支 `dispatch-01-placement`，基点 `8cf9bff`）执行，日志在 `/var/tmp/wemux-p01-logs/`。下表为合并 `main`（`72b8b0b`，无冲突）后的复验结果；`merge-*.log` 即合并后复跑，未合并前的同名日志见同目录。
 
 | 命令 | 结果 |
 | --- | --- |
@@ -25,7 +25,7 @@
 | `node --import tsx --test packages/domain/src/dispatch.test.ts` | tests 14 / pass 14 / fail 0 |
 | `node --import tsx --test apps/server/src/test/dispatch-claims.test.ts` | tests 5 / pass 5 / fail 0 |
 | `node --import tsx --test apps/server/src/test/task-dispatch-service.test.ts` | tests 5 / pass 5 / fail 0 |
-| `node --import tsx --test apps/server/src/test/*.test.ts` | tests 988 / pass 988 / fail 0，退出码 0（`server-tests.log`） |
+| `node --import tsx --test apps/server/src/test/*.test.ts` | tests 988 / pass 988 / fail 0，退出码 0（`server-tests.log`）；合并 `main`（`72b8b0b`）后复验 tests 1008 / pass 1008 / fail 0，退出码 0（`merge-server-tests.log`） |
 | `npm test --workspace @wemux/worker` | tests 532 / pass 527 / fail 0 / skip 5（既有跳过），退出码 0（`worker-tests.log`） |
 | `node --import tsx apps/e2e/dispatch-claim-transport.mjs` | 13 项真实链路断言全部通过，退出码 0（`e2e-dispatch.log`） |
 | `node --import tsx apps/web-next/tests/task-dispatch.browser.mts`（`WEMUX_NEXT_TEST_DIST` + Playwright） | 7 项检查通过（桌面 1440×900、手机 390×844），退出码 0，稳定复跑 2 次（`browser-dispatch-2.log`） |
