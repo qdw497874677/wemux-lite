@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { agentRegistryOrigin, agentRuntimeCatalog, managedAgentCatalogEntries, normalizeManagedAgentKey, type ManagedAgentKey } from '@wemux/domain'
 import type {
   ReconcileReport,
   AgentKey,
@@ -23,7 +24,23 @@ export interface ResourceNotifier {
   send(workerId: WorkerId, payload: ResourceSetNotifyPayload): void
 }
 
-const runtimePackages: Readonly<Record<string, string>> = { pi: '@earendil-works/pi-coding-agent', opencode: 'opencode-ai', 'claude-code': '@anthropic-ai/claude-code' }
+// 官方运行时包名从共享固定版本目录派生，避免出现第二份清单而与 Worker 漂移。
+const runtimePackages: Readonly<Record<string, string>> = Object.fromEntries(managedAgentCatalogEntries().map(entry => [entry.key, entry.packageName]))
+
+export interface ManagedAgentInstallInput {
+  readonly workerId: WorkerId
+  readonly agentKey: string
+  readonly createdBy: UserId
+}
+
+export interface ManagedAgentInstallResult {
+  readonly agentKey: ManagedAgentKey
+  readonly packageName: string
+  readonly packageVersion: string
+  readonly resourceId: string
+  readonly resourceRevisionId: string
+  readonly binding: ResourceBinding
+}
 
 export interface CreateResourceBindingInput {
   readonly id?: string
@@ -114,8 +131,66 @@ export class ResourceService {
       return { application, notify: snapshot }
     })
     // Never send a desired-state notification for a transaction that rolled back.
-    if (notify) this.notifier.send(input.workerId, { type: 'resource.set.notify', workerId: input.workerId, setRevision: notify.revision, fingerprint: notify.fingerprint, resources: notify.bindings.map(item => ({ bindingId: item.bindingId, resourceRevisionId: item.resourceRevisionId, kind: item.kind, contentSha256: item.contentSha256 })) })
+    if (notify) this.sendSet(input.workerId, notify)
     return application
+  }
+
+  /** 期望态通知的唯一出口；只有在事务提交后才调用。 */
+  private sendSet(workerId: WorkerId, snapshot: ResourceSetSnapshot): void {
+    this.notifier.send(workerId, {
+      type: 'resource.set.notify',
+      workerId,
+      setRevision: snapshot.revision,
+      fingerprint: snapshot.fingerprint,
+      resources: snapshot.bindings.map(item => ({ bindingId: item.bindingId, resourceRevisionId: item.resourceRevisionId, kind: item.kind, contentSha256: item.contentSha256 })),
+    })
+  }
+
+  /**
+   * 管理员显式确认后，把固定版本目录中的官方运行时下发给指定 Worker。
+   * 同一个 Worker × Agent 重复调用是幂等的：资源、修订、绑定都用确定性 id，
+   * 只重建期望态，因此失败后重试不会产生第二份修订或第二个绑定。
+   */
+  async installManagedAgent(input: ManagedAgentInstallInput): Promise<ManagedAgentInstallResult> {
+    const key = normalizeManagedAgentKey(input.agentKey)
+    if (!key) throw new Error('invalid_managed_agent_key')
+    const spec = agentRuntimeCatalog[key]
+    const resourceId = `managed-agent-runtime-${key}`
+    const resourceRevisionId = `${resourceId}-v${spec.version}`
+    const bindingId = `managed-agent-binding-${input.workerId}-${key}`
+    const name = `托管 Agent 运行时（${key}）`
+    const contentSha256 = createHash('sha256').update(JSON.stringify({ kind: 'agent-runtime', key, packageName: spec.name, packageVersion: spec.version, packageIntegrity: spec.integrity })).digest('hex')
+    const at = this.now()
+    const snapshot = await this.repository.transaction(() => {
+      if (!this.repository.resource(resourceId)) {
+        this.repository.createResource({ id: resourceId, kind: 'agent-runtime', name, description: `${spec.name}@${spec.version}`, definition: {}, createdBy: input.createdBy, createdAt: at, updatedAt: at })
+      }
+      if (!this.repository.revision(resourceRevisionId)) {
+        this.repository.createRevision({
+          id: resourceRevisionId, resourceId, kind: 'agent-runtime', version: 1, state: 'published',
+          manifest: {
+            schemaVersion: 1, name, description: `${spec.name}@${spec.version}`,
+            compatibility: { workerProtocol: '2', platforms: ['linux', 'darwin'], architectures: ['x64', 'arm64'], agentKeys: [key as AgentKey] },
+            bytes: 0, fileCount: 0, sha256: contentSha256, materializerVersion: 1, restartPolicy: 'worker',
+          },
+          payload: { mode: 'artifact', packageName: spec.name, packageVersion: spec.version, registryOrigin: agentRegistryOrigin, packageIntegrity: spec.integrity },
+          supplyChain: { mode: 'registry-package', packageName: spec.name, packageVersion: spec.version, registryOrigin: agentRegistryOrigin, packageIntegrity: spec.integrity },
+          contentSha256, createdBy: input.createdBy, createdAt: at,
+        })
+      }
+      const existing = this.repository.binding(bindingId)
+      if (existing && (existing.status === 'pending-gc' || existing.status === "gc'd")) throw new Error('managed_agent_binding_retired')
+      if (existing && (existing.resourceRevisionId !== resourceRevisionId || existing.workerId !== input.workerId || existing.agentKey !== key)) throw new Error('managed_agent_binding_conflict')
+      if (!existing) {
+        this.repository.createBinding({ id: bindingId, workerId: input.workerId, resourceRevisionId, resourceId, kind: 'agent-runtime', agentKey: key as AgentKey, projectId: null, status: 'assigned', revision: 1, createdBy: input.createdBy, createdAt: at, updatedAt: at })
+      }
+      // assigned/failed 会被刷新回 notified，因此这里是失败后的重试入口。
+      return this.refreshDesiredSet(input.workerId, false)
+    })
+    this.sendSet(input.workerId, snapshot)
+    const binding = this.repository.binding(bindingId)
+    if (!binding) throw new Error('managed_agent_binding_missing')
+    return { agentKey: key, packageName: spec.name, packageVersion: spec.version, resourceId, resourceRevisionId, binding }
   }
 
   createResource(resource: Resource): Resource { return this.repository.createResource(resource) }
@@ -238,7 +313,7 @@ export class ResourceService {
     if (current?.fingerprint === fingerprint) return current
     const snapshot: ResourceSetSnapshot = { workerId, revision: (current?.revision ?? 0) + 1, fingerprint, bindings: desired, createdAt: this.now() }
     this.repository.putResourceSet(snapshot, current?.revision ?? 0)
-    if (notify) this.notifier.send(workerId, { type: 'resource.set.notify', workerId, setRevision: snapshot.revision, fingerprint, resources: desired.map(item => ({ bindingId: item.bindingId, resourceRevisionId: item.resourceRevisionId, kind: item.kind, contentSha256: item.contentSha256 })) })
+    if (notify) this.sendSet(workerId, snapshot)
     return snapshot
   }
 

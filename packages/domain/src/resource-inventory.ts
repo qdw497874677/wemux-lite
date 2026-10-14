@@ -117,6 +117,16 @@ export function agentExecutionAxis(capability: AgentCapability | null, connectio
 }
 
 /** 分发以 Worker 的安装回执为准；没有回执时只能读到 Server 侧绑定状态并明说未确认。 */
+/**
+ * Worker 的失败回执里 message 往往是通用文案，真实原因在 errorCode（例如
+ * unapproved_runtime_artifact）。两者都要呈现，不能让管理面只看到“安装失败”。
+ */
+function failureDetail(report: ReconcileReport, fallback: string): string {
+  const message = report.message ?? fallback
+  if (!report.errorCode || message.includes(report.errorCode)) return message
+  return `${message}（${report.errorCode}）`
+}
+
 export function bindingDistributionAxis(status: ResourceBindingStatus, report: ReconcileReport | null): DistributionAxis {
   const axis = (state: DistributionState, detail: string, setRevision: number | null = null, observedAt: Timestamp | null = null): DistributionAxis => ({ state, detail, observedAt, setRevision })
   if (!report) {
@@ -127,8 +137,8 @@ export function bindingDistributionAxis(status: ResourceBindingStatus, report: R
   }
   const observedAt = report.occurredAt
   if (report.result === 'pending-gc') return axis('not-distributed', report.message ?? '已从期望态移除并回收', report.resourceSetRevision, observedAt)
-  if (report.result === 'version-mismatch') return axis('failed', `版本不匹配：${report.message ?? report.errorCode ?? '完整性标识不一致'}`, report.resourceSetRevision, observedAt)
-  if (report.result === 'failed') return axis('failed', report.message ?? report.errorCode ?? 'Worker 上报安装失败', report.resourceSetRevision, observedAt)
+  if (report.result === 'version-mismatch') return axis('failed', `版本不匹配：${failureDetail(report, '完整性标识不一致')}`, report.resourceSetRevision, observedAt)
+  if (report.result === 'failed') return axis('failed', failureDetail(report, 'Worker 上报安装失败'), report.resourceSetRevision, observedAt)
   if (report.phase === 'ready') return axis('distributed', report.message ?? 'Worker 已确认安装并就绪', report.resourceSetRevision, observedAt)
   if (report.phase === null) return axis('pending', report.message ?? 'Worker 已收到期望态，尚未完成安装', report.resourceSetRevision, observedAt)
   return axis('pending', report.message ?? `正在安装（${phaseLabels[report.phase]}）`, report.resourceSetRevision, observedAt)

@@ -1,5 +1,5 @@
 import type { ServerResponse } from 'node:http'
-import { agentRegistryOrigin, agentRestartNotice, agentRuntimeCatalog, type ManagedAgentKey } from '@wemux/domain'
+import { agentRegistryOrigin, agentRestartNotice, agentRuntimeCatalog, type ManagedAgentCatalogEntry, type ManagedAgentKey } from '@wemux/domain'
 
 /**
  * 托管 Agent 安装的公开下载面：固定版本清单 + 一键安装脚本。
@@ -33,10 +33,20 @@ export function agentCatalogEntries(catalog: AgentCatalogLike = agentRuntimeCata
   return (Object.keys(catalog) as ManagedAgentKey[]).map(key => ({ key, packageName: catalog[key].name, packageVersion: catalog[key].version, bin: catalog[key].bin, packageIntegrity: catalog[key].integrity }))
 }
 
-export function agentManifestBody(options: AgentDownloadOptions = {}): string {
+export interface AgentManifest {
+  readonly schemaVersion: 1
+  readonly registryOrigin: string
+  readonly installerPath: string
+  readonly manifestPath: string
+  readonly installDirectoryRule: string
+  readonly restartNotice: string
+  readonly agents: readonly ManagedAgentCatalogEntry[]
+}
+
+export function agentManifest(options: AgentDownloadOptions = {}): AgentManifest {
   const catalog = options.catalog ?? agentRuntimeCatalog
   const registryOrigin = options.registryOrigin ?? agentRegistryOrigin
-  return JSON.stringify({
+  return {
     schemaVersion: 1,
     registryOrigin,
     installerPath: agentInstallerPath,
@@ -44,7 +54,11 @@ export function agentManifestBody(options: AgentDownloadOptions = {}): string {
     installDirectoryRule: 'WEMUX_INSTALL_DIR 必须是绝对路径且位于 WEMUX_WORKER_HOME 内（缺省 <WEMUX_WORKER_HOME>/agents/<key>）；每次安装落到该目录下的 <version>-<random> 子目录。',
     restartNotice: agentRestartNotice,
     agents: agentCatalogEntries(catalog),
-  })
+  }
+}
+
+export function agentManifestBody(options: AgentDownloadOptions = {}): string {
+  return JSON.stringify(agentManifest(options))
 }
 
 const DRIVER_HEADER = 'const CONSTANTS = '
