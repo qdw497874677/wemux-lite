@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { AgentCapability } from '@wemux/domain'
+import type { AgentKey, ModelId, SessionId, UserId } from '@wemux/domain'
 import { adminRouteFixture } from './fixtures/admin-route-fixture.ts'
 import { seedLocalAccount } from './fixtures/administrator.js'
 
 const outsiderEmail = 'lineage-outsider@example.test'
 const outsiderPassword = 'private outsider password 123'
-const outsiderId = 'lineage-outsider'
+const outsiderId = 'lineage-outsider' as UserId
 const outsiderToken = 'synthetic-lineage-outsider'
 
 type Fixture = Awaited<ReturnType<typeof adminRouteFixture>>
@@ -17,14 +17,13 @@ type Fixture = Awaited<ReturnType<typeof adminRouteFixture>>
  * 让 Fork 走 createForkTargetInTx 的真实校验，而不是绕过它。
  */
 async function makeForkTargetReady(fixture: Fixture) {
-  const capability = {
-    agentKey: 'fixture', displayName: 'Fixture Agent', version: null, mode: 'execution',
-    availability: { status: 'available' }, models: [{ modelId: 'fixture', displayName: 'Fixture Model', source: 'detected' }],
-  } as AgentCapability
   await fixture.app.store.transaction(async tx => {
     const worker = (await tx.resources.getWorker(fixture.worker.workerId))!
     // Team 级共享：项目成员据此获得 Worker 使用权限（fixture 默认 owner 独占）。
-    await tx.resources.saveWorker({ ...worker, connectionState: 'online', shareScope: 'team', capabilities: [capability] })
+    await tx.resources.saveWorker({
+      ...worker, connectionState: 'online', shareScope: 'team',
+      capabilities: [{ agentKey: 'fixture' as AgentKey, displayName: 'Fixture Agent', version: null, mode: 'execution', availability: { status: 'available' }, models: [{ modelId: 'fixture' as ModelId, displayName: 'Fixture Model', source: 'detected' }] }],
+    })
     const workspace = (await tx.resources.getWorkspace(fixture.workspace.id))!
     await tx.resources.saveWorkspace({ ...workspace, status: 'ready', placements: [{ workerId: fixture.worker.workerId, status: 'ready', failureReason: null, location: null }] })
   })
@@ -48,7 +47,7 @@ test('Team 成员按会话权限读取画布、在同 Task 下固定 cursor Fork
   const project = `/projects/${fixture.project.id}`
 
   const before = await fixture.app.store.transaction(async tx => ({
-    session: await tx.resources.getSession(fixture.sessionId),
+    session: await tx.resources.getSession(fixture.sessionId as SessionId),
     forks: await tx.resources.listSessionForks(fixture.project.id),
   }))
   assert.equal(before.forks.length, 0)
@@ -119,8 +118,8 @@ test('Team 成员按会话权限读取画布、在同 Task 下固定 cursor Fork
 
   // Fork 不修改原会话历史：来源行逐字段不变，血缘是独立投影。
   const after = await fixture.app.store.transaction(async tx => ({
-    session: await tx.resources.getSession(fixture.sessionId),
-    freshness: await tx.cache.getFreshness(fixture.sessionId),
+    session: await tx.resources.getSession(fixture.sessionId as SessionId),
+    freshness: await tx.cache.getFreshness(fixture.sessionId as SessionId),
   }))
   assert.deepEqual(after.session, before.session)
   assert.equal(after.freshness?.contiguousSeq ?? 0, 0)
@@ -163,7 +162,7 @@ test('非成员被拒；撤权后列表、血缘、边详情与图谱四个出�
 
   const revoke = await fixture.request(`${project}/grants/${fixture.accounts.member.id}`, { method: 'DELETE' })
   assert.equal(revoke.status, 204, JSON.stringify(revoke.data))
-  fixture.app.service.notifications.authorization(fixture.accounts.member.id)
+  fixture.app.service.notifications.authorization(fixture.accounts.member.id as UserId)
 
   const revoked = [
     await fixture.request(`${project}/session-graph`, member),
