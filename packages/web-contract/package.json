@@ -33,6 +33,10 @@
     "./browser-host": {
       "types": "./dist/browser-host.d.ts",
       "import": "./dist/browser-host.js"
+    },
+    "./resource-write": {
+      "types": "./dist/resource-write.d.ts",
+      "import": "./dist/resource-write.js"
     }
   },
   "files": [

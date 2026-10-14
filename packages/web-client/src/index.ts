@@ -8,6 +8,8 @@ export { anonymousSession, isSignedIn, toAccountSession, createClusterClient, cl
 export { createLocalIdentityClient, createLocalTransport, localIdentityOperations } from './local-identity.ts'
 export { agentInstallOperations } from './agent-install.ts'
 export { randomId } from './random.ts'
+export { resourceManagementOperations } from './resource-management.ts'
+export { isResourceWriteConflict, describeResourceWriteError } from './resource-errors.ts'
 export { copyText, selectElementText } from './clipboard.ts'
 export { taskSessionOperations } from './task-sessions.ts'
 export { sessionGraphOperations } from './session-graph.ts'
