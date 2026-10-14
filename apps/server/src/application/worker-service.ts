@@ -135,7 +135,7 @@ export class WorkerService {
         case 'heartbeat': replies.push({ type: 'heartbeat', nonce: message.nonce, sentAt: now() }); break
         case 'capability':
           if (message.workerId !== workerId) throw new AppError(403, 'Worker identity mismatch')
-          await tx.resources.saveWorker({ ...worker, capabilities: message.capabilities, lastSeenAt: now() })
+          await tx.resources.saveWorker({ ...worker, capabilities: message.capabilities, capabilitiesObservedAt: message.detectedAt, lastSeenAt: now() })
           if (JSON.stringify(worker.capabilities) !== JSON.stringify(message.capabilities)) {
             for (const session of await tx.resources.listSessions()) if (!session.deletedAt && session.binding.agent.workerId === workerId) changed.add(session.id)
           }

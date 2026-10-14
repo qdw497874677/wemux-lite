@@ -45,6 +45,8 @@ const execution = (state: ExecutionState, detail: string, observedAt: Timestamp 
 const authentication = (state: AuthenticationState, detail: string, observedAt: Timestamp | null = null): ResourceStateAxis<AuthenticationState> => ({ state, detail, observedAt })
 
 const connectionOf = (worker: Worker): InventoryWorkerConnectionState => worker.connectionState
+const probeTimeOf = (worker: Worker): Timestamp | null => worker.capabilitiesObservedAt ?? null
+const observedAt = <State extends string>(axis: ResourceStateAxis<State>, at: Timestamp | null): ResourceStateAxis<State> => axis.observedAt === null ? { ...axis, observedAt: at } : axis
 
 /**
  * 把 Server 侧权威声明（资源、已发布修订、预设、绑定）与 Worker 侧真实探测（能力快照、
@@ -127,6 +129,7 @@ export class ResourceInventoryService {
 
   private agentEntry(worker: Worker, agentKey: AgentKey, all: readonly Projection[]): ResourceInventoryEntry {
     const capability = this.capabilityOf(worker, agentKey)
+    const probeTime = probeTimeOf(worker)
     const own = all.filter(item => item.binding.workerId === worker.id && item.binding.kind === 'agent-runtime' && item.binding.agentKey === agentKey)
     const managed = own.find(item => item.binding.status !== 'pending-gc' && item.binding.status !== "gc'd") ?? own[0] ?? null
     const managedRevision = managed ? this.resources.revision(managed.binding.resourceRevisionId) : null
@@ -146,21 +149,22 @@ export class ResourceInventoryService {
         : capability?.mode === 'execution'
           ? configuration('configured', '本机已配置所选路径')
           : configuration('unconfigured', '集群未分发托管安装，本机也没有选择路径'),
-      authentication: agentAuthenticationAxis(capability),
+      authentication: observedAt(agentAuthenticationAxis(capability), probeTime),
       distribution: this.aggregateDistribution(own, this.resources.desiredSet(worker.id).revision, '集群未向该 Worker 分发托管安装'),
-      execution: agentExecutionAxis(capability, connectionOf(worker)),
+      execution: observedAt(agentExecutionAxis(capability, connectionOf(worker)), probeTime),
       targets: [],
     }
   }
 
   private modelEntries(worker: Worker, all: readonly Projection[]): readonly ResourceInventoryEntry[] {
     const connection = connectionOf(worker)
+    const probeTime = probeTimeOf(worker)
     const desired = this.resources.desiredSet(worker.id)
     const entries = new Map<string, ResourceInventoryEntry>()
     for (const agentKey of knownAgentKeys) {
       const capability = this.capabilityOf(worker, agentKey)
-      const agentExecution = agentExecutionAxis(capability, connection)
-      const agentAuthentication = agentAuthenticationAxis(capability)
+      const agentExecution = observedAt(agentExecutionAxis(capability, connection), probeTime)
+      const agentAuthentication = observedAt(agentAuthenticationAxis(capability), probeTime)
       for (const model of capability?.models ?? []) {
         const id = modelInventoryIdentity(worker.id, agentKey, model.modelId)
         entries.set(id, this.modelEntry({ worker, agentKey, modelId: model.modelId, displayName: model.displayName, source: model.source, connection, agentExecution, agentAuthentication, declaredBy: null }))
@@ -182,8 +186,8 @@ export class ResourceInventoryService {
             displayName: model,
             source: 'configured',
             connection,
-            agentExecution: agentExecutionAxis(this.capabilityOf(worker, target), connection),
-            agentAuthentication: agentAuthenticationAxis(this.capabilityOf(worker, target)),
+            agentExecution: observedAt(agentExecutionAxis(this.capabilityOf(worker, target), connection), probeTime),
+            agentAuthentication: observedAt(agentAuthenticationAxis(this.capabilityOf(worker, target)), probeTime),
             declaredBy: { bindingId: snapshot.bindingId, setRevision: desired.revision, status: projection?.binding.status ?? 'assigned', report: projection?.reconcile ?? null },
           }))
         }
@@ -323,7 +327,7 @@ export class ResourceInventoryService {
     return workers.flatMap(worker => {
       const own = projections.filter(item => item.binding.workerId === worker.id)
       if (own.length === 0) return []
-      const agents = knownAgentKeys.map(agentKey => agentExecutionAxis(this.capabilityOf(worker, agentKey), connectionOf(worker)))
+      const agents = knownAgentKeys.map(agentKey => observedAt(agentExecutionAxis(this.capabilityOf(worker, agentKey), connectionOf(worker)), probeTimeOf(worker)))
       const distributionAxis = this.aggregateDistribution(own, desiredRevision(worker.id), '该 Worker 上没有该资源')
       return [{
         workerId: worker.id,

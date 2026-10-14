@@ -4,6 +4,13 @@ import { createHash } from 'node:crypto'
 import type { AgentCapability, AgentKey, ReconcileReport, Resource, ResourceRevision, Timestamp, UserId, WorkerId } from '@wemux/domain'
 import { ResourceService } from '../application/resource-service.js'
 import { ResourceInventoryService } from '../application/resource-inventory-service.js'
+import { WorkerService } from '../application/worker-service.ts'
+import { ServerService, now } from '../application/server-service.ts'
+import { Notifications } from '../application/notifications.ts'
+import { CommandSigningIdentity } from '../application/command-signing.ts'
+import { SqliteServerStore } from '../storage/sqlite/store.ts'
+import { SharedSqliteDatabase } from '../storage/sqlite/shared-database.ts'
+import { seedOperator, instanceOperatorId } from './fixtures/administrator.ts'
 import { SqliteResourceRepository } from '../storage/sqlite-resource-repository.js'
 import type { Worker } from '@wemux/server-domain'
 
@@ -62,7 +69,7 @@ function capability(overrides: Partial<AgentCapability> & { agentKey: AgentKey }
 }
 
 function workerRecord(id: WorkerId, connectionState: Worker['connectionState'], capabilities: readonly AgentCapability[], extra: Partial<Worker> = {}): Worker {
-  return { id, teamId: 'team-1' as never, ownerId: actor, name: `节点 ${id}`, shareScope: 'team' as never, connectionState, version: '2.0.0', platform: 'linux', capabilities, lastSeenAt: at, ...extra }
+  return { id, teamId: 'team-1' as never, ownerId: actor, name: `节点 ${id}`, shareScope: 'team' as never, connectionState, version: '2.0.0', platform: 'linux', capabilities, capabilitiesObservedAt: at, lastSeenAt: at, ...extra }
 }
 
 async function harness(workers: readonly Worker[]) {
@@ -120,6 +127,11 @@ test('未探测到的 Agent 也列出，且可执行状态为不可用而不是�
   assert.equal(codex.version, null)
   assert.equal(codex.authentication.state, 'unknown')
   assert.equal(codex.configuration.state, 'unconfigured')
+
+  // 离线 Worker 的上报时间必须保留，界面才能判断快照是否过期。
+  const onlinePi = snapshot.agents.find(entry => entry.agentKey === 'pi')!
+  assert.equal(onlinePi.execution.observedAt, at)
+  assert.ok(snapshot.agents.every(entry => entry.execution.observedAt === at))
 })
 
 test('可用但没有版本探测的 Agent 不得被展示为可执行，认证缺失不冒充已认证', async t => {
@@ -135,6 +147,7 @@ test('可用但没有版本探测的 Agent 不得被展示为可执行，认证�
   const pi = snapshot.agents.find(entry => entry.agentKey === 'pi')!
   assert.equal(pi.execution.state, 'unavailable')
   assert.match(pi.execution.detail, /版本/)
+  assert.equal(pi.execution.observedAt, at, '探测时间来自 Worker 的探测快照')
   assert.equal(pi.authentication.state, 'unknown')
   assert.equal(pi.configuration.state, 'configured')
 
@@ -235,6 +248,29 @@ test('分发状态区分已确认、等待重启与安装失败，并保留回�
   const target = entry.targets.find(item => item.workerId === onlineId)!
   assert.equal(target.distribution.observedAt, at)
   assert.equal(target.distribution.setRevision, set.revision)
+})
+
+test('Worker 上报的探测时刻被持久化，并在管理面作为探测证据时间展示', async t => {
+  const database = new SharedSqliteDatabase(':memory:')
+  const store = new SqliteServerStore(database); t.after(() => store.close())
+  const signals = new Notifications()
+  const server = new ServerService(store, signals, { commandSigning: new CommandSigningIdentity(database.connection) })
+  await seedOperator(store, server)
+  const { worker } = await server.enroll({ token: (await server.createEnrollment({})).token, name: '探测节点' })
+  const ingress = new WorkerService(store, signals)
+  await ingress.connected(worker.id, { workerVersion: '2.0.0', platform: 'linux' })
+
+  const detectedAt = '2026-05-02T03:04:05.000Z' as Timestamp
+  await ingress.receive(worker.id, { type: 'capability', workerId: worker.id, capabilities: [capability({ agentKey: 'pi' as AgentKey, version: '0.87.1' })], detectedAt })
+  assert.equal((await store.resources.getWorker(worker.id))?.capabilitiesObservedAt, detectedAt)
+
+  const repository = new SqliteResourceRepository(':memory:'); t.after(() => repository.close())
+  const resources = new ResourceService(repository, { send: () => undefined }, () => at)
+  const inventory = new ResourceInventoryService(resources, () => store.resources.listWorkers(), () => at)
+  const entry = (await inventory.inventory()).agents.find(item => item.agentKey === 'pi')!
+  assert.equal(entry.execution.state, 'executable')
+  assert.equal(entry.execution.observedAt, detectedAt)
+  assert.notEqual(entry.execution.observedAt, now(), '探测时间不是读取/心跳时间')
 })
 
 test('预设列出为模板，不直接声明可执行', async t => {
