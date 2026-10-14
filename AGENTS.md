@@ -64,9 +64,9 @@ node apps/worker/dist/cli.js start --prefer tailnet  # 优先走 tailnet 地址�
 node apps/worker/dist/cli.js tailscale --server http://100.101.102.103:8010
 # Server 也有自检：GET /api/cluster/tailnet（管理员鉴权）→ 注册弹窗据此推荐 tailnet 地址
 # 沙箱内无真实 tailscale；测试桩在 /tmp/fake-bin/tailscale，PATH=/tmp/fake-bin:$PATH 启动 server 即可验证
-# 浏览器 E2E：playwright-core@1.61.0 恰好匹配沙箱已缓存的 chromium-1228，环境在 /tmp/wemux-tailnet-pw
-# Chromium 可执行文件在 /opt/data/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome（/root/.cache 下没有）：
-# PLAYWRIGHT_CORE_PATH=/tmp/wemux-tailnet-pw/node_modules/playwright-core/index.mjs PLAYWRIGHT_CHROMIUM_PATH=/opt/data/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome
+# 浏览器 E2E：playwright-core@1.61.0 在本机缓存 /home/qdw/.cache/wemux-pw，系统 Chromium 152 在 /usr/bin/chromium
+# （旧文档里的 /tmp/wemux-tailnet-pw 与 /opt/data/.cache/ms-playwright 在本机已不存在，勿再引用）：
+# PLAYWRIGHT_CORE_PATH=/home/qdw/.cache/wemux-pw/node_modules/playwright-core/index.mjs PLAYWRIGHT_CHROMIUM_PATH=/usr/bin/chromium
 # web-next 浏览器用例与 apps/e2e 脚本都要求 WEMUX_NEXT_TEST_DIST 指向 /tmp/ 下的一次性 dist 拷贝（脚本断言 startsWith('/tmp/')）
 ```
 
