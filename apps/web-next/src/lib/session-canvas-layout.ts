@@ -30,10 +30,12 @@ export interface CanvasLayout {
   readonly height: number
 }
 
-function depthOf(nodes: readonly SessionGraphNode[], edges: readonly SessionGraphEdge[]): Map<string, number> {
+type SessionId = SessionGraphNode['sessionId']
+
+function depthOf(nodes: readonly SessionGraphNode[], edges: readonly SessionGraphEdge[]): Map<SessionId, number> {
   const known = new Set(nodes.map(node => node.sessionId))
-  const outgoing = new Map<string, string[]>()
-  const incoming = new Set<string>()
+  const outgoing = new Map<SessionId, SessionId[]>()
+  const incoming = new Set<SessionId>()
   for (const edge of edges) {
     if (!known.has(edge.sourceSessionId) || !known.has(edge.targetSessionId)) continue
     const list = outgoing.get(edge.sourceSessionId)
@@ -41,10 +43,10 @@ function depthOf(nodes: readonly SessionGraphNode[], edges: readonly SessionGrap
     else outgoing.set(edge.sourceSessionId, [edge.targetSessionId])
     incoming.add(edge.targetSessionId)
   }
-  const depth = new Map<string, number>()
-  const placed = new Set<string>()
+  const depth = new Map<SessionId, number>()
+  const placed = new Set<SessionId>()
   // 从没有任何入边的节点出发按最短距离分列：环上的节点保留首次落列的深度，深度不会无尽增长。
-  const queue = nodes.map(node => node.sessionId).filter(id => !incoming.has(id)).sort().map(id => [id, 0] as const)
+  const queue: Array<readonly [SessionId, number]> = nodes.map(node => node.sessionId).filter(id => !incoming.has(id)).sort().map(id => [id, 0] as const)
   for (let index = 0; index < queue.length; index += 1) {
     const [sessionId, distance] = queue[index]!
     if (placed.has(sessionId)) continue
