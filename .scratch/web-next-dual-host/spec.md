@@ -84,6 +84,8 @@ Status: ready-for-agent
 | --- | --- |
 | [01 资源管理面](issues/01-resource-management.md) | 01 |
 | [02 独立宿主、身份入群与双端验收](issues/02-local-host-enrollment-acceptance.md) | 02、03、04 |
+| [03 资源管理面写路径](issues/03-resource-management-write-path.md) | 新增（原票 01 拆分：管理面内的配置动作） |
+| [04 Web 远程托管安装入口](issues/04-remote-managed-agent-install.md) | 新增（原票 01 拆分：远程托管安装入口；用户决定 m00996：从 Server 获取一键安装脚本，安装到指定目录） |
 
 02 内依次推进本地宿主、入群生命周期、桌面手机验收，不另建子票。证据准备完成后转 `ready-for-human`；用户确认前不关闭该 ticket、不认定本 spec 验收通过、不勾选 NEXT-11 / NEXT-13 / NEXT-14。
 

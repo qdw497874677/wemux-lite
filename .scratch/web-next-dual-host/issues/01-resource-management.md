@@ -15,10 +15,10 @@ Blocked by: 无未完成 ticket 前置；复用现有 Project/Workspace、Worker
 
 ## 验收
 
-- [ ] 六类资源均可列出、查看与配置（列出与查看已完成并验证；web-next 管理面目前是只读投影，配置仍走既有 `/api/resources*` 授权管理 API，管理面内的配置动作未实现）
+- [ ] 六类资源均可列出、查看与配置（列出与查看已完成并验证；管理面内的配置动作移交 [票 03](03-resource-management-write-path.md)，不在本票验收）
 - [x] 四态分离展示，配置状态不冒充可执行状态
 - [x] 版本与能力来自真实探测，探测失败如实上报不可用
-- [ ] 远程安装 Agent 不覆盖全局安装，失败给出明确原因（失败原因上报已验证；托管安装的固定版本与 Worker home 独立目录是既有 `ResourceReconciler` 行为，本票未新增针对远程安装入口的验收，且 Web 远程安装入口尚未实现）
+- [ ] 远程安装 Agent 不覆盖全局安装，失败给出明确原因（失败原因上报已验证；固定版本 + Worker home 独立目录是既有 `ResourceReconciler`/`installAgent` 行为；Web 远程安装入口（Server 一键安装脚本、指定目录）移交 [票 04](04-remote-managed-agent-install.md)，不在本票验收）
 - [x] 无权限用户不能修改管理面配置
 - [x] 断言与截图作为证据留存
 
@@ -61,6 +61,10 @@ Blocked by: 无未完成 ticket 前置；复用现有 Project/Workspace、Worker
 
 ## 门槛（转 ready-for-human 的理由）
 
-1. 验收项 1 的「配置」与管理面内的配置动作未实现：web-next `/next/resources` 目前是只读投影（列出、查看、四态、刷新），写路径仍是既有 `/api/resources*`、`/api/resource-presets`、`/api/resource-bindings` 授权管理 API（既有测试 `resource-http.test.ts`、`resource-authorization-http.test.ts` 覆盖）。是否需要管理面内配置动作，需人工确认范围。
-2. 验收项 4 的远程托管安装入口未实现（`AGENTS.md` 已记「Web 远程安装入口尚未实现」）：本票只验证了安装失败原因的如实上报，未新增「不覆盖全局安装、固定版本、独立目录」的远程安装验收。
+1. 验收项 1 的「配置」与管理面内的配置动作未实现：web-next `/next/resources` 目前是只读投影（列出、查看、四态、刷新）。**2026-10-14 用户决定（m00996）**：要有这些资源的管理；配置动作拆为 [票 03](03-resource-management-write-path.md)，本票验收限定为只读投影。
+2. 验收项 4 的远程托管安装入口未实现（`AGENTS.md` 已记「Web 远程安装入口尚未实现」）：本票只验证了安装失败原因的如实上报，未新增「不覆盖全局安装、固定版本、独立目录」的远程安装验收。**2026-10-14 用户决定（m00996）**：入口从 Server 获取一键安装脚本、装到指定目录（沿用 Worker 一键安装的既有逻辑）；拆为 [票 04](04-remote-managed-agent-install.md)。
 3. `spec.md` 要求证据准备完成后转 ready-for-human，并在用户确认前不勾选 NEXT-11/13/14、不关闭本票。
+
+## Comments
+
+- 2026-10-14（用户决定，m00996）：管理面要有这些资源的管理。原验收项 1 的配置动作拆为[票 03](03-resource-management-write-path.md)；原验收项 4 的远程托管安装入口拆为[票 04](04-remote-managed-agent-install.md)，入口沿用 Worker 一键安装的既有逻辑：从 Server 获取一键安装脚本，安装到指定目录（Worker home 内独立目录，不覆盖全局安装）。本票验收范围收敛为只读投影与四态如实呈现，状态维持 `ready-for-human` 等待人工确认。
