@@ -25,6 +25,7 @@ import type { AttentionService } from '../../application/attention-service.ts'
 import type { ArtifactService } from '../../application/artifact-service.ts'
 import type { ProjectAccessService } from '../../application/project-access-service.ts'
 import type { ResourceService } from '../../application/resource-service.ts'
+import type { ResourceInventoryService } from '../../application/resource-inventory-service.ts'
 import type { ServerService } from '../../application/server-service.ts'
 import type { SessionAccessService } from '../../application/session-access-service.ts'
 import type { SessionLineageService } from '../../application/session-lineage-service.ts'
@@ -88,6 +89,7 @@ export interface HttpHandlerOptions {
   readonly attention?: AttentionService | null
   readonly artifacts?: ArtifactService | null
   readonly resources?: ResourceService | null
+  readonly resourceInventory?: ResourceInventoryService | null
 }
 
 export interface RouteRequestContext extends HttpHandlerOptions {

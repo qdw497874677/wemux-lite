@@ -4,6 +4,10 @@ import type { AgentKey, ModelId } from './values.js'
 
 export type KnownAgentKey = 'pi' | 'claude-code' | 'codex' | 'opencode'
 
+/** 管理面需要按 Agent 身份枚举，未安装/未探测的也要如实列出而不是消失。 */
+const agentKeys = ['pi', 'claude-code', 'codex', 'opencode'] as const satisfies readonly KnownAgentKey[]
+export const knownAgentKeys: readonly AgentKey[] = agentKeys.map(key => key as AgentKey)
+
 export interface AgentRef {
   readonly workerId: WorkerId
   readonly agentKey: AgentKey

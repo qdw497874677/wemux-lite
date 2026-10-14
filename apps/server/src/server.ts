@@ -27,6 +27,7 @@ import { ApprovalDecisionRouter } from './application/approval-decision-router.t
 import { AttentionService } from './application/attention-service.ts'
 import { ArtifactService } from './application/artifact-service.ts'
 import { ResourceService } from './application/resource-service.ts'
+import { ResourceInventoryService } from './application/resource-inventory-service.ts'
 import { CanvasCollaborationService } from './application/canvas-collaboration-service.ts'
 import { CanvasLayoutService } from './application/canvas-layout-service.ts'
 import { ConnectorService } from './application/connector-service.ts'
@@ -208,6 +209,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
   } }
   resources = new ResourceService(resourceRepository, { send: (workerId, payload) => { void workerGateway.send(workerId, payload) } }, undefined, resourceBlobs)
   workers.attachResources(resources)
+  const resourceInventory = new ResourceInventoryService(resources, () => service.listWorkers())
   const sessionFiles = new SessionFileService(service, workers, workerGateway)
   const sessionTerminals = new SessionTerminalService(service, workers, workerGateway)
   const tasks = new TaskService(store, event => notifications.project(event), service)
@@ -257,6 +259,7 @@ export function createWemuxServer(options: WemuxServerOptions) {
     attention,
     artifacts,
     resources,
+    resourceInventory,
   }))
   gateway = new WorkerGateway(server, auth, workers, notifications, new ServerTransportStore(options.databasePath === ':memory:' ? ':memory:' : `${options.databasePath}.transport`), undefined, service)
   let closed = false
