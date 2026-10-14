@@ -74,7 +74,7 @@ test('候选排序按剩余容量比例优先，比例相同时按采样时间�
     worker({ workerId: 'idle', capacityLimit: 2, capacityInUse: 0 }),
     worker({ workerId: 'half', capacityLimit: 2, capacityInUse: 1 }),
   ], { kind: 'any' })
-  assert.deepEqual(ordered.map(item => item.workerId), ['idle', 'busy', 'half'])
+  assert.deepEqual(ordered.map(item => item.workerId), ['idle', 'half', 'busy'])
 })
 
 test('候选排序过滤越权/不合格/无容量，且只保留机器范围内成员', () => {
@@ -131,8 +131,8 @@ test('结果未知的已承接执行不因超时释放占用，也不允许换�
 test('接手复用同一执行意图：旧代次不得越过交接边界，新代次需确认旧执行已停止', () => {
   const handed = intent({ generation: 1 })
   const old = claim({ generation: 0, state: 'accepted' })
-  assert.deepEqual(claimDecision({ intent: handed, worker: worker(), attempt: { workerId: 'worker-b', generation: 0 }, currentClaim: old, priorExecutionConfirmedStopped: true }), { ok: false, reason: 'stale_generation' })
-  assert.deepEqual(claimDecision({ intent: handed, worker: worker(), attempt: { workerId: 'worker-b', generation: 1 }, currentClaim: old, priorExecutionConfirmedStopped: false }), { ok: false, reason: 'prior_execution_in_flight' })
+  assert.deepEqual(claimDecision({ intent: handed, worker: worker(), attempt: { workerId: 'worker-a', generation: 0 }, currentClaim: old, priorExecutionConfirmedStopped: true }), { ok: false, reason: 'stale_generation' })
+  assert.deepEqual(claimDecision({ intent: handed, worker: worker({ workerId: 'worker-b' }), attempt: { workerId: 'worker-b', generation: 1 }, currentClaim: old, priorExecutionConfirmedStopped: false }), { ok: false, reason: 'prior_execution_in_flight' })
   assert.deepEqual(claimDecision({ intent: handed, worker: worker({ workerId: 'worker-b' }), attempt: { workerId: 'worker-b', generation: 1 }, currentClaim: old, priorExecutionConfirmedStopped: true }), { ok: true, remainingCapacity: 0 })
   assert.deepEqual(claimDecision({ intent: handed, worker: worker({ workerId: 'worker-b' }), attempt: { workerId: 'worker-b', generation: 1 }, currentClaim: claim({ generation: 1, state: 'reserved' }), priorExecutionConfirmedStopped: true }), { ok: false, reason: 'already_claimed' })
 })
