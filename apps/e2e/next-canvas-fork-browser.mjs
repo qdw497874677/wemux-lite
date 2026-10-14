@@ -219,6 +219,29 @@ try {
     revocations.push({ name, exit: 'stream', status: streamText.trim(), exitStatuses })
     check(true, `${name}: 撤权后实时流收到服务端撤销信号并停止，界面清空受控缓存，四个出口都停止提供`)
 
+    step = `${name}: 撤权后重连实时出口由服务端重新鉴权并拒绝`
+    await canvas.getByRole('button', { name: '重新连接实时出口' }).click()
+    await page.waitForFunction(() => document.querySelector('[data-stream-status]')?.dataset.streamStatus === 'error', undefined, { timeout: 20000 })
+    const reconnectText = await canvas.locator('[data-stream-status]').innerText()
+    assert.doesNotMatch(reconnectText, /已连接/, '撤权后重连不得回到已连接状态')
+    assert.match(reconnectText, /订阅失败/, '重连必须如实报告服务端拒绝')
+    assert.equal(await canvas.locator('[data-session-id]').count(), 0, '重连失败不得把已清空的节点带回来')
+    check(true, `${name}: 撤权后重连实时出口重新鉴权被拒，界面仍未从本地副本恢复内容`)
+
+    step = `${name}: 撤权后刷新不得从本地副本恢复内容`
+    await page.reload({ waitUntil: 'domcontentloaded' })
+    await page.waitForLoadState('networkidle')
+    const reloadedText = await page.evaluate(() => document.body.innerText)
+    assert.doesNotMatch(reloadedText, /（分支）/, '刷新后不得从任何本地副本恢复分支节点')
+    assert.ok(!reloadedText.includes(sourceTitle), '刷新后不得从任何本地副本恢复来源会话标题')
+    assert.equal(await page.locator('[data-session-id]').count(), 0, '刷新后不得恢复节点')
+    assert.equal(await page.locator('[data-edge-key]').count(), 0)
+    assert.equal(await page.locator('[data-lineage]').count(), 0)
+    assert.equal(await page.locator('[data-stream-status]').count(), 0, '项目访问被撤后不得再建立画布订阅')
+    await page.screenshot({ path: join(evidence, `canvas-reloaded-${name}.png`), fullPage: true })
+    revocations.push({ name, exit: 'reload', stream: reconnectText.trim(), visible: reloadedText.slice(0, 200) })
+    check(true, `${name}: 撤权后刷新由服务端拒绝，界面不从本地副本恢复任何画布内容`)
+
     await context.close()
   }
   await writeFile(join(evidence, 'revocations.json'), JSON.stringify(revocations, null, 2))
