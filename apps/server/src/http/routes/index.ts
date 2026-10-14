@@ -9,6 +9,7 @@ import { feishuRoutes } from './feishu-routes.ts'
 import { connectorRoutes } from './connector-routes.ts'
 import { projectRoutes } from './project-routes.ts'
 import { nodeResourceRoutes } from './node-resource-routes.ts'
+import { resourceInventoryRoutes } from './resource-inventory-routes.ts'
 import { projectionRoutes } from './projection-routes.ts'
 import { publicRoutes } from './public-routes.ts'
 import { resourceRoutes } from './resource-routes.ts'
@@ -36,6 +37,7 @@ export const routes: readonly RouteDescriptor[] = [
   ...workspaceRoutes,
   ...workerRoutes,
   ...nodeResourceRoutes,
+  ...resourceInventoryRoutes,
   ...sessionRoutes,
   ...resourceRoutes,
   ...adminRoutes,
