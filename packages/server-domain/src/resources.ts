@@ -31,6 +31,11 @@ export interface Worker {
   /** Worker 自己声明的能力探测时刻；缺失时只说明它是历史记录，不得当作当前事实。 */
   readonly capabilitiesObservedAt?: Timestamp | null
   readonly lastSeenAt: Timestamp | null
+  /**
+   * 机器管理者配置的最大并发执行数；缺省时用平台默认（1）。容量只描述执行槽位，
+   * CPU/内存是选机参考而非准入依据。
+   */
+  readonly executionCapacityLimit?: number
 }
 
 export interface Project {

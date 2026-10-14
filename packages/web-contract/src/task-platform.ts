@@ -6,7 +6,7 @@ export type { ActionCapability, CapabilityFacts, CapabilityAction, TaskCapabilit
 /** Status vocabulary and transition rule are domain invariants; re-exported so Web, Server and Worker share one contract. */
 export { taskStatuses, workflowTargets } from '@wemux/domain'
 export type { TaskStatus, BlockedFrom, CancelledFrom, TaskWorkflowState } from '@wemux/domain'
-import type { TaskStatus } from '@wemux/domain'
+import type { MachineScope, TaskStatus } from '@wemux/domain'
 /** Project review vocabulary is shared with the Task projection; one definition serves both. */
 import type { ReviewPolicy } from './browser-host.js'
 export type { ReviewPolicy }
@@ -121,6 +121,10 @@ export interface TaskDetail extends TaskSummary {
   readonly cancelledFrom: Exclude<TaskStatus, 'cancelled'> | null
   readonly workspaces: readonly TaskWorkspace[]
   readonly links: readonly TaskLink[]
+  /**
+   * 机器范围：决定后续执行意图能落在哪些 Worker。缺省为任意获权候选，不改变已有 Run 的绑定。
+   */
+  readonly machineScope?: MachineScope
 }
 export type Task = TaskDetail
 export interface TaskWorkspace {
@@ -242,6 +246,11 @@ export const taskErrorStatus = {
   request_id_conflict: 409, version_conflict: 409, active_run: 409,
   assignment_changed: 409, workspace_not_ready: 409, runtime_unavailable: 409,
   reuse_ineligible: 409, workspace_bound: 409, invalid_transition: 409,
+  // 派发票据 01：机器范围、申领、容量与承接的拒绝原因直接进 HTTP 语义，界面不改写服务端判定。
+  machine_scope_invalid: 400, machine_scope_unauthorized: 403, worker_unauthorized: 403,
+  worker_identity_mismatch: 403, worker_not_a_candidate: 409, claim_already_held: 409,
+  claim_stale_generation: 409, claim_not_holding: 409, claim_not_found: 404,
+  intent_not_dispatchable: 409, insufficient_capacity: 409, prior_execution_in_flight: 409,
 } as const
 export type TaskErrorCode = keyof typeof taskErrorStatus
 export interface VersionConflictDetails {

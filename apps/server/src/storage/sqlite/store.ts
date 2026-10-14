@@ -347,6 +347,20 @@ export class SqliteServerStore implements ServerStore {
       return review
     })
   }
+  private readDispatchIntents(where: string, ...params: string[]): import('../../application/ports/server-store-types.ts').DispatchIntentRecord[] {
+    return this.db.prepare(`SELECT * FROM task_dispatch_intents WHERE ${where}`).all(...params).map(row => {
+      const intent = JSON.parse(String(row.data)) as import('../../application/ports/server-store-types.ts').DispatchIntentRecord
+      if (!intent || intent.intentId !== row.id || intent.taskId !== row.task_id || intent.generation !== row.generation || intent.queueOrder !== row.queue_order || intent.state !== row.state) throw new AppError(409, 'Dispatch intent indexed identity is corrupt')
+      return intent
+    })
+  }
+  private readDispatchClaims(where: string, ...params: string[]): import('../../application/ports/server-store-types.ts').DispatchClaimRecord[] {
+    return this.db.prepare(`SELECT * FROM task_dispatch_claims WHERE ${where}`).all(...params).map(row => {
+      const claim = JSON.parse(String(row.data)) as import('../../application/ports/server-store-types.ts').DispatchClaimRecord
+      if (!claim || claim.claimId !== row.id || claim.intentId !== row.intent_id || claim.taskId !== row.task_id || claim.workerId !== row.worker_id || claim.generation !== row.generation || claim.state !== row.state || claim.requestId !== row.request_id) throw new AppError(409, 'Dispatch claim indexed identity is corrupt')
+      return claim
+    })
+  }
   private readonly taskReader: ServerStore['tasks'] = {
     reviewById: async id => this.readReviews('id=?', id)[0] ?? null,
     review: async runId => this.readReviews('run_id=? ORDER BY rowid DESC LIMIT 1', runId)[0] ?? null,
@@ -367,6 +381,15 @@ export class SqliteServerStore implements ServerStore {
     }),
     get: async id => { const row = this.db.prepare('SELECT data FROM tasks WHERE id=?').get(id); return row ? { ...JSON.parse(String(row.data)), workspaces: this.taskBindings(id) } : null },
     activity: async (id, after) => this.db.prepare('SELECT data FROM task_activity WHERE task_id=? AND seq>? ORDER BY seq').all(id, after).map(row => JSON.parse(String(row.data))),
+    dispatchIntent: async id => this.readDispatchIntents('id=?', id)[0] ?? null,
+    dispatchIntents: async taskId => this.readDispatchIntents('task_id=? ORDER BY generation DESC', taskId),
+    dispatchClaim: async id => this.readDispatchClaims('id=?', id)[0] ?? null,
+    dispatchClaimByRequest: async (intentId, requestId) => this.readDispatchClaims('intent_id=? AND request_id=?', intentId, requestId)[0] ?? null,
+    lastDispatchClaim: async intentId => (await this.readDispatchClaims('intent_id=? ORDER BY rowid DESC LIMIT 1', intentId))[0] ?? null,
+    activeDispatchClaim: async intentId => this.readDispatchClaims("intent_id=? AND state<>'released' ORDER BY rowid DESC LIMIT 1", intentId)[0] ?? null,
+    dispatchQueue: async () => this.readDispatchIntents("state='pending' ORDER BY queue_order, id"),
+    dispatchClaimsByWorker: async workerId => this.readDispatchClaims('worker_id=? ORDER BY rowid', workerId),
+    nextDispatchQueueOrder: async () => Number((this.db.prepare('SELECT COALESCE(MAX(queue_order), 0) + 1 AS next FROM task_dispatch_intents').get() as { next: number }).next),
   }
   readonly tasks = this.committed(this.taskReader)
   private readonly fileWriteReader: ServerStore['fileWrites'] = {
@@ -414,6 +437,18 @@ export class SqliteServerStore implements ServerStore {
       bind: async binding => { this.db.prepare('INSERT INTO task_workspaces(task_id,project_id,workspace_id,created_at) VALUES(?,?,?,?)').run(binding.taskId, binding.projectId, binding.workspaceId, binding.createdAt) },
       unbind: async (taskId, workspaceId) => { this.db.prepare('DELETE FROM task_workspaces WHERE task_id=? AND workspace_id=?').run(taskId, workspaceId) },
       save: async task => { this.db.prepare('INSERT INTO tasks VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data').run(task.id, task.projectId, JSON.stringify(task)) },
+      saveDispatchIntent: async intent => {
+        const stored = this.readDispatchIntents('id=?', intent.intentId)[0]
+        if (stored && JSON.stringify([stored.taskId, stored.generation, stored.queueOrder, stored.kind, stored.enqueuedAt, stored.supersedes]) !== JSON.stringify([intent.taskId, intent.generation, intent.queueOrder, intent.kind, intent.enqueuedAt, intent.supersedes])) throw new Error('Immutable dispatch intent identity changed')
+        this.db.prepare('INSERT INTO task_dispatch_intents(id,task_id,generation,queue_order,state,data) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,data=excluded.data').run(intent.intentId, intent.taskId, intent.generation, intent.queueOrder, intent.state, JSON.stringify(intent))
+      },
+      saveDispatchClaim: async claim => {
+        const stored = this.readDispatchClaims('id=?', claim.claimId)[0]
+        if (stored && JSON.stringify([stored.intentId, stored.taskId, stored.workerId, stored.generation, stored.requestId, stored.createdAt]) !== JSON.stringify([claim.intentId, claim.taskId, claim.workerId, claim.generation, claim.requestId, claim.createdAt])) throw new Error('Immutable dispatch claim identity changed')
+        // 有效承接的唯一性由 `task_dispatch_claims_active` 部分唯一索引裁决：并发申领在这里由
+        // SQLite 拒绝第二个写者，而不是先读后写。
+        this.db.prepare('INSERT INTO task_dispatch_claims(id,intent_id,task_id,worker_id,generation,state,request_id,created_at,data) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,data=excluded.data').run(claim.claimId, claim.intentId, claim.taskId, claim.workerId, claim.generation, claim.state, claim.requestId, claim.createdAt, JSON.stringify(claim))
+      },
       append: async (event, sourceKey) => {
         if (sourceKey && this.db.prepare('SELECT 1 FROM task_activity WHERE task_id=? AND source_key=?').get(event.taskId, sourceKey)) return
         const seq = Number(this.db.prepare('SELECT COALESCE(MAX(seq),0)+1 AS seq FROM task_activity WHERE task_id=?').get(event.taskId)!.seq)

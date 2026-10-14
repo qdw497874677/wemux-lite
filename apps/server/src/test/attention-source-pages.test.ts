@@ -5,7 +5,7 @@ import type { ProjectId, UserId } from '@wemux/domain'
 import type { AttentionSourcePage } from '../application/ports/attention-source.ts'
 import { SharedSqliteDatabase } from '../storage/sqlite/shared-database.ts'
 import { SqliteAttentionSource } from '../storage/sqlite/attention-source.ts'
-import { migrate, migrationCount } from '../storage/sqlite/migrations.ts'
+import { attentionHumanReviewIndexVersion, attentionPageIndexesVersion, migrate, migrationCount } from '../storage/sqlite/migrations.ts'
 
 const actorId = 'submitter' as UserId
 const authorizedProjectIds = ['project-a', 'project-b'] as ProjectId[]
@@ -234,7 +234,7 @@ test('attention ordering indexes migrate existing rows and replay without changi
     f.deadLetter('existing-delivery', 'project-a', recent)
     f.db.exec('DROP INDEX attention_failed_runs_order; DROP INDEX attention_dead_letters_order; DROP INDEX attention_human_reviews_order')
     // The two attention indexes precede the human review, personal visibility and Team coordination migrations.
-    for (const version of [migrationCount - 2, migrationCount - 3]) {
+    for (const version of [attentionHumanReviewIndexVersion, attentionPageIndexesVersion]) {
       f.db.prepare('DELETE FROM schema_migrations WHERE version=?').run(version)
     }
     migrate(f.db)

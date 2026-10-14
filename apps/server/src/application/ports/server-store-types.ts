@@ -50,6 +50,15 @@ import type {
 import type { CommandReceipt, WorkerCommand } from '@wemux/wire-protocol'
 import type { WorkspacePreparationProof, WorkspacePreparationProofIdentity } from './workspace-preparation-proof.ts'
 
+/** 持久执行意图：线协议视图加派发可消费性（状态本身已是线协议视图的一部分）。 */
+export type DispatchIntentRecord = import('@wemux/web-contract/task-dispatch').DispatchIntentView & {
+  /** 任务当前是否处于该意图可消费的状态（普通派发要求 todo，接手允许 in_progress）。 */
+  readonly dispatchable: boolean
+}
+
+/** 持久承接记录：线协议视图即权威外形，不附加只读派生字段，避免第二份真值。 */
+export type DispatchClaimRecord = import('@wemux/web-contract/task-dispatch').DispatchClaimView
+
 export interface ServerTaskReader {
   reviewById(id: string): Promise<import('@wemux/web-contract/task-platform').ReviewRequest | null>
   review(runId: string): Promise<import('@wemux/web-contract/task-platform').ReviewRequest | null>
@@ -68,6 +77,20 @@ export interface ServerTaskReader {
   list(projectId: string, includeDeleted?: boolean): Promise<readonly import('@wemux/web-contract/task-platform').TaskSummary[]>
   get(id: string): Promise<import('@wemux/web-contract/task-platform').TaskDetail | null>
   activity(id: string, after: number): Promise<readonly import('@wemux/web-contract/task-platform').TaskActivity[]>
+  dispatchIntent(id: string): Promise<DispatchIntentRecord | null>
+  dispatchIntents(taskId: string): Promise<readonly DispatchIntentRecord[]>
+  dispatchClaim(id: string): Promise<DispatchClaimRecord | null>
+  dispatchClaimByRequest(intentId: string, requestId: string): Promise<DispatchClaimRecord | null>
+  /** 当前仍占用该执行意图的承接（reserved/accepted/unknown）；已释放不算。 */
+  activeDispatchClaim(intentId: string): Promise<DispatchClaimRecord | null>
+  /** 该意图上最后一次承接，含已释放记录：接手要绑定被接替的执行身份，不能只看进行中的承接。 */
+  lastDispatchClaim(intentId: string): Promise<DispatchClaimRecord | null>
+  /** 待安排队列：按持久入队序号稳定排序，重放/重启不重排。 */
+  dispatchQueue(): Promise<readonly DispatchIntentRecord[]>
+  /** 某台 Worker 上的全部承接，用于统计仍占用的执行槽位。 */
+  dispatchClaimsByWorker(workerId: string): Promise<readonly DispatchClaimRecord[]>
+  /** 下一个持久入队序号：单调递增，重放与重启都不得重排既有意图。 */
+  nextDispatchQueueOrder(): Promise<number>
 }
 export interface ServerTaskWriter {
   saveReview(review: import('@wemux/web-contract/task-platform').ReviewRequest): Promise<void>
@@ -77,6 +100,9 @@ export interface ServerTaskWriter {
   unbind(taskId: string, workspaceId: string): Promise<void>
   save(task: import('@wemux/web-contract/task-platform').TaskDetail): Promise<void>
   append(event: Omit<import('@wemux/web-contract/task-platform').TaskActivity, 'seq'>, sourceKey?: string): Promise<void>
+  saveDispatchIntent(intent: DispatchIntentRecord): Promise<void>
+  /** 有效承接（state<>'released'）在同一意图上唯一，冲突由部分唯一索引裁决。 */
+  saveDispatchClaim(claim: DispatchClaimRecord): Promise<void>
 }
 
 export interface PendingCommand {

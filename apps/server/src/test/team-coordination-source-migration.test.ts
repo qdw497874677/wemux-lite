@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SharedSqliteDatabase } from '../storage/sqlite/shared-database.ts'
-import { migrate, migrationCount } from '../storage/sqlite/migrations.ts'
+import { migrate, migrationCount, teamCoordinationSourceVersion } from '../storage/sqlite/migrations.ts'
 import { runInvariants } from '../storage/sqlite/run-invariants.ts'
 
 const teamId = 'team-a', ownerId = 'owner-a', workerId = 'worker-a', agentKey = 'test'
@@ -39,7 +39,8 @@ test('Team coordination source migration upgrades an existing database and repla
     db.exec(`CREATE TRIGGER session_task_scope BEFORE UPDATE ON records WHEN NEW.kind='session' AND json_extract(NEW.data,'$.taskId') IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM tasks WHERE id=json_extract(NEW.data,'$.taskId') AND project_id=json_extract(NEW.data,'$.projectId'))
       BEGIN SELECT RAISE(ABORT,'Session Task project mismatch'); END;`)
-    db.prepare('DELETE FROM schema_migrations WHERE version=?').run(migrationCount)
+    // 只回退本迁移的版本行，避免把「最后一条迁移」与它绑死。
+    db.prepare('DELETE FROM schema_migrations WHERE version=?').run(teamCoordinationSourceVersion)
     migrate(db)
     migrate(db)
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get()?.count, migrationCount)

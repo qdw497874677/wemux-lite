@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { runInvariants } from './run-invariants.ts'
 import { teamCoordinationSourceMigration } from './team-coordination-source.ts'
+import { dispatchClaimsMigration } from './dispatch-claims.ts'
 import { attentionPageIndexesMigration, attentionHumanReviewIndexMigration } from './attention-page-indexes.ts'
 import { commandRejectionsMigration } from './command-rejections.ts'
 import { sessionModelSelectionMigration } from './session-model-selection.ts'
@@ -676,10 +677,20 @@ const workspaceAccountVisibilityMigration = `CREATE TABLE IF NOT EXISTS workspac
   PRIMARY KEY(account_id,workspace_id));
 CREATE INDEX IF NOT EXISTS workspace_account_visibility_actor_hidden ON workspace_account_visibility(account_id,hidden);`
 
-const migrations = [...legacyMigrations, ...accountMigrations, fileWriteAdmissionMigration, fileWriteReplacementMigration, fileWriteResultsMigration, sessionModelSelectionMigration, legacyModelSelectionMigration, legacyModelChainMigration, commandRejectionsMigration, attentionPageIndexesMigration, attentionHumanReviewIndexMigration, workspaceAccountVisibilityMigration, teamCoordinationSourceMigration]
+const migrations = [...legacyMigrations, ...accountMigrations, fileWriteAdmissionMigration, fileWriteReplacementMigration, fileWriteResultsMigration, sessionModelSelectionMigration, legacyModelSelectionMigration, legacyModelChainMigration, commandRejectionsMigration, attentionPageIndexesMigration, attentionHumanReviewIndexMigration, workspaceAccountVisibilityMigration, teamCoordinationSourceMigration, dispatchClaimsMigration]
 
 /** 迁移条目数：升级测试用它验证重放不重复插入版本行，避免硬编码数字后静默失效。 */
 export const migrationCount = migrations.length
+
+/**
+ * 具名版本号：需要回放某一特定位迁移的测试用它，而不是「倒数第 N 个」——
+ * 追加新迁移不再改变既有迁移的版本，测试也不因尾部增长而失效。
+ */
+export const attentionPageIndexesVersion = migrations.indexOf(attentionPageIndexesMigration) + 1
+export const attentionHumanReviewIndexVersion = migrations.indexOf(attentionHumanReviewIndexMigration) + 1
+export const workspaceAccountVisibilityVersion = migrations.indexOf(workspaceAccountVisibilityMigration) + 1
+export const dispatchClaimsVersion = migrations.indexOf(dispatchClaimsMigration) + 1
+export const teamCoordinationSourceVersion = migrations.indexOf(teamCoordinationSourceMigration) + 1
 
 export function migrate(db: DatabaseSync): void {
   db.exec('PRAGMA foreign_keys=ON')
