@@ -245,6 +245,7 @@ test('分发状态区分已确认、等待重启与安装失败，并保留回�
   const entry = snapshot.skills.find(item => item.id === skill.resource.id)!
   assert.equal(entry.authentication.state, 'not-required')
   assert.equal(entry.distribution.state, 'pending', '仍有未完成目标的技能不算全部分发')
+  assert.equal(entry.distribution.setRevision, set.revision, '资源级条目没有唯一期望态时退回 Worker 回执里的版本')
   const target = entry.targets.find(item => item.workerId === onlineId)!
   assert.equal(target.distribution.observedAt, at)
   assert.equal(target.distribution.setRevision, set.revision)

@@ -315,12 +315,15 @@ export class ResourceInventoryService {
     if (projections.length === 0) return distribution('not-distributed', emptyDetail, setRevision)
     const axes = projections.map(item => bindingDistributionAxis(item.binding.status, item.reconcile))
     const observedAt = axes.map(axis => axis.observedAt).filter((value): value is Timestamp => value !== null).sort().at(-1) ?? null
+    // 资源级条目跨多个目标时没有唯一的期望态版本，退回使用 Worker 回执里的版本，避免只留下空白。
+    const receiptRevision = axes.map(axis => axis.setRevision).filter((value): value is number => value !== null).sort((left, right) => left - right).at(-1) ?? null
+    const revision = setRevision ?? receiptRevision
     const failed = axes.find(axis => axis.state === 'failed')
-    if (failed) return distribution('failed', failed.detail, setRevision, observedAt)
+    if (failed) return distribution('failed', failed.detail, revision, observedAt)
     const done = axes.filter(axis => axis.state === 'distributed').length
-    if (done === axes.length) return distribution('distributed', axes[0]!.detail, setRevision, observedAt)
+    if (done === axes.length) return distribution('distributed', axes[0]!.detail, revision, observedAt)
     const pending = axes.find(axis => axis.state !== 'distributed')!
-    return distribution('pending', done === 0 ? pending.detail : `${done}/${axes.length} 个目标已确认安装｜${pending.detail}`, setRevision, observedAt)
+    return distribution('pending', done === 0 ? pending.detail : `${done}/${axes.length} 个目标已确认安装｜${pending.detail}`, revision, observedAt)
   }
 
   private targets(projections: readonly Projection[], workers: readonly Worker[], desiredRevision: (workerId: WorkerId) => number | null): readonly ResourceInventoryTarget[] {
