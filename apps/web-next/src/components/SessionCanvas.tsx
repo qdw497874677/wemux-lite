@@ -170,7 +170,7 @@ function SessionCanvasScope({ api, project, collaboration, initialSessionId }: P
           <h5>子分支</h5>{!lineage.children.length && <p>还没有从本会话分出的会话。</p>}<ul>{lineage.children.map(fork => <li key={fork.forkId} data-child-fork={fork.forkId}><p>Fork {fork.forkId}：{fork.sourceSessionId} → {fork.targetSessionId}</p><p>分支点游标：{fork.sourceEventCursor}；{kindOf(fork)?.visibility === 'placeholder' ? '目标会话当前不可读，不显示标题' : '目标会话可读'}</p><Button variant="outline" onClick={() => setSelected(fork.targetSessionId)}>查看分支会话</Button></li>)}</ul></>}
         {writable
           ? <form className="account-form" aria-label="从固定游标创建分支" onSubmit={event => { event.preventDefault(); void fork() }}><fieldset disabled={forkBusy}>
-            <p>从固定游标分支：目标会话拥有独立的 Journal 与后续上下文，来源游标之后的消息不会进入目标；来源会话历史保持不变。</p>
+            <p>从固定游标分支：目标会话拥有独立的 Journal 与后续上下文，来源游标之后的消息不会进入目标；来源会话历史保持不变。分支也不复制文件或执行现场，目标按所选执行环境落到自己的 Session，同一执行环境内的文件状态仍由该落点共享。</p>
             <p>此会话当前持久化到游标 {lineage.durableSeq}，Fork 必须在已持久化的游标上创建。</p>
             <label>分支点事件游标<Input aria-label="分支点事件游标" inputMode="numeric" value={cursor} required onChange={event => setCursorDraft(event.target.value)} /></label>
             <label>目标执行环境<select aria-label="目标执行环境" value={target} required onChange={event => setTarget(event.target.value)}><option value="">选择 Workspace / Worker / Agent / Model</option>{options.map(value => <option key={value.key} value={value.key}>{value.label}</option>)}</select></label>
