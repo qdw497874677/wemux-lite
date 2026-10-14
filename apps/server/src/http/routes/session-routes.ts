@@ -163,12 +163,12 @@ export const sessionRoutes: readonly RouteDescriptor[] = [
     await authorizeResource()
     context.streams.open(context.response, id, eventCursor(context), actor, authorizeCredential, authorizeResource, credentialActor)
   } },
-  { method: 'GET', pattern: '/sessions/:sessionId/lineage', auth: 'admin', handler: async context => {
+  { method: 'GET', pattern: '/sessions/:sessionId/lineage', auth: 'authenticated', handler: async context => {
     if (!context.lineage) throw new AppError(404, 'Not found')
-    context.json(200, await context.lineage.lineage({ operator: await context.operator(), sessionId: context.params.sessionId as SessionId }))
+    context.json(200, await context.lineage.lineage({ operator: await context.actor(), sessionId: context.params.sessionId as SessionId }))
   } },
-  { method: 'GET', pattern: '/session-forks/:forkId', auth: 'admin', handler: async context => {
+  { method: 'GET', pattern: '/session-forks/:forkId', auth: 'authenticated', handler: async context => {
     if (!context.lineage) throw new AppError(404, 'Not found')
-    context.json(200, await context.lineage.getForkPoint({ operator: await context.operator(), forkId: context.params.forkId as SessionForkId }))
+    context.json(200, await context.lineage.getForkPoint({ operator: await context.actor(), forkId: context.params.forkId as SessionForkId }))
   } },
 ]

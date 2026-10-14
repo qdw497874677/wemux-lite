@@ -48,9 +48,9 @@ export const projectRoutes: readonly RouteDescriptor[] = [
     if (!context.projects) throw new AppError(404, 'Not found')
     await context.projects.revoke(await context.actor(), context.params.projectId as ProjectId, context.params.grantId as never); context.noContent()
   } },
-  { method: 'POST', pattern: '/projects/:projectId/session-forks', auth: 'admin', handler: async context => {
+  { method: 'POST', pattern: '/projects/:projectId/session-forks', auth: 'authenticated', handler: async context => {
     if (!context.lineage) throw new AppError(404, 'Not found')
-    context.json(201, await context.lineage.fork({ operator: await context.operator(), projectId: context.params.projectId as ProjectId, command: await context.readBody() }))
+    context.json(201, await context.lineage.fork({ operator: await context.actor(), projectId: context.params.projectId as ProjectId, command: await context.readBody() }))
   } },
   { method: 'GET', pattern: '/projects/:projectId/session-graph', auth: 'authenticated', handler: async context => {
     if (!context.lineage) throw new AppError(404, 'Not found')
