@@ -6,6 +6,7 @@ import { ResourceWriteActions } from './ResourceWriteActions.tsx'
 import {
   authenticationLabels, axisTitles, classLabels, configurationLabels, distributionLabels, executionLabels, observation, type InventoryAxisName,
 } from '../lib/resource-labels.ts'
+import { RemoteAgentInstall } from './RemoteAgentInstall.tsx'
 
 type ClassKey = 'workers' | 'agents' | 'models' | 'skills' | 'presets' | 'providers'
 const sections: readonly { key: ClassKey; className: ResourceInventoryEntryDTO['class'] }[] = [
@@ -84,6 +85,8 @@ export function ResourceManagement({ api, administrator }: { api: ProjectClient;
       {inventory[section.key].length === 0 ? <p>没有可展示的{classLabels[section.className]}条目。</p> : null}
       {inventory[section.key].length > 0 && <ul>{inventory[section.key].map(entry => <InventoryEntry key={`${section.key}:${entry.id}`} entry={entry} />)}</ul>}
     </section>)}
+    {/* 托管安装入口（管理员）：只新增一个挂载点，只读投影的其余部分保持不变。 */}
+    <RemoteAgentInstall api={api} inventory={inventory} onChanged={() => setRevision(value => value + 1)} />
   </section>
 }
 

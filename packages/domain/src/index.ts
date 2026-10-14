@@ -1,6 +1,7 @@
 export * from './task.js'
 export * from './agent.js'
 export * from './agent-profile.js'
+export * from './agent-runtime-catalog.js'
 export * from './agent-failure.js'
 export * from './canvas-layout.js'
 export * from './capabilities.js'

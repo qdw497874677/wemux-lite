@@ -92,6 +92,11 @@ test('分发状态由绑定与 Worker 安装回执共同决定，并保留回执
   const failed = bindingDistributionAxis('failed', report({ result: 'failed', phase: null, errorCode: 'runtime_activation_failed', message: 'Agent 安装或探测失败，已保留当前激活版本' }))
   assert.equal(failed.state, 'failed')
   assert.match(failed.detail, /安装|探测/)
+  // 回执 message 是通用文案时，真实原因（errorCode）必须出现在管理面上。
+  assert.match(failed.detail, /runtime_activation_failed/)
+  const rejected = bindingDistributionAxis('failed', report({ result: 'failed', phase: null, errorCode: 'unapproved_runtime_artifact', message: 'Agent 安装或探测失败，已保留当前激活版本' }))
+  assert.equal(rejected.state, 'failed')
+  assert.match(rejected.detail, /unapproved_runtime_artifact/)
 
   const mismatch = bindingDistributionAxis('failed', report({ result: 'version-mismatch', phase: null, errorCode: 'resource_revision_integrity_conflict' }))
   assert.equal(mismatch.state, 'failed')
