@@ -14,6 +14,11 @@ export const runRuntimeProcess: RuntimeProcess = request => new Promise((resolve
   const grouped = process.platform !== 'win32'
   const child = spawn(request.command, request.args, { cwd: request.cwd, env: request.env, detached: grouped, stdio: ['ignore', 'pipe', 'pipe'], shell: false })
   const output: Buffer[] = []
+  // Keep a bounded tail of stderr so failures (npm 取包被拒、校验失败等) can be reported
+  // truthfully to the Server instead of a bare exit code. stdout stays untouched.
+  const stderrTail: Buffer[] = []
+  let stderrTailLength = 0
+  const detail = (): string => stderrTailLength === 0 ? '' : `: ${Buffer.concat(stderrTail).toString('utf8').trim().replace(/\s+/g, ' ').slice(-400)}`
   const sizes = { stdout: 0, stderr: 0 }
   let failure: Error | undefined
   let cleanupTimer: ReturnType<typeof setTimeout> | undefined
@@ -42,7 +47,7 @@ export const runRuntimeProcess: RuntimeProcess = request => new Promise((resolve
     }
     cleanupTimer = setTimeout(finish, 1000)
   }
-  const timer = setTimeout(() => fail(Object.assign(new Error('Runtime process timed out'), { code: 'ETIMEDOUT', killed: true })), request.timeout)
+  const timer = setTimeout(() => fail(Object.assign(new Error(`Runtime process timed out${detail()}`), { code: 'ETIMEDOUT', killed: true })), request.timeout)
   for (const stream of ['stdout', 'stderr'] as const) {
     child[stream].on('data', (chunk: Buffer) => {
       if (failure) return
@@ -50,11 +55,16 @@ export const runRuntimeProcess: RuntimeProcess = request => new Promise((resolve
       if (sizes[stream] > 1024 * 1024) {
         fail(Object.assign(new Error(`${stream} maxBuffer exceeded`), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', killed: true }))
       } else if (stream === 'stdout') output.push(chunk)
+      else {
+        stderrTail.push(chunk)
+        stderrTailLength += chunk.length
+        while (stderrTailLength > 2000 && stderrTail.length > 1) stderrTailLength -= stderrTail.shift()!.length
+      }
     })
   }
   child.on('error', fail)
   child.on('exit', (code, signal) => {
-    if (code !== 0) fail(Object.assign(new Error(`Runtime process exited with ${code ?? signal}`), { code, signal }))
+    if (code !== 0) fail(Object.assign(new Error(`Runtime process exited with ${code ?? signal}${detail()}`), { code, signal }))
   })
   // Timeout remains armed until close, not merely until the npm parent exits.
   child.on('close', finish)
