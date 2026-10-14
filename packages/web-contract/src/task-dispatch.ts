@@ -44,6 +44,11 @@ export interface DispatchIntentView {
   /** 接替代次：首次派发 0，接手每换一代加一。 */
   readonly generation: number
   readonly machineScope: MachineScope
+  /**
+   * 机器范围决定落在哪台 Worker，运行身份与模型仍要显式：两项都可缺省，缺省时由
+   * 申领 Worker 自身可用的执行 Agent 解析，绝不由范围隐式挑 Agent/模型。
+   */
+  readonly execution: { readonly agentKey?: string; readonly modelId?: string }
   /** 本次执行安排的持久入队序号；重放与重启不重排。 */
   readonly queueOrder: number
   readonly enqueuedAt: string
@@ -51,6 +56,8 @@ export interface DispatchIntentView {
   readonly supersedes?: { readonly claimId: string; readonly workerId: string; readonly generation: number; readonly runId: string | null }
 }
 
+/** 释放原因：只有 `reconciled_stopped` 是「已确认旧执行停止」的对账结论。 */
+export type DispatchClaimReleaseReason = 'started' | 'declined' | 'failed_before_start' | 'reconciled_stopped'
 export interface DispatchClaimView {
   readonly claimId: string
   readonly intentId: string
@@ -60,6 +67,8 @@ export interface DispatchClaimView {
   readonly state: DispatchClaimState
   readonly requestId: string
   readonly createdAt: string
+  /** 已释放承接的释放原因；进行中的承接没有这一项。 */
+  readonly releasedReason?: DispatchClaimReleaseReason
 }
 
 /** 看板/任务详情用的派发视图：有意保留 queueOrder 以便解释「谁先安排」。 */

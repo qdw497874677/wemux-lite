@@ -29,6 +29,11 @@ export interface Worker {
   readonly platform: string | null
   readonly capabilities: readonly AgentCapability[]
   readonly lastSeenAt: Timestamp | null
+  /**
+   * 机器管理者配置的最大并发执行数；缺省时用平台默认（1）。容量只描述执行槽位，
+   * CPU/内存是选机参考而非准入依据。
+   */
+  readonly executionCapacityLimit?: number
 }
 
 export interface Project {
