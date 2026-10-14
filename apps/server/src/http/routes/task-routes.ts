@@ -67,6 +67,12 @@ export const taskRoutes: readonly RouteDescriptor[] = [
   { method: 'GET', pattern: '/projects/:projectId/tasks/:taskId/runs/:runId/review', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, { review: await tasks.review(context.params.projectId, context.params.taskId, context.params.runId, task) })) },
   { method: 'POST', pattern: '/projects/:projectId/tasks/:taskId/runs/:runId/review', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.reviewAction(context.params.projectId, context.params.taskId, context.params.runId, await context.readBody(), task))) },
   { method: 'POST', pattern: '/projects/:projectId/tasks/:taskId/launch', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.launch(context.params.projectId, context.params.taskId, await context.readBody(), task))) },
+  // 派发视图是看板与任务详情读取机器范围、执行意图、有效承接与等待原因的唯一入口。
+  { method: 'GET', pattern: '/projects/:projectId/tasks/:taskId/dispatch', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.dispatch(context.params.projectId, context.params.taskId, task))) },
+  { method: 'PUT', pattern: '/projects/:projectId/tasks/:taskId/dispatch/machine-scope', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.setMachineScope(context.params.projectId, context.params.taskId, await context.readBody(), task))) },
+  // 显式安排：普通派发消费 todo 的执行意图，接手（handoff）在 in_progress 下为本代次建立接手意图。
+  { method: 'POST', pattern: '/projects/:projectId/tasks/:taskId/dispatch', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.arrangeDispatch(context.params.projectId, context.params.taskId, await context.readBody(), task))) },
+  { method: 'POST', pattern: '/projects/:projectId/tasks/:taskId/dispatch/handoff', auth: 'task', handler: taskHandler(async (context, tasks, task) => context.json(200, await tasks.openHandoff(context.params.projectId, context.params.taskId, await context.readBody(), task))) },
   { method: 'GET', pattern: '/projects/:projectId/tasks/:taskId/sessions', auth: 'task', handler: taskHandler(async (context, tasks, task) => {
     const query = context.url.searchParams, archived = query.get('archived')
     if (archived !== null && archived !== 'true' && archived !== 'false') throw new TaskError('invalid_request', 'archived must be true or false')

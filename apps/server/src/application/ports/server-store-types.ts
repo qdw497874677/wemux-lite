@@ -50,9 +50,8 @@ import type {
 import type { CommandReceipt, WorkerCommand } from '@wemux/wire-protocol'
 import type { WorkspacePreparationProof, WorkspacePreparationProofIdentity } from './workspace-preparation-proof.ts'
 
-/** 持久执行意图：线协议视图加持久状态与派发可消费性。 */
+/** 持久执行意图：线协议视图加派发可消费性（状态本身已是线协议视图的一部分）。 */
 export type DispatchIntentRecord = import('@wemux/web-contract/task-dispatch').DispatchIntentView & {
-  readonly state: 'pending' | 'claimed' | 'cancelled'
   /** 任务当前是否处于该意图可消费的状态（普通派发要求 todo，接手允许 in_progress）。 */
   readonly dispatchable: boolean
 }

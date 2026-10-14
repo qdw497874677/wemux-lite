@@ -7,6 +7,7 @@ import { channelRoutes } from './channel-routes.ts'
 import { genericWebhookRoutes } from './generic-webhook-routes.ts'
 import { feishuRoutes } from './feishu-routes.ts'
 import { connectorRoutes } from './connector-routes.ts'
+import { dispatchClaimRoutes } from './dispatch-claim-routes.ts'
 import { projectRoutes } from './project-routes.ts'
 import { nodeResourceRoutes } from './node-resource-routes.ts'
 import { projectionRoutes } from './projection-routes.ts'
@@ -29,6 +30,7 @@ export const routes: readonly RouteDescriptor[] = [
   ...channelRoutes,
   ...connectorRoutes,
   ...taskRoutes,
+  ...dispatchClaimRoutes,
   ...projectionRoutes,
   ...attentionRoutes,
   ...artifactRoutes,

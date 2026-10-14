@@ -9,7 +9,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { launchFingerprintInput, type LaunchRequest, type Run } from '@wemux/web-contract/task-platform'
 import { ensureRunCancel, saveRunProjection, isActiveRun } from './run-projection.ts'
 import { resolveReviewRequirement } from './review-requirement.ts'
-import { claimDecision, normalizeMachineScope, transitionTask, type ClaimRejectionReason, type ProjectId, type UserId } from '@wemux/domain'
+import { claimDecision, normalizeMachineScope, transitionTask, type MachineScope, type ClaimRejectionReason, type ProjectId, type UserId } from '@wemux/domain'
 import { claimHoldsIntent, type DispatchClaimReleaseReason, type TaskDispatchView } from '@wemux/web-contract/task-dispatch'
 import { intentDispatchable, supersedesPriorExecution, workerExecutionState } from './task-dispatch.ts'
 import type { DispatchIntentRecord } from './ports/server-store-types.ts'
@@ -869,10 +869,10 @@ export class TaskService {
       taskId: task.id, version: task.version, machineScope,
       intent: {
         intentId: intent.intentId, taskId: intent.taskId, kind: intent.kind, generation: intent.generation,
-        machineScope: intent.machineScope, execution: intent.execution, queueOrder: intent.queueOrder,
+        machineScope: intent.machineScope, execution: intent.execution, state: intent.state, queueOrder: intent.queueOrder,
         enqueuedAt: intent.enqueuedAt, ...(intent.supersedes ? { supersedes: intent.supersedes } : {}),
       },
-      claim: claim ? { claimId: claim.claimId, intentId: claim.intentId, taskId: claim.taskId, workerId: claim.workerId, generation: claim.generation, state: claim.state, requestId: claim.requestId, createdAt: claim.createdAt } : null,
+      claim: claim ? { claimId: claim.claimId, intentId: claim.intentId, taskId: claim.taskId, workerId: claim.workerId, generation: claim.generation, state: claim.state, requestId: claim.requestId, createdAt: claim.createdAt, ...(claim.releasedReason ? { releasedReason: claim.releasedReason } : {}) } : null,
       // 已承接（含结果未知）就不再有等待原因；未承接时按任务状态给出可展示的原因。
       waitingReason: holding ? null : intent.state === 'cancelled' ? null : intentDispatchable(intent, task.status) ? 'no_candidate' : 'intent_not_dispatchable',
     }
@@ -1019,6 +1019,56 @@ export class TaskService {
     // 「启动过」不等于「已停止」：只有承接方本人对账确认停止才放行接手。
     return claim?.state === 'released' && claim.releasedReason === 'reconciled_stopped'
   }
+  /**
+   * 显式安排（指定派发）：普通派发只消费 todo 的执行意图。已有待安排意图就地更新范围与执行选择，
+   * 不重排入队序号、不推进代次——重复请求与重启都不得改变已经排队的位置。
+   */
+  async arrangeDispatch(projectId: string, id: string, input: unknown, context: TaskContext) {
+    const b = object(input)
+    if (Object.keys(b).some(key => !['requestId', 'version', 'machineScope', 'execution'].includes(key))) invalid('Unknown dispatch fields are not allowed')
+    const scope = b.machineScope === undefined ? null : normalizeMachineScope(b.machineScope)
+    if (b.machineScope !== undefined && !scope) throw new TaskError('machine_scope_invalid', 'Machine scope must be any, candidates or fixed')
+    const execution = b.execution === undefined ? {} : object(b.execution)
+    if (Object.keys(execution).some(key => !['agentKey', 'modelId'].includes(key)) ||
+      Object.values(execution).some(value => typeof value !== 'string' || !value.trim() || value.includes('\0'))) throw new TaskError('machine_scope_invalid', 'Execution selection must be agent and model keys')
+    const outcome = await this.store.transaction(async tx => {
+      const current = await this.writeTask(tx, projectId, id, context)
+      this.cas(current, b.version)
+      if (current.status !== 'todo') throw new TaskError('invalid_transition', 'Explicit dispatch arranges a todo Task')
+      if (scope) await this.authorizeScope(tx, scope, context)
+      const at = new Date().toISOString()
+      const task = { ...current, version: current.version + 1, updatedAt: at, lastActivityAt: at, ...(scope ? { machineScope: scope } : {}) }
+      const latest = await latestIntent(tx, task.id)
+      const claim = latest ? await tx.tasks.activeDispatchClaim(latest.intentId) : null
+      const holding = claim ? claimHoldsIntent(claim.state) : false
+      // 已被承接（含结果未知）的意图不可就地改写：它的执行事实已经存在，只能等承接方释放。
+      if (claim && !holding) invalid('Dispatch claim is no longer holding this intent')
+      const arranged = latest && latest.state === 'pending' && !holding
+        ? { ...latest, machineScope: scope ?? latest.machineScope, execution: { ...latest.execution, ...execution } }
+        : {
+            intentId: randomUUID(), taskId: task.id, kind: 'dispatch' as const,
+            generation: (latest?.generation ?? -1) + 1,
+            machineScope: scope ?? task.machineScope ?? { kind: 'any' as const }, execution,
+            queueOrder: await tx.tasks.nextDispatchQueueOrder(), enqueuedAt: at,
+            state: 'pending' as const, dispatchable: true,
+          }
+      await tx.tasks.saveDispatchIntent(arranged)
+      await this.record(tx, task, 'task.updated', { action: 'dispatch.arranged', intentId: arranged.intentId, generation: arranged.generation }, context)
+      return { arranged, projectId: task.projectId, taskId: task.id }
+    })
+    this.publish({ id: randomUUID(), projectId: outcome.projectId, taskId: outcome.taskId, type: 'task.updated' })
+    return this.dispatch(projectId, id, context)
+  }
+  /** 机器范围里的每个 Worker 都要能查出、未撤销，且本次操作者确实有权使用。 */
+  private async authorizeScope(tx: ServerStoreTx, scope: MachineScope, context: TaskContext) {
+    if (scope.kind === 'any') return
+    for (const workerId of scope.kind === 'fixed' ? [scope.workerId] : scope.workerIds) {
+      // 范围只能包含本次操作者确实有权使用的 Worker，否则就是把执行塞进别人的机器。
+      const worker = await tx.resources.getWorker(workerId as WorkerId)
+      if (!worker || worker.connectionState === 'revoked') throw new TaskError('machine_scope_unauthorized', 'Machine scope includes a Worker the caller cannot use')
+      if (this.server) await this.server.requireWorkerUseInTx(tx, context.actor, workerId as WorkerId)
+    }
+  }
   /** 指定机器手工执行不经过协调入口；机器范围仍然要能授权，越权直接拒绝。 */
   async setMachineScope(projectId: string, id: string, input: unknown, context: TaskContext) {
     const b = object(input)
@@ -1028,16 +1078,12 @@ export class TaskService {
     const next = await this.store.transaction(async tx => {
       const current = await this.writeTask(tx, projectId, id, context)
       this.cas(current, b.version)
-      if (scope.kind !== 'any') {
-        for (const workerId of scope.kind === 'fixed' ? [scope.workerId] : scope.workerIds) {
-          // 范围只能包含本次操作者确实有权使用的 Worker，否则就是把执行塞进别人的机器。
-          const worker = await tx.resources.getWorker(workerId as WorkerId)
-          if (!worker || worker.connectionState === 'revoked') throw new TaskError('machine_scope_unauthorized', 'Machine scope includes a Worker the caller cannot use')
-          if (this.server) await this.server.requireWorkerUseInTx(tx, context.actor, workerId as WorkerId)
-        }
-      }
+      await this.authorizeScope(tx, scope, context)
       const at = new Date().toISOString()
       const updated = { ...current, machineScope: scope, version: current.version + 1, updatedAt: at, lastActivityAt: at }
+      // 尚未被承接的执行意图随范围一起改变；已承接的意图保留原范围记录，只影响后续安排。
+      const latest = await latestIntent(tx, id)
+      if (latest && latest.state === 'pending' && !(await tx.tasks.activeDispatchClaim(latest.intentId))) await tx.tasks.saveDispatchIntent({ ...latest, machineScope: scope })
       await this.record(tx, updated, 'task.updated', { action: 'machine_scope.changed', kind: scope.kind }, context)
       return updated
     })
