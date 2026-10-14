@@ -15,6 +15,7 @@ import { Teams, JoinTeam } from './components/Teams.tsx'
 import { TeamCoordination } from './components/TeamCoordination.tsx'
 import { Shell } from './components/Shell.tsx'
 import { Attention } from './components/Attention.tsx'
+import { ResourceManagement } from './components/ResourceManagement.tsx'
 
 export const application = createApplication()
 export function App({ app = application }: { app?: Application }) {
@@ -46,9 +47,10 @@ export function App({ app = application }: { app?: Application }) {
   const project = route.kind === 'project' ? state.projects.find(item => item.id === route.projectId) : undefined
   const projectList = <><ProjectList projects={state.projects} loading={state.busy} />{state.account?.instanceAdministrator && <ProjectCreate api={api} teamId={state.account.teamId} reload={app.loadProjects} />}</>
   const accountPage = route.kind === 'settings' ? <><h1>账号设置</h1><AccountSecurity api={api} restart={app.start} /><AccountCredentials api={api} /><AccountGovernance api={api} administrator={state.account!.instanceAdministrator} restart={app.start} /></> : route.kind === 'teams' ? <><Teams api={api} app={app} />{state.account?.teamId && <TeamCoordination api={api} teamId={state.account.teamId} />}</> : route.kind === 'join' ? <JoinTeam api={api} app={app} token={new URLSearchParams(location.search).get('token') ?? ''} /> : null
+  const resourcesPage = route.kind === 'resources' ? <ResourceManagement api={api} administrator={state.account!.instanceAdministrator} /> : null
   return <Shell key={`${state.account?.username}:${state.account?.teamId}`} state={state} app={app} location={location}>
     {accountPage && state.error && <Failure error={state.error} retry={() => void app.loadProjects()} />}
-    {accountPage ?? (state.error ? <Failure error={state.error} retry={() => void app.loadProjects()} /> : route.kind === 'projects' ? projectList : route.kind === 'attention' ? <Attention api={api} projects={state.projects} busy={state.busy} administrator={state.account!.instanceAdministrator} /> : route.kind === 'not-found' ? <EmptyState icon={FolderKanban} title="页面不存在" message="此地址没有对应的新版页面。请检查链接，或返回项目列表。" action="返回项目列表" onAction={() => navigate('/next/projects')} /> : route.kind === 'project' ? <ProjectPage search={location.search} key={route.projectId} project={project} busy={state.busy} api={api} administrator={state.account!.instanceAdministrator} reload={app.loadProjects} /> : <ProjectList projects={state.projects} />)}
+    {accountPage ?? resourcesPage ?? (state.error ? <Failure error={state.error} retry={() => void app.loadProjects()} /> : route.kind === 'projects' ? projectList : route.kind === 'attention' ? <Attention api={api} projects={state.projects} busy={state.busy} administrator={state.account!.instanceAdministrator} /> : route.kind === 'not-found' ? <EmptyState icon={FolderKanban} title="页面不存在" message="此地址没有对应的新版页面。请检查链接，或返回项目列表。" action="返回项目列表" onAction={() => navigate('/next/projects')} /> : route.kind === 'project' ? <ProjectPage search={location.search} key={route.projectId} project={project} busy={state.busy} api={api} administrator={state.account!.instanceAdministrator} reload={app.loadProjects} /> : <ProjectList projects={state.projects} />)}
   </Shell>
 }
 

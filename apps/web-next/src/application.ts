@@ -151,10 +151,11 @@ export function safeReturnTarget(target: string | null): string {
     return `${url.pathname}${url.search}${url.hash}`
   } catch { return '/next/projects' }
 }
-export function resolveRoute(pathname: string): { kind: 'projects' | 'login' | 'not-found' | 'settings' | 'teams' | 'join' | 'auth-link' | 'attention' } | { kind: 'project'; projectId: string } {
+export function resolveRoute(pathname: string): { kind: 'projects' | 'login' | 'not-found' | 'settings' | 'teams' | 'join' | 'auth-link' | 'attention' | 'resources' } | { kind: 'project'; projectId: string } {
   if (['/next/', '/next/projects', '/next/projects/'].includes(pathname)) return { kind: 'projects' }
   if (pathname === '/next/settings') return { kind: 'settings' }
   if (pathname === '/next/attention') return { kind: 'attention' }
+  if (pathname === '/next/resources') return { kind: 'resources' }
   if (pathname === '/next/teams') return { kind: 'teams' }
   if (pathname === '/next/join') return { kind: 'join' }
   if (['/next/auth/verify-email', '/next/auth/password/reset', '/next/auth/confirm-email-change'].includes(pathname)) return { kind: 'auth-link' }
