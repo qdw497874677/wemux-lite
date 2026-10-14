@@ -16,6 +16,7 @@ export interface AttentionPagesResult {
   readonly generatedAt: string
 }
 import type { TaskCreate, TaskDetail, TaskSummary, TaskPatch, TaskActivity, Assignment, CreateTaskWorkspaceRequest, TaskDeleteReceipt, Run, LaunchRequest, LaunchResponse, CancelRunResponse, CompletionRequest, CompletionResponse, HumanReviewSubmissionRequest, HumanReviewSubmissionResponse, HumanReviewDecisionRequest, HumanReviewDecisionResponse, ReviewRequest } from '@wemux/web-contract/task-platform'
+import type { DispatchRequest, HandoffRequest, HandoffResponse, SetMachineScopeRequest, TaskDispatchView } from '@wemux/web-contract/task-dispatch'
 import type { createClusterTransport } from './cluster-transport.ts'
 const id = encodeURIComponent
 const project = (p: string) => `/api/projects/${id(p)}`
@@ -66,5 +67,9 @@ export function projectManagementOperations({ request, list }: ReturnType<typeof
     bindTaskWorkspace: (p: string, t: string, w: string) => request<TaskDetail>(`${task(p, t)}/workspaces/${id(w)}`, {}, undefined, 'PUT'),
     unbindTaskWorkspace: (p: string, t: string, w: string, version: number) => request<TaskDetail>(`${task(p, t)}/workspaces/${id(w)}`, { version }, undefined, 'DELETE'),
     assignTask: (p: string, t: string, assignee: Assignment | null, version: number) => request<TaskDetail>(`${task(p, t)}/assignment`, assignee ? { assignee, version } : { version }, undefined, assignee ? 'PUT' : 'DELETE'),
+    taskDispatch: (p: string, t: string) => request<TaskDispatchView>(`${task(p, t)}/dispatch`),
+    setMachineScope: (p: string, t: string, body: SetMachineScopeRequest) => request<TaskDispatchView>(`${task(p, t)}/dispatch/machine-scope`, body, undefined, 'PUT'),
+    arrangeDispatch: (p: string, t: string, body: DispatchRequest) => request<TaskDispatchView>(`${task(p, t)}/dispatch`, body),
+    arrangeHandoff: (p: string, t: string, body: HandoffRequest) => request<HandoffResponse>(`${task(p, t)}/dispatch/handoff`, body),
   }
 }

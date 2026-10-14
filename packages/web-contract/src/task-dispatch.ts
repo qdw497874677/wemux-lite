@@ -90,11 +90,25 @@ export interface SetMachineScopeRequest {
   readonly scope: MachineScope
 }
 
+/**
+ * 显式安排一次执行意图。范围与执行选择都可缺省：缺省沿用任务当前机器范围，
+ * 由候选机器按授权、执行环境与容量申领，取消时只重排这次意图，不改任务状态。
+ */
 export interface DispatchRequest {
   readonly requestId: string
   readonly version: number
-  /** 显式指定承接 Worker；缺省时按候选范围申领，范围 `any` 亦然。 */
-  readonly workerId?: string
+  readonly machineScope?: MachineScope
+  readonly execution?: { readonly agentKey?: string; readonly modelId?: string }
+}
+
+/** 显式接手：在 in_progress 上安排新 Session，绑定被接替的承接与接替代次。 */
+export type HandoffRequest = DispatchRequest
+
+export interface HandoffResponse {
+  readonly taskId: string
+  readonly version: number
+  readonly intentId: string
+  readonly generation: number
 }
 
 export interface ClaimDispatchRequest {
