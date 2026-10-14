@@ -1,6 +1,7 @@
 import type { CapabilityToolName } from '@wemux/domain'
 import { AppError } from '../../application/errors.ts'
 import { TaskError } from '../../application/task-service.ts'
+import { serveAgentDownload } from '../agent-downloads.ts'
 import { serveWorkerDownload } from '../worker-downloads.ts'
 import type { RouteDescriptor } from './types.ts'
 
@@ -20,6 +21,16 @@ export const publicRoutes: readonly RouteDescriptor[] = [
   {
     method: 'GET', pattern: '/downloads/install-worker.sh', auth: 'public', handler: async ({ response, path, downloads }) => {
       if (!await serveWorkerDownload(response, path, downloads)) throw new AppError(404, 'Not found')
+    },
+  },
+  {
+    method: 'GET', pattern: '/downloads/agent-manifest.json', auth: 'public', handler: async ({ response, path }) => {
+      if (!await serveAgentDownload(response, path)) throw new AppError(404, 'Not found')
+    },
+  },
+  {
+    method: 'GET', pattern: '/downloads/install-agent.sh', auth: 'public', handler: async ({ response, path }) => {
+      if (!await serveAgentDownload(response, path)) throw new AppError(404, 'Not found')
     },
   },
   { method: 'POST', pattern: '/workers/enroll', auth: 'public', handler: async ({ service, readBody, json }) => json(201, await service.enroll(await readBody())) },

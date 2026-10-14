@@ -2,8 +2,9 @@ import { access, realpath, rm, stat } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { ResourceBindingSnapshot, WorkerId } from '@wemux/domain'
+import { approvedAgentRuntime } from '@wemux/domain'
 import type { AgentAdapter } from '../application/ports/agent-adapter.ts'
-import { installCatalog, matchesRuntimeVersion, runRuntimeProcess, stageAgentRuntime, type RuntimeProcess } from '../runtimes/management.ts'
+import { matchesRuntimeVersion, runRuntimeProcess, stageAgentRuntime, type RuntimeProcess } from '../runtimes/management.ts'
 import { runtimeVersionEnvironment } from '../runtimes/version-environment.js'
 import { readAgentSettings, removeAgentSelection, saveAgentSelection } from '../config/agent-settings.ts'
 import { ResourceStateStore, type InstalledResourceState } from './resource-state-store.ts'
@@ -65,9 +66,9 @@ export class RuntimeMaterializer {
   private approved(binding: ResourceBindingSnapshot) {
     const artifact = binding.artifact
     if (binding.kind !== 'agent-runtime' || !artifact || binding.agentKey === null || binding.projectId !== null || binding.files.length !== 0) throw new Error('invalid_runtime_binding')
-    const entry = (Object.entries(installCatalog) as [keyof typeof installCatalog, (typeof installCatalog)[keyof typeof installCatalog]][]).find(([, spec]) => spec.name === artifact.packageName)
-    if (!entry || binding.agentKey !== entry[0] || artifact.packageVersion !== entry[1].version || artifact.registryOrigin !== 'https://registry.npmjs.org' || artifact.packageIntegrity !== entry[1].integrity) throw new Error('unapproved_runtime_artifact')
-    return { key: entry[0], artifact }
+    const approved = approvedAgentRuntime(artifact)
+    if (!approved || binding.agentKey !== approved.key) throw new Error('unapproved_runtime_artifact')
+    return { key: approved.key, artifact }
   }
 
   async verify(binding: ResourceBindingSnapshot): Promise<boolean> {

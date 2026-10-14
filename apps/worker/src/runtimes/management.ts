@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
 import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
+import { agentInstallWarning, agentRestartNotice, agentRuntimeCatalog, approvedAgentRuntime, matchesAgentRuntimeVersion } from '@wemux/domain'
 import { runtimeKey, saveAgentSelection, type RuntimeKey } from '../config/agent-settings.js'
 
 import { runtimeVersionEnvironment } from './version-environment.js'
@@ -60,19 +61,13 @@ export const runRuntimeProcess: RuntimeProcess = request => new Promise((resolve
 })
 
 // Exact official registry releases, not user-controlled package specs or shell commands.
-export const installCatalog = {
-  pi: { name: '@earendil-works/pi-coding-agent', version: '0.85.1', bin: 'dist/bundle/cli.js', integrity: 'sha512-FGRN+OHbWaefBPGaTggAdLjrIHW+s2PzLyglz/5dfLzb9of7uuXMXYC0fJIeZTw+shS32o2cuQ9jF7YSDuL/oQ==' },
-  opencode: { name: 'opencode-ai', version: '1.18.31', bin: 'bin/opencode.exe', integrity: 'sha512-J95feefeWwtIaw3irx76WjzWcgQXxmuHmDVphvs5ep9X30fBJ6T6bFhw50i9Kx50MG/xPn5w2pafXIfNtdry9w==' },
-  'claude-code': { name: '@anthropic-ai/claude-code', version: '2.1.34', bin: 'cli.js', integrity: 'sha512-uQ3yv41lvCExj2Ju/pCZ1KIKub5d5V3RQyeSKICPoJzk/H2Ktp0zonZeLkD/Q56qa4vPpA8MmvsBmFkAr+Z42w==' },
-} as const
-export const installWarning = '警告：此操作将从 https://registry.npmjs.org 下载固定版本的官方 npm 包及依赖，可能执行包的安装脚本；需要网络并信任上游代码。仅安装到 Worker home，不使用全局安装、不覆盖已有 Agent。请明确提供 --yes。'
-export const restartNotice = '选择已保存；正在运行的 Worker 不会热更新，请重启 Worker 后生效。Agent 登录/模型配置仍需单独完成。'
+// 单一来源在 @wemux/domain，Server 生成安装脚本/修订时读同一份目录。
+export const installCatalog = agentRuntimeCatalog
+export const installWarning = agentInstallWarning
+export const restartNotice = agentRestartNotice
 
 /** Match the exact release token, never accept 0.85.10 as 0.85.1. */
-export function matchesRuntimeVersion(output: string, version: string): boolean {
-  const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`(^|[^0-9.])${escaped}($|[^0-9.])`).test(output)
-}
+export const matchesRuntimeVersion = matchesAgentRuntimeVersion
 
 async function validateExecutable(executable: string, run: RuntimeProcess, key: RuntimeKey): Promise<string> {
   if (!isAbsolute(executable)) throw new Error('--path 必须是可执行文件的绝对路径（不是命令或参数）')
@@ -106,9 +101,9 @@ export async function installAgent(home: string, value: string | undefined, yes:
 
 /** Stage a fixed official runtime without changing the executable used by running Sessions. */
 export async function stageAgentRuntime(home: string, artifact: { readonly packageName: string; readonly packageVersion: string; readonly registryOrigin: string; readonly packageIntegrity: string }, run: RuntimeProcess = runRuntimeProcess) {
-  const entry = (Object.entries(installCatalog) as [keyof typeof installCatalog, (typeof installCatalog)[keyof typeof installCatalog]][]).find(([, spec]) => spec.name === artifact.packageName)
-  if (!entry || artifact.packageVersion !== entry[1].version || artifact.registryOrigin !== 'https://registry.npmjs.org' || artifact.packageIntegrity !== entry[1].integrity) throw new Error('unapproved_runtime_artifact')
-  return materializeAgentPackage(home, entry[0], run)
+  const approved = approvedAgentRuntime(artifact)
+  if (!approved) throw new Error('unapproved_runtime_artifact')
+  return materializeAgentPackage(home, approved.key, run)
 }
 
 async function materializeAgentPackage(home: string, value: string | undefined, run: RuntimeProcess, expectedIntegrity?: string) {

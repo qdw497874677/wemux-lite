@@ -1,3 +1,4 @@
+import { agentRegistryOrigin, managedAgentCatalogEntries } from './agent-runtime-catalog.js'
 import type { AgentKey, Timestamp } from './values.js'
 import type { ProjectId, UserId, WorkerId } from './ids.js'
 
@@ -198,8 +199,9 @@ export interface ReconcileReport {
 const SHA256 = /^[a-f0-9]{64}$/
 const EXACT_VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
 const SAFE_PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)$/
-const TRUSTED_REGISTRY_ORIGINS = new Set(['https://registry.npmjs.org'])
-const OFFICIAL_RUNTIME_PACKAGES = new Set(['@earendil-works/pi-coding-agent', '@anthropic-ai/claude-code', 'opencode-ai'])
+// 受信 registry 与官方运行时包名都从托管目录派生，不在这里重复维护。
+const TRUSTED_REGISTRY_ORIGINS = new Set([agentRegistryOrigin])
+const OFFICIAL_RUNTIME_PACKAGES = new Set(managedAgentCatalogEntries().map(entry => entry.packageName))
 
 export function assertResourceRevisionValid(revision: ResourceRevision): void {
   if (!revision.id || !revision.resourceId || revision.version < 1 || !Number.isSafeInteger(revision.version)) throw new Error('invalid_resource_revision')
