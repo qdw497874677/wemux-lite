@@ -39,13 +39,15 @@ Blocked by: 无未完成 ticket 前置；复用现有账号授权与 Task Sessio
 - `921457c` test(e2e): 画布与 Fork 的两用户真实浏览器验收
 - `5d650c7` Merge branch 'main' into collab-01-canvas-fork
 - `750b566` test(e2e): 覆盖撤权后的刷新与重连出口
+- `129bc58` fix(web-next): 画布 Fork 说明明确不复制文件与执行现场
+- `8122753` docs(ticket): 画布与 Fork 票据 01 记录验收结论并标为 done
 
 ### 交付内容
 
 - 服务端：`GET /api/projects/:projectId/session-graph`、`GET /api/sessions/:sessionId/lineage`、`GET /api/session-forks/:forkId`、`POST /api/projects/:projectId/session-forks` 由管理员鉴权放宽到项目成员鉴权，节点摘要、边、血缘与 Fork 全部经 `SessionAccessService` 逐会话判定，未获权会话整体省略（不返回标识与标题），两端不可读的关系不出现在图、血缘与边详情中。Fork 目标在事务内创建并要求 `contributor`，仍固定在来源 Task 上。
 - web-contract：`SessionForkRequest`/`SessionForkResponse` 改为纯字符串 DTO，浏览器只依赖字符串标识，不转发领域品牌类型。
 - web-client：`sessionGraph` / `sessionLineage` / `sessionForkPoint` / `forkSession` 与 `watchCanvasCollaboration`（只透传 `snapshot` / `presence.updated` / `presence.left` / `authorization` 四个事件名，`authorization` 为终止态，断线按预算重连）。
-- web-next：`会话画布` tab（深链 `/next/projects/:projectId?canvas=1&session=<sessionId>`），画布只投影服务端事实：可读节点、受限占位、Fork 边、画布版本、权限未显示关系计数提示；选中节点后读取权威血缘与持久化游标，从固定游标创建分支（requestId 与草稿内容绑定，重试不重复创建），成功后重读权威图而不是本地建节点；`authorization` 事件到达即停止订阅并清空图、血缘、分支草稿与选择。
+- web-next：`会话画布` tab（深链 `/next/projects/:projectId?canvas=1&session=<sessionId>`），画布只投影服务端事实：可读节点、受限占位、Fork 边、画布版本、权限未显示关系计数提示；选中节点后读取权威血缘与持久化游标，从固定游标创建分支（requestId 与草稿内容绑定，重试不重复创建），成功后重读权威图而不是本地建节点；`authorization` 事件到达即停止订阅并清空图、血缘、分支草稿与选择。分支表单明确目标会话有独立 Journal 与后续上下文、不复制文件与执行现场，同一执行环境内的文件状态仍由该落点共享。
 
 ### 验证命令与结果（退出码全 0）
 
@@ -60,7 +62,7 @@ Blocked by: 无未完成 ticket 前置；复用现有账号授权与 Task Sessio
 | `node --import tsx apps/e2e/next-canvas-fork-browser.mjs`（真实 Chromium，desktop 1440x1000 + mobile 390x844） | exit 0，23 checks | `/var/tmp/wemux-c01-merge-canvas-e2e.log` |
 
 真实浏览器验收每次运行的证据目录（截图、`result.json`、`revocations.json`、`cleanup.json`）形如
-`/var/tmp/wemux-c01-tmp/wemux-next-canvas-fork-*`，本轮为 `/var/tmp/wemux-c01-tmp/wemux-next-canvas-fork-vZBToU`；
+`/var/tmp/wemux-c01-tmp/wemux-next-canvas-fork-*`，本轮为 `/var/tmp/wemux-c01-tmp/wemux-next-canvas-fork-KVvxBW`（更早的同构证据目录为 `...-vZBToU`、`...-t1LTXQ`）；
 脚本本身已入库，可重复生成同等证据：
 
 ```bash
