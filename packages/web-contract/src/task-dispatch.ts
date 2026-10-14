@@ -44,6 +44,8 @@ export interface DispatchIntentView {
   /** 接替代次：首次派发 0，接手每换一代加一。 */
   readonly generation: number
   readonly machineScope: MachineScope
+  /** 意图自身的状态：待承接、已被承接、或随任务状态被撤销。 */
+  readonly state: 'pending' | 'claimed' | 'cancelled'
   /**
    * 机器范围决定落在哪台 Worker，运行身份与模型仍要显式：两项都可缺省，缺省时由
    * 申领 Worker 自身可用的执行 Agent 解析，绝不由范围隐式挑 Agent/模型。
