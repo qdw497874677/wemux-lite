@@ -1,6 +1,6 @@
 # 05: 协调闭环 review 跟进（断言补签、重试语义与测试环境修复）
 
-Status: needs-triage
+Status: done
 Blocked by: 无（02 已 done；本票是 integration/web-next-coordination-closure 全量 review 后的遗留项收敛，非功能门）。
 
 **优先级（2026-10-12 主会话排定）：** 第 1、2、5 项现在做（断言过期补签是可用性/诚实性缺口；手机上传 E2E 与 apps/web 环境修复便宜且解除本机验证阻塞）；第 3、4 项挂起（症状偶发/可绕）；第 6 项机会性处理不单开门。
@@ -76,3 +76,7 @@ UI：`TeamCoordination.tsx` 文案改为“Worker 当前离线，恢复后自动
 **验证（日志 `/var/tmp/t06c-*.log`，退出码全 0）**：`npm run build:packages` 0；`npm run typecheck` 0；`npm test --workspace @wemux/worker` 532 tests（527 pass / 5 skip / 0 fail）；server+worker 构建后 `node --import tsx --test apps/server/src/test/*.test.ts` 978 pass / 0 fail；`TMPDIR=/var/tmp/t06c-e2e-run1 node --import tsx apps/e2e/coordination-command-transport.mjs` exit 0 且 `status:pass`（三项检查全过）。
 
 **残余风险**：第 5 条的收窄仍是 SQL 侧逐行过滤（无索引），个人/团队实例规模下无感知，数据量显著增长时需先解开三个相对位置测试再补索引；第 7 条两侧严格度差异靠 `named` 判别与注释维护，若未来新增具名 kind 需同步 helper 与两侧语义。
+
+### 2026-10-14 主会话：全部六项并入 main 并置 done
+
+第 3、4、6 项分别经 `t05-attachment-retry`（83fbc71）、`t05-e2e-jitter`（3b81f72）、`t05-standards-refactor`（481e870）合并入 main；主树复验 build:packages/typecheck 0、server 978/978、worker 527 pass/5 skip/0 fail、三个 e2e 全过；`git push origin main`（e1274e6..481e870）已推送。手机 E2E read-file 等待预算 30s→75s 微修（47c67dd）。验收框 6/6 全勾，票据置 done。
