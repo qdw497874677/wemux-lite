@@ -6,8 +6,7 @@
 import type {
   CanvasLayout,
   CanvasLayoutScope,
-  ForkSessionCommand,
-  ForkSessionResult,
+  SessionForkContextPolicy,
   SessionForkPoint,
   SessionGraphNode,
   SessionGraphEdge,
@@ -54,13 +53,32 @@ export interface SessionForkPointResponse {
   readonly graphRevision: string
 }
 
-/** `POST /api/projects/:projectId/session-forks` */
-export interface SessionForkRequest extends Omit<ForkSessionCommand, 'sourceSessionId'> {
+/**
+ * `POST /api/projects/:projectId/session-forks`
+ *
+ * 浏览器 DTO 与其它 web-contract 请求一致使用纯字符串标识：品牌标识只属于领域命令，
+ * 由服务端在 `parseForkCommand` 处解释与校验。JSON 形状与领域命令完全相同，
+ * 因此这里收窄标识类型不会改变线上协议，也不会让调用方为了构造请求而做类型断言。
+ */
+export interface SessionForkRequest {
   readonly sourceSessionId: string
+  /** 固定边界：来源会话中序号不超过该值的事件才进入目标上下文。 */
+  readonly sourceEventCursor?: number
+  readonly contextPolicy?: SessionForkContextPolicy
+  readonly targetWorkspaceId: string
+  readonly targetWorkerId: string
+  readonly targetAgentKey: string
+  readonly targetModelId: string | null
+  /** 调用方生成的幂等键：重试不得创建第二个会话。 */
+  readonly requestId: string
 }
 
-export interface SessionForkResponse extends Omit<ForkSessionResult, 'fork'> {
+export interface SessionForkResponse {
   readonly fork: SessionForkPoint
+  readonly targetSessionId: string
+  readonly graphRevision: string
+  /** True when the same `requestId` already produced this Fork. */
+  readonly replayed: boolean
 }
 
 /** `GET /api/projects/:projectId/canvas-layout?scope=` */

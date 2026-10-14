@@ -28,6 +28,8 @@ export interface Worker {
   readonly version: string | null
   readonly platform: string | null
   readonly capabilities: readonly AgentCapability[]
+  /** Worker 自己声明的能力探测时刻；缺失时只说明它是历史记录，不得当作当前事实。 */
+  readonly capabilitiesObservedAt?: Timestamp | null
   readonly lastSeenAt: Timestamp | null
   /**
    * 机器管理者配置的最大并发执行数；缺省时用平台默认（1）。容量只描述执行槽位，

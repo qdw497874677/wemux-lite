@@ -126,3 +126,37 @@ export interface WorkspaceDTO {
 export interface WorkerDTO {
   id: string; teamId: string; name: string; connectionState: 'online' | 'offline' | 'revoked'; capabilities: AgentDTO[]
 }
+
+/**
+ * 资源管理面投影：Worker / Agent / Model / Skill / Preset / Provider 各自给出四条独立轴。
+ * 界面不得把「已配置」当作「可执行」，也不得在没有探测证据时显示为实时（observedAt 为 null）。
+ */
+export type ResourceInventoryClassDTO = 'worker' | 'agent' | 'model' | 'skill' | 'preset' | 'provider'
+export type ConfigurationStateDTO = 'configured' | 'unconfigured'
+export type AuthenticationStateDTO = 'authenticated' | 'unauthenticated' | 'unknown' | 'not-required'
+export type DistributionStateDTO = 'distributed' | 'pending' | 'failed' | 'not-distributed'
+export type ExecutionStateDTO = 'executable' | 'unavailable' | 'unknown' | 'not-applicable'
+export interface ResourceStateAxisDTO<State extends string> { state: State; detail: string; observedAt: string | null }
+export interface ConfigurationAxisDTO extends ResourceStateAxisDTO<ConfigurationStateDTO> { revision: number | null }
+export interface DistributionAxisDTO extends ResourceStateAxisDTO<DistributionStateDTO> { setRevision: number | null }
+export interface ResourceInventoryTargetDTO {
+  workerId: string; workerName: string; connectionState: WorkerDTO['connectionState']
+  distribution: DistributionAxisDTO; execution: ResourceStateAxisDTO<ExecutionStateDTO>
+}
+export interface ResourceInventoryEntryDTO {
+  class: ResourceInventoryClassDTO
+  id: string; name: string; description: string
+  workerId: string | null; workerName: string | null; connectionState: WorkerDTO['connectionState'] | null
+  agentKey: string | null; modelId: string | null
+  version: string | null
+  configuration: ConfigurationAxisDTO
+  authentication: ResourceStateAxisDTO<AuthenticationStateDTO>
+  distribution: DistributionAxisDTO
+  execution: ResourceStateAxisDTO<ExecutionStateDTO>
+  targets: ResourceInventoryTargetDTO[]
+}
+export interface ResourceInventoryDTO {
+  generatedAt: string
+  workers: ResourceInventoryEntryDTO[]; agents: ResourceInventoryEntryDTO[]; models: ResourceInventoryEntryDTO[]
+  skills: ResourceInventoryEntryDTO[]; presets: ResourceInventoryEntryDTO[]; providers: ResourceInventoryEntryDTO[]
+}
