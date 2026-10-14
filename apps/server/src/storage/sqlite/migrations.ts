@@ -690,6 +690,7 @@ export const attentionPageIndexesVersion = migrations.indexOf(attentionPageIndex
 export const attentionHumanReviewIndexVersion = migrations.indexOf(attentionHumanReviewIndexMigration) + 1
 export const workspaceAccountVisibilityVersion = migrations.indexOf(workspaceAccountVisibilityMigration) + 1
 export const dispatchClaimsVersion = migrations.indexOf(dispatchClaimsMigration) + 1
+export const teamCoordinationSourceVersion = migrations.indexOf(teamCoordinationSourceMigration) + 1
 
 export function migrate(db: DatabaseSync): void {
   db.exec('PRAGMA foreign_keys=ON')
