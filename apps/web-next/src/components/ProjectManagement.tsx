@@ -8,6 +8,7 @@ import type { Application } from '../application.ts'
 import { ActionForm, AccountSection, ConfirmButton, useAccountData } from './AccountForms.tsx'
 import { ProjectWorkspaces } from './ProjectWorkspaces.tsx'
 import { ProjectTasks } from './ProjectTasks.tsx'
+import { SessionCanvas } from './SessionCanvas.tsx'
 import { ProjectConversation } from './ProjectConversation.tsx'
 import { Button } from './primitives.tsx'
 import { confirmNavigation } from '../lib/unsaved-navigation.ts'
@@ -25,9 +26,15 @@ export function ProjectCreate({ api, teamId, reload }: { api: ProjectClient; tea
 }
 export function ProjectManagement({ api, project, administrator, reload, search }: { api: ProjectClient; project: ProjectDTO; administrator: boolean; reload: () => Promise<void>; search: string }) {
   const [tab, setTab] = useState('tasks')
-  useEffect(() => { if (new URLSearchParams(search).has('task')) setTab('tasks') }, [search])
-  return <><nav className="account-actions" aria-label="项目管理"><Button variant={tab === 'tasks' ? 'default' : 'outline'} onClick={() => confirmNavigation() && setTab('tasks')}>任务</Button><Button variant={tab === 'workspaces' ? 'default' : 'outline'} onClick={() => confirmNavigation() && setTab('workspaces')}>工作区</Button><Button variant={tab === 'conversation' ? 'default' : 'outline'} onClick={() => confirmNavigation() && setTab('conversation')}>试聊</Button><Button variant={tab === 'settings' ? 'default' : 'outline'} onClick={() => confirmNavigation() && setTab('settings')}>项目设置</Button></nav>
-    {tab === 'tasks' ? <ProjectTasks api={api} project={project} search={search} /> : tab === 'workspaces' ? <ProjectWorkspaces api={api} project={project} administrator={administrator} /> : tab === 'conversation' ? <ProjectConversation api={api} project={project} /> : <>
+  const [canvasSession, setCanvasSession] = useState('')
+  useEffect(() => {
+    const query = new URLSearchParams(search)
+    if (query.has('task')) setTab('tasks')
+    // 深链只做选择：画布内容始终重新向服务端读取，URL 不携带任何会话内容。
+    if (query.has('canvas')) { setTab('canvas'); setCanvasSession(query.get('session') ?? '') }
+  }, [search])
+  return <><nav className="account-actions" aria-label="项目管理"><Button variant={tab === 'tasks' ? 'default' : 'outline'} onClick={() => confirmNavigation() && setTab('tasks')}>任务</Button><Button variant={tab === 'canvas' ? 'default' : 'outline'} onClick={() => confirmNavigation() && setTab('canvas')}>画布</Button><Button variant={tab === 'workspaces' ? 'default' : 'outline'} onClick={() => confirmNavigation() && setTab('workspaces')}>工作区</Button><Button variant={tab === 'conversation' ? 'default' : 'outline'} onClick={() => confirmNavigation() && setTab('conversation')}>试聊</Button><Button variant={tab === 'settings' ? 'default' : 'outline'} onClick={() => confirmNavigation() && setTab('settings')}>项目设置</Button></nav>
+    {tab === 'tasks' ? <ProjectTasks api={api} project={project} search={search} /> : tab === 'canvas' ? <SessionCanvas api={api} project={project} initialSessionId={canvasSession} /> : tab === 'workspaces' ? <ProjectWorkspaces api={api} project={project} administrator={administrator} /> : tab === 'conversation' ? <ProjectConversation api={api} project={project} /> : <>
       {administrator && ['owner', 'manager'].includes(project.accessRole) ? <AccountSection title="项目配置"><p>即使列表为空，项目内保留的已删除任务/工作区历史仍会阻止项目删除；不会级联清理。</p><ActionForm label="保存项目名称" fields={[{ name: 'name', label: '项目名称', value: project.name }]} submit={async ({ name }) => { await api.renameProject(project.id, name); await reload(); return '项目名称已保存。' }} /><ConfirmButton confirm="删除项目？保留任何工作区或任务记录（包括已逻辑删除）时服务端将拒绝，不会清理文件。" act={async () => { await api.deleteProject(project.id); await reload(); navigate('/next/projects') }}>删除项目</ConfirmButton></AccountSection> : <p>项目改名和删除需要实例管理员身份以及当前项目所有者或管理者权限。</p>}
       {['owner', 'manager'].includes(project.accessRole) ? <ProjectAccess key={project.reviewPolicyVersion ?? 1} api={api} project={project} reload={reload} /> : <p>当前项目角色无权管理共享范围和成员授权。</p>}
     </>}

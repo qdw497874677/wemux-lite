@@ -200,3 +200,18 @@ select { max-width: 100%; padding: 8px; border: 1px solid var(--border); border-
 .conversation-composer { border-block: 1px solid var(--border); padding-block: 12px; margin-block: 16px; }
 .conversation-composer textarea { width: 100%; min-width: 0; box-sizing: border-box; resize: vertical; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--background); color: var(--foreground); font: inherit; }
 .conversation-composer form { display: grid; gap: 8px; }
+
+/* 会话画布：确定性布局只来自服务端图事实，窄屏横向滚动而不压缩节点文字。 */
+.session-canvas { border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-block: 16px; min-width: 0; overflow-wrap: anywhere; }
+.session-canvas h3 { margin: 0; flex: 1; }
+.session-canvas ul { padding-inline-start: 20px; }
+.canvas-scroll { max-width: 100%; overflow-x: auto; }
+.canvas-surface { position: relative; margin-block: 12px; }
+.canvas-edges { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
+.canvas-edge { fill: none; stroke: var(--muted-foreground); stroke-width: 2; }
+.canvas-node { position: absolute; width: 208px; min-height: 96px; box-sizing: border-box; display: grid; gap: 4px; align-content: start; text-align: left; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); color: var(--foreground); font: inherit; font-size: .82rem; overflow-wrap: anywhere; }
+.canvas-node strong { font-size: .9rem; }
+.canvas-node[aria-pressed="true"] { outline: 2px solid var(--ring); outline-offset: 2px; background: var(--accent); }
+.canvas-node-restricted { display: flex; align-items: center; justify-content: center; border-style: dashed; color: var(--muted-foreground); }
+.session-canvas :focus-visible { outline: 2px solid var(--ring); outline-offset: 3px; }
+@media (max-width: 767px) { .session-canvas { padding: 10px; } .canvas-node { font-size: .78rem; } }
