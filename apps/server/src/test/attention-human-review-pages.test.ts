@@ -4,7 +4,7 @@ import type { ProjectId, UserId } from '@wemux/domain'
 import { SharedSqliteDatabase } from '../storage/sqlite/shared-database.ts'
 import { SqliteAttentionSource } from '../storage/sqlite/attention-source.ts'
 import { SqliteServerStore } from '../storage/sqlite/store.ts'
-import { migrate, migrationCount } from '../storage/sqlite/migrations.ts'
+import { attentionHumanReviewIndexVersion, migrate, migrationCount } from '../storage/sqlite/migrations.ts'
 import { AttentionService } from '../application/attention-service.ts'
 import type { ProjectionService } from '../application/projection-service.ts'
 import { seedAttentionHumanReview, reviewRequestedAt } from './fixtures/attention-human-reviews.ts'
@@ -174,7 +174,7 @@ test('human review ordering migration retains existing review data and actionabl
     assert.equal(page.items[0]?.reviewId, 'retained')
     f.db.exec('DROP INDEX attention_human_reviews_order')
     // Replay the migration that owns this index; newer Team coordination migrations may follow it.
-    f.db.prepare('DELETE FROM schema_migrations WHERE version=?').run(migrationCount - 2)
+    f.db.prepare('DELETE FROM schema_migrations WHERE version=?').run(attentionHumanReviewIndexVersion)
     for (let replay = 0; replay < 2; replay++) {
       migrate(f.db)
       assert.deepEqual(f.db.prepare('SELECT * FROM review_requests WHERE id=?').get('retained'), before)

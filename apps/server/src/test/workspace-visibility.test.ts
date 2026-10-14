@@ -8,7 +8,7 @@ import type { ProjectId, Timestamp, UserId, WorkerId, WorkspaceId } from '@wemux
 import { createWemuxServer } from '../server.ts'
 import { administratorEmail, administratorToken, instanceOperatorId, seedAdministrator } from './fixtures/administrator.ts'
 import { SqliteServerStore } from '../storage/sqlite/store.ts'
-import { migrationCount } from '../storage/sqlite/migrations.ts'
+import { workspaceAccountVisibilityVersion } from '../storage/sqlite/migrations.ts'
 import { createClusterClient } from '@wemux/web-client'
 
 const second = 'visibility-peer' as UserId
@@ -117,7 +117,7 @@ test('visibility migration upgrades existing Workspace records without rewriting
     const before = db.prepare("SELECT data FROM records WHERE kind='workspace' AND id=?").get(f.workspaceId)?.data
     assert.ok(before)
     db.exec('DROP TABLE workspace_account_visibility')
-    db.prepare('DELETE FROM schema_migrations WHERE version=?').run(migrationCount - 1)
+    db.prepare('DELETE FROM schema_migrations WHERE version=?').run(workspaceAccountVisibilityVersion)
     db.close()
     const upgraded = new SqliteServerStore(path)
     try {
