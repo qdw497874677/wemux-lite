@@ -1,4 +1,5 @@
 import { TaskSessions } from './TaskSessions.tsx'
+import { TaskDispatch } from './TaskDispatch.tsx'
 import { TaskRuns } from './TaskRuns.tsx'
 import { TaskDeletion } from './TaskDeletion.tsx'
 import { TaskWorkspaces } from './TaskWorkspaces.tsx'
@@ -20,6 +21,7 @@ export function TaskDetailPanel({ api, project, taskId, sessionId, runId, select
   return <AccountSection title="任务详情"><div className="account-actions"><Button variant="outline" onClick={close}>关闭详情</Button><Button variant="outline" onClick={reload}>加载最新版本</Button></div>{state.feedback}{task && <><h3>{task.title}</h3><p>版本 {task.version}，{taskLabels[task.status]}</p><p className="muted">并发冲突时保留表单内容。点击“加载最新版本”核实状态，再决定是否重新提交；状态修改由服务端版本校验；内容修改的限制见下方。</p>
     {task.deletedAt ? <div role="status"><h3>任务已永久删除</h3><p>删除时间：{task.deletedAt}。只读历史，不能恢复；工作区和文件独立保留。</p><p>{task.description}</p><pre>{task.acceptanceCriteria}</pre></div> : <TaskContentEditor api={api} task={task} writable={writable} changed={reload} />}
     <ActionForm label="更新任务状态" disabled={!writable} submit={async ({ status }) => { await api.patchTask(project.id, taskId, { status: status as TaskStatus, version: task.version }); reload(); return '任务状态已更新。' }}><label>任务状态<select name="status" defaultValue={task.status}>{Object.entries(taskLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label></ActionForm>
+    <TaskDispatch key={JSON.stringify([api.taskSessionScope, project.id, task.id, task.version])} api={api} project={project} task={task} workers={state.data![2]} writable={writable} changed={reload} />
     <TaskRuns key={JSON.stringify([api.taskSessionScope, project.id, task.id])} api={api} project={project} task={task} runId={runId} selectSession={selectSession} changed={reload} reconcile={reconcile} reconciliationReady={ready} />
     <TaskSessions api={api} project={project} task={task} sessionId={sessionId} selectSession={selectSession} />
     <h3>外部关联</h3><ul>{task.links.map(link => <li className="account-row" key={link.id}><a href={link.url} target="_blank" rel="noreferrer">{link.title ?? link.url}</a>{writable && <ConfirmButton confirm="移除此外部关联？" act={async () => { await api.removeTaskLink(project.id, taskId, link.id); reload() }}>移除关联</ConfirmButton>}</li>)}</ul>{writable && <ActionForm label="添加外部关联" fields={[{ name: 'url', label: 'GitHub Issue 或 Pull Request URL', type: 'url' }]} submit={async ({ url }) => { await api.addTaskLink(project.id, taskId, url); reload() }} />}
