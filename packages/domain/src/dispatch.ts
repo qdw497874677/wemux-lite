@@ -94,6 +94,8 @@ export interface DispatchIntent {
   readonly machineScope: MachineScope
   /** 任务是否符合当前工作流状态（普通派发要求 todo，接手允许 in_progress）。 */
   readonly dispatchable: boolean
+  /** 本意图是否接替一次已有执行。接替必须等旧执行确认停止后才可被承接。 */
+  readonly supersedesPriorExecution?: boolean
   readonly queueOrder: number
   readonly enqueuedAt: string
 }
@@ -150,7 +152,8 @@ export function claimDecision(input: ClaimInput): ClaimDecision {
   if (attempt.workerId !== worker.workerId || !worker.authorized) return { ok: false, reason: 'worker_unauthorized' }
   if (!worker.qualified) return { ok: false, reason: 'worker_unqualified' }
   if (attempt.generation < intent.generation) return { ok: false, reason: 'stale_generation' }
-  if (intent.generation > 0 && !input.priorExecutionConfirmedStopped) return { ok: false, reason: 'prior_execution_in_flight' }
+  // 「启动过」不等于「已停止」：只有明确接替旧执行时才要求对账结论，普通重新派发不受影响。
+  if (intent.supersedesPriorExecution && !input.priorExecutionConfirmedStopped) return { ok: false, reason: 'prior_execution_in_flight' }
   if (currentClaim && currentClaim.state !== 'released' && currentClaim.generation >= attempt.generation) return { ok: false, reason: 'already_claimed' }
   const remaining = worker.capacityLimit - worker.capacityInUse
   if (remaining < 1) return { ok: false, reason: 'no_capacity' }

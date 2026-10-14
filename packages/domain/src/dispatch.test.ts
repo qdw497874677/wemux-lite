@@ -129,7 +129,7 @@ test('结果未知的已承接执行不因超时释放占用，也不允许换�
 })
 
 test('接手复用同一执行意图：旧代次不得越过交接边界，新代次需确认旧执行已停止', () => {
-  const handed = intent({ generation: 1 })
+  const handed = intent({ generation: 1, supersedesPriorExecution: true })
   const old = claim({ generation: 0, state: 'accepted' })
   assert.deepEqual(claimDecision({ intent: handed, worker: worker(), attempt: { workerId: 'worker-a', generation: 0 }, currentClaim: old, priorExecutionConfirmedStopped: true }), { ok: false, reason: 'stale_generation' })
   assert.deepEqual(claimDecision({ intent: handed, worker: worker({ workerId: 'worker-b' }), attempt: { workerId: 'worker-b', generation: 1 }, currentClaim: old, priorExecutionConfirmedStopped: false }), { ok: false, reason: 'prior_execution_in_flight' })
